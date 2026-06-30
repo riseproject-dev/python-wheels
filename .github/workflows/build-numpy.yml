@@ -1,0 +1,135 @@
+---
+name: Build numpy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'numpy version to build (git tag without leading v, e.g. 2.5.0)'
+        required: true
+        default: '2.5.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-numpy.yml'
+      - 'actions/publish-to-gitlab/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.5.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 2.5.0 there.
+  NUMPY_VERSION: ${{ inputs.version || '2.5.0' }}
+
+jobs:
+  build_wheels:
+    name: Build numpy ${{ inputs.version || '2.5.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: "/project"
+      CCACHE_COMPILERCHECK: "content"
+
+    steps:
+      # Layout note: numpy is checked out at the workspace root (not under a
+      # subdir) so cibuildwheel's `{project}` template substitution resolves
+      # to the numpy source tree. numpy's pyproject.toml uses
+      # `{project}/tools/wheels/cibw_before_build.sh`, which only works when
+      # CWD == numpy root at cibuildwheel invocation time. python-wheels is
+      # placed under `python-wheels-repo/` to free the workspace root for numpy.
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels-repo
+          persist-credentials: false
+
+      - name: Checkout numpy v${{ env.NUMPY_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: numpy/numpy
+          ref: v${{ env.NUMPY_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Restore compilation cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        id: ccache-restore
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-wheels-numpy-v${{ env.NUMPY_VERSION }}-manylinux_riscv64-${{ matrix.python }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-wheels-numpy-v${{ env.NUMPY_VERSION }}-manylinux_riscv64-${{ matrix.python }}-
+            ccache-wheels-numpy-manylinux_riscv64-${{ matrix.python }}-
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@294735312765b09d24a2fbec22660ce817587d55  # v4.1.0
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_BEFORE_ALL_LINUX: |
+            set -eux
+            CCACHE_VERSION=4.13.6
+            curl -fsSL https://github.com/ccache/ccache/releases/download/v${CCACHE_VERSION}/ccache-${CCACHE_VERSION}-linux-$(uname -m)-musl-static.tar.gz | \
+              tar -xvzf - --strip-components 1 -C /usr/local/bin ccache-${CCACHE_VERSION}-linux-$(uname -m)-musl-static/ccache
+            ccache --version
+            ccache --zero-stats
+          CIBW_ENVIRONMENT_PASS_LINUX: >-
+            CCACHE_BASEDIR
+            CCACHE_COMPILERCHECK
+          CIBW_CONTAINER_ENGINE: "docker; create_args: --volume ${{ env.CCACHE_DIR }}:/root/.ccache"
+
+      - name: Save compilation cache
+        if: always() && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-wheels-numpy-v${{ env.NUMPY_VERSION }}-manylinux_riscv64-${{ matrix.python }}-${{ github.run_id }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: numpy-${{ env.NUMPY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish numpy ${{ inputs.version || '2.5.0' }} to GitLab
+    needs: build_wheels
+    # Only publish when the workflow was triggered from main with a specific
+    # version. Manual trigger is the only entry point, so checking the ref is
+    # enough to gate uploads.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04-riscv
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels-repo
+          persist-credentials: false
+
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: numpy-${{ env.NUMPY_VERSION }}-*-manylinux_riscv64
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to GitLab Package Registry
+        uses: ./python-wheels-repo/actions/publish-to-gitlab
+        with:
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          token-type: deploy-token
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          package-name: numpy
+          package-version: ${{ env.NUMPY_VERSION }}
+          files: |
+            dist/*.whl
