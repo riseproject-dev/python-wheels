@@ -1,0 +1,254 @@
+name: 'Publish to GitLab Package Registry'
+description: >
+  Uploads one or more build artifacts from a GitHub Actions runner to a
+  GitLab Generic Package Registry endpoint using the GitLab REST API.
+
+inputs:
+
+  # ── Required ────────────────────────────────────────────────────────────────
+
+  gitlab-token:
+    description: >
+      GitLab authentication token. Use a Personal Access Token (scope: api)
+      or a Deploy Token (scope: write_package_registry).
+      Store this value as a GitHub Actions secret and pass it in; never
+      hard-code it in a workflow file.
+    required: true
+
+  gitlab-project-id:
+    description: >
+      Numeric ID of the target GitLab project (found under
+      Settings → General → Project ID).
+    required: true
+
+  package-name:
+    description: >
+      Name of the package to create or update in the registry.
+      Allowed characters: a-z, A-Z, 0-9, dot (.), hyphen (-), underscore (_).
+    required: true
+
+  package-version:
+    description: >
+      Semantic version string for this package release, e.g. "1.2.3" or
+      "1.0.0-beta.1". Tip: pass github.ref_name for tag-triggered workflows.
+    required: true
+
+  # files is a newline-separated list of glob patterns resolved by the runner.
+  files:
+    description: >
+      Newline-separated list of file paths (or globs) to upload.
+      Each matched file is uploaded as a separate package file.
+      Example:
+        files: |
+          dist/my-app-linux-amd64
+          dist/my-app-darwin-arm64
+          checksums.txt
+    required: true
+
+  # ── Optional ────────────────────────────────────────────────────────────────
+
+  gitlab-host:
+    description: >
+      Base URL of your GitLab instance. Override for self-hosted GitLab.
+    required: false
+    default: 'https://gitlab.com'
+
+  token-type:
+    description: >
+      The type of token supplied in gitlab-token.
+      Accepted values: "private-token" (Personal / Project Access Token) or
+      "deploy-token".
+    required: false
+    default: 'private-token'
+
+  status:
+    description: >
+      Package status after upload. Use "default" to make the package visible
+      in the UI, or "hidden" to suppress it from listings (useful for
+      draft/pre-release packages).
+    required: false
+    default: 'default'
+
+  fail-on-duplicate:
+    description: >
+      When "true", the action exits with an error if a file with the same
+      name already exists in the specified package version. When "false"
+      (default), the existing file is silently overwritten.
+    required: false
+    default: 'false'
+
+outputs:
+
+  package-url:
+    description: >
+      URL of the package in the GitLab Package Registry UI.
+    value: >-
+      ${{ inputs.gitlab-host }}/-/packages?search[]=${{ inputs.package-name }}
+
+  uploaded-files:
+    description: Newline-separated list of filenames that were successfully uploaded.
+    value: ${{ steps.upload.outputs.uploaded_files }}
+
+runs:
+  using: 'composite'
+  steps:
+
+    # ── 1. Validate inputs ───────────────────────────────────────────────────
+    - name: Validate inputs
+      shell: bash
+      run: |
+        echo "::group::Validating inputs"
+
+        error=0
+
+        if [[ -z "${{ inputs.gitlab-token }}" ]]; then
+          echo "::error::Input 'gitlab-token' must not be empty."
+          error=1
+        fi
+
+        if [[ ! "${{ inputs.gitlab-project-id }}" =~ ^[0-9]+$ ]]; then
+          echo "::error::Input 'gitlab-project-id' must be a numeric project ID."
+          error=1
+        fi
+
+        if [[ ! "${{ inputs.package-name }}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+          echo "::error::Input 'package-name' contains invalid characters. Allowed: a-z A-Z 0-9 . - _"
+          error=1
+        fi
+
+        if [[ -z "${{ inputs.package-version }}" ]]; then
+          echo "::error::Input 'package-version' must not be empty."
+          error=1
+        fi
+
+        TOKEN_TYPE="${{ inputs.token-type }}"
+        if [[ "$TOKEN_TYPE" != "private-token" && "$TOKEN_TYPE" != "deploy-token" ]]; then
+          echo "::error::Input 'token-type' must be 'private-token' or 'deploy-token'. Got: $TOKEN_TYPE"
+          error=1
+        fi
+
+        STATUS="${{ inputs.status }}"
+        if [[ "$STATUS" != "default" && "$STATUS" != "hidden" ]]; then
+          echo "::error::Input 'status' must be 'default' or 'hidden'. Got: $STATUS"
+          error=1
+        fi
+
+        if [[ $error -eq 1 ]]; then
+          echo "::endgroup::"
+          exit 1
+        fi
+
+        echo "All inputs validated successfully."
+        echo "::endgroup::"
+
+    # ── 2. Resolve globs and upload files ────────────────────────────────────
+    - name: Upload files
+      id: upload
+      shell: bash
+      env:
+        GITLAB_TOKEN: ${{ inputs.gitlab-token }}
+      run: |
+        echo "::group::Uploading files to GitLab Package Registry"
+
+        GITLAB_HOST="${{ inputs.gitlab-host }}"
+        PROJECT_ID="${{ inputs.gitlab-project-id }}"
+        PKG_NAME="${{ inputs.package-name }}"
+        PKG_VERSION="${{ inputs.package-version }}"
+        TOKEN_TYPE="${{ inputs.token-type }}"
+        STATUS="${{ inputs.status }}"
+        FAIL_ON_DUPLICATE="${{ inputs.fail-on-duplicate }}"
+
+        API_BASE="${GITLAB_HOST}/api/v4/projects/${PROJECT_ID}/packages/generic/${PKG_NAME}/${PKG_VERSION}"
+
+        uploaded_files=()
+        failed_files=()
+
+        # Read the newline-separated file list and expand globs
+        while IFS= read -r pattern; do
+          # Skip blank lines
+          [[ -z "$pattern" ]] && continue
+
+          # Expand glob; if no match, the literal string is returned — catch that
+          matched=( $pattern )
+          if [[ ${#matched[@]} -eq 0 ]] || [[ ! -e "${matched[0]}" ]]; then
+            echo "::warning::Pattern '${pattern}' did not match any files — skipping."
+            continue
+          fi
+
+          for filepath in "${matched[@]}"; do
+            if [[ ! -f "$filepath" ]]; then
+              echo "::warning::'${filepath}' is not a regular file — skipping."
+              continue
+            fi
+
+            filename=$(basename "$filepath")
+            url="${API_BASE}/${filename}?status=${STATUS}"
+
+            echo "Uploading: ${filepath} → ${url}"
+
+            http_status=$(curl \
+              --silent \
+              --output /tmp/gitlab_upload_response.txt \
+              --write-out "%{http_code}" \
+              --location \
+              --header "${TOKEN_TYPE}: ${GITLAB_TOKEN}" \
+              --upload-file "${filepath}" \
+              "${url}")
+
+            response_body=$(cat /tmp/gitlab_upload_response.txt)
+
+            if [[ "$http_status" == "201" ]]; then
+              echo "  ✓ Uploaded successfully (HTTP 201)."
+              uploaded_files+=("$filename")
+
+            elif [[ "$http_status" == "200" ]]; then
+              if [[ "$FAIL_ON_DUPLICATE" == "true" ]]; then
+                echo "::error::File '${filename}' already exists in ${PKG_NAME}@${PKG_VERSION} and fail-on-duplicate is true."
+                failed_files+=("$filename")
+              else
+                echo "  ✓ File already existed and was overwritten (HTTP 200)."
+                uploaded_files+=("$filename")
+              fi
+
+            else
+              echo "::error::Failed to upload '${filename}'. HTTP ${http_status}: ${response_body}"
+              failed_files+=("$filename")
+            fi
+          done
+        done <<< "${{ inputs.files }}"
+
+        # Emit output
+        uploaded_list=$(printf '%s\n' "${uploaded_files[@]}")
+        echo "uploaded_files<<EOF" >> "$GITHUB_OUTPUT"
+        echo "$uploaded_list"      >> "$GITHUB_OUTPUT"
+        echo "EOF"                 >> "$GITHUB_OUTPUT"
+
+        echo ""
+        echo "── Summary ──────────────────────────────────────────────────"
+        echo "  Uploaded : ${#uploaded_files[@]} file(s)"
+        echo "  Failed   : ${#failed_files[@]} file(s)"
+        echo "─────────────────────────────────────────────────────────────"
+
+        echo "::endgroup::"
+
+        if [[ ${#failed_files[@]} -gt 0 ]]; then
+          echo "::error::${#failed_files[@]} file(s) failed to upload: ${failed_files[*]}"
+          exit 1
+        fi
+
+    # ── 3. Annotate the workflow run with the registry URL ───────────────────
+    - name: Print registry URL
+      shell: bash
+      run: |
+        echo "### GitLab Package Registry" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        echo "Package \`${{ inputs.package-name }}@${{ inputs.package-version }}\` published." >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        echo "**Registry:** ${{ inputs.gitlab-host }}/$( \
+          echo '${{ inputs.gitlab-host }}' | sed 's|https://||' \
+        )" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        echo "**Uploaded files:**" >> "$GITHUB_STEP_SUMMARY"
+        while IFS= read -r f; do
+          [[ -n "$f" ]] && echo "- \`$f\`" >> "$GITHUB_STEP_SUMMARY"
+        done <<< "${{ steps.upload.outputs.uploaded_files }}"
