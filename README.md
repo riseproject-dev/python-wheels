@@ -7,6 +7,8 @@ native riscv64 hardware, with the goal of maintaining a riscv64-specific package
 repository for projects where upstream are not yet ready or able to perform
 builds themselves.
 
+[python-wheels Documentation](https://riseproject-dev.github.io/python-wheels/)
+
 This work is a continuation of the earlier
 [wheel_builder](https://gitlab.com/riseproject/python/wheel_builder) project,
 which hosts binary wheels for a variety of Python modules.
