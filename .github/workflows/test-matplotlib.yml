@@ -1,0 +1,252 @@
+---
+name: Test matplotlib (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'matplotlib version to test (git tag without leading v, e.g. 3.11.0)'
+        required: true
+        default: '3.11.0'
+  pull_request:
+    paths:
+      - '.github/workflows/test-matplotlib.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '3.11.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  NO_AT_BRIDGE: 1  # Necessary for GTK3 interactive test.
+  OPENBLAS_NUM_THREADS: 1
+  PYTHONFAULTHANDLER: 1
+  MPL_VERSION: ${{ inputs.version || '3.11.0' }}
+  # Query PyPI + gitlab riscv64 mirror; pick best compatible wheel
+  # (`unsafe-best-match` = pip-like). Refuse sdist for dependencies so uv
+  # selects the gitlab riscv64 wheel when PyPI lacks one instead of falling
+  # back to a source build.
+  UV_EXTRA_INDEX_URL: https://gitlab.com/api/v4/projects/riseproject%2Fpython%2Fwheel_builder/packages/pypi/simple
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_ONLY_BINARY: ':all:'
+
+jobs:
+  test:
+    permissions:
+      contents: read
+    name: "Test matplotlib ${{ inputs.version || '3.11.0' }} — Python ${{ matrix.python-version }} on ${{ matrix.os }}"
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04-riscv
+            python-version: '3.12'
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels-repo
+          persist-credentials: false
+
+      - name: Checkout matplotlib v${{ env.MPL_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: matplotlib/matplotlib
+          ref: v${{ env.MPL_VERSION }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install OS dependencies
+        run: |
+          echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/80-retries
+          sudo apt-get update -yy
+          sudo apt-get install -yy --no-install-recommends \
+            ccache \
+            cm-super \
+            dvipng \
+            fonts-freefont-otf \
+            fonts-noto-cjk \
+            fonts-wqy-zenhei \
+            gdb \
+            gir1.2-gtk-3.0 \
+            gir1.2-gtk-4.0 \
+            graphviz \
+            inkscape \
+            language-pack-de \
+            lcov \
+            libcairo2 \
+            libcairo2-dev \
+            libffi-dev \
+            libgeos-dev \
+            libnotify4 \
+            libxkbcommon-x11-0 \
+            libxcb-cursor0 \
+            libxcb-icccm4 \
+            libxcb-image0 \
+            libxcb-keysyms1 \
+            libxcb-randr0 \
+            libxcb-render-util0 \
+            libxcb-xinerama0 \
+            lmodern \
+            ninja-build \
+            pkg-config \
+            qtbase5-dev \
+            texlive-fonts-recommended \
+            texlive-latex-base \
+            texlive-latex-extra \
+            texlive-latex-recommended \
+            texlive-luatex \
+            texlive-pictures \
+            texlive-xetex
+          sudo apt-get install -yy --no-install-recommends ffmpeg poppler-utils
+          sudo apt-get install -yy --no-install-recommends libgirepository-2.0-dev
+
+      - name: Cache uv
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: ~/.cache/uv
+          key: |
+            ${{ matrix.os }}-py${{ matrix.python-version }}-uv-${{
+            hashFiles('pyproject.toml', 'ci/minver-requirements.txt') }}
+          restore-keys: |
+            ${{ matrix.os }}-py${{ matrix.python-version }}-uv-
+      - name: Cache ccache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.ccache
+          key: ${{ matrix.os }}-py${{ matrix.python-version }}-ccache-${{ hashFiles('src/*') }}
+          restore-keys: |
+            ${{ matrix.os }}-py${{ matrix.python-version }}-ccache-
+      - name: Cache Matplotlib
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cache/matplotlib
+            !~/.cache/matplotlib/tex.cache
+            !~/.cache/matplotlib/test_cache
+          key: 6-${{ matrix.os }}-py${{ matrix.python-version }}-mpl-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            6-${{ matrix.os }}-py${{ matrix.python-version }}-mpl-${{ github.ref }}-
+            6-${{ matrix.os }}-py${{ matrix.python-version }}-mpl-
+
+      - name: Install Python dependencies
+        run: |
+          # Upgrade pip and setuptools and wheel to get as clean an install as
+          # possible.
+          uv pip install --upgrade pip setuptools wheel
+
+          # Install dependencies from PyPI.
+          # Preinstall build requirements to enable no-build-isolation builds.
+          uv pip install --upgrade --only-binary :all: \
+            --group build --group test
+
+          # Install optional dependencies from PyPI.
+          # Sphinx is needed to run sphinxext tests
+          uv pip install --upgrade sphinx!=6.1.2
+
+          # GUI toolkits are pip-installable only for some versions of Python
+          # so don't fail if we can't install them.  Make it easier to check
+          # whether the install was successful by trying to import the toolkit
+          # (sometimes, the install appears to be successful but shared
+          # libraries cannot be loaded at runtime, so an actual import is a
+          # better check).
+          uv pip install --upgrade pycairo 'cairocffi>=0.8' 'PyGObject' &&
+            (
+              python -c 'import gi; gi.require_version("Gtk", "4.0"); from gi.repository import Gtk' &&
+              echo 'PyGObject 4 is available' || echo 'PyGObject 4 is not available'
+            ) && (
+              python -c 'import gi; gi.require_version("Gtk", "3.0"); from gi.repository import Gtk' &&
+              echo 'PyGObject 3 is available' || echo 'PyGObject 3 is not available'
+            )
+
+          # PyQt5 has no riscv64 wheels; skip.
+          uv pip install --upgrade --only-binary :all: pyqt6 &&
+            python -c 'import PyQt6.QtCore' &&
+            echo 'PyQt6 is available' ||
+            echo 'PyQt6 is not available'
+          uv pip install --upgrade --only-binary :all: pyside6 &&
+            python -c 'import PySide6.QtCore' &&
+            echo 'PySide6 is available' ||
+            echo 'PySide6 is not available'
+
+      - name: Install Matplotlib
+        run: |
+          ccache -s
+          git describe
+
+          export CPPFLAGS='--coverage -fprofile-abs-path'
+
+          uv pip install --no-deps --no-build-isolation --verbose \
+            --config-settings=setup-args="-DrcParams-backend=Agg" \
+            --editable .[dev]
+
+          unset CPPFLAGS
+
+      - name: Run pytest
+        run: |
+          pytest -rfEsXR -n auto \
+            --maxfail=50 --timeout=300 --durations=25 \
+            --cov-report=xml --cov=lib --log-level=DEBUG --color=yes
+
+      - name: Cleanup non-failed image files
+        if: failure()
+        run: |
+          find ./result_images -name "*-expected*.png" | while read file; do
+            if [[ $file == *-expected_???.png ]]; then
+              extension=${file: -7:3}
+              base=${file%*-expected_$extension.png}_$extension
+            else
+              extension="png"
+              base=${file%-expected.png}
+            fi
+            if [[ ! -e ${base}-failed-diff.png ]]; then
+              indent=""
+              list=($file $base.png)
+              if [[ $extension != "png" ]]; then
+                list+=(${base%_$extension}-expected.$extension ${base%_$extension}.$extension)
+              fi
+              for to_remove in "${list[@]}"; do
+                if [[ -e $to_remove ]]; then
+                  rm $to_remove
+                  echo "${indent}Removed $to_remove"
+                fi
+                indent+=" "
+              done
+            fi
+          done
+
+          if [ "$(find ./result_images -mindepth 1 -type d)" ]; then
+              find ./result_images/* -type d -empty -delete
+          fi
+
+      - name: Filter C coverage
+        if: ${{ !cancelled() }}
+        run: |
+          LCOV_IGNORE_ERRORS='mismatch'
+          lcov --rc lcov_branch_coverage=1 --ignore-errors $LCOV_IGNORE_ERRORS \
+            --capture --directory . --exclude $PWD/subprojects --exclude $PWD/build \
+            --output-file coverage.info
+          lcov --rc lcov_branch_coverage=1 --ignore-errors $LCOV_IGNORE_ERRORS \
+            --output-file coverage.info --extract coverage.info $PWD/src/'*'
+          lcov --rc lcov_branch_coverage=1 --ignore-errors $LCOV_IGNORE_ERRORS \
+            --list coverage.info
+          find . -name '*.gc*' -delete
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: failure()
+        with:
+          name: "matplotlib-${{ env.MPL_VERSION }}-py${{ matrix.python-version }}-${{ matrix.os }}-result-images"
+          path: result_images

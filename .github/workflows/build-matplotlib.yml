@@ -1,0 +1,194 @@
+---
+name: Build matplotlib wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'matplotlib version to build (git tag without leading v, e.g. 3.11.0)'
+        required: true
+        default: '3.11.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-matplotlib.yml'
+      - '.github/workflows/test-matplotlib.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '3.11.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default there.
+  MPL_VERSION: ${{ inputs.version || '3.11.0' }}
+  # Query PyPI + gitlab riscv64 mirror; pick best compatible wheel
+  # (`unsafe-best-match` = pip-like). Refuse sdist for dependencies so uv
+  # selects the gitlab riscv64 wheel when PyPI lacks one instead of falling
+  # back to a source build.
+  UV_EXTRA_INDEX_URL: https://gitlab.com/api/v4/projects/riseproject%2Fpython%2Fwheel_builder/packages/pypi/simple
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_ONLY_BINARY: ':all:'
+
+jobs:
+  build_sdist:
+    name: Build matplotlib ${{ inputs.version || '3.11.0' }} sdist
+    runs-on: ubuntu-24.04-riscv
+    permissions:
+      contents: read
+    outputs:
+      SDIST_NAME: ${{ steps.sdist.outputs.SDIST_NAME }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels-repo
+          persist-credentials: false
+
+      - name: Checkout matplotlib v${{ env.MPL_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: matplotlib/matplotlib
+          ref: v${{ env.MPL_VERSION }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        name: Install Python
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      # Something changed somewhere that prevents the downloaded-at-build-time
+      # licenses from being included in built wheels, so pre-download them so
+      # that they exist before the build and are included.
+      - name: Pre-download bundled licenses
+        run: >
+          curl -Lo LICENSE/LICENSE_QHULL
+          https://github.com/qhull/qhull/raw/2020.2/COPYING.txt
+
+      - name: Install dependencies
+        run: uv pip install build twine
+
+      - name: Build sdist
+        id: sdist
+        run: |
+          python -m build --sdist
+          python ci/export_sdist_name.py
+
+      - name: Check README rendering for PyPI
+        run: twine check dist/*
+
+      - name: Upload sdist result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: matplotlib-${{ env.MPL_VERSION }}-cibw-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: build_sdist
+    name: Build matplotlib ${{ inputs.version || '3.11.0' }} wheels for riscv64
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels-repo
+          persist-credentials: false
+
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: matplotlib-${{ env.MPL_VERSION }}-cibw-sdist
+          path: dist/
+
+      - name: Build wheels for CPython 3.14
+        uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084  # v3.4.1
+        with:
+          package-dir: dist/${{ needs.build_sdist.outputs.SDIST_NAME }}
+        env:
+          CIBW_BUILD: "cp314-* cp314t-*"
+          CIBW_ARCHS: "riscv64"
+          # Skip musllinux: upstream matplotlib isn't building it either
+          CIBW_SKIP: "*-musllinux_*"
+          CIBW_BUILD_FRONTEND: "build[uv]"
+          CIBW_ENVIRONMENT: >-
+            UV_EXTRA_INDEX_URL=https://gitlab.com/api/v4/projects/riseproject%2Fpython%2Fwheel_builder/packages/pypi/simple
+            UV_INDEX_STRATEGY=unsafe-best-match
+            UV_ONLY_BINARY=:all:
+
+      - name: Build wheels for CPython 3.13
+        uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084  # v3.4.1
+        with:
+          package-dir: dist/${{ needs.build_sdist.outputs.SDIST_NAME }}
+        env:
+          CIBW_BUILD: "cp313-*"
+          CIBW_ARCHS: "riscv64"
+          # Skip musllinux: upstream matplotlib isn't building it either
+          CIBW_SKIP: "*-musllinux_*"
+          CIBW_BUILD_FRONTEND: "build[uv]"
+          CIBW_ENVIRONMENT: >-
+            UV_EXTRA_INDEX_URL=https://gitlab.com/api/v4/projects/riseproject%2Fpython%2Fwheel_builder/packages/pypi/simple
+            UV_INDEX_STRATEGY=unsafe-best-match
+            UV_ONLY_BINARY=:all:
+
+      - name: Build wheels for CPython 3.12
+        uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084  # v3.4.1
+        with:
+          package-dir: dist/${{ needs.build_sdist.outputs.SDIST_NAME }}
+        env:
+          CIBW_BUILD: "cp312-*"
+          CIBW_ARCHS: "riscv64"
+          # Skip musllinux: upstream matplotlib isn't building it either
+          CIBW_SKIP: "*-musllinux_*"
+          CIBW_BUILD_FRONTEND: "build[uv]"
+          CIBW_ENVIRONMENT: >-
+            UV_EXTRA_INDEX_URL=https://gitlab.com/api/v4/projects/riseproject%2Fpython%2Fwheel_builder/packages/pypi/simple
+            UV_INDEX_STRATEGY=unsafe-best-match
+            UV_ONLY_BINARY=:all:
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: matplotlib-${{ env.MPL_VERSION }}-cibw-wheels-riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish matplotlib ${{ inputs.version || '3.11.0' }} to GitLab
+    needs: build_wheels
+    # Only publish when the workflow was triggered from main with a specific
+    # version. Manual trigger is the only entry point that reaches main;
+    # PR runs sit on refs/pull/<n>/merge and skip this job.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04-riscv
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels-repo
+          persist-credentials: false
+
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: matplotlib-${{ env.MPL_VERSION }}-cibw-wheels-riscv64
+          path: dist
+
+      - name: Publish to GitLab PyPI registry
+        uses: ./python-wheels-repo/actions/publish-to-gitlab
+        with:
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          files: |
+            dist/*.whl
