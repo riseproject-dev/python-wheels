@@ -161,7 +161,9 @@ def generate_md_page(yaml_file, output_md, package_list):
         is_latest = version_number == latest_version
         summary_label = f"{version_number} (latest)" if is_latest else version_number
 
-        lines.append(f"<details{' open' if is_latest else ''}>")
+        lines.append(
+            f'<details markdown="1"{" open" if is_latest else ""}>'
+        )
         lines.append(f"<summary><strong>{summary_label}</strong></summary>")
         lines.append("")
 
