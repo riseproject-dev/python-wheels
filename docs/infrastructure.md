@@ -1,3 +1,9 @@
+---
+title: Infrastructure
+layout: default
+nav_order: 6
+---
+
 # Infrastructure
 
 The [python-wheels](https://github.com/riseproject-dev/python-wheels) project
