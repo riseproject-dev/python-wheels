@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+
+name: PR package build trigger
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  actions: write
+  pull-requests: read
+
+jobs:
+  dispatch-triggers:
+    runs-on: ubuntu-latest
+    if: contains(github.event.pull_request.body, 'Trigger:')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          package_version: ${{ github.event.pull_request.head.sha }}
+
+      - name: Dispatch build/test workflows for Trigger directives
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [ "$HEAD_REPO" != "$BASE_REPO" ]; then
+            echo "PR from fork ($HEAD_REPO); cannot dispatch workflows against fork ref. Skipping."
+            exit 0
+          fi
+
+          triggers=$(printf '%s\n' "$PR_BODY" | grep -oE '^Trigger:[[:space:]]*[^[:space:]]+' || true)
+
+          if [ -z "$triggers" ]; then
+            echo "No Trigger: directives found."
+            exit 0
+          fi
+
+          printf '%s\n' "$triggers" | while IFS= read -r line; do
+            directive=${line#Trigger:}
+            directive=${directive# }
+            package_name=${directive%:*}
+            package_version=${directive#*:}
+
+            if [ -z "$package_name" ] || [ -z "$package_version" ] || [ "$package_name" = "$package_version" ]; then
+              echo "Skipping malformed directive: $line"
+              continue
+            fi
+
+            # Normalize: build workflows prepend `v` to the version themselves
+            # (e.g. `ref: v${{ env.NUMPY_VERSION }}`). Strip any leading v/V
+            # in the directive so `Trigger: numpy:v2.5.1` and
+            # `Trigger: numpy:2.5.1` behave identically.
+            package_version=${package_version#[vV]}
+
+            build_wf=".github/workflows/build-${package_name}.yml"
+            test_wf=".github/workflows/test-${package_name}.yml"
+
+            if [ ! -f "$build_wf" ]; then
+              echo "No build workflow for $package_name at $build_wf; skipping."
+              continue
+            fi
+
+            echo "Dispatching build-${package_name}.yml on $HEAD_REF with version=$package_version"
+            gh workflow run "build-${package_name}.yml" --ref "$HEAD_REF" -f "version=$package_version"
+
+            if [ -f "$test_wf" ]; then
+              echo "Dispatching test-${package_name}.yml on $HEAD_REF with version=$package_version"
+              gh workflow run "test-${package_name}.yml" --ref "$HEAD_REF" -f "version=$package_version"
+            fi
+          done
