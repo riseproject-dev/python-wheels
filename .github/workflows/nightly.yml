@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+
+name: Run nightly package version and status checks
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+  issues: read
+
+env:
+  PIP_EXTRA_INDEX_URL: https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+
+jobs:
+  check_versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3'
+
+      - name: Install Python dependencies
+        run: pip install requests packaging
+
+      - name: Check versions and open PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 ci_scripts/check_versions.py --summary --create-prs
+
+  check_deprecated_packages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install curl and jq
+        run: sudo apt-get update -qq && sudo apt-get install -qq -y curl jq
+
+      - name: Verify riscv64 wheels still published
+        run: |
+          ret=0
+          while IFS= read -r pkg; do
+            [[ -z "$pkg" || "$pkg" =~ ^[[:space:]]*# ]] && continue
+
+            if ! output=$(curl -sf "https://pypi.org/pypi/${pkg}/json"); then
+              echo "Failed to fetch $pkg, skipping..."
+              continue
+            fi
+
+            if ! filenames=$(echo "$output" | jq -r '.urls[].filename'); then
+              echo "Failed to parse JSON for $pkg, skipping..."
+              continue
+            fi
+
+            if ! echo "$filenames" | grep -qi riscv; then
+              echo "$pkg does not distribute riscv64 wheel anymore!"
+              ret=1
+            fi
+          done < ci_scripts/deprecated.txt
+          exit $ret
+
+  check_installation:
+    runs-on: ubuntu-24.04-riscv
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packages inside riscv64 container
+        working-directory: ci_scripts
+        run: |
+          sed -Ei 's/^scipy.*$//' packages.txt
+          sed -Ei 's/^patchelf.*$//' packages.txt
+          ./list-packages.sh python-wheels
+
+  pip_audit:
+    runs-on: ubuntu-24.04-riscv
+    continue-on-error: true
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run pip-audit
+        working-directory: ci_scripts
+        run: ./audit.sh python-wheels
+
+      - name: Report vulnerabilities and open issues
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 ci_scripts/audit_report.py ci_scripts/audit-report.json
