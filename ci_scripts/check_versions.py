@@ -23,7 +23,7 @@ from pathlib import Path
 import requests
 
 
-REGISTRY_URL = "https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple"
+REGISTRY_URL = "https://pypi.riseproject.dev/simple/"
 PACKAGES_FILE = "ci_scripts/packages.txt"
 REPO = "riseproject-dev/python-wheels"
 
