@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>2026.1.14 (latest)</strong></summary>
 
 ```bash
-pip install regex --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install regex --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -35,7 +35,7 @@ pip install regex --index-url https://gitlab.com/api/v4/projects/56254198/packag
 <summary><strong>2025.11.3</strong></summary>
 
 ```bash
-pip install regex==2025.11.3 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install regex==2025.11.3 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -46,7 +46,7 @@ pip install regex==2025.11.3 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>2025.10.23</strong></summary>
 
 ```bash
-pip install regex==2025.10.23 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install regex==2025.10.23 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -57,7 +57,7 @@ pip install regex==2025.10.23 --index-url https://gitlab.com/api/v4/projects/562
 <summary><strong>2025.10.22</strong></summary>
 
 ```bash
-pip install regex==2025.10.22 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install regex==2025.10.22 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -68,7 +68,7 @@ pip install regex==2025.10.22 --index-url https://gitlab.com/api/v4/projects/562
 <summary><strong>2025.9.18</strong></summary>
 
 ```bash
-pip install regex==2025.9.18 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install regex==2025.9.18 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -79,7 +79,7 @@ pip install regex==2025.9.18 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>2025.9.1</strong></summary>
 
 ```bash
-pip install regex==2025.9.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install regex==2025.9.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -90,7 +90,7 @@ pip install regex==2025.9.1 --index-url https://gitlab.com/api/v4/projects/56254
 <summary><strong>2025.8.29</strong></summary>
 
 ```bash
-pip install regex==2025.8.29 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install regex==2025.8.29 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -101,7 +101,7 @@ pip install regex==2025.8.29 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>2025.7.34</strong></summary>
 
 ```bash
-pip install regex==2025.7.34 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install regex==2025.7.34 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -112,7 +112,7 @@ pip install regex==2025.7.34 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>2025.7.33</strong></summary>
 
 ```bash
-pip install regex==2025.7.33 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install regex==2025.7.33 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -123,7 +123,7 @@ pip install regex==2025.7.33 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>2025.7.31</strong></summary>
 
 ```bash
-pip install regex==2025.7.31 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install regex==2025.7.31 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -134,7 +134,7 @@ pip install regex==2025.7.31 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>2025.7.29</strong></summary>
 
 ```bash
-pip install regex==2025.7.29 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install regex==2025.7.29 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -145,7 +145,7 @@ pip install regex==2025.7.29 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>2024.11.6</strong></summary>
 
 ```bash
-pip install regex==2024.11.6 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install regex==2024.11.6 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0

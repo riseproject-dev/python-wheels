@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>1.1.1 (latest)</strong></summary>
 
 ```bash
-pip install watchfiles --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install watchfiles --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -35,7 +35,7 @@ pip install watchfiles --index-url https://gitlab.com/api/v4/projects/56254198/p
 <summary><strong>1.1.0</strong></summary>
 
 ```bash
-pip install watchfiles==1.1.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install watchfiles==1.1.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -46,7 +46,7 @@ pip install watchfiles==1.1.0 --index-url https://gitlab.com/api/v4/projects/562
 <summary><strong>1.0.5</strong></summary>
 
 ```bash
-pip install watchfiles==1.0.5 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install watchfiles==1.0.5 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT

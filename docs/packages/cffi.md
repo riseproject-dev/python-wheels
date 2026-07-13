@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>2.0.0 (latest)</strong></summary>
 
 ```bash
-pip install cffi --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cffi --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -27,7 +27,7 @@ pip install cffi --index-url https://gitlab.com/api/v4/projects/56254198/package
 <summary><strong>1.17.1</strong></summary>
 
 ```bash
-pip install cffi==1.17.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cffi==1.17.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -38,7 +38,7 @@ pip install cffi==1.17.1 --index-url https://gitlab.com/api/v4/projects/56254198
 <summary><strong>1.17.0</strong></summary>
 
 ```bash
-pip install cffi==1.17.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cffi==1.17.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT

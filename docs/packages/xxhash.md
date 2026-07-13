@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>3.6.0 (latest)</strong></summary>
 
 ```bash
-pip install xxhash --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install xxhash --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 2-Clause
@@ -35,7 +35,7 @@ pip install xxhash --index-url https://gitlab.com/api/v4/projects/56254198/packa
 <summary><strong>3.5.0</strong></summary>
 
 ```bash
-pip install xxhash==3.5.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install xxhash==3.5.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 2-Clause

@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>0.2.1 (latest)</strong></summary>
 
 ```bash
-pip install sentencepiece --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install sentencepiece --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -26,7 +26,7 @@ pip install sentencepiece --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>0.2.0</strong></summary>
 
 ```bash
-pip install sentencepiece==0.2.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install sentencepiece==0.2.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0

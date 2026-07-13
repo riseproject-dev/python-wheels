@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>2.41.5 (latest)</strong></summary>
 
 ```bash
-pip install pydantic-core --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pydantic-core --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -39,7 +39,7 @@ pip install pydantic-core --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>2.41.4</strong></summary>
 
 ```bash
-pip install pydantic-core==2.41.4 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pydantic-core==2.41.4 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -54,7 +54,7 @@ pip install pydantic-core==2.41.4 --index-url https://gitlab.com/api/v4/projects
 <summary><strong>2.41.2</strong></summary>
 
 ```bash
-pip install pydantic-core==2.41.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pydantic-core==2.41.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -69,7 +69,7 @@ pip install pydantic-core==2.41.2 --index-url https://gitlab.com/api/v4/projects
 <summary><strong>2.41.1</strong></summary>
 
 ```bash
-pip install pydantic-core==2.41.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pydantic-core==2.41.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -84,7 +84,7 @@ pip install pydantic-core==2.41.1 --index-url https://gitlab.com/api/v4/projects
 <summary><strong>2.41.0</strong></summary>
 
 ```bash
-pip install pydantic-core==2.41.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pydantic-core==2.41.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -99,7 +99,7 @@ pip install pydantic-core==2.41.0 --index-url https://gitlab.com/api/v4/projects
 <summary><strong>2.40.1</strong></summary>
 
 ```bash
-pip install pydantic-core==2.40.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pydantic-core==2.40.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -114,7 +114,7 @@ pip install pydantic-core==2.40.1 --index-url https://gitlab.com/api/v4/projects
 <summary><strong>2.40.0</strong></summary>
 
 ```bash
-pip install pydantic-core==2.40.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pydantic-core==2.40.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -129,7 +129,7 @@ pip install pydantic-core==2.40.0 --index-url https://gitlab.com/api/v4/projects
 <summary><strong>2.39.0</strong></summary>
 
 ```bash
-pip install pydantic-core==2.39.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pydantic-core==2.39.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -144,7 +144,7 @@ pip install pydantic-core==2.39.0 --index-url https://gitlab.com/api/v4/projects
 <summary><strong>2.33.2</strong></summary>
 
 ```bash
-pip install pydantic-core==2.33.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pydantic-core==2.33.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -159,7 +159,7 @@ pip install pydantic-core==2.33.2 --index-url https://gitlab.com/api/v4/projects
 <summary><strong>2.27.2</strong></summary>
 
 ```bash
-pip install pydantic-core==2.27.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pydantic-core==2.27.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT

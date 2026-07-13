@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>1.17.3 (latest)</strong></summary>
 
 ```bash
-pip install wrapt --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install wrapt --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-2-Clause
@@ -35,7 +35,7 @@ pip install wrapt --index-url https://gitlab.com/api/v4/projects/56254198/packag
 <summary><strong>1.17.2</strong></summary>
 
 ```bash
-pip install wrapt==1.17.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install wrapt==1.17.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-2-Clause

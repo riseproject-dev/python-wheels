@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>2.0.30 (latest)</strong></summary>
 
 ```bash
-pip install pyuwsgi --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pyuwsgi --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** GPL2

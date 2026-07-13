@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>0.3.2 (latest)</strong></summary>
 
 ```bash
-pip install nh3 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install nh3 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -35,7 +35,7 @@ pip install nh3 --index-url https://gitlab.com/api/v4/projects/56254198/packages
 <summary><strong>0.3.1</strong></summary>
 
 ```bash
-pip install nh3==0.3.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install nh3==0.3.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -46,7 +46,7 @@ pip install nh3==0.3.1 --index-url https://gitlab.com/api/v4/projects/56254198/p
 <summary><strong>0.3.0</strong></summary>
 
 ```bash
-pip install nh3==0.3.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install nh3==0.3.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -57,7 +57,7 @@ pip install nh3==0.3.0 --index-url https://gitlab.com/api/v4/projects/56254198/p
 <summary><strong>0.2.22</strong></summary>
 
 ```bash
-pip install nh3==0.2.22 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install nh3==0.2.22 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -68,7 +68,7 @@ pip install nh3==0.2.22 --index-url https://gitlab.com/api/v4/projects/56254198/
 <summary><strong>0.2.21</strong></summary>
 
 ```bash
-pip install nh3==0.2.21 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install nh3==0.2.21 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -79,7 +79,7 @@ pip install nh3==0.2.21 --index-url https://gitlab.com/api/v4/projects/56254198/
 <summary><strong>0.2.20</strong></summary>
 
 ```bash
-pip install nh3==0.2.20 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install nh3==0.2.20 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -90,7 +90,7 @@ pip install nh3==0.2.20 --index-url https://gitlab.com/api/v4/projects/56254198/
 <summary><strong>0.2.19</strong></summary>
 
 ```bash
-pip install nh3==0.2.19 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install nh3==0.2.19 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -101,7 +101,7 @@ pip install nh3==0.2.19 --index-url https://gitlab.com/api/v4/projects/56254198/
 <summary><strong>0.2.18</strong></summary>
 
 ```bash
-pip install nh3==0.2.18 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install nh3==0.2.18 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT

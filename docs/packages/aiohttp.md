@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>3.12.14 (latest)</strong></summary>
 
 ```bash
-pip install aiohttp --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install aiohttp --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache-2.0
@@ -36,7 +36,7 @@ pip install aiohttp --index-url https://gitlab.com/api/v4/projects/56254198/pack
 <summary><strong>3.11.18</strong></summary>
 
 ```bash
-pip install aiohttp==3.11.18 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install aiohttp==3.11.18 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache-2.0

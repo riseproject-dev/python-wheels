@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>1.76.0 (latest)</strong></summary>
 
 ```bash
-pip install grpcio --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install grpcio --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache License 2.0
@@ -31,7 +31,7 @@ pip install grpcio --index-url https://gitlab.com/api/v4/projects/56254198/packa
 <summary><strong>1.75.1</strong></summary>
 
 ```bash
-pip install grpcio==1.75.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install grpcio==1.75.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache License 2.0
@@ -47,7 +47,7 @@ pip install grpcio==1.75.1 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>1.72.0</strong></summary>
 
 ```bash
-pip install grpcio==1.72.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install grpcio==1.72.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache License 2.0

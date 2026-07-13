@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>0.17.2.2 (latest)</strong></summary>
 
 ```bash
-pip install patchelf --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install patchelf --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0/GPL v3
@@ -40,7 +40,7 @@ pip install patchelf --index-url https://gitlab.com/api/v4/projects/56254198/pac
 <summary><strong>0.17.2.1</strong></summary>
 
 ```bash
-pip install patchelf==0.17.2.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install patchelf==0.17.2.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0/GPL v3

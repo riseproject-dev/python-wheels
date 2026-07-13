@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>6.5.7 (latest)</strong></summary>
 
 ```bash
-pip install tornado --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tornado --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -30,7 +30,7 @@ pip install tornado --index-url https://gitlab.com/api/v4/projects/56254198/pack
 <summary><strong>6.5.6</strong></summary>
 
 ```bash
-pip install tornado==6.5.6 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tornado==6.5.6 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -45,7 +45,7 @@ pip install tornado==6.5.6 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>6.5.5</strong></summary>
 
 ```bash
-pip install tornado==6.5.5 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tornado==6.5.5 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -60,7 +60,7 @@ pip install tornado==6.5.5 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>6.5.4</strong></summary>
 
 ```bash
-pip install tornado==6.5.4 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tornado==6.5.4 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -75,7 +75,7 @@ pip install tornado==6.5.4 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>6.5.3</strong></summary>
 
 ```bash
-pip install tornado==6.5.3 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tornado==6.5.3 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -90,7 +90,7 @@ pip install tornado==6.5.3 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>6.5.2</strong></summary>
 
 ```bash
-pip install tornado==6.5.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tornado==6.5.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -105,7 +105,7 @@ pip install tornado==6.5.2 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>6.5.1</strong></summary>
 
 ```bash
-pip install tornado==6.5.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tornado==6.5.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -120,7 +120,7 @@ pip install tornado==6.5.1 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>6.5</strong></summary>
 
 ```bash
-pip install tornado==6.5 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tornado==6.5 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -135,7 +135,7 @@ pip install tornado==6.5 --index-url https://gitlab.com/api/v4/projects/56254198
 <summary><strong>6.4.2</strong></summary>
 
 ```bash
-pip install tornado==6.4.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tornado==6.4.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -150,7 +150,7 @@ pip install tornado==6.4.2 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>6.4.1</strong></summary>
 
 ```bash
-pip install tornado==6.4.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tornado==6.4.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0

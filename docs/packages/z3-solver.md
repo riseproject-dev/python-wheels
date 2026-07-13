@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>4.16.0.0 (latest)</strong></summary>
 
 ```bash
-pip install z3-solver --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install z3-solver --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -27,7 +27,7 @@ pip install z3-solver --index-url https://gitlab.com/api/v4/projects/56254198/pa
 <summary><strong>4.15.8.0</strong></summary>
 
 ```bash
-pip install z3-solver==4.15.8.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install z3-solver==4.15.8.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -39,7 +39,7 @@ pip install z3-solver==4.15.8.0 --index-url https://gitlab.com/api/v4/projects/5
 <summary><strong>4.15.4.0</strong></summary>
 
 ```bash
-pip install z3-solver==4.15.4.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install z3-solver==4.15.4.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -51,7 +51,7 @@ pip install z3-solver==4.15.4.0 --index-url https://gitlab.com/api/v4/projects/5
 <summary><strong>4.15.1.0</strong></summary>
 
 ```bash
-pip install z3-solver==4.15.1.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install z3-solver==4.15.1.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -63,7 +63,7 @@ pip install z3-solver==4.15.1.0 --index-url https://gitlab.com/api/v4/projects/5
 <summary><strong>4.14.1.0</strong></summary>
 
 ```bash
-pip install z3-solver==4.14.1.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install z3-solver==4.14.1.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -79,7 +79,7 @@ pip install z3-solver==4.14.1.0 --index-url https://gitlab.com/api/v4/projects/5
 <summary><strong>4.12.6.0</strong></summary>
 
 ```bash
-pip install z3-solver==4.12.6.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install z3-solver==4.12.6.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -95,7 +95,7 @@ pip install z3-solver==4.12.6.0 --index-url https://gitlab.com/api/v4/projects/5
 <summary><strong>4.12.2.0</strong></summary>
 
 ```bash
-pip install z3-solver==4.12.2.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install z3-solver==4.12.2.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT

@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>1.8.0 (latest)</strong></summary>
 
 ```bash
-pip install frozenlist --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install frozenlist --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -27,7 +27,7 @@ pip install frozenlist --index-url https://gitlab.com/api/v4/projects/56254198/p
 <summary><strong>1.7.0</strong></summary>
 
 ```bash
-pip install frozenlist==1.7.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install frozenlist==1.7.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -39,7 +39,7 @@ pip install frozenlist==1.7.0 --index-url https://gitlab.com/api/v4/projects/562
 <summary><strong>1.6.2</strong></summary>
 
 ```bash
-pip install frozenlist==1.6.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install frozenlist==1.6.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -51,7 +51,7 @@ pip install frozenlist==1.6.2 --index-url https://gitlab.com/api/v4/projects/562
 <summary><strong>1.6.1</strong></summary>
 
 ```bash
-pip install frozenlist==1.6.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install frozenlist==1.6.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -63,7 +63,7 @@ pip install frozenlist==1.6.1 --index-url https://gitlab.com/api/v4/projects/562
 <summary><strong>1.6.0</strong></summary>
 
 ```bash
-pip install frozenlist==1.6.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install frozenlist==1.6.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -74,7 +74,7 @@ pip install frozenlist==1.6.0 --index-url https://gitlab.com/api/v4/projects/562
 <summary><strong>1.5.0</strong></summary>
 
 ```bash
-pip install frozenlist==1.5.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install frozenlist==1.5.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0

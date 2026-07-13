@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>6.7.1 (latest)</strong></summary>
 
 ```bash
-pip install multidict --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install multidict --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -26,7 +26,7 @@ pip install multidict --index-url https://gitlab.com/api/v4/projects/56254198/pa
 <summary><strong>6.7.0</strong></summary>
 
 ```bash
-pip install multidict==6.7.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install multidict==6.7.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -37,7 +37,7 @@ pip install multidict==6.7.0 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>6.6.4</strong></summary>
 
 ```bash
-pip install multidict==6.6.4 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install multidict==6.6.4 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -48,7 +48,7 @@ pip install multidict==6.6.4 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>6.6.3</strong></summary>
 
 ```bash
-pip install multidict==6.6.3 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install multidict==6.6.3 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -59,7 +59,7 @@ pip install multidict==6.6.3 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>6.6.2</strong></summary>
 
 ```bash
-pip install multidict==6.6.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install multidict==6.6.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -70,7 +70,7 @@ pip install multidict==6.6.2 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>6.5.1</strong></summary>
 
 ```bash
-pip install multidict==6.5.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install multidict==6.5.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -81,7 +81,7 @@ pip install multidict==6.5.1 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>6.4.4</strong></summary>
 
 ```bash
-pip install multidict==6.4.4 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install multidict==6.4.4 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -92,7 +92,7 @@ pip install multidict==6.4.4 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>6.4.3</strong></summary>
 
 ```bash
-pip install multidict==6.4.3 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install multidict==6.4.3 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -103,7 +103,7 @@ pip install multidict==6.4.3 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>6.4.2</strong></summary>
 
 ```bash
-pip install multidict==6.4.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install multidict==6.4.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -114,7 +114,7 @@ pip install multidict==6.4.2 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>6.2.0</strong></summary>
 
 ```bash
-pip install multidict==6.2.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install multidict==6.2.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -125,7 +125,7 @@ pip install multidict==6.2.0 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>6.1.0</strong></summary>
 
 ```bash
-pip install multidict==6.1.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install multidict==6.1.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0

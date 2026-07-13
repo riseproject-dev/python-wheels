@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>16.0 (latest)</strong></summary>
 
 ```bash
-pip install websockets --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install websockets --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause
@@ -30,7 +30,7 @@ pip install websockets --index-url https://gitlab.com/api/v4/projects/56254198/p
 <summary><strong>15.0.1</strong></summary>
 
 ```bash
-pip install websockets==15.0.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install websockets==15.0.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause
@@ -41,7 +41,7 @@ pip install websockets==15.0.1 --index-url https://gitlab.com/api/v4/projects/56
 <summary><strong>15.0</strong></summary>
 
 ```bash
-pip install websockets==15.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install websockets==15.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause
@@ -52,7 +52,7 @@ pip install websockets==15.0 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>14.2</strong></summary>
 
 ```bash
-pip install websockets==14.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install websockets==14.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause
@@ -63,7 +63,7 @@ pip install websockets==14.2 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>14.1</strong></summary>
 
 ```bash
-pip install websockets==14.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install websockets==14.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause

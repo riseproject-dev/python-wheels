@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>1.8.6 (latest)</strong></summary>
 
 ```bash
-pip install libcst --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install libcst --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT / PSF / Apache 2.0 (see more details in `LICENSE file <https://github.com/Instagram/LibCST/blob/main/LICENSE>`_)

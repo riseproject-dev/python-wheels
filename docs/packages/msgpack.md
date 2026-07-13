@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>1.1.2 (latest)</strong></summary>
 
 ```bash
-pip install msgpack --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install msgpack --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -35,7 +35,7 @@ pip install msgpack --index-url https://gitlab.com/api/v4/projects/56254198/pack
 <summary><strong>1.1.1</strong></summary>
 
 ```bash
-pip install msgpack==1.1.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install msgpack==1.1.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -46,7 +46,7 @@ pip install msgpack==1.1.1 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>1.1.0</strong></summary>
 
 ```bash
-pip install msgpack==1.1.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install msgpack==1.1.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -57,7 +57,7 @@ pip install msgpack==1.1.0 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>1.0.8</strong></summary>
 
 ```bash
-pip install msgpack==1.0.8 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install msgpack==1.0.8 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0

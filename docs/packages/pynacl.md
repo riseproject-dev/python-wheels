@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>1.6.2 (latest)</strong></summary>
 
 ```bash
-pip install PyNaCl --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install PyNaCl --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache License 2.0
@@ -26,7 +26,7 @@ pip install PyNaCl --index-url https://gitlab.com/api/v4/projects/56254198/packa
 <summary><strong>1.6.1</strong></summary>
 
 ```bash
-pip install PyNaCl==1.6.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install PyNaCl==1.6.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache License 2.0
@@ -38,7 +38,7 @@ pip install PyNaCl==1.6.1 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>1.6.0</strong></summary>
 
 ```bash
-pip install PyNaCl==1.6.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install PyNaCl==1.6.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache License 2.0
@@ -50,7 +50,7 @@ pip install PyNaCl==1.6.0 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>1.5.0</strong></summary>
 
 ```bash
-pip install PyNaCl==1.5.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install PyNaCl==1.5.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache License 2.0

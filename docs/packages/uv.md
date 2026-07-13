@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>0.7.13 (latest)</strong></summary>
 
 ```bash
-pip install uv --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install uv --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT or Apache 2.0
@@ -36,7 +36,7 @@ pip install uv --index-url https://gitlab.com/api/v4/projects/56254198/packages/
 <summary><strong>0.6.6</strong></summary>
 
 ```bash
-pip install uv==0.6.6 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install uv==0.6.6 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT or Apache 2.0
@@ -48,7 +48,7 @@ pip install uv==0.6.6 --index-url https://gitlab.com/api/v4/projects/56254198/pa
 <summary><strong>0.6.3</strong></summary>
 
 ```bash
-pip install uv==0.6.3 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install uv==0.6.3 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT or Apache 2.0

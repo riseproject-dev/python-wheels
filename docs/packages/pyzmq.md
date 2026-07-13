@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>27.1.0 (latest)</strong></summary>
 
 ```bash
-pip install pyzmq --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pyzmq --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause/ISC(sodium)/MPL(zeromq)
@@ -30,7 +30,7 @@ pip install pyzmq --index-url https://gitlab.com/api/v4/projects/56254198/packag
 <summary><strong>27.0.2</strong></summary>
 
 ```bash
-pip install pyzmq==27.0.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pyzmq==27.0.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause/ISC(sodium)/MPL(zeromq)
@@ -45,7 +45,7 @@ pip install pyzmq==27.0.2 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>27.0.1</strong></summary>
 
 ```bash
-pip install pyzmq==27.0.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pyzmq==27.0.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause/ISC(sodium)/MPL(zeromq)
@@ -60,7 +60,7 @@ pip install pyzmq==27.0.1 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>27.0.0</strong></summary>
 
 ```bash
-pip install pyzmq==27.0.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pyzmq==27.0.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause/ISC(sodium)/MPL(zeromq)
@@ -75,7 +75,7 @@ pip install pyzmq==27.0.0 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>26.4.0</strong></summary>
 
 ```bash
-pip install pyzmq==26.4.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pyzmq==26.4.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause/ISC(sodium)/MPL(zeromq)
@@ -90,7 +90,7 @@ pip install pyzmq==26.4.0 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>26.3.0</strong></summary>
 
 ```bash
-pip install pyzmq==26.3.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pyzmq==26.3.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause/ISC(sodium)/MPL(zeromq)
@@ -105,7 +105,7 @@ pip install pyzmq==26.3.0 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>26.2.1</strong></summary>
 
 ```bash
-pip install pyzmq==26.2.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pyzmq==26.2.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause/ISC(sodium)/MPL(zeromq)
@@ -120,7 +120,7 @@ pip install pyzmq==26.2.1 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>26.2.0</strong></summary>
 
 ```bash
-pip install pyzmq==26.2.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pyzmq==26.2.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause/ISC(sodium)/MPL(zeromq)

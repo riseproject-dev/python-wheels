@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>12.2.0 (latest)</strong></summary>
 
 ```bash
-pip install pillow --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pillow --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT-CMU License
@@ -33,7 +33,7 @@ pip install pillow --index-url https://gitlab.com/api/v4/projects/56254198/packa
 <summary><strong>12.1.1</strong></summary>
 
 ```bash
-pip install pillow==12.1.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pillow==12.1.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT-CMU License
@@ -45,7 +45,7 @@ pip install pillow==12.1.1 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>12.1.0</strong></summary>
 
 ```bash
-pip install pillow==12.1.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pillow==12.1.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT-CMU License
@@ -57,7 +57,7 @@ pip install pillow==12.1.0 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>12.0.0</strong></summary>
 
 ```bash
-pip install pillow==12.0.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pillow==12.0.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT-CMU License
@@ -69,7 +69,7 @@ pip install pillow==12.0.0 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>11.3.0</strong></summary>
 
 ```bash
-pip install pillow==11.3.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pillow==11.3.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT-CMU License
@@ -85,7 +85,7 @@ pip install pillow==11.3.0 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>11.1.0</strong></summary>
 
 ```bash
-pip install pillow==11.1.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pillow==11.1.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT-CMU License
@@ -97,7 +97,7 @@ pip install pillow==11.1.0 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>11.0.0</strong></summary>
 
 ```bash
-pip install pillow==11.0.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pillow==11.0.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** HPND License
@@ -109,7 +109,7 @@ pip install pillow==11.0.0 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>10.4.0</strong></summary>
 
 ```bash
-pip install pillow==10.4.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pillow==10.4.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** HPND License
@@ -121,7 +121,7 @@ pip install pillow==10.4.0 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>10.3.0</strong></summary>
 
 ```bash
-pip install pillow==10.3.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pillow==10.3.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** HPND License

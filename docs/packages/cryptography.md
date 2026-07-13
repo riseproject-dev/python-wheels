@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>49.0.0 (latest)</strong></summary>
 
 ```bash
-pip install cryptography --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cryptography --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause or Apache 2.0
@@ -26,7 +26,7 @@ pip install cryptography --index-url https://gitlab.com/api/v4/projects/56254198
 <summary><strong>48.0.1</strong></summary>
 
 ```bash
-pip install cryptography==48.0.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cryptography==48.0.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause or Apache 2.0
@@ -37,7 +37,7 @@ pip install cryptography==48.0.1 --index-url https://gitlab.com/api/v4/projects/
 <summary><strong>48.0.0</strong></summary>
 
 ```bash
-pip install cryptography==48.0.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cryptography==48.0.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause or Apache 2.0
@@ -48,7 +48,7 @@ pip install cryptography==48.0.0 --index-url https://gitlab.com/api/v4/projects/
 <summary><strong>47.0.0</strong></summary>
 
 ```bash
-pip install cryptography==47.0.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cryptography==47.0.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause or Apache 2.0
@@ -59,7 +59,7 @@ pip install cryptography==47.0.0 --index-url https://gitlab.com/api/v4/projects/
 <summary><strong>46.0.7</strong></summary>
 
 ```bash
-pip install cryptography==46.0.7 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cryptography==46.0.7 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause or Apache 2.0
@@ -70,7 +70,7 @@ pip install cryptography==46.0.7 --index-url https://gitlab.com/api/v4/projects/
 <summary><strong>46.0.6</strong></summary>
 
 ```bash
-pip install cryptography==46.0.6 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cryptography==46.0.6 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause or Apache 2.0
@@ -81,7 +81,7 @@ pip install cryptography==46.0.6 --index-url https://gitlab.com/api/v4/projects/
 <summary><strong>46.0.5</strong></summary>
 
 ```bash
-pip install cryptography==46.0.5 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cryptography==46.0.5 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause or Apache 2.0
@@ -92,7 +92,7 @@ pip install cryptography==46.0.5 --index-url https://gitlab.com/api/v4/projects/
 <summary><strong>45.0.4</strong></summary>
 
 ```bash
-pip install cryptography==45.0.4 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cryptography==45.0.4 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause or Apache 2.0
@@ -103,7 +103,7 @@ pip install cryptography==45.0.4 --index-url https://gitlab.com/api/v4/projects/
 <summary><strong>43.0.1</strong></summary>
 
 ```bash
-pip install cryptography==43.0.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cryptography==43.0.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause or Apache 2.0
@@ -118,7 +118,7 @@ pip install cryptography==43.0.1 --index-url https://gitlab.com/api/v4/projects/
 <summary><strong>39.0.2</strong></summary>
 
 ```bash
-pip install cryptography==39.0.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cryptography==39.0.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause or Apache 2.0

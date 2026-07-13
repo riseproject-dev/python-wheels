@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>7.2.2 (latest)</strong></summary>
 
 ```bash
-pip install psutil --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install psutil --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -27,7 +27,7 @@ pip install psutil --index-url https://gitlab.com/api/v4/projects/56254198/packa
 <summary><strong>7.2.1</strong></summary>
 
 ```bash
-pip install psutil==7.2.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install psutil==7.2.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -39,7 +39,7 @@ pip install psutil==7.2.1 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>7.2.0</strong></summary>
 
 ```bash
-pip install psutil==7.2.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install psutil==7.2.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -51,7 +51,7 @@ pip install psutil==7.2.0 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>7.1.3</strong></summary>
 
 ```bash
-pip install psutil==7.1.3 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install psutil==7.1.3 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -63,7 +63,7 @@ pip install psutil==7.1.3 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>7.1.2</strong></summary>
 
 ```bash
-pip install psutil==7.1.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install psutil==7.1.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -75,7 +75,7 @@ pip install psutil==7.1.2 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>7.1.1</strong></summary>
 
 ```bash
-pip install psutil==7.1.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install psutil==7.1.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -87,7 +87,7 @@ pip install psutil==7.1.1 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>7.1.0</strong></summary>
 
 ```bash
-pip install psutil==7.1.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install psutil==7.1.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -99,7 +99,7 @@ pip install psutil==7.1.0 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>7.0.0</strong></summary>
 
 ```bash
-pip install psutil==7.0.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install psutil==7.0.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -111,7 +111,7 @@ pip install psutil==7.0.0 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>6.1.1</strong></summary>
 
 ```bash
-pip install psutil==6.1.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install psutil==6.1.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -123,7 +123,7 @@ pip install psutil==6.1.1 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>6.1.0</strong></summary>
 
 ```bash
-pip install psutil==6.1.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install psutil==6.1.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -135,7 +135,7 @@ pip install psutil==6.1.0 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>6.0.0</strong></summary>
 
 ```bash
-pip install psutil==6.0.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install psutil==6.0.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -147,7 +147,7 @@ pip install psutil==6.0.0 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>5.9.8</strong></summary>
 
 ```bash
-pip install psutil==5.9.8 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install psutil==5.9.8 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause

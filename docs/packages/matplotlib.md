@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>3.10.9 (latest)</strong></summary>
 
 ```bash
-pip install matplotlib --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install matplotlib --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Matplotlib license
@@ -26,7 +26,7 @@ pip install matplotlib --index-url https://gitlab.com/api/v4/projects/56254198/p
 <summary><strong>3.10.8</strong></summary>
 
 ```bash
-pip install matplotlib==3.10.8 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install matplotlib==3.10.8 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Matplotlib license
@@ -37,7 +37,7 @@ pip install matplotlib==3.10.8 --index-url https://gitlab.com/api/v4/projects/56
 <summary><strong>3.10.7</strong></summary>
 
 ```bash
-pip install matplotlib==3.10.7 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install matplotlib==3.10.7 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Matplotlib license
@@ -48,7 +48,7 @@ pip install matplotlib==3.10.7 --index-url https://gitlab.com/api/v4/projects/56
 <summary><strong>3.10.6</strong></summary>
 
 ```bash
-pip install matplotlib==3.10.6 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install matplotlib==3.10.6 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Matplotlib license
@@ -59,7 +59,7 @@ pip install matplotlib==3.10.6 --index-url https://gitlab.com/api/v4/projects/56
 <summary><strong>3.10.5</strong></summary>
 
 ```bash
-pip install matplotlib==3.10.5 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install matplotlib==3.10.5 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Matplotlib license
@@ -70,7 +70,7 @@ pip install matplotlib==3.10.5 --index-url https://gitlab.com/api/v4/projects/56
 <summary><strong>3.10.3</strong></summary>
 
 ```bash
-pip install matplotlib==3.10.3 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install matplotlib==3.10.3 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Matplotlib license
@@ -81,7 +81,7 @@ pip install matplotlib==3.10.3 --index-url https://gitlab.com/api/v4/projects/56
 <summary><strong>3.10.2</strong></summary>
 
 ```bash
-pip install matplotlib==3.10.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install matplotlib==3.10.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Matplotlib license
@@ -92,7 +92,7 @@ pip install matplotlib==3.10.2 --index-url https://gitlab.com/api/v4/projects/56
 <summary><strong>3.10.1</strong></summary>
 
 ```bash
-pip install matplotlib==3.10.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install matplotlib==3.10.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Matplotlib license
@@ -103,7 +103,7 @@ pip install matplotlib==3.10.1 --index-url https://gitlab.com/api/v4/projects/56
 <summary><strong>3.10.0</strong></summary>
 
 ```bash
-pip install matplotlib==3.10.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install matplotlib==3.10.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Matplotlib license
@@ -114,7 +114,7 @@ pip install matplotlib==3.10.0 --index-url https://gitlab.com/api/v4/projects/56
 <summary><strong>3.9.2</strong></summary>
 
 ```bash
-pip install matplotlib==3.9.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install matplotlib==3.9.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Matplotlib license

@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>1.2.0 (latest)</strong></summary>
 
 ```bash
-pip install hf-xet --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install hf-xet --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache-2.0
@@ -26,7 +26,7 @@ pip install hf-xet --index-url https://gitlab.com/api/v4/projects/56254198/packa
 <summary><strong>1.1.10</strong></summary>
 
 ```bash
-pip install hf-xet==1.1.10 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install hf-xet==1.1.10 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache-2.0
@@ -37,7 +37,7 @@ pip install hf-xet==1.1.10 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>1.1.9</strong></summary>
 
 ```bash
-pip install hf-xet==1.1.9 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install hf-xet==1.1.9 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache-2.0
@@ -48,7 +48,7 @@ pip install hf-xet==1.1.9 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>1.1.8</strong></summary>
 
 ```bash
-pip install hf-xet==1.1.8 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install hf-xet==1.1.8 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache-2.0
@@ -59,7 +59,7 @@ pip install hf-xet==1.1.8 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>1.1.7</strong></summary>
 
 ```bash
-pip install hf-xet==1.1.7 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install hf-xet==1.1.7 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache-2.0
@@ -70,7 +70,7 @@ pip install hf-xet==1.1.7 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>1.1.6</strong></summary>
 
 ```bash
-pip install hf-xet==1.1.6 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install hf-xet==1.1.6 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache-2.0
@@ -81,7 +81,7 @@ pip install hf-xet==1.1.6 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>1.1.5</strong></summary>
 
 ```bash
-pip install hf-xet==1.1.5 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install hf-xet==1.1.5 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache-2.0
@@ -92,7 +92,7 @@ pip install hf-xet==1.1.5 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>1.1.4</strong></summary>
 
 ```bash
-pip install hf-xet==1.1.4 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install hf-xet==1.1.4 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache-2.0

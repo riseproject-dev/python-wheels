@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>0.3.31.22.0 (latest)</strong></summary>
 
 ```bash
-pip install scipy-openblas64 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install scipy-openblas64 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 2-Clause
@@ -40,7 +40,7 @@ pip install scipy-openblas64 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>0.3.30.0.1</strong></summary>
 
 ```bash
-pip install scipy-openblas64==0.3.30.0.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install scipy-openblas64==0.3.30.0.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 2-Clause
@@ -56,7 +56,7 @@ pip install scipy-openblas64==0.3.30.0.1 --index-url https://gitlab.com/api/v4/p
 <summary><strong>0.3.29.0.0</strong></summary>
 
 ```bash
-pip install scipy-openblas64==0.3.29.0.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install scipy-openblas64==0.3.29.0.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 2-Clause
@@ -72,7 +72,7 @@ pip install scipy-openblas64==0.3.29.0.0 --index-url https://gitlab.com/api/v4/p
 <summary><strong>0.3.28.0.2</strong></summary>
 
 ```bash
-pip install scipy-openblas64==0.3.28.0.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install scipy-openblas64==0.3.28.0.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 2-Clause
@@ -88,7 +88,7 @@ pip install scipy-openblas64==0.3.28.0.2 --index-url https://gitlab.com/api/v4/p
 <summary><strong>0.3.27.63.1</strong></summary>
 
 ```bash
-pip install scipy-openblas64==0.3.27.63.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install scipy-openblas64==0.3.27.63.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 2-Clause

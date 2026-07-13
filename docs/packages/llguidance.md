@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>1.5.0 (latest)</strong></summary>
 
 ```bash
-pip install llguidance --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install llguidance --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -35,7 +35,7 @@ pip install llguidance --index-url https://gitlab.com/api/v4/projects/56254198/p
 <summary><strong>1.4.0</strong></summary>
 
 ```bash
-pip install llguidance==1.4.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install llguidance==1.4.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -46,7 +46,7 @@ pip install llguidance==1.4.0 --index-url https://gitlab.com/api/v4/projects/562
 <summary><strong>1.3.0</strong></summary>
 
 ```bash
-pip install llguidance==1.3.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install llguidance==1.3.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -57,7 +57,7 @@ pip install llguidance==1.3.0 --index-url https://gitlab.com/api/v4/projects/562
 <summary><strong>1.2.0</strong></summary>
 
 ```bash
-pip install llguidance==1.2.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install llguidance==1.2.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -68,7 +68,7 @@ pip install llguidance==1.2.0 --index-url https://gitlab.com/api/v4/projects/562
 <summary><strong>1.1.2</strong></summary>
 
 ```bash
-pip install llguidance==1.1.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install llguidance==1.1.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -79,7 +79,7 @@ pip install llguidance==1.1.2 --index-url https://gitlab.com/api/v4/projects/562
 <summary><strong>1.1.1</strong></summary>
 
 ```bash
-pip install llguidance==1.1.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install llguidance==1.1.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -90,7 +90,7 @@ pip install llguidance==1.1.1 --index-url https://gitlab.com/api/v4/projects/562
 <summary><strong>1.1.0</strong></summary>
 
 ```bash
-pip install llguidance==1.1.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install llguidance==1.1.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -101,7 +101,7 @@ pip install llguidance==1.1.0 --index-url https://gitlab.com/api/v4/projects/562
 <summary><strong>1.0.1</strong></summary>
 
 ```bash
-pip install llguidance==1.0.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install llguidance==1.0.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -112,7 +112,7 @@ pip install llguidance==1.0.1 --index-url https://gitlab.com/api/v4/projects/562
 <summary><strong>1.0.0</strong></summary>
 
 ```bash
-pip install llguidance==1.0.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install llguidance==1.0.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -123,7 +123,7 @@ pip install llguidance==1.0.0 --index-url https://gitlab.com/api/v4/projects/562
 <summary><strong>0.7.30</strong></summary>
 
 ```bash
-pip install llguidance==0.7.30 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install llguidance==0.7.30 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -134,7 +134,7 @@ pip install llguidance==0.7.30 --index-url https://gitlab.com/api/v4/projects/56
 <summary><strong>0.7.29</strong></summary>
 
 ```bash
-pip install llguidance==0.7.29 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install llguidance==0.7.29 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT

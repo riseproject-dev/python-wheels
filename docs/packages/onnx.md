@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>1.21.0 (latest)</strong></summary>
 
 ```bash
-pip install onnx --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install onnx --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache License v2.0
@@ -27,7 +27,7 @@ pip install onnx --index-url https://gitlab.com/api/v4/projects/56254198/package
 <summary><strong>1.20.1</strong></summary>
 
 ```bash
-pip install onnx==1.20.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install onnx==1.20.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache License v2.0
@@ -39,7 +39,7 @@ pip install onnx==1.20.1 --index-url https://gitlab.com/api/v4/projects/56254198
 <summary><strong>1.20.0</strong></summary>
 
 ```bash
-pip install onnx==1.20.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install onnx==1.20.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache License v2.0
@@ -51,7 +51,7 @@ pip install onnx==1.20.0 --index-url https://gitlab.com/api/v4/projects/56254198
 <summary><strong>1.19.1</strong></summary>
 
 ```bash
-pip install onnx==1.19.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install onnx==1.19.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache License v2.0

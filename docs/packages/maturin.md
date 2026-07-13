@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>1.8.1 (latest)</strong></summary>
 
 ```bash
-pip install maturin --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install maturin --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT or Apache 2.0
@@ -35,7 +35,7 @@ pip install maturin --index-url https://gitlab.com/api/v4/projects/56254198/pack
 <summary><strong>1.7.1</strong></summary>
 
 ```bash
-pip install maturin==1.7.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install maturin==1.7.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT or Apache 2.0

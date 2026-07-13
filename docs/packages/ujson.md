@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>5.13.0 (latest)</strong></summary>
 
 ```bash
-pip install ujson --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install ujson --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause + TCL/TK License
@@ -26,7 +26,7 @@ pip install ujson --index-url https://gitlab.com/api/v4/projects/56254198/packag
 <summary><strong>5.12.1</strong></summary>
 
 ```bash
-pip install ujson==5.12.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install ujson==5.12.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause + TCL/TK License
@@ -37,7 +37,7 @@ pip install ujson==5.12.1 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>5.12.0</strong></summary>
 
 ```bash
-pip install ujson==5.12.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install ujson==5.12.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause + TCL/TK License
@@ -48,7 +48,7 @@ pip install ujson==5.12.0 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>5.11.0</strong></summary>
 
 ```bash
-pip install ujson==5.11.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install ujson==5.11.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause + TCL/TK License
@@ -59,7 +59,7 @@ pip install ujson==5.11.0 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>5.10.0</strong></summary>
 
 ```bash
-pip install ujson==5.10.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install ujson==5.10.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause + TCL/TK License

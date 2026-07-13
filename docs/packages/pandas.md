@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>3.0.3 (latest)</strong></summary>
 
 ```bash
-pip install pandas --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pandas --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause
@@ -31,7 +31,7 @@ pip install pandas --index-url https://gitlab.com/api/v4/projects/56254198/packa
 <summary><strong>3.0.2</strong></summary>
 
 ```bash
-pip install pandas==3.0.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pandas==3.0.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause
@@ -47,7 +47,7 @@ pip install pandas==3.0.2 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>3.0.1</strong></summary>
 
 ```bash
-pip install pandas==3.0.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pandas==3.0.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause
@@ -63,7 +63,7 @@ pip install pandas==3.0.1 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>3.0.0</strong></summary>
 
 ```bash
-pip install pandas==3.0.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pandas==3.0.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause
@@ -79,7 +79,7 @@ pip install pandas==3.0.0 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>2.3.3</strong></summary>
 
 ```bash
-pip install pandas==2.3.3 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pandas==2.3.3 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause
@@ -98,7 +98,7 @@ pip install pandas==2.3.3 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>2.3.2</strong></summary>
 
 ```bash
-pip install pandas==2.3.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pandas==2.3.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause
@@ -117,7 +117,7 @@ pip install pandas==2.3.2 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>2.3.1</strong></summary>
 
 ```bash
-pip install pandas==2.3.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pandas==2.3.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause
@@ -132,7 +132,7 @@ pip install pandas==2.3.1 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>2.2.3</strong></summary>
 
 ```bash
-pip install pandas==2.2.3 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pandas==2.2.3 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause
@@ -147,7 +147,7 @@ pip install pandas==2.2.3 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>2.2.2</strong></summary>
 
 ```bash
-pip install pandas==2.2.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install pandas==2.2.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause

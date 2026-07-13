@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>0.8.0 (latest)</strong></summary>
 
 ```bash
-pip install fastar --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install fastar --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -35,7 +35,7 @@ pip install fastar --index-url https://gitlab.com/api/v4/projects/56254198/packa
 <summary><strong>0.7.0</strong></summary>
 
 ```bash
-pip install fastar==0.7.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install fastar==0.7.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT

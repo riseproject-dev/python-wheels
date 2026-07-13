@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>6.0.3 (latest)</strong></summary>
 
 ```bash
-pip install PyYAML --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install PyYAML --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -26,7 +26,7 @@ pip install PyYAML --index-url https://gitlab.com/api/v4/projects/56254198/packa
 <summary><strong>6.0.2</strong></summary>
 
 ```bash
-pip install PyYAML==6.0.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install PyYAML==6.0.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -37,7 +37,7 @@ pip install PyYAML==6.0.2 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>6.0.1</strong></summary>
 
 ```bash
-pip install PyYAML==6.0.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install PyYAML==6.0.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT

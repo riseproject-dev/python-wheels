@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>0.8.0 (latest)</strong></summary>
 
 ```bash
-pip install httptools --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install httptools --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -26,7 +26,7 @@ pip install httptools --index-url https://gitlab.com/api/v4/projects/56254198/pa
 <summary><strong>0.7.1</strong></summary>
 
 ```bash
-pip install httptools==0.7.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install httptools==0.7.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -37,7 +37,7 @@ pip install httptools==0.7.1 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>0.6.4</strong></summary>
 
 ```bash
-pip install httptools==0.6.4 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install httptools==0.6.4 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT

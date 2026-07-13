@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>1.0.8 (latest)</strong></summary>
 
 ```bash
-pip install blake3 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install blake3 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** CC0-1.0 OR Apache-2.0
@@ -35,7 +35,7 @@ pip install blake3 --index-url https://gitlab.com/api/v4/projects/56254198/packa
 <summary><strong>1.0.7</strong></summary>
 
 ```bash
-pip install blake3==1.0.7 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install blake3==1.0.7 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** CC0-1.0 OR Apache-2.0
@@ -46,7 +46,7 @@ pip install blake3==1.0.7 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>1.0.6</strong></summary>
 
 ```bash
-pip install blake3==1.0.6 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install blake3==1.0.6 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** CC0-1.0 OR Apache-2.0
@@ -57,7 +57,7 @@ pip install blake3==1.0.6 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>1.0.5</strong></summary>
 
 ```bash
-pip install blake3==1.0.5 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install blake3==1.0.5 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** CC0-1.0 OR Apache-2.0

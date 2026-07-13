@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>1.15.2 (latest)</strong></summary>
 
 ```bash
-pip install scipy --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install scipy --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause
@@ -39,7 +39,7 @@ pip install scipy --index-url https://gitlab.com/api/v4/projects/56254198/packag
 <summary><strong>1.15.1</strong></summary>
 
 ```bash
-pip install scipy==1.15.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install scipy==1.15.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause
@@ -63,7 +63,7 @@ pip install scipy==1.15.1 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>1.15.0</strong></summary>
 
 ```bash
-pip install scipy==1.15.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install scipy==1.15.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause
@@ -87,7 +87,7 @@ pip install scipy==1.15.0 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>1.14.1</strong></summary>
 
 ```bash
-pip install scipy==1.14.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install scipy==1.14.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause
@@ -111,7 +111,7 @@ pip install scipy==1.14.1 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>1.12.0</strong></summary>
 
 ```bash
-pip install scipy==1.12.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install scipy==1.12.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause

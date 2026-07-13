@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>3.4.2 (latest)</strong></summary>
 
 ```bash
-pip install charset-normalizer --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install charset-normalizer --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -35,7 +35,7 @@ pip install charset-normalizer --index-url https://gitlab.com/api/v4/projects/56
 <summary><strong>3.4.1</strong></summary>
 
 ```bash
-pip install charset-normalizer==3.4.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install charset-normalizer==3.4.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT

@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>1.3.3 (latest)</strong></summary>
 
 ```bash
-pip install contourpy --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install contourpy --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause
@@ -26,7 +26,7 @@ pip install contourpy --index-url https://gitlab.com/api/v4/projects/56254198/pa
 <summary><strong>1.3.2</strong></summary>
 
 ```bash
-pip install contourpy==1.3.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install contourpy==1.3.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause
@@ -37,7 +37,7 @@ pip install contourpy==1.3.2 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>1.3.1</strong></summary>
 
 ```bash
-pip install contourpy==1.3.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install contourpy==1.3.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause

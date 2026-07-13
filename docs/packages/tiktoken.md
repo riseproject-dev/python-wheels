@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>0.13.0 (latest)</strong></summary>
 
 ```bash
-pip install tiktoken --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tiktoken --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -26,7 +26,7 @@ pip install tiktoken --index-url https://gitlab.com/api/v4/projects/56254198/pac
 <summary><strong>0.12.0</strong></summary>
 
 ```bash
-pip install tiktoken==0.12.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tiktoken==0.12.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -37,7 +37,7 @@ pip install tiktoken==0.12.0 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>0.11.0</strong></summary>
 
 ```bash
-pip install tiktoken==0.11.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tiktoken==0.11.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -48,7 +48,7 @@ pip install tiktoken==0.11.0 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>0.9.0</strong></summary>
 
 ```bash
-pip install tiktoken==0.9.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tiktoken==0.9.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -59,7 +59,7 @@ pip install tiktoken==0.9.0 --index-url https://gitlab.com/api/v4/projects/56254
 <summary><strong>0.8.0</strong></summary>
 
 ```bash
-pip install tiktoken==0.8.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tiktoken==0.8.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -70,7 +70,7 @@ pip install tiktoken==0.8.0 --index-url https://gitlab.com/api/v4/projects/56254
 <summary><strong>0.7.0</strong></summary>
 
 ```bash
-pip install tiktoken==0.7.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tiktoken==0.7.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT

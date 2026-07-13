@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>0.13.0 (latest)</strong></summary>
 
 ```bash
-pip install jiter --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install jiter --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -35,7 +35,7 @@ pip install jiter --index-url https://gitlab.com/api/v4/projects/56254198/packag
 <summary><strong>0.12.0</strong></summary>
 
 ```bash
-pip install jiter==0.12.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install jiter==0.12.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -46,7 +46,7 @@ pip install jiter==0.12.0 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>0.11.1</strong></summary>
 
 ```bash
-pip install jiter==0.11.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install jiter==0.11.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -57,7 +57,7 @@ pip install jiter==0.11.1 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>0.11.0</strong></summary>
 
 ```bash
-pip install jiter==0.11.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install jiter==0.11.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -69,7 +69,7 @@ pip install jiter==0.11.0 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>0.10.0</strong></summary>
 
 ```bash
-pip install jiter==0.10.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install jiter==0.10.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -81,7 +81,7 @@ pip install jiter==0.10.0 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>0.9.1</strong></summary>
 
 ```bash
-pip install jiter==0.9.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install jiter==0.9.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -93,7 +93,7 @@ pip install jiter==0.9.1 --index-url https://gitlab.com/api/v4/projects/56254198
 <summary><strong>0.9.0</strong></summary>
 
 ```bash
-pip install jiter==0.9.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install jiter==0.9.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -105,7 +105,7 @@ pip install jiter==0.9.0 --index-url https://gitlab.com/api/v4/projects/56254198
 <summary><strong>0.8.2</strong></summary>
 
 ```bash
-pip install jiter==0.8.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install jiter==0.8.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT

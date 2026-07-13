@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>0.4.1 (latest)</strong></summary>
 
 ```bash
-pip install propcache --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install propcache --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -35,7 +35,7 @@ pip install propcache --index-url https://gitlab.com/api/v4/projects/56254198/pa
 <summary><strong>0.3.1</strong></summary>
 
 ```bash
-pip install propcache==0.3.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install propcache==0.3.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -47,7 +47,7 @@ pip install propcache==0.3.1 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>0.3.0</strong></summary>
 
 ```bash
-pip install propcache==0.3.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install propcache==0.3.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -59,7 +59,7 @@ pip install propcache==0.3.0 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>0.2.1</strong></summary>
 
 ```bash
-pip install propcache==0.2.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install propcache==0.2.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -70,7 +70,7 @@ pip install propcache==0.2.1 --index-url https://gitlab.com/api/v4/projects/5625
 <summary><strong>0.2.0</strong></summary>
 
 ```bash
-pip install propcache==0.2.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install propcache==0.2.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0

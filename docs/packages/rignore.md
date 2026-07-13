@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>0.7.6 (latest)</strong></summary>
 
 ```bash
-pip install rignore --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install rignore --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -26,7 +26,7 @@ pip install rignore --index-url https://gitlab.com/api/v4/projects/56254198/pack
 <summary><strong>0.7.3</strong></summary>
 
 ```bash
-pip install rignore==0.7.3 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install rignore==0.7.3 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -37,7 +37,7 @@ pip install rignore==0.7.3 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>0.7.2</strong></summary>
 
 ```bash
-pip install rignore==0.7.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install rignore==0.7.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -48,7 +48,7 @@ pip install rignore==0.7.2 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>0.7.1</strong></summary>
 
 ```bash
-pip install rignore==0.7.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install rignore==0.7.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -59,7 +59,7 @@ pip install rignore==0.7.1 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>0.7.0</strong></summary>
 
 ```bash
-pip install rignore==0.7.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install rignore==0.7.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -70,7 +70,7 @@ pip install rignore==0.7.0 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>0.6.4</strong></summary>
 
 ```bash
-pip install rignore==0.6.4 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install rignore==0.6.4 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT

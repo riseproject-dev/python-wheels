@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>0.25.2 (latest)</strong></summary>
 
 ```bash
-pip install scikit-image --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install scikit-image --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause
@@ -26,7 +26,7 @@ pip install scikit-image --index-url https://gitlab.com/api/v4/projects/56254198
 <summary><strong>0.22.0</strong></summary>
 
 ```bash
-pip install scikit-image==0.22.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install scikit-image==0.22.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause

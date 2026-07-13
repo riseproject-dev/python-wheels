@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>4.3.1 (latest)</strong></summary>
 
 ```bash
-pip install swig --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install swig --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0/GPL v3/`Others <https://github.com/nightlark/swig-pypi/blob/main/LICENSE-UNIVERSITIES>`_

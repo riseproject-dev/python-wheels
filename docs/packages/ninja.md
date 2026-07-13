@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>1.11.1.3 (latest)</strong></summary>
 
 ```bash
-pip install ninja --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install ninja --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -35,7 +35,7 @@ pip install ninja --index-url https://gitlab.com/api/v4/projects/56254198/packag
 <summary><strong>1.11.1.2</strong></summary>
 
 ```bash
-pip install ninja==1.11.1.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install ninja==1.11.1.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -46,7 +46,7 @@ pip install ninja==1.11.1.2 --index-url https://gitlab.com/api/v4/projects/56254
 <summary><strong>1.11.1.1</strong></summary>
 
 ```bash
-pip install ninja==1.11.1.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install ninja==1.11.1.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0

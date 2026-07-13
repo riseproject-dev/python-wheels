@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>0.20.0 (latest)</strong></summary>
 
 ```bash
-pip install msgspec --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install msgspec --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause
@@ -26,7 +26,7 @@ pip install msgspec --index-url https://gitlab.com/api/v4/projects/56254198/pack
 <summary><strong>0.19.0</strong></summary>
 
 ```bash
-pip install msgspec==0.19.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install msgspec==0.19.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause

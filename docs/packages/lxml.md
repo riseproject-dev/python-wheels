@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>5.3.0 (latest)</strong></summary>
 
 ```bash
-pip install lxml --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install lxml --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause

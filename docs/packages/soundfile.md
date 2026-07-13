@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>0.13.1 (latest)</strong></summary>
 
 ```bash
-pip install soundfile --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install soundfile --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause License

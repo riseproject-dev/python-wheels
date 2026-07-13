@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>1.20.0 (latest)</strong></summary>
 
 ```bash
-pip install yarl --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install yarl --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -36,7 +36,7 @@ pip install yarl --index-url https://gitlab.com/api/v4/projects/56254198/package
 <summary><strong>1.18.3</strong></summary>
 
 ```bash
-pip install yarl==1.18.3 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install yarl==1.18.3 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0

@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>0.7.0 (latest)</strong></summary>
 
 ```bash
-pip install safetensors --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install safetensors --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -35,7 +35,7 @@ pip install safetensors --index-url https://gitlab.com/api/v4/projects/56254198/
 <summary><strong>0.6.2</strong></summary>
 
 ```bash
-pip install safetensors==0.6.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install safetensors==0.6.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -46,7 +46,7 @@ pip install safetensors==0.6.2 --index-url https://gitlab.com/api/v4/projects/56
 <summary><strong>0.6.1</strong></summary>
 
 ```bash
-pip install safetensors==0.6.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install safetensors==0.6.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -57,7 +57,7 @@ pip install safetensors==0.6.1 --index-url https://gitlab.com/api/v4/projects/56
 <summary><strong>0.6.0.dev0</strong></summary>
 
 ```bash
-pip install safetensors==0.6.0.dev0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install safetensors==0.6.0.dev0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -72,7 +72,7 @@ pip install safetensors==0.6.0.dev0 --index-url https://gitlab.com/api/v4/projec
 <summary><strong>0.5.3</strong></summary>
 
 ```bash
-pip install safetensors==0.5.3 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install safetensors==0.5.3 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -83,7 +83,7 @@ pip install safetensors==0.5.3 --index-url https://gitlab.com/api/v4/projects/56
 <summary><strong>0.5.2</strong></summary>
 
 ```bash
-pip install safetensors==0.5.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install safetensors==0.5.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0

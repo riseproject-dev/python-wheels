@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>0.5.4 (latest)</strong></summary>
 
 ```bash
-pip install ml-dtypes --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install ml-dtypes --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache-2.0 / MPL-2.0 (eigen)
@@ -30,7 +30,7 @@ pip install ml-dtypes --index-url https://gitlab.com/api/v4/projects/56254198/pa
 <summary><strong>0.5.3</strong></summary>
 
 ```bash
-pip install ml-dtypes==0.5.3 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install ml-dtypes==0.5.3 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache-2.0 / MPL-2.0 (eigen)

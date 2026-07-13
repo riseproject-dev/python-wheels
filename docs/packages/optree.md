@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>0.13.1 (latest)</strong></summary>
 
 ```bash
-pip install optree --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install optree --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -35,7 +35,7 @@ pip install optree --index-url https://gitlab.com/api/v4/projects/56254198/packa
 <summary><strong>0.13.0</strong></summary>
 
 ```bash
-pip install optree==0.13.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install optree==0.13.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -46,7 +46,7 @@ pip install optree==0.13.0 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>0.12.1</strong></summary>
 
 ```bash
-pip install optree==0.12.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install optree==0.12.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -57,7 +57,7 @@ pip install optree==0.12.1 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>0.12.0</strong></summary>
 
 ```bash
-pip install optree==0.12.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install optree==0.12.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -68,7 +68,7 @@ pip install optree==0.12.0 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>0.11.0</strong></summary>
 
 ```bash
-pip install optree==0.11.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install optree==0.11.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0

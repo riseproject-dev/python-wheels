@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>4.0.3 (latest)</strong></summary>
 
 ```bash
-pip install cmake --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cmake --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -36,7 +36,7 @@ pip install cmake --index-url https://gitlab.com/api/v4/projects/56254198/packag
 <summary><strong>4.0.0</strong></summary>
 
 ```bash
-pip install cmake==4.0.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cmake==4.0.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -48,7 +48,7 @@ pip install cmake==4.0.0 --index-url https://gitlab.com/api/v4/projects/56254198
 <summary><strong>3.31.6</strong></summary>
 
 ```bash
-pip install cmake==3.31.6 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cmake==3.31.6 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -60,7 +60,7 @@ pip install cmake==3.31.6 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>3.31.4</strong></summary>
 
 ```bash
-pip install cmake==3.31.4 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cmake==3.31.4 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -72,7 +72,7 @@ pip install cmake==3.31.4 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>3.31.2</strong></summary>
 
 ```bash
-pip install cmake==3.31.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cmake==3.31.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -84,7 +84,7 @@ pip install cmake==3.31.2 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>3.30.5</strong></summary>
 
 ```bash
-pip install cmake==3.30.5 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cmake==3.30.5 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -96,7 +96,7 @@ pip install cmake==3.30.5 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>3.30.2</strong></summary>
 
 ```bash
-pip install cmake==3.30.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cmake==3.30.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -108,7 +108,7 @@ pip install cmake==3.30.2 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>3.30.1</strong></summary>
 
 ```bash
-pip install cmake==3.30.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cmake==3.30.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -120,7 +120,7 @@ pip install cmake==3.30.1 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>3.30.0</strong></summary>
 
 ```bash
-pip install cmake==3.30.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cmake==3.30.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -132,7 +132,7 @@ pip install cmake==3.30.0 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>3.29.6</strong></summary>
 
 ```bash
-pip install cmake==3.29.6 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cmake==3.29.6 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -144,7 +144,7 @@ pip install cmake==3.29.6 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>3.29.5.1</strong></summary>
 
 ```bash
-pip install cmake==3.29.5.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cmake==3.29.5.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -155,7 +155,7 @@ pip install cmake==3.29.5.1 --index-url https://gitlab.com/api/v4/projects/56254
 <summary><strong>3.29.5</strong></summary>
 
 ```bash
-pip install cmake==3.29.5 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cmake==3.29.5 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -166,7 +166,7 @@ pip install cmake==3.29.5 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>3.29.3</strong></summary>
 
 ```bash
-pip install cmake==3.29.3 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cmake==3.29.3 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -177,7 +177,7 @@ pip install cmake==3.29.3 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>3.29.2</strong></summary>
 
 ```bash
-pip install cmake==3.29.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cmake==3.29.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -188,7 +188,7 @@ pip install cmake==3.29.2 --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>3.27.7</strong></summary>
 
 ```bash
-pip install cmake==3.27.7 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install cmake==3.27.7 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause

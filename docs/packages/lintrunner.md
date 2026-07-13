@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>0.12.7 (latest)</strong></summary>
 
 ```bash
-pip install lintrunner --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install lintrunner --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -36,7 +36,7 @@ pip install lintrunner --index-url https://gitlab.com/api/v4/projects/56254198/p
 <summary><strong>0.12.5</strong></summary>
 
 ```bash
-pip install lintrunner==0.12.5 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install lintrunner==0.12.5 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT

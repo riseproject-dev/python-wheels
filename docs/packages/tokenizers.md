@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>0.22.2 (latest)</strong></summary>
 
 ```bash
-pip install tokenizers --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tokenizers --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -35,7 +35,7 @@ pip install tokenizers --index-url https://gitlab.com/api/v4/projects/56254198/p
 <summary><strong>0.22.1</strong></summary>
 
 ```bash
-pip install tokenizers==0.22.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tokenizers==0.22.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -46,7 +46,7 @@ pip install tokenizers==0.22.1 --index-url https://gitlab.com/api/v4/projects/56
 <summary><strong>0.22.0</strong></summary>
 
 ```bash
-pip install tokenizers==0.22.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tokenizers==0.22.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -57,7 +57,7 @@ pip install tokenizers==0.22.0 --index-url https://gitlab.com/api/v4/projects/56
 <summary><strong>0.21.1</strong></summary>
 
 ```bash
-pip install tokenizers==0.21.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tokenizers==0.21.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -68,7 +68,7 @@ pip install tokenizers==0.21.1 --index-url https://gitlab.com/api/v4/projects/56
 <summary><strong>0.21.0</strong></summary>
 
 ```bash
-pip install tokenizers==0.21.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tokenizers==0.21.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0
@@ -79,7 +79,7 @@ pip install tokenizers==0.21.0 --index-url https://gitlab.com/api/v4/projects/56
 <summary><strong>0.20.3</strong></summary>
 
 ```bash
-pip install tokenizers==0.20.3 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tokenizers==0.20.3 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache 2.0

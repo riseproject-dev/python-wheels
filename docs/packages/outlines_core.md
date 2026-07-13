@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>0.2.11 (latest)</strong></summary>
 
 ```bash
-pip install outlines-core --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install outlines-core --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache-2.0
@@ -26,7 +26,7 @@ pip install outlines-core --index-url https://gitlab.com/api/v4/projects/5625419
 <summary><strong>0.2.10</strong></summary>
 
 ```bash
-pip install outlines-core==0.2.10 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install outlines-core==0.2.10 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache-2.0
@@ -37,7 +37,7 @@ pip install outlines-core==0.2.10 --index-url https://gitlab.com/api/v4/projects
 <summary><strong>0.2.9</strong></summary>
 
 ```bash
-pip install outlines-core==0.2.9 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install outlines-core==0.2.9 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache-2.0
@@ -48,7 +48,7 @@ pip install outlines-core==0.2.9 --index-url https://gitlab.com/api/v4/projects/
 <summary><strong>0.2.2</strong></summary>
 
 ```bash
-pip install outlines-core==0.2.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install outlines-core==0.2.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache-2.0
@@ -59,7 +59,7 @@ pip install outlines-core==0.2.2 --index-url https://gitlab.com/api/v4/projects/
 <summary><strong>0.1.27</strong></summary>
 
 ```bash
-pip install outlines-core==0.1.27 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install outlines-core==0.1.27 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache-2.0
@@ -70,7 +70,7 @@ pip install outlines-core==0.1.27 --index-url https://gitlab.com/api/v4/projects
 <summary><strong>0.1.26</strong></summary>
 
 ```bash
-pip install outlines-core==0.1.26 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install outlines-core==0.1.26 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** Apache-2.0

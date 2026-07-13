@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>1.41.2 (latest)</strong></summary>
 
 ```bash
-pip install polars-runtime-32 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install polars-runtime-32 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -26,7 +26,7 @@ pip install polars-runtime-32 --index-url https://gitlab.com/api/v4/projects/562
 <summary><strong>1.41.1</strong></summary>
 
 ```bash
-pip install polars-runtime-32==1.41.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install polars-runtime-32==1.41.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -37,7 +37,7 @@ pip install polars-runtime-32==1.41.1 --index-url https://gitlab.com/api/v4/proj
 <summary><strong>1.41.0</strong></summary>
 
 ```bash
-pip install polars-runtime-32==1.41.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install polars-runtime-32==1.41.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -48,7 +48,7 @@ pip install polars-runtime-32==1.41.0 --index-url https://gitlab.com/api/v4/proj
 <summary><strong>1.40.1</strong></summary>
 
 ```bash
-pip install polars-runtime-32==1.40.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install polars-runtime-32==1.40.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -59,7 +59,7 @@ pip install polars-runtime-32==1.40.1 --index-url https://gitlab.com/api/v4/proj
 <summary><strong>1.40.0</strong></summary>
 
 ```bash
-pip install polars-runtime-32==1.40.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install polars-runtime-32==1.40.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT
@@ -70,7 +70,7 @@ pip install polars-runtime-32==1.40.0 --index-url https://gitlab.com/api/v4/proj
 <summary><strong>1.39.3</strong></summary>
 
 ```bash
-pip install polars-runtime-32==1.39.3 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install polars-runtime-32==1.39.3 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT

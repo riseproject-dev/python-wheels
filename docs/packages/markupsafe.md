@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>3.0.2 (latest)</strong></summary>
 
 ```bash
-pip install MarkupSafe --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install MarkupSafe --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -35,7 +35,7 @@ pip install MarkupSafe --index-url https://gitlab.com/api/v4/projects/56254198/p
 <summary><strong>3.0.1</strong></summary>
 
 ```bash
-pip install MarkupSafe==3.0.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install MarkupSafe==3.0.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -46,7 +46,7 @@ pip install MarkupSafe==3.0.1 --index-url https://gitlab.com/api/v4/projects/562
 <summary><strong>2.1.5</strong></summary>
 
 ```bash
-pip install MarkupSafe==2.1.5 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install MarkupSafe==2.1.5 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause

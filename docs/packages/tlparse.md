@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>0.4.3 (latest)</strong></summary>
 
 ```bash
-pip install tlparse --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tlparse --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -26,7 +26,7 @@ pip install tlparse --index-url https://gitlab.com/api/v4/projects/56254198/pack
 <summary><strong>0.4.2</strong></summary>
 
 ```bash
-pip install tlparse==0.4.2 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tlparse==0.4.2 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -37,7 +37,7 @@ pip install tlparse==0.4.2 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>0.4.1</strong></summary>
 
 ```bash
-pip install tlparse==0.4.1 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tlparse==0.4.1 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -48,7 +48,7 @@ pip install tlparse==0.4.1 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>0.4.0</strong></summary>
 
 ```bash
-pip install tlparse==0.4.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tlparse==0.4.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -59,7 +59,7 @@ pip install tlparse==0.4.0 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>0.3.30</strong></summary>
 
 ```bash
-pip install tlparse==0.3.30 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tlparse==0.3.30 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -71,7 +71,7 @@ pip install tlparse==0.3.30 --index-url https://gitlab.com/api/v4/projects/56254
 <summary><strong>0.3.25</strong></summary>
 
 ```bash
-pip install tlparse==0.3.25 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tlparse==0.3.25 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -83,7 +83,7 @@ pip install tlparse==0.3.25 --index-url https://gitlab.com/api/v4/projects/56254
 <summary><strong>0.3.7</strong></summary>
 
 ```bash
-pip install tlparse==0.3.7 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tlparse==0.3.7 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause
@@ -95,7 +95,7 @@ pip install tlparse==0.3.7 --index-url https://gitlab.com/api/v4/projects/562541
 <summary><strong>0.3.5</strong></summary>
 
 ```bash
-pip install tlparse==0.3.5 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install tlparse==0.3.5 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD 3-Clause

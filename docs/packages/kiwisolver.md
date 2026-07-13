@@ -24,7 +24,7 @@ parent: Supported Packages
 <summary><strong>1.4.9 (latest)</strong></summary>
 
 ```bash
-pip install kiwisolver --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install kiwisolver --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause
@@ -35,7 +35,7 @@ pip install kiwisolver --index-url https://gitlab.com/api/v4/projects/56254198/p
 <summary><strong>1.4.8</strong></summary>
 
 ```bash
-pip install kiwisolver==1.4.8 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install kiwisolver==1.4.8 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause
@@ -46,7 +46,7 @@ pip install kiwisolver==1.4.8 --index-url https://gitlab.com/api/v4/projects/562
 <summary><strong>1.4.7</strong></summary>
 
 ```bash
-pip install kiwisolver==1.4.7 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install kiwisolver==1.4.7 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause

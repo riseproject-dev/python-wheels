@@ -15,7 +15,7 @@ parent: Supported Packages
 <summary><strong>25.1.0 (latest)</strong></summary>
 
 ```bash
-pip install argon2-cffi-bindings --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install argon2-cffi-bindings --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT/CC0(libargon2)
@@ -26,7 +26,7 @@ pip install argon2-cffi-bindings --index-url https://gitlab.com/api/v4/projects/
 <summary><strong>21.2.0</strong></summary>
 
 ```bash
-pip install argon2-cffi-bindings==21.2.0 --index-url https://gitlab.com/api/v4/projects/56254198/packages/pypi/simple
+pip install argon2-cffi-bindings==21.2.0 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** MIT/CC0(libargon2)
