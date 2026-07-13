@@ -19,7 +19,7 @@ and then pass the `--index-url` option to the install command to tell pip to
 pull packages from the registry associated with this project, e.g.,
 
 ```bash
-python -m pip install scipy --index-url https://gitlab.com/api/v4/projects/riseproject%2Fpython%2Fwheel_builder/packages/pypi/simple
+python -m pip install scipy --index-url https://pypi.riseproject.dev/simple/
 ```
 
 {: .note }
@@ -30,7 +30,7 @@ python -m pip install scipy --index-url https://gitlab.com/api/v4/projects/risep
 > To make sure to always install the latest version available, use
 >
 > ```bash
-> python -m pip install scipy --prefer-binary --extra-index-url https://gitlab.com/api/v4/projects/riseproject%2Fpython%2Fwheel_builder/packages/pypi/simple
+> python -m pip install scipy --prefer-binary --extra-index-url https://pypi.riseproject.dev/simple/
 > ```
 >
 > This will:
