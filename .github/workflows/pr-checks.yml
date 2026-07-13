@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+
+name: PR verification checks
+
+on:
+  pull_request:
+
+jobs:
+  check_commit_messages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reject revertme / DO NOT MERGE commits
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          range="$BASE_SHA..$HEAD_SHA"
+          if git log --pretty=format:%s "$range" | grep -i -e '^revertme' -e '^revert me'; then
+            echo "::error::Merge request contains at least a commit starting with a 'revert me' tag. Fix it before merging."
+            exit 1
+          fi
+          if git log --pretty=format:%s "$range" | grep -i -e '^DO NOT MERGE'; then
+            echo "::error::Merge request contains at least a commit starting with a 'DO NOT MERGE' tag. Review it."
+            exit 1
+          fi
+
+  check_patches:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3'
+
+      - name: Validate Upstream-Status in added/modified patches
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python ci_scripts/check_patch.py "$BASE_SHA" "$HEAD_SHA"
