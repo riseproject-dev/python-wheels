@@ -62,7 +62,7 @@ jobs:
 
 ### Target Python Versions
 
-By default, riscv64 wheel should be built for a matrix covering the four latest
+By default, riscv64 wheels should be built for a matrix covering the four latest
 released Python versions. As of July 14th, 2026, this includes Pythons 3.11,
 3.12, 3.13, and 3.14 (along with 3.14t, the freethreaded equivalent). Some
 wheels have previously been built for 3.13t, but since this was an experimental
@@ -192,7 +192,7 @@ workflow and retry, while opening an issue to track the musl incompatibility.
 ### Patching a Project
 
 If a workflow fails consistently when building or testing a module, consider
-whether the failure meets one of the following three critieria:
+whether the failure meets one of the following three criteria:
 
 1. The failure exercises a narrow part of the module's functionality, or relies
    on external resources (e.g. large downloads over the network)
@@ -228,8 +228,8 @@ the `main` branch in order to release the wheels to the package registry.
 
 The wheels built by the `python-wheels` project use a variety of open-source
 licenses. Since RISE is the distributor of riscv64 wheels in the corresponding
-package registry, ensuring that the wheels adhere to each project's licensing
-requirements. More specifically, check:
+package registry, we must ensure that the wheels adhere to each project's
+licensing requirements. More specifically, check:
 
 1. The built wheel contains one or more `LICENSE` files corresponding to those
    contained in the upstream project source.
