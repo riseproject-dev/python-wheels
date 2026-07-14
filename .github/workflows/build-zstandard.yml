@@ -54,14 +54,29 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
+      # zstandard 0.25.0 targets cibuildwheel 3.x and pins
+      # `enable = ["cpython-freethreading", "cpython-prerelease"]`. cibuildwheel
+      # 4.x dropped the cpython-freethreading group (freethreaded builds are on
+      # by default now) and errors out on it at config-parse. Strip it so the
+      # pinned 4.1.0 can read the config; freethreaded cp314t still builds.
+      # Upstream HEAD already removed it, so this is only needed for this tag.
+      - name: Make pyproject enable groups compatible with cibuildwheel 4.x
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("pyproject.toml")
+          t = p.read_text()
+          for tok in ('"cpython-freethreading", ', ', "cpython-freethreading"',
+                      '"cpython-freethreading"'):
+              t = t.replace(tok, "")
+          p.write_text(t)
+          PY
+
       - name: Build wheels
         uses: pypa/cibuildwheel@294735312765b09d24a2fbec22660ce817587d55  # v4.1.0
         env:
           CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
-          # Upstream pins `build-frontend = "build[uv]"` in pyproject.toml, which
-          # fails on riscv64: uv is not present in the manylinux_riscv64 image, so
-          # cibuildwheel aborts on `which uv`. Force the plain build frontend.
-          CIBW_BUILD_FRONTEND: build
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
