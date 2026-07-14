@@ -238,3 +238,58 @@ requirements. More specifically, check:
 If either point is not met, we should follow the [Patching a
 Project](#patching-a-project) process for patching our build, and submit an
 issue and/or PR upstream to help them comply with license requirements as well.
+
+### Adding Builds for Rust Packages
+
+Modules which are cross-compiled from Rust to Python typically use
+[maturin](https://www.maturin.rs/). This greatly simplifies building binary
+wheels for riscv64, but there is a pitfall here to watch out for - many projects
+use a matrix definition looking like:
+
+```
+matrix:
+  platform:
+    - runner: ubuntu-22.04
+      target: x86_64
+    - runner: ubuntu-22.04
+      target: x86
+    - runner: ubuntu-22.04
+      target: aarch64
+    - runner: ubuntu-22.04
+      target: armv7
+    - runner: ubuntu-22.04
+      target: ppc64le
+```
+
+For riscv64 and some other architectures, the `rustc` toolchain target name does
+not follow this simple pattern (i.e. the `arch` part of the triple is not exact):
+
+```
+tgamblin@alchemist ~/workspace/baylibre/rise/python-wheels (tgamblin/dev-guide)$ rustup target list | grep riscv64
+riscv64a23-unknown-linux-gnu
+riscv64gc-unknown-linux-gnu
+riscv64gc-unknown-linux-musl
+riscv64gc-unknown-none-elf
+riscv64imac-unknown-none-elf
+```
+
+Simply adding a new line with `target: riscv64` will lead to build failures. The
+recommended approach here is to make the matrix more explicit, then add riscv64,
+so that each entry looks like:
+
+```
+- runner: ubuntu-24.04-riscv
+  target: riscv64gc-unknown-linux-gnu
+  arch: riscv64
+```
+
+Note that doing so typically requires a tweak to an `Upload wheels` step or
+similar, so that it uses the `arch` field:
+
+```
+- name: Upload wheels
+  uses: actions/upload-artifact@v4
+  with:
+    name: wheels-linux-${{ matrix.platform.arch }}
+    path: dist
+```
