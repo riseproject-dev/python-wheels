@@ -64,15 +64,17 @@ jobs:
 
 By default, riscv64 wheel should be built for a matrix covering the four latest
 released Python versions. As of July 14th, 2026, this includes Pythons 3.11,
-3.12, 3.13, and 3.14. There is also a freethreaded version of Python 3.14t which
-we include. Some wheels have previously been built for 3.13t, but since this was
-an experimental version with limited support we avoid it now.
+3.12, 3.13, and 3.14 (along with 3.14t, the freethreaded equivalent). Some
+wheels have previously been built for 3.13t, but since this was an experimental
+version with limited support we avoid it now. This makes our target matrix:
+
+`['3.11', '3.12', '3.13', '3.14', '3.14t']`
 
 It is worth noting that NumPy releases follow a minimum supported version
 pattern that implies a narrower matrix - for example, as of NumPy 2.5.0, only
-Python 3.12 and newer are supported. If we follow this precedent, then our
-entire riscv64 build matrix consists of `3.12`, `3.13`, `3.14`, and `3.14t`
-until `3.15` releases.
+Python 3.12 and newer are supported. However, we cannot ensure that all users
+will choose 2.5.0 or greater for their projects, so until Python 3.15 is
+released we should continue building for 3.11.
 
 ### uv
 
@@ -293,3 +295,10 @@ similar, so that it uses the `arch` field:
     name: wheels-linux-${{ matrix.platform.arch }}
     path: dist
 ```
+
+### GCC Version Mismatches
+
+Some packages may require GCC 14 or later to compile for riscv64. If your build
+requires GCC 14, ensure that you are either using a cibuildwheel container
+approach, or (if the project doesn't use cibuildwheel) have an appropriate
+workaround in place, since the RISC-V runners currently ship GCC 13 by default.
