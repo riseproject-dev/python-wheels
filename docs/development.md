@@ -6,7 +6,7 @@ nav_order: 6
 
 # Development Guide
 
-Structurally, the [python-wheels](https://github.com/riseproject-dev/python-wheels) repository has three goals:
+Structurally, the [python-wheels](https://github.com/riseproject-dev/python-wheels) repository has four goals:
 
 1. Provide a simple interface for users to install Python wheels from.
 2. Create GitHub Actions workflows for building binary Python wheels that
@@ -15,6 +15,8 @@ Structurally, the [python-wheels](https://github.com/riseproject-dev/python-whee
 3. Add supplemental workflows and tooling to track upstream releases, automate
    version upgrades, and simplify deprecation once upstream projects incorporate
    riscv64 builds, allowing developers to focus on broader package support.
+4. Serve as a reference to upstream maintainers, indicating that their projects
+   can easily add support for riscv64.
 
 ## Workflow Creation Process
 
@@ -33,13 +35,12 @@ The general process:
 2. Create a copy of the upstream build workflow in the `python-wheels` repo at
    `.github/workflows/build-<package>.yml`, where `<package>` matches the
    project name (e.g. `build-numpy.yml` for NumPy`).
-3. Strip out any logic not related to the Linux glibc and musl (if present)
-   build processes.
+3. Remove any workflow logic not related to the Linux glibc and musl (if
+   present) build processes, support for other architectures and operating
+   systems (e.g. Windows, Mac OS). This includes the sdist build (unless it is
+   consumed by a build or test step).
 4. Repeat steps #2 and #3 for the corresponding test workflow, if it is separate
    from the upstream build file.
-5. Strip out any build logic which is not relevant to riscv64 for Linux. This
-   includes all other architectures, along with builds for Windows, Mac OS, and
-   so on. Also remove the sdist and publish steps.
 
 From this point, some customizations are required to enable builds targeting
 riscv64.
@@ -62,19 +63,23 @@ jobs:
 
 ### Target Python Versions
 
-By default, riscv64 wheels should be built for a matrix covering the four latest
-released Python versions. As of July 14th, 2026, this includes Pythons 3.11,
-3.12, 3.13, and 3.14 (along with 3.14t, the freethreaded equivalent). Some
-wheels have previously been built for 3.13t, but since this was an experimental
-version with limited support we avoid it now. This makes our target matrix:
+Previously RISE has used a Python version matrix covering the four latest
+releases (`major.minor`, e.g. `3.14`), plus any freethreaded variants available
+(e.g. `3.14t`). As of July 14th, 2026, this includes Pythons 3.11, 3.12, 3.13,
+and 3.14 (along with 3.14t, the freethreaded equivalent). However, the NumPy
+project (as of version 2.5.0) supports Python 3.12 as the minimum. Since this
+package is fundamental to many others which we are supporting, we will follow
+its precedent when defining our version matrix. Some wheels have previously been
+built for 3.13t, but since this was an experimental version with limited support
+we avoid it now.
 
-`['3.11', '3.12', '3.13', '3.14', '3.14t']`
+With these factors, our default version matrix becomes:
 
-It is worth noting that NumPy releases follow a minimum supported version
-pattern that implies a narrower matrix - for example, as of NumPy 2.5.0, only
-Python 3.12 and newer are supported. However, we cannot ensure that all users
-will choose 2.5.0 or greater for their projects, so until Python 3.15 is
-released we should continue building for 3.11.
+`['3.12', '3.13', '3.14', '3.14t']`
+
+Exceptions may be necessary for some packages, which should be carefully
+considered to balance achieving similarity to upstream with feasibility of
+maintenance.
 
 ### uv
 
@@ -121,7 +126,7 @@ fork. More importantly, it is critical for uncomplicated usage of tools like
 cibuildwheel, which assumes that the root directory is the project to be built
 when invoked.
 
-### python-wheels Checkouts
+### Using the python-wheels Repository in Workflows
 
 The `python-wheels` repository contains some custom Actions we require, and
 patch files to apply for certain projects. The most critical example is the
@@ -165,7 +170,8 @@ Python registry.
 ## Testing a New Workflow
 
 Open a new draft PR with the workflow(s) included, and include a `Trigger:` line
-with a version for each package version you want to build, like so:
+in the PR description with a version for each package version you want to build,
+like so:
 
 `Trigger: numpy:v2.5.0`
 `Trigger: numpy:v2.5.1`
@@ -186,23 +192,31 @@ workflow and retry, while opening an issue to track the musl incompatibility.
 
 ### Patching a Project
 
-If a workflow fails consistently when building or testing a module, consider
-whether the failure meets one of the following three criteria:
+Some workflows may fail consistently when building or testing a module, despite
+following the guidelines above. When this occurs, consider whether the failure
+meets one of the following criteria:
 
 1. The failure exercises a narrow part of the module's functionality, or relies
    on external resources (e.g. large downloads over the network)
 2. The failure is due to reliance on some other software unavailable on riscv64
 3. The failure is a consequence of an artificial test limitation, e.g. a maximum
    timeout
+4. The project's build scripts use host tooling which isn't available on the
+   runners or in the riscv64 manylinux images (e.g. `apt` vs `dnf`)
 
-In these cases, it may be justified to add one or more patch files to remove
-these cases from the workflow. In this scenario, follow these steps:
+Additionally, some packages may not fully incorporate all of the LICENSE files
+found in their repositories or as required by their dependencies. See the
+[Licensing](#licensing) section for more info on this topic. In these cases, it
+may be justified to add one or more patch files to remove these cases from the
+workflow. In this scenario, follow these steps:
 
 1. Any such patches should be placed in a `patches/<package_name>/<version_tag>`
    path inside `python-wheels`.
-2. an extra step should be added to the build/test workflows before execution to
+2. Each patch should include an `Upstream-Status` tag. See the [Upstream Status
+   Tags](#upstream-status-tags) section for details on valid types.
+3. An extra step should be added to the build/test workflows before execution to
    use `git apply` to make necessary modifications to the project source.
-3. The change should be documented for the package, so that users are aware of
+4. The change should be documented for the package, so that users are aware of
    modifications made.
 
 **Note: Patching should be performed and reviewed on a case-by-case basis - as
@@ -297,3 +311,36 @@ Some packages may require GCC 14 or later to compile for riscv64. If your build
 requires GCC 14, ensure that you are either using a cibuildwheel container
 approach, or (if the project doesn't use cibuildwheel) have an appropriate
 workaround in place, since the RISC-V runners currently ship GCC 13 by default.
+
+### Upstream Status Tags
+
+We use a pattern established by the [Yocto
+Project](https://docs.yoctoproject.org/dev/contributor-guide/recipe-style-guide.html#patch-upstream-status)
+for indicating the purpose and status of custom patches which we carry for
+various projects. Each tag should be specified in the patch file's commit
+message like so:
+
+```
+Upstream-Status: <type> [reason and/or link]
+```
+
+There are five valid `Upstream-Status` types for the `python-wheels` repository:
+
+1. `Issue`: An issue has been opened on the upstream project to indicate a bug
+   was found during build/test. The issue link should be included.
+2. `Submitted`: A change was submitted to fix an issue upstream, but we are
+   carrying the patch ourselves until it's merged and released in a future
+   version. Include a link to the upstream PR and/or merged commit.
+3. `To upstream`: The patch needs to be submitted upstream, but submission is
+   blocked. Include an explanation of why it can't be submitted upstream yet.
+4. `Inappropriate`: The patch includes changes which are necessary for riscv64
+   builds and/or our infrastructure, but are not relevant upstream. Include a
+   short description of why.
+5. `Backport`: The patch includes a fix which is already merged in an upstream
+   release version, but not in the version we're trying to build. Include a link
+   and short description of the problem.
+
+Including an `Upstream-Status` tag is a baseline requirement for custom patches,
+and it is automatically searched for by the `ci_scripts/check_patch.py` script
+when submitting a PR. However, any additional detail which can be provided in
+each patch's commit message is helpful for maintenance.
