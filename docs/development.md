@@ -136,17 +136,11 @@ publish:
   # version. Manual trigger is the only entry point, so checking the ref is
   # enough to gate uploads.
   if: github.ref == 'refs/heads/main'
-  runs-on: ubuntu-24.04-riscv
+  runs-on: ubuntu-latest
   permissions:
     contents: read
 
   steps:
-    - name: Checkout python-wheels
-      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-      with:
-        path: python-wheels-repo
-        persist-credentials: false
-
     - name: Download wheels
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
       with:
@@ -155,7 +149,7 @@ publish:
         merge-multiple: true
 
     - name: Publish to GitLab PyPI registry
-      uses: ./python-wheels-repo/actions/publish-to-gitlab
+      uses: riseproject-dev/python-wheels/actions/publish-to-gitlab@main
       with:
         gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
         gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
@@ -211,9 +205,9 @@ these cases from the workflow. In this scenario, follow these steps:
 3. The change should be documented for the package, so that users are aware of
    modifications made.
 
-**Patching should be performed and reviewed on a case-by-case basis - as much
-functionality as possible should be tested by our system to ensure a smooth user
-experience when consuming wheels from RISE's package registry.**
+**Note: Patching should be performed and reviewed on a case-by-case basis - as
+much functionality as possible should be tested by our system to ensure a smooth
+user experience when consuming wheels from RISE's package registry.**
 
 ## Releasing a Wheel
 
