@@ -79,9 +79,10 @@ released we should continue building for 3.11.
 ### uv
 
 The official `actions/setup-python` Action does not yet support riscv64 builds,
-so riscv64 workflows using it will generally fail. A simple workaround is to
-replace any usage of `actions/setup-python` in the upstream workflow with
-`astral-sh/setup-uv` like so:
+so workflows using it will fall back to using the host version (if one
+is present matching the `major.minor` numbering used by the workflow, e.g.
+`3.12`). A simple alternative is to replace any usage of `actions/setup-python`
+in the upstream workflow with `astral-sh/setup-uv` like so:
 
 ```
 - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
