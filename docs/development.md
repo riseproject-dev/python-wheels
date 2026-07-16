@@ -129,9 +129,16 @@ when invoked.
 ### Using the python-wheels Repository in Workflows
 
 The `python-wheels` repository contains some custom Actions we require, and
-patch files to apply for certain projects. The most critical example is the
-`publish-to-gitlab` Action. With it in place, the `build-numpy.yml` script's
-`publish` job looks like this:
+patch files to apply for certain projects. The one every `build-<package>.yml`
+workflow needs is `publish-wheels`, which performs the following steps:
+
+1. Downloads the built wheel(s) from the previous job
+2. Uploads them to the GitLab PyPI registry (via the lower-level
+   `publish-to-gitlab` Action)
+3. Opens a PR against `docs/packages/<name>.yaml` documenting the new version
+   (via `ci_scripts/update_doc.py`), which `docs/packages/generate_packages_doc.py`
+   later renders into the published Markdown page. With it in place, the
+   `build-numpy.yml` script's `publish` job looks like this:
 
 ```
 publish:
@@ -143,29 +150,28 @@ publish:
   if: github.ref == 'refs/heads/main'
   runs-on: ubuntu-latest
   permissions:
-    contents: read
+    contents: write
+    pull-requests: write
 
   steps:
-    - name: Download wheels
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+    - name: Publish wheels and open docs PR
+      uses: riseproject-dev/python-wheels/actions/publish-wheels@main
       with:
-        pattern: numpy-${{ env.NUMPY_VERSION }}-*-manylinux_riscv64
-        path: dist
-        merge-multiple: true
-
-    - name: Publish to GitLab PyPI registry
-      uses: riseproject-dev/python-wheels/actions/publish-to-gitlab@main
-      with:
+        artifact-pattern: numpy-${{ env.NUMPY_VERSION }}-*-manylinux_riscv64
         gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
         gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
         gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
-        files: |
-          dist/*.whl
+        gh-token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-Other workflows need to follow a similar process - checkout the `python-wheels`
-repo, and run the `publish-to-gitlab` action to upload built wheels to the RISE
-Python registry.
+`permissions` needs `contents: write` and `pull-requests: write` here (not just
+`contents: read`) since the docs step pushes a branch and opens a PR with the
+default `GITHUB_TOKEN`.
+
+Other workflows need to follow the same process, modifying `artifact-pattern` to
+match their own artifact naming scheme and otherwise reusing `publish-wheels`
+like the example. The `publish-to-gitlab` Action should only be used directly if
+a workflow needs the upload step without the docs PR side effect.
 
 ## Testing a New Workflow
 
