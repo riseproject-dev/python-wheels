@@ -256,7 +256,7 @@ If either point is not met, we should follow the [Patching a
 Project](#patching-a-project) process for patching our build, and submit an
 issue and/or PR upstream to help them comply with license requirements as well.
 
-#### Publishing GPL Sources
+### Publishing GPL Sources
 
 Some builds statically or dynamically link against GPL-licensed components
 that aren't part of the upstream project itself, but come from our build
