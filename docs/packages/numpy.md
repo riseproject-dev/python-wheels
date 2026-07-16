@@ -12,10 +12,31 @@ parent: Supported Packages
 - **Supported versions:**
 
 <details markdown="1" open>
-<summary><strong>2.4.3 (latest)</strong></summary>
+<summary><strong>2.5.1 (latest)</strong></summary>
 
 ```bash
 pip install numpy --index-url https://pypi.riseproject.dev/simple/
+```
+
+- **License:** BSD-3-Clause
+- **Download files:** [https://gitlab.com/riseproject/python/wheel_builder/-/packages/64125271](https://gitlab.com/riseproject/python/wheel_builder/-/packages/64125271)
+</details>
+
+<summary><strong>2.5.0</strong></summary>
+
+```bash
+pip install numpy==2.5.0 --index-url https://pypi.riseproject.dev/simple/
+```
+
+- **License:** BSD-3-Clause
+- **Download files:** [https://gitlab.com/riseproject/python/wheel_builder/-/packages/63279782](https://gitlab.com/riseproject/python/wheel_builder/-/packages/63279782)
+</details>
+
+<details markdown="1" open>
+<summary><strong>2.4.3</strong></summary>
+
+```bash
+pip install numpy==2.4.3 --index-url https://pypi.riseproject.dev/simple/
 ```
 
 - **License:** BSD-3-Clause
