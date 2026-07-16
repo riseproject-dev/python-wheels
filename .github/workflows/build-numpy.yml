@@ -24,6 +24,10 @@ env:
   UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
   UV_INDEX_STRATEGY: unsafe-best-match
   UV_ONLY_BINARY: ':all:'
+  # Pinned explicitly (rather than left to cibuildwheel's default resolution)
+  # so the gpl_sources job below can pull the exact same image the wheels
+  # were built in.
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   build_wheels:
@@ -79,6 +83,7 @@ jobs:
             CCACHE_BASEDIR
             CCACHE_COMPILERCHECK
           CIBW_CONTAINER_ENGINE: "docker; create_args: --volume ${{ env.CCACHE_DIR }}:/root/.ccache"
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
 
       - name: Save compilation cache
         if: always() && github.ref == 'refs/heads/main'
@@ -93,9 +98,26 @@ jobs:
           path: ./wheelhouse/*.whl
           if-no-files-found: error
 
+  gpl_sources:
+    name: Collect GPL sources (gcc) for numpy ${{ inputs.version || '2.5.1' }}
+    runs-on: ubuntu-24.04-riscv
+    steps:
+      - name: Collect gcc source RPM from manylinux_riscv64
+        uses: riseproject-dev/python-wheels/actions/collect-gpl-sources@main
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: numpy-${{ env.NUMPY_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
   publish:
     name: Publish numpy ${{ inputs.version || '2.5.1' }} to GitLab
-    needs: build_wheels
+    needs: [build_wheels, gpl_sources]
     # Only publish when the workflow was triggered from main with a specific
     # version. Manual trigger is the only entry point, so checking the ref is
     # enough to gate uploads.
@@ -114,3 +136,6 @@ jobs:
           gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
           gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
           gh-token: ${{ secrets.GITHUB_TOKEN }}
+          gpl-sources-artifact: numpy-${{ env.NUMPY_VERSION }}-gpl-sources
+          gpl-sources-release-tag: numpy-v${{ env.NUMPY_VERSION }}
+          gpl-sources-description: gcc

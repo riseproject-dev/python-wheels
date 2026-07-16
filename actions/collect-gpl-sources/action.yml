@@ -1,0 +1,81 @@
+name: 'Collect GPL Source RPMs from a manylinux Container'
+description: >
+  Pulls the manylinux/musllinux container image used to build a package's
+  riscv64 wheels and downloads the source RPM(s) for one or more of its
+  installed packages (e.g. gcc), satisfying GPL source-distribution
+  requirements for the toolchain baked into the container. The collected
+  .src.rpm files are bundled into a single tar archive.
+
+inputs:
+
+  # ── Required ────────────────────────────────────────────────────────────────
+
+  image:
+    description: >
+      Container image reference to pull GPL sources from, e.g.
+      quay.io/pypa/manylinux_2_39_riscv64. Should match the image actually
+      used to build the wheels (e.g. via CIBW_MANYLINUX_RISCV64_IMAGE) so the
+      published sources correspond to the toolchain that produced them.
+    required: true
+
+  # ── Optional ────────────────────────────────────────────────────────────────
+
+  packages:
+    description: Space-separated list of installed RPM package names to fetch source RPMs for.
+    required: false
+    default: 'gcc'
+
+  output:
+    description: Path of the tar archive to produce.
+    required: false
+    default: 'gpl-sources.tar'
+
+runs:
+  using: 'composite'
+  steps:
+
+    - name: Pull container image
+      shell: bash
+      run: docker pull "${{ inputs.image }}"
+
+    - name: Download source RPMs from the container's package repos
+      shell: bash
+      run: |
+        set -euxo pipefail
+
+        workdir="$(mktemp -d)"
+
+        # Package name and config-manager syntax for enabling the *-source
+        # repos differ between dnf4 (dnf-plugins-core, `--set-enabled`) and
+        # dnf5 (dnf5-plugins, `setopt <repo>.enabled=1`). Rocky/RHEL 10 based
+        # manylinux images ship dnf5, but both forms are attempted so this
+        # keeps working if the base image changes.
+        docker run --rm -v "${workdir}:/out" "${{ inputs.image }}" bash -c '
+          set -euxo pipefail
+          dnf -y install dnf5-plugins || dnf -y install dnf-plugins-core
+          for repo in baseos-source appstream-source crb-source; do
+            dnf -y config-manager setopt "${repo}.enabled=1" \
+              || dnf -y config-manager --set-enabled "$repo" \
+              || true
+          done
+          dnf -y download --source --destdir /out ${{ inputs.packages }}
+        '
+
+        found=$(find "${workdir}" -maxdepth 1 -name "*.src.rpm" -printf '%f\n')
+        if [[ -z "${found}" ]]; then
+          echo "::error::No .src.rpm files were collected from ${{ inputs.image }} for packages: ${{ inputs.packages }}"
+          exit 1
+        fi
+        printf '%s\n' "${found}"
+
+        tar -cf "${{ inputs.output }}" -C "${workdir}" .
+        rm -rf "${workdir}"
+
+    - name: Print summary
+      shell: bash
+      run: |
+        echo "### GPL Sources" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        echo "Collected from \`${{ inputs.image }}\`:" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        tar -tf "${{ inputs.output }}" | sed 's/^/- `/;s/$/`/' >> "$GITHUB_STEP_SUMMARY"
