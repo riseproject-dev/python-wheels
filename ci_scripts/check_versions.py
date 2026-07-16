@@ -166,7 +166,7 @@ def create_deprecation_pr(package: str, reason: str) -> Optional[str]:
         git_run("fetch", "origin")
         git_run("switch", "main")
 
-        yaml_file = Path(f"docs/source/packages/{package}.yaml")
+        yaml_file = Path(f"docs/packages/{package}.yaml")
         if not yaml_file.exists():
             print(f"    [!] YAML file for {package} does not exist")
             return None

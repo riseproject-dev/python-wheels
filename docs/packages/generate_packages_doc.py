@@ -17,14 +17,7 @@ GITLAB_REGISTRY_URL = (
 GITLAB_WHEEL_BUILDER_URL = (
     "https://gitlab.com/riseproject/python/wheel_builder/-/tree/main"
 )
-
-# YAML source still lives in the old wheel_builder repo for now.
-YAML_SRC_DIR = os.path.normpath(
-    os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "..", "..", "..", "wheel_builder", "docs", "source", "packages",
-    )
-)
+PYPI_INDEX_URL = "https://pypi.riseproject.dev/simple/"
 
 # Match RST inline external refs: `Label <url>`_ or `Label <url>`__
 RST_LINK_RE = re.compile(r"`([^`<]+?)\s*<([^>]+)>`_+")
@@ -168,11 +161,10 @@ def generate_md_page(yaml_file, output_md, package_list):
         lines.append("")
 
         install_command = (
-            f"pip install {package_name} "
-            f"--index-url {GITLAB_REGISTRY_URL}/pypi/simple"
+            f"pip install {package_name} --index-url {PYPI_INDEX_URL}"
             if is_latest
             else f"pip install {package_name}=={version_number} "
-            f"--index-url {GITLAB_REGISTRY_URL}/pypi/simple"
+            f"--index-url {PYPI_INDEX_URL}"
         )
         lines += ["```bash", install_command, "```", ""]
 
@@ -231,12 +223,12 @@ def generate_md_page(yaml_file, output_md, package_list):
 
 
 def process_all_yaml_files(package_list):
-    yaml_files = sorted(glob.glob(os.path.join(YAML_SRC_DIR, "*.yaml")))
+    out_dir = os.path.dirname(os.path.abspath(__file__))
+    yaml_files = sorted(glob.glob(os.path.join(out_dir, "*.yaml")))
     if not yaml_files:
-        print(f"No YAML files found in {YAML_SRC_DIR}")
+        print(f"No YAML files found in {out_dir}")
         return
 
-    out_dir = os.path.dirname(os.path.abspath(__file__))
     package_entries = []
     for yaml_file in yaml_files:
         base = os.path.basename(yaml_file).replace(".yaml", ".md")
