@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+
+name: Build and deploy documentation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+  workflow_dispatch:
+
+concurrency:
+  group: docs-${{ github.ref }}
+
+jobs:
+  preview:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        if: github.event.action != 'closed'
+        with:
+          python-version: '3'
+
+      - name: Install package doc generator dependencies
+        if: github.event.action != 'closed'
+        run: pip install -r docs/requirements.txt
+
+      - name: Generate package pages from YAML
+        if: github.event.action != 'closed'
+        run: python docs/packages/generate_packages_doc.py
+
+      - name: Compute preview baseurl
+        if: github.event.action != 'closed'
+        id: preview_baseurl
+        run: |
+          base=$(python3 -c "import yaml; print(yaml.safe_load(open('docs/_config.yml'))['baseurl'])")
+          echo "value=${base}/pr-preview/pr-${{ github.event.number }}" >> "$GITHUB_OUTPUT"
+
+      - uses: ruby/setup-ruby@v1
+        if: github.event.action != 'closed'
+        with:
+          ruby-version: '3.3'
+
+      # actions/jekyll-build-pages has no way to override _config.yml's
+      # hardcoded baseurl, but a preview is served one path segment deeper
+      # (.../pr-preview/pr-<N>/) than the production site, so it needs its
+      # own baseurl or every internal link/asset would point at production.
+      - name: Build with Jekyll
+        if: github.event.action != 'closed'
+        run: |
+          # jekyll-remote-theme only fetches just-the-docs' layouts/assets;
+          # its own gem dependencies (jekyll-seo-tag, jekyll-include-cache,
+          # rake) still have to be installed separately.
+          gem install jekyll jekyll-remote-theme jekyll-seo-tag jekyll-include-cache rake --no-document
+          jekyll build --source docs --destination _site \
+            --baseurl "${{ steps.preview_baseurl.outputs.value }}"
+
+      # Auto-detects deploy vs. removal from the pull_request event action,
+      # so this same step both publishes updates and tears down the preview
+      # when the PR is closed.
+      #
+      # wait-for-pages-deployment is deliberately left at its default
+      # (false): on classic "deploy from a branch" Pages, its lookup against
+      # the legacy Pages Builds API doesn't reliably find an exact-commit
+      # build within its hardcoded 180s timeout, and that timeout is a hard,
+      # non-configurable `exit 1` that fails the whole step/PR check even
+      # when the preview deployed and is serving correctly. A link that's
+      # occasionally not live for a few seconds is a smaller problem than a
+      # misleading red X on an otherwise-working PR.
+      - name: Deploy or remove PR preview
+        uses: rossjrw/pr-preview-action@v1
+        with:
+          source-dir: ./_site
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3'
+
+      - name: Install package doc generator dependencies
+        run: pip install -r docs/requirements.txt
+
+      - name: Generate package pages from YAML
+        run: python docs/packages/generate_packages_doc.py
+
+      - name: Build with Jekyll
+        uses: actions/jekyll-build-pages@v1
+        with:
+          source: ./docs
+          destination: ./_site
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./_site
+          keep_files: true
