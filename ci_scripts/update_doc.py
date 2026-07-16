@@ -28,6 +28,8 @@ REPO = "riseproject-dev/python-wheels"
 DOCS_DIR = Path("docs/packages")
 PACKAGES_FILE = Path("ci_scripts/packages.txt")
 ARTIFACTS_PATH = os.environ.get("ARTIFACTS_PATH", "dist")
+GPL_SOURCES_URL = os.environ.get("GPL_SOURCES_URL")
+GPL_SOURCES_DESCRIPTION = os.environ.get("GPL_SOURCES_DESCRIPTION", "").strip()
 
 
 def find_wheel_file(path):
@@ -102,6 +104,18 @@ def extract_metadata_from_whl(whl_path):
         }
 
 
+def render_gpl_sources_comment():
+    """
+    Render a doc comment linking to a permanently-hosted GPL sources
+    artifact (e.g. a manylinux toolchain's src.rpm), if the calling workflow
+    published one for this build.
+    """
+    if not GPL_SOURCES_URL:
+        return None
+    suffix = f" ({GPL_SOURCES_DESCRIPTION})" if GPL_SOURCES_DESCRIPTION else ""
+    return f"`Link <{GPL_SOURCES_URL}>`__ to sources of bundled GPL libraries{suffix}"
+
+
 def find_patch_dir(slug, version):
     """
     Look for a `patches/<slug>/<version_tag>` directory as described in
@@ -121,7 +135,7 @@ def yaml_line(key, value):
     ).rstrip("\n")
 
 
-def render_new_yaml(slug, source_code, license, version, patch_dir):
+def render_new_yaml(slug, source_code, license, version, patch_dir, comment=None):
     """Render a brand-new docs/packages/<slug>.yaml for a package's first version."""
     lines = [yaml_line("package-name", slug)]
     if source_code:
@@ -131,10 +145,12 @@ def render_new_yaml(slug, source_code, license, version, patch_dir):
     lines.append(f"  - {yaml_line('version', version)}")
     if patch_dir is not None:
         lines.append("    patched:")
+    if comment:
+        lines.append(f"    {yaml_line('comment', comment)}")
     return "\n".join(lines) + "\n"
 
 
-def append_version(content, package_data, version, license, patch_dir):
+def append_version(content, package_data, version, license, patch_dir, comment=None):
     """
     Append a new version entry to the end of an existing package YAML file's
     `versions:` list, preserving the rest of the file byte-for-byte.
@@ -153,6 +169,8 @@ def append_version(content, package_data, version, license, patch_dir):
         lines.append("    patched:")
     if license and license != top_level_license:
         lines.append(f"    {yaml_line('license', license)}")
+    if comment:
+        lines.append(f"    {yaml_line('comment', comment)}")
 
     return content.rstrip("\n") + "\n" + "\n".join(lines) + "\n"
 
@@ -200,17 +218,20 @@ def main():
 
     slug = normalize_name(display_name)
     patch_dir = find_patch_dir(slug, version)
+    comment = render_gpl_sources_comment()
     yaml_path = DOCS_DIR / f"{slug}.yaml"
     is_new = not yaml_path.exists()
 
     if is_new:
         yaml_path.write_text(
-            render_new_yaml(slug, source_code, license, version, patch_dir)
+            render_new_yaml(slug, source_code, license, version, patch_dir, comment)
         )
     else:
         content = yaml_path.read_text()
         package_data = yaml.safe_load(content) or {}
-        updated = append_version(content, package_data, version, license, patch_dir)
+        updated = append_version(
+            content, package_data, version, license, patch_dir, comment
+        )
         if updated is None:
             print(f"{slug} {version} is already documented; nothing to do")
             return
