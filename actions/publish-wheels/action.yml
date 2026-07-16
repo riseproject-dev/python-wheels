@@ -1,0 +1,99 @@
+name: 'Publish riscv64 Wheels and Document Release'
+description: >
+  Checks out python-wheels, downloads a package's built wheel artifacts,
+  publishes them to the GitLab PyPI Package Registry, and opens a pull
+  request documenting the new version in docs/packages/. Wraps the publish
+  job body shared by every build-<package>.yml workflow so it doesn't need
+  to be duplicated per package.
+
+inputs:
+
+  # ── Required ────────────────────────────────────────────────────────────────
+
+  artifact-pattern:
+    description: >
+      Pattern passed to actions/download-artifact to select this package's
+      wheel artifacts, e.g. "numpy-2.5.1-*-manylinux_riscv64".
+    required: true
+
+  gitlab-username:
+    description: Passed through to the publish-to-gitlab action.
+    required: true
+
+  gitlab-token:
+    description: Passed through to the publish-to-gitlab action.
+    required: true
+
+  gitlab-project-id:
+    description: Passed through to the publish-to-gitlab action.
+    required: true
+
+  gh-token:
+    description: >
+      GitHub token used to push the docs branch and open the docs PR.
+      Composite actions cannot read the `secrets` context directly, so the
+      caller must pass it explicitly (e.g. secrets.GITHUB_TOKEN).
+    required: true
+
+  # ── Optional ────────────────────────────────────────────────────────────────
+
+  artifact-path:
+    description: Directory the wheel artifacts are downloaded into.
+    required: false
+    default: 'dist'
+
+  files:
+    description: Newline-separated glob(s) of files to publish. Passed through to publish-to-gitlab.
+    required: false
+    default: 'dist/*.whl'
+
+  skip-existing:
+    description: Passed through to the publish-to-gitlab action.
+    required: false
+    default: 'false'
+
+  twine-version:
+    description: Passed through to the publish-to-gitlab action.
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+
+    - name: Checkout python-wheels
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Download wheels
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+      with:
+        pattern: ${{ inputs.artifact-pattern }}
+        path: ${{ inputs.artifact-path }}
+        merge-multiple: true
+
+    - name: Publish to GitLab PyPI registry
+      uses: riseproject-dev/python-wheels/actions/publish-to-gitlab@main
+      with:
+        gitlab-username: ${{ inputs.gitlab-username }}
+        gitlab-token: ${{ inputs.gitlab-token }}
+        gitlab-project-id: ${{ inputs.gitlab-project-id }}
+        files: ${{ inputs.files }}
+        skip-existing: ${{ inputs.skip-existing }}
+        twine-version: ${{ inputs.twine-version }}
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3'
+
+    - name: Install ci_scripts/update_doc.py dependencies
+      shell: bash
+      run: pip install pyyaml
+
+    - name: Open docs update PR
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.gh-token }}
+        ARTIFACTS_PATH: ${{ inputs.artifact-path }}
+      run: python3 ci_scripts/update_doc.py
