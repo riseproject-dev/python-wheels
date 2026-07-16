@@ -256,6 +256,57 @@ If either point is not met, we should follow the [Patching a
 Project](#patching-a-project) process for patching our build, and submit an
 issue and/or PR upstream to help them comply with license requirements as well.
 
+#### Publishing GPL Sources
+
+Some builds statically or dynamically link against GPL-licensed components
+that aren't part of the upstream project itself, but come from our build
+environment - most commonly the toolchain baked into the manylinux_riscv64
+container (e.g. `gcc`). As the distributor of the resulting wheel, we need to
+make the corresponding source available permanently, not just for as long as
+a CI job's artifacts happen to be retained.
+
+Use the `collect-gpl-sources` action in a job alongside
+`build_wheels` to pull the same container image and bundle the source RPM(s)
+for one or more installed packages into a `gpl-sources.tar` artifact:
+
+```
+gpl_sources:
+  name: Collect GPL sources (gcc) for <package> ${{ inputs.version }}
+  runs-on: ubuntu-24.04-riscv
+  steps:
+    - name: Collect gcc source RPM from manylinux_riscv64
+      uses: riseproject-dev/python-wheels/actions/collect-gpl-sources@main
+      with:
+        image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+        packages: gcc
+        output: gpl-sources.tar
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: <package>-${{ inputs.version }}-gpl-sources
+        path: gpl-sources.tar
+        if-no-files-found: error
+```
+
+Pin `MANYLINUX_RISCV64_IMAGE` as a workflow-level `env` and pass it to both
+`CIBW_MANYLINUX_RISCV64_IMAGE` in the build job and this job, so the sources
+collected actually correspond to the toolchain that produced the wheels (see
+`build-numpy.yml` for a complete example).
+
+Then add `gpl_sources` to the `publish` job's `needs:`, and pass the artifact
+through to `publish-wheels`:
+
+```
+gpl-sources-artifact: <package>-${{ inputs.version }}-gpl-sources
+gpl-sources-release-tag: <package>-v${{ inputs.version }}
+gpl-sources-description: gcc
+```
+
+`publish-wheels` publishes the tar as a permanent asset on a GitHub Release
+(created if it doesn't already exist) and passes its download URL to
+`ci_scripts/update_doc.py`, which renders it as a `comment:` on the new
+version entry automatically - no manual doc edit needed.
+
 ### Adding Builds for Rust Packages
 
 Modules which are cross-compiled from Rust to Python typically use
