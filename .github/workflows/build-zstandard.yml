@@ -1,0 +1,107 @@
+---
+name: Build zstandard wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'zstandard version to build (git tag, e.g. 0.25.0)'
+        required: true
+        default: '0.25.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-zstandard.yml'
+      - 'actions/publish-to-gitlab/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.25.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.25.0 there.
+  ZSTANDARD_VERSION: ${{ inputs.version || '0.25.0' }}
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_ONLY_BINARY: ':all:'
+
+jobs:
+  build_wheels:
+    name: Build zstandard ${{ inputs.version || '0.25.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp311", "cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      # zstandard vendors the zstd C library as a submodule and, unlike numpy,
+      # tags releases without a leading `v` (e.g. `0.25.0`), so the ref is the
+      # bare version.
+      - name: Checkout zstandard ${{ env.ZSTANDARD_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: indygreg/python-zstandard
+          ref: ${{ env.ZSTANDARD_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      # zstandard 0.25.0 targets cibuildwheel 3.x and pins
+      # `enable = ["cpython-freethreading", "cpython-prerelease"]`. cibuildwheel
+      # 4.x dropped the cpython-freethreading group (freethreaded builds are on
+      # by default now) and errors out on it at config-parse. Strip it so the
+      # pinned 4.1.0 can read the config; freethreaded cp314t still builds.
+      # Upstream HEAD already removed it, so this is only needed for this tag.
+      - name: Make pyproject enable groups compatible with cibuildwheel 4.x
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("pyproject.toml")
+          t = p.read_text()
+          for tok in ('"cpython-freethreading", ', ', "cpython-freethreading"',
+                      '"cpython-freethreading"'):
+              t = t.replace(tok, "")
+          p.write_text(t)
+          PY
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@294735312765b09d24a2fbec22660ce817587d55  # v4.1.0
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: zstandard-${{ env.ZSTANDARD_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish zstandard ${{ inputs.version || '0.25.0' }} to GitLab
+    needs: build_wheels
+    # Only publish when the workflow was triggered from main with a specific
+    # version. Manual trigger is the only entry point, so checking the ref is
+    # enough to gate uploads.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: zstandard-${{ env.ZSTANDARD_VERSION }}-*-manylinux_riscv64
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to GitLab PyPI registry
+        uses: riseproject-dev/python-wheels/actions/publish-to-gitlab@main
+        with:
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          files: |
+            dist/*.whl
