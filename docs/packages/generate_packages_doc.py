@@ -80,7 +80,9 @@ def get_upstream_tag(package_name, version, package_list):
         (
             pkg["pipeline"]["ref"]
             for pkg in package_list
-            if pkg["name"] == package_name and pkg["version"].startswith(version)
+            if pkg["name"] == package_name
+            and pkg["version"].startswith(version)
+            and "pipeline" in pkg
         ),
         None,
     )
