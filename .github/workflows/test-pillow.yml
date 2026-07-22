@@ -1,0 +1,82 @@
+---
+name: Test pillow (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pillow version to test (git tag without leading v, e.g. 12.3.0)'
+        required: true
+        default: '12.3.0'
+  pull_request:
+    paths:
+      - '.github/workflows/test-pillow.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '12.3.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  FORCE_COLOR: 1
+  PIP_DISABLE_PIP_VERSION_CHECK: 1
+  PILLOW_VERSION: ${{ inputs.version || '12.3.0' }}
+
+jobs:
+  test:
+    permissions:
+      contents: read
+    name: "Test pillow ${{ inputs.version || '12.3.0' }} — Python ${{ matrix.python-version }} on ${{ matrix.os }}"
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04-riscv
+            python-version: '3.12'
+
+    steps:
+      - name: Checkout pillow v${{ env.PILLOW_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: python-pillow/Pillow
+          ref: ${{ env.PILLOW_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install Linux dependencies
+        run: |
+          .ci/install.sh
+        env:
+          GHA_PYTHON_VERSION: ${{ matrix.python-version }}
+
+      - name: Build
+        run: |
+          .ci/build.sh
+
+      - name: Test
+        run: |
+          xvfb-run -s '-screen 0 1024x768x24' sway&
+          export WAYLAND_DISPLAY=wayland-1
+          .ci/test.sh
+
+      - name: Prepare to upload errors
+        if: failure()
+        run: |
+          mkdir -p Tests/errors
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: failure()
+        with:
+          name: "pillow-${{ env.PILLOW_VERSION }}-py${{ matrix.python-version }}-${{ matrix.os }}-errors"
+          path: Tests/errors
