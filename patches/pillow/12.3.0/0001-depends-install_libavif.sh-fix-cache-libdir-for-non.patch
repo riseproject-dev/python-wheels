@@ -1,0 +1,53 @@
+From 672262c8715b24485f82e18580fe33786dbce2b9 Mon Sep 17 00:00:00 2001
+From: Trevor Gamblin <tgamblin@baylibre.com>
+Date: Thu, 23 Jul 2026 10:57:00 -0400
+Subject: [PATCH] depends: install_libavif.sh: fix cache LIBDIR for non-x86_64
+ hosts
+
+The GitHub Actions cache restore/save paths hardcode
+LIBDIR=/usr/lib/x86_64-linux-gnu, but on riscv64 the multiarch install
+path is /usr/lib/riscv64-linux-gnu. The cache-save cp then fails:
+
+    cp: cannot stat '/usr/lib/x86_64-linux-gnu/libavif.so*': No such file or directory
+
+Because that cp isn't the last command in an && list, `set -e`
+doesn't stop the script there either, so it falls through with a
+stale working directory and breaks the next dependency's `pushd
+depends` in .ci/install.sh:
+
+    .ci/install.sh: line 58: pushd: depends: No such file or directory
+
+Derive LIBDIR from `uname -m` instead of hardcoding the triplet.
+
+Upstream-Status: To upstream [relevant for non-x86_64 CI runners]
+
+Signed-off-by: Trevor Gamblin <tgamblin@baylibre.com>
+---
+ depends/install_libavif.sh | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/depends/install_libavif.sh b/depends/install_libavif.sh
+index b837f6d65..ae4d7f87a 100755
+--- a/depends/install_libavif.sh
++++ b/depends/install_libavif.sh
+@@ -5,7 +5,7 @@ version=1.4.2
+ 
+ if [[ "$GHA_LIBAVIF_CACHE_HIT" == "true" ]]; then
+ 
+-    LIBDIR=/usr/lib/x86_64-linux-gnu
++    LIBDIR=/usr/lib/$(uname -m)-linux-gnu
+ 
+     # Copy cached files into place
+     sudo cp ~/cache-libavif/lib/* $LIBDIR/
+@@ -80,7 +80,7 @@ else
+ 
+     if [ -n "$GITHUB_ACTIONS" ] && [ "$(uname)" != "Darwin" ]; then
+         # Copy to cache
+-        LIBDIR=/usr/lib/x86_64-linux-gnu
++        LIBDIR=/usr/lib/$(uname -m)-linux-gnu
+         rm -rf ~/cache-libavif
+         mkdir -p ~/cache-libavif/lib
+         mkdir -p ~/cache-libavif/include
+-- 
+2.55.0
+
