@@ -1,0 +1,100 @@
+---
+name: Build sentencepiece wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'sentencepiece version to build (git tag without leading v, e.g. 0.2.2)'
+        required: true
+        default: '0.2.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-sentencepiece.yml'
+      - 'actions/publish-to-gitlab/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.2.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  SENTENCEPIECE_VERSION: ${{ inputs.version || '0.2.2' }}
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_ONLY_BINARY: ':all:'
+
+jobs:
+  build_wheels:
+    name: Build sentencepiece ${{ inputs.version || '0.2.2' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp311", "cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      # sentencepiece's Python packaging lives in the `python/` subdirectory
+      # (setup.py + pyproject.toml there), so cibuildwheel is pointed at it via
+      # package-dir. The C++ core is vendored through a submodule, hence
+      # submodules: true.
+      - name: Checkout sentencepiece v${{ env.SENTENCEPIECE_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: google/sentencepiece
+          ref: v${{ env.SENTENCEPIECE_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@294735312765b09d24a2fbec22660ce817587d55  # v4.1.0
+        with:
+          package-dir: python
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_BUILD_VERBOSITY: 1
+          CIBW_ENVIRONMENT: CMAKE_BUILD_PARALLEL_LEVEL=8
+          # Mirror upstream's `test-command = "pytest -v {project}/test"`.
+          # test-sources are resolved relative to the checkout root (hence the
+          # python/ prefix); tools/ is copied alongside test/ because
+          # gen_stubs_test inserts ../tools on sys.path to import gen_stubs.
+          # test-requires (pytest, numpy, protobuf) come from the project's own
+          # [tool.cibuildwheel] table in python/pyproject.toml.
+          CIBW_TEST_SOURCES: python/test python/tools
+          CIBW_TEST_COMMAND: pytest -v python/test
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sentencepiece-${{ env.SENTENCEPIECE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish sentencepiece ${{ inputs.version || '0.2.2' }} to GitLab
+    needs: build_wheels
+    # Only publish when the workflow was triggered from main with a specific
+    # version. Manual trigger is the only entry point, so checking the ref is
+    # enough to gate uploads.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: sentencepiece-${{ env.SENTENCEPIECE_VERSION }}-*-manylinux_riscv64
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to GitLab PyPI registry
+        uses: riseproject-dev/python-wheels/actions/publish-to-gitlab@main
+        with:
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          files: |
+            dist/*.whl
