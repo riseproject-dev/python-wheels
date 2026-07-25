@@ -74,8 +74,17 @@ outputs:
       ${{ inputs.gitlab-host }}/-/packages
 
   uploaded-files:
-    description: Newline-separated list of files that twine successfully uploaded.
+    description: >
+      Newline-separated list of files that twine successfully uploaded. Empty
+      when running in dry-run mode (see `dry-run` output).
     value: ${{ steps.upload.outputs.uploaded_files }}
+
+  dry-run:
+    description: >
+      "true" when the action ran outside of the main branch and only printed
+      a mock of what would have been uploaded, "false" when it actually
+      uploaded via twine.
+    value: ${{ steps.upload.outputs.dry_run }}
 
 runs:
   using: 'composite'
@@ -166,6 +175,33 @@ runs:
         printf '  %s\n' "${matched_files[@]}"
 
         echo "::endgroup::"
+
+        if [[ "${{ github.ref }}" != 'refs/heads/main' ]]; then
+          echo "::group::Dry run (not on main branch — no upload will happen)"
+
+          echo "dry_run=true" >> "$GITHUB_OUTPUT"
+
+          skip_flag=''
+          if [[ "${{ inputs.skip-existing }}" == 'true' ]]; then
+            skip_flag=' --skip-existing'
+          fi
+
+          printf 'Would run: twine upload --disable-progress-bar%s <files>\n' "$skip_flag"
+          printf 'Would upload %d file(s) to %s:\n' "${#matched_files[@]}" "${{ inputs.gitlab-host }}"
+          printf '  %s\n' "${matched_files[@]}"
+
+          echo "::endgroup::"
+
+          {
+            echo "uploaded_files<<EOF"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          exit 0
+        fi
+
+        echo "dry_run=false" >> "$GITHUB_OUTPUT"
+
         echo "::group::Uploading via twine"
 
         twine_from='twine'
@@ -200,7 +236,12 @@ runs:
         echo "" >> "$GITHUB_STEP_SUMMARY"
         echo "**Registry endpoint:** \`${{ inputs.gitlab-host }}/api/v4/projects/${{ inputs.gitlab-project-id }}/packages/pypi\`" >> "$GITHUB_STEP_SUMMARY"
         echo "" >> "$GITHUB_STEP_SUMMARY"
-        echo "**Uploaded files:**" >> "$GITHUB_STEP_SUMMARY"
-        while IFS= read -r f; do
-          [[ -n "$f" ]] && echo "- \`$f\`" >> "$GITHUB_STEP_SUMMARY"
-        done <<< "${{ steps.upload.outputs.uploaded_files }}"
+
+        if [[ "${{ steps.upload.outputs.dry_run }}" == 'true' ]]; then
+          echo "**DRY RUN** — not on main branch, nothing was uploaded." >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo "**Uploaded files:**" >> "$GITHUB_STEP_SUMMARY"
+          while IFS= read -r f; do
+            [[ -n "$f" ]] && echo "- \`$f\`" >> "$GITHUB_STEP_SUMMARY"
+          done <<< "${{ steps.upload.outputs.uploaded_files }}"
+        fi
