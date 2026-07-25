@@ -144,10 +144,6 @@ workflow needs is `publish-wheels`, which performs the following steps:
 publish:
   name: Publish numpy ${{ inputs.version || '2.5.0' }} to GitLab
   needs: build_wheels
-  # Only publish when the workflow was triggered from main with a specific
-  # version. Manual trigger is the only entry point, so checking the ref is
-  # enough to gate uploads.
-  if: github.ref == 'refs/heads/main'
   runs-on: ubuntu-latest
   permissions:
     contents: write
@@ -231,11 +227,16 @@ user experience when consuming wheels from RISE's package registry.**
 
 ## Releasing a Wheel
 
-The `publish-to-gitlab` action does not run unless the workflow is triggered
-from main. This is intentional, and is meant to ensure that only those workflows
+The `publish-to-gitlab` and `publish-wheels` actions only perform their real
+side effects (twine upload, GPL sources release, docs PR) when the workflow is
+triggered from `main`. On any other ref they print a dry-run instead — the
+resolved file globs, the twine command that would have run, and the branch/PR
+title `update_doc.py` would have used — without uploading anything or opening
+a PR. This is intentional, and is meant to ensure that only those workflows
 which have been fully tested, reviewed, and merged are used to build and push
-packages. Following the merge of a PR, the workflow(s) must be re-triggered from
-the `main` branch in order to release the wheels to the package registry.
+packages, while still letting a PR run demonstrate what publishing would do.
+Following the merge of a PR, the workflow(s) must be re-triggered from the
+`main` branch in order to actually release the wheels to the package registry.
 
 ## Other Workflow Tips and Tricks
 

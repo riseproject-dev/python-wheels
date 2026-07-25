@@ -12,6 +12,7 @@ Markdown pages, so this script only needs to maintain the YAML source of
 truth; it never touches docs/packages/*.md or index.md directly.
 """
 
+import difflib
 import os
 import re
 import string
@@ -30,6 +31,7 @@ PACKAGES_FILE = Path("ci_scripts/packages.txt")
 ARTIFACTS_PATH = os.environ.get("ARTIFACTS_PATH", "dist")
 GPL_SOURCES_URL = os.environ.get("GPL_SOURCES_URL")
 GPL_SOURCES_DESCRIPTION = os.environ.get("GPL_SOURCES_DESCRIPTION", "").strip()
+DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() == "true"
 
 
 def find_wheel_file(path):
@@ -221,25 +223,40 @@ def main():
     comment = render_gpl_sources_comment()
     yaml_path = DOCS_DIR / f"{slug}.yaml"
     is_new = not yaml_path.exists()
+    old_content = None if is_new else yaml_path.read_text()
 
     if is_new:
-        yaml_path.write_text(
-            render_new_yaml(slug, source_code, license, version, patch_dir, comment)
-        )
+        new_content = render_new_yaml(slug, source_code, license, version, patch_dir, comment)
     else:
-        content = yaml_path.read_text()
-        package_data = yaml.safe_load(content) or {}
-        updated = append_version(
-            content, package_data, version, license, patch_dir, comment
+        package_data = yaml.safe_load(old_content) or {}
+        new_content = append_version(
+            old_content, package_data, version, license, patch_dir, comment
         )
-        if updated is None:
+        if new_content is None:
             print(f"{slug} {version} is already documented; nothing to do")
             return
-        yaml_path.write_text(updated)
-
-    configure_git_identity()
 
     branch = f"github-actions/{'add' if is_new else 'update'}-doc-for-{slug}"
+    pr_title = f"docs: {'add' if is_new else 'update'} {slug}"
+
+    if DRY_RUN:
+        print("[dry-run] Not on main branch — no branch, commit, or PR will be created.")
+        print(f"[dry-run] Would write {yaml_path}:")
+        diff = difflib.unified_diff(
+            (old_content or "").splitlines(keepends=True),
+            new_content.splitlines(keepends=True),
+            fromfile=str(yaml_path) if old_content is not None else "/dev/null",
+            tofile=str(yaml_path),
+        )
+        sys.stdout.writelines(diff)
+        if is_new:
+            print(f"[dry-run] Would add '{slug}' to {PACKAGES_FILE}")
+        print(f"[dry-run] Would open PR '{pr_title}' from branch '{branch}' against main")
+        return
+
+    yaml_path.write_text(new_content)
+    configure_git_identity()
+
     git_run("switch", "-c", branch)
     git_run("add", str(yaml_path))
 
@@ -259,7 +276,7 @@ def main():
             "--base", "main",
             "--head", branch,
             "--reviewer", "threexc,justeph",
-            "--title", f"docs: {'add' if is_new else 'update'} {slug}",
+            "--title", pr_title,
             "--body",
             "Automatically generated PR to document a newly published wheel. "
             "Please review it carefully before merging.\n\n"
