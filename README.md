@@ -1,6 +1,6 @@
 # RISE Python Wheels
 
-[RISE Python Wheels](https://riseproject-dev.github.io/python-wheels) is a public project enabling the RISC-V support for the
+[RISE Python Wheels](https://pypi.riseproject.dev) is a public project enabling the RISC-V support for the
 Python ecosystem. It makes use of the [RISE RISC-V Runners](https://riscv-runners.riseproject.dev/)
 project to build wheels on native riscv64 hardware, with the goal of maintaining a riscv64-specific package
 repository for projects where upstream are not yet ready or able to perform builds themselves.
@@ -11,7 +11,7 @@ repository for projects where upstream are not yet ready or able to perform buil
 
 ## Documentation
 
-Find complete documentation on [the python-wheels website](https://riseproject-dev.github.io/python-wheels/)
+Find complete documentation on [the python-wheels website](https://pypi.riseproject.dev/)
 
 ## Background
 
