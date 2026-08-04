@@ -30,12 +30,8 @@ env:
 
 jobs:
   build_wheels:
-    name: Build sentencepiece ${{ inputs.version || '0.2.2' }} ${{ matrix.python }}-manylinux_riscv64
+    name: Build sentencepiece ${{ inputs.version || '0.2.2' }} manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ["cp312", "cp313", "cp314", "cp314t"]
 
     steps:
       - name: Checkout sentencepiece v${{ env.SENTENCEPIECE_VERSION }}
@@ -64,8 +60,10 @@ jobs:
       # it. Build and test settings come from [tool.cibuildwheel] in
       # python/pyproject.toml (test-requires pytest/numpy/protobuf, test-command
       # "pytest -v {project}/test"), so only the riscv64-specific parts are set
-      # here. CIBW_BUILD pins one target, which is what upstream's CIBW_ARCHS_LINUX
-      # and CIBW_SKIP work out to for the Linux half of their matrix.
+      # here. This mirrors upstream's single cibuildwheel invocation per
+      # platform: CIBW_ARCHS_LINUX resolves to riscv64 on this runner, and
+      # CIBW_SKIP carries the version selection rather than a matrix, so the
+      # diff against upstream's wheel.yml stays readable.
       - name: Build wheels
         working-directory: python
         run: |
@@ -73,10 +71,14 @@ jobs:
           cp ../data/*.bin src/sentencepiece/package_data
           python -m cibuildwheel --output-dir wheelhouse
         env:
-          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_ARCHS_LINUX: auto
+          # Upstream skips musllinux and win32. We skip musllinux for the same
+          # reason, plus cp39/cp310/cp311: those predate riscv64 being a target
+          # anyone ships for, and building them here would roughly double the
+          # runtime of an already serialized job for no consumer.
+          CIBW_SKIP: "cp39-* cp310-* cp311-* *-musllinux_*"
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           CIBW_BUILD_VERBOSITY: 1
-          CIBW_ENABLE: cpython-freethreading
           # PIP_EXTRA_INDEX_URL covers the test-requires install inside the
           # container, where numpy has riscv64 wheels in our registry but not on
           # PyPI.
@@ -86,12 +88,14 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: sentencepiece-${{ env.SENTENCEPIECE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          name: sentencepiece-${{ env.SENTENCEPIECE_VERSION }}-cibw-wheels-manylinux_riscv64
           path: ./python/wheelhouse/*.whl
           if-no-files-found: error
 
-  # Upstream runs this job against 3.13t. We use 3.14t, the freethreaded version in
-  # the python-wheels default matrix.
+  # Upstream runs this job against 3.13t. We use 3.14t, the freethreaded
+  # version in the python-wheels default matrix. cibuildwheel only gates
+  # cp313t behind CIBW_ENABLE=cpython-freethreading, so cp314t comes out of
+  # the build job above without any extra opt-in.
   free-threading:
     name: Test sentencepiece ${{ inputs.version || '0.2.2' }} free-threaded
     needs: [build_wheels]
@@ -115,12 +119,13 @@ jobs:
           activate-environment: true
           enable-cache: false
 
-      - name: Download free-threaded wheel
+      # One artifact now holds every version the build job produced. uv picks the
+      # cp314t wheel out of it because that is what the interpreter above resolves.
+      - name: Download wheels
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          pattern: sentencepiece-${{ env.SENTENCEPIECE_VERSION }}-cp314t-manylinux_riscv64
+          name: sentencepiece-${{ env.SENTENCEPIECE_VERSION }}-cibw-wheels-manylinux_riscv64
           path: python/wheelhouse
-          merge-multiple: true
 
       - name: Install sentencepiece wheel
         run: uv pip install --find-links=python/wheelhouse sentencepiece
