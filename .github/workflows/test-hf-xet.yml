@@ -25,12 +25,14 @@ env:
   HFXET_VERSION: ${{ inputs.version || '1.6.0' }}
 
 jobs:
-  # Mirrors ci.yml's build_and_test-linux job: build the extension in place
-  # with `maturin develop` and run hf_xet's own pytest suite against it.
-  # hf-xet-tests.yml (huggingface_hub's xet integration tests) and the
-  # workspace-wide `cargo test` in ci.yml are dropped - the former always
-  # installs the released PyPI wheel rather than what's built here, and the
-  # latter exercises git_xet/xet_client code outside the Python package.
+  # Mirrors ci.yml's build_and_test-linux job: build the extension and run
+  # hf_xet's own pytest suite against it. Builds a wheel and installs it
+  # rather than using upstream's `maturin develop` - see the comment on the
+  # Build wheel step below. hf-xet-tests.yml (huggingface_hub's xet
+  # integration tests) and the workspace-wide `cargo test` in ci.yml are
+  # dropped - the former always installs the released PyPI wheel rather than
+  # what's built here, and the latter exercises git_xet/xet_client code
+  # outside the Python package.
   test:
     permissions:
       contents: read
@@ -71,12 +73,36 @@ jobs:
       - name: Build and Test hf_xet
         run: cd hf_xet && cargo test --verbose --no-fail-fast
 
+      # `command: develop` in PyO3/maturin-action is hard-restricted to its
+      # non-container `hostBuild` path (innerMain() only ever sets useDocker
+      # for 'build'/'publish'), which downloads its maturin binary via a
+      # native-arch check that only recognizes 'arm64' vs. everything else as
+      # 'x86_64' - it fetches an x86_64 binary and fails to execute it here.
+      # `build` isn't restricted that way and reuses the same riscv64
+      # manylinux container as build-hf-xet.yml, so build a wheel and install
+      # it instead of using `develop` directly.
       - name: Build wheel
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
         with:
-          command: develop
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          args: -i 3.12 --out dist
           sccache: 'true'
+          manylinux: '2_39'
           working-directory: hf_xet
+          before-script-linux: |
+            if command -v apt-get &> /dev/null; then
+                apt-get update && apt-get install libatomic-ops-dev -y
+            elif command -v yum &> /dev/null; then
+                yum install libatomic_ops-devel perl-IPC-Cmd -y
+            else
+                echo "Neither apt-get nor yum is installed. Please install a package manager."
+                exit 1
+            fi
+            git config --global --add safe.directory "*"
+
+      - name: Install built wheel
+        run: uv pip install hf_xet/dist/*.whl
 
       - name: Python integration tests (hf_xet)
         run: |
