@@ -1,0 +1,145 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+
+name: Build hf-xet wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'hf-xet version to build (git tag without leading v, e.g. 1.6.0)'
+        required: true
+        default: '1.6.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-hf-xet.yml'
+      - '.github/workflows/test-hf-xet.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.6.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  HFXET_VERSION: ${{ inputs.version || '1.6.0' }}
+
+jobs:
+  # The 3.14 wheel is abi3 compatible, so a separate build is only needed for
+  # 3.14t (free-threaded CPython has no stable ABI to target yet).
+  build_wheels:
+    name: Build hf-xet ${{ inputs.version || '1.6.0' }} ${{ matrix.python-version }}-riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - target: riscv64gc-unknown-linux-gnu
+            arch: riscv64
+            manylinux: 2_39
+        python-version:
+          - '3.14'
+          - '3.14t'
+
+    steps:
+      - name: Checkout hf-xet v${{ env.HFXET_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: huggingface/xet-core
+          ref: v${{ env.HFXET_VERSION }}
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel tooling
+        run: |
+          uv pip install --upgrade pip
+          pip install wheel
+
+      - uses: ./.github/actions/set-build-profile
+        with:
+          tag: v${{ env.HFXET_VERSION }}
+
+      # the upstream maturin-action version used doesn't handle riscv64 wheels
+      # on manylinux 2_39. v1.51.0 does, so switch our workflow to that
+      - name: Build wheels
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --profile ${{ env.BUILD_PROFILE }} -i ${{ matrix.python-version }} --out dist
+          sccache: 'true'
+          manylinux: ${{ matrix.platform.manylinux }}
+          working-directory: hf_xet
+          before-script-linux: |
+            if command -v apt-get &> /dev/null; then
+                apt-get update && apt-get install libatomic-ops-dev -y
+            elif command -v yum &> /dev/null; then
+                yum install libatomic_ops-devel perl-IPC-Cmd -y
+            else
+                echo "Neither apt-get nor yum is installed. Please install a package manager."
+                exit 1
+            fi
+            git config --global --add safe.directory "*"
+
+      - name: Strip debug symbols into a separate file
+        if: env.IS_RELEASE == 'true'
+        run: |
+          mkdir hf_xet/dbg
+          mkdir dist
+          pushd dist
+          cp ../hf_xet/dist/* .
+          LATEST_WHEEL=$(ls -tr1 *.whl | tail -n 1)
+          WHEEL_NAME=$(basename $LATEST_WHEEL .whl)
+          WHEEL_VERSION=$(echo $LATEST_WHEEL | cut -d '-' -f 2)
+          SYMBOL_FILE=${WHEEL_NAME}.so.dbg
+          wheel unpack $LATEST_WHEEL
+          rm *.whl
+          objcopy --only-keep-debug hf_xet-${WHEEL_VERSION}/hf_xet/hf_xet.*.so hf_xet-${WHEEL_VERSION}/hf_xet/${SYMBOL_FILE}
+          objcopy --strip-debug hf_xet-${WHEEL_VERSION}/hf_xet/hf_xet.*.so
+          objcopy --add-gnu-debuglink=hf_xet-${WHEEL_VERSION}/hf_xet/${SYMBOL_FILE} hf_xet-${WHEEL_VERSION}/hf_xet/hf_xet.*.so
+          mv hf_xet-${WHEEL_VERSION}/hf_xet/${SYMBOL_FILE} ../hf_xet/dbg/${SYMBOL_FILE}
+          wheel pack hf_xet-${WHEEL_VERSION}
+          rm -rf hf_xet-${WHEEL_VERSION}
+
+      - name: Copy unstripped wheels to upload directory
+        if: env.IS_RELEASE != 'true'
+        run: |
+          mkdir dist
+          cp hf_xet/dist/* dist/
+
+      - name: Upload debug symbols
+        if: env.IS_RELEASE == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: hf-xet-${{ env.HFXET_VERSION }}-${{ matrix.python-version }}-riscv64-dbg
+          path: hf_xet/dbg
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: hf-xet-${{ env.HFXET_VERSION }}-${{ matrix.python-version }}-riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish hf-xet ${{ inputs.version || '1.6.0' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: hf-xet-${{ env.HFXET_VERSION }}-*-riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
