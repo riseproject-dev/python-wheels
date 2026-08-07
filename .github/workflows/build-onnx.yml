@@ -1,0 +1,147 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/onnx/onnx/blob/main/.github/workflows/release_linux_cibw.yml
+name: Build onnx wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'onnx version to build (git tag without leading v, e.g. 1.22.0)'
+        required: true
+        default: '1.22.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-onnx.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.22.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  ONNX_VERSION: ${{ inputs.version || '1.22.0' }}
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_ONLY_BINARY: ':all:'
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build:
+    name: Build onnx ${{ inputs.version || '1.22.0' }} ${{ matrix.build }}
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        # cp312 wheel is abi3, so only cp314t needs a separate build
+        build:
+          - "cp312-manylinux_riscv64"
+          - "cp314t-manylinux_riscv64"
+
+    steps:
+      - name: Checkout onnx v${{ env.ONNX_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: onnx/onnx
+          ref: v${{ env.ONNX_VERSION }}
+          persist-credentials: false
+
+      - name: Read protobuf version from sbom.cdx.json
+        run: echo "PROTOBUF_VERSION=$(jq -r '.components[] | select(.name=="protobuf") | .version' sbom.cdx.json)" >> "$GITHUB_ENV"
+
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        name: Install Python
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      # Upstream's "Set preview version" step is skipped: it only rewrites
+      # VERSION_NUMBER/pyproject.toml for the weekly onnx-weekly preview channel
+      # (create_release.yml's build_mode input), which we don't build.
+
+      - name: Download protobuf source
+        run: |
+          curl -sSL "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOBUF_VERSION}/protobuf-${PROTOBUF_VERSION}.tar.gz" -o protobuf.tar.gz
+          tar -xf protobuf.tar.gz
+
+      # Upstream's "Download protoc" step (a prebuilt host protoc binary,
+      # passed to CMake as ONNX_CUSTOM_PROTOC_EXECUTABLE to skip compiling
+      # protoc) is dropped: protobuf's GitHub releases only ship x86_64 and
+      # aarch64 protoc binaries, no riscv64. Without
+      # ONNX_CUSTOM_PROTOC_EXECUTABLE set, ONNX's CMakeLists.txt (see the
+      # `if(NOT ONNX_PROTOC_EXECUTABLE)` block) falls back to building protoc
+      # itself from the FetchContent'd protobuf source below - the same path
+      # upstream's own non-release CI (main.yml) takes on every platform.
+      # FETCHCONTENT_SOURCE_DIR_PROTOBUF below still points CMake at the
+      # source we just downloaded, so it's this build that gets compiled
+      # rather than a fresh fetch.
+      - name: Set SOURCE_DATE_EPOCH for reproducible builds
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@294735312765b09d24a2fbec22660ce817587d55  # v4.1.0
+        with:
+          output-dir: dist/
+          only: ${{ matrix.build }}
+        env:
+          CIBW_ENVIRONMENT: >-
+            CMAKE_ARGS="
+            -DFETCHCONTENT_SOURCE_DIR_PROTOBUF=/project/protobuf-${{ env.PROTOBUF_VERSION }}
+            -DONNX_HARDENING=ON
+            -DONNX_USE_LITE_PROTO=ON
+            -DONNX_WERROR=ON
+            "
+          # cibuildwheel has no manylinux-riscv64-image default the way
+          # onnx's own pyproject.toml configures manylinux-x86_64-image /
+          # manylinux-aarch64-image under [tool.cibuildwheel.linux]; since we
+          # build from an unmodified upstream checkout we can't add a
+          # riscv64 line there, so it's pinned here instead.
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Not in upstream: test-command/test-requires (pytest, Pillow) come
+          # from onnx's own [tool.cibuildwheel] in pyproject.toml unchanged,
+          # but Pillow has no riscv64 wheel on public PyPI yet, so our
+          # registry is used.
+          CIBW_ENVIRONMENT_PASS_LINUX: PIP_EXTRA_INDEX_URL
+          CIBW_TEST_COMMAND: "pytest -k 'not maxpool_2d_uint8_cpu' {project}/onnx/test"
+          PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          # Upstream names this wheels-linux-${{ matrix.build }}; ours is
+          # prefixed with package name and version instead, since
+          # publish-wheels' artifact-pattern needs both to tell packages
+          # and versions apart (upstream only ever builds one package here).
+          name: onnx-${{ env.ONNX_VERSION }}-${{ matrix.build }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+      - name: Validate wheel
+        run: |
+          uv pip install -q abi3audit check-wheel-contents
+          for whl in dist/*.whl; do
+            echo "Checking $whl"
+            check-wheel-contents "$whl"
+            python -m abi3audit -v "$whl"
+          done
+
+  publish:
+    name: Publish onnx ${{ inputs.version || '1.22.0' }} to GitLab
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: onnx-${{ env.ONNX_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
