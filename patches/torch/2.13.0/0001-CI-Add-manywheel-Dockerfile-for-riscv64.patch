@@ -1,0 +1,109 @@
+From 0000000000000000000000000000000000000001 Mon Sep 17 00:00:00 2001
+From: RISE Project CI <ci@riseproject.dev>
+Date: Thu, 10 Jul 2026 00:00:00 +0000
+Subject: [PATCH 1/2] [CI] Add manywheel Dockerfile for riscv64
+
+Add Dockerfile_2_39_riscv64 for building riscv64 manywheel images using
+quay.io/pypa/manylinux_2_39_riscv64 as base, and register the new
+manylinux2_39_riscv64-builder:cpu-riscv64 image in build.sh.
+
+Upstream-Status: To upstream
+
+Signed-off-by: RISE Project CI <ci@riseproject.dev>
+---
+ .ci/docker/manywheel/Dockerfile_2_39_riscv64 | 66 +++++++++++++++++++++++++++++++++
+ .ci/docker/manywheel/build.sh                |  8 ++++
+ 2 files changed, 74 insertions(+)
+
+diff --git a/.ci/docker/manywheel/Dockerfile_2_39_riscv64 b/.ci/docker/manywheel/Dockerfile_2_39_riscv64
+new file mode 100644
+--- /dev/null
++++ b/.ci/docker/manywheel/Dockerfile_2_39_riscv64
+@@ -0,0 +1,66 @@
++FROM quay.io/pypa/manylinux_2_39_riscv64 as base
++
++ARG GCCTOOLSET_VERSION=14
++
++# Language variables
++ENV LC_ALL=en_US.UTF-8
++ENV LANG=en_US.UTF-8
++ENV LANGUAGE=en_US.UTF-8
++
++ARG PIP_EXTRA_INDEX_URL
++ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
++ARG PIP_PREFER_BINARY
++ENV PIP_PREFER_BINARY=${PIP_PREFER_BINARY}
++
++# Installed needed OS packages. This is to support all
++# the binary builds (torch, vision, audio, text, data)
++RUN yum -y update
++RUN yum install -y \
++  autoconf \
++  automake \
++  bison \
++  bzip2 \
++  curl \
++  diffutils \
++  file \
++  git \
++  less \
++  libffi-devel \
++  libgomp \
++  make \
++  openssl-devel \
++  patch \
++  perl \
++  unzip \
++  util-linux \
++  wget \
++  which \
++  xz \
++  zstd \
++  sudo \
++  gcc \
++  gcc-c++ \
++  gcc-gfortran \
++  gdb
++RUN yum install -y ninja-build
++
++# git236+ would refuse to run git commands in repos owned by other users
++# Which causes version check to fail, as pytorch repo is bind-mounted into the image
++# Override this behaviour by treating every folder as safe
++# For more details see https://github.com/pytorch/pytorch/issues/78659#issuecomment-1144107327
++RUN git config --global --add safe.directory "*"
++
++# Build CPython 3.15.0 / 3.15.0t from source; quay.io/pypa does not ship them yet
++COPY ./common/install_cpython.sh install_cpython.sh
++RUN CPYTHON_VERSIONS="3.15.0 3.15.0t" bash ./install_cpython.sh && rm install_cpython.sh
++
++FROM base as openblas
++# Install openblas
++ARG OPENBLAS_VERSION
++ADD ./common/install_openblas.sh install_openblas.sh
++RUN bash ./install_openblas.sh && rm install_openblas.sh
++
++FROM base as final
++
++# remove unnecessary python versions
++COPY --from=openblas     /opt/OpenBLAS/  /opt/OpenBLAS/
+
+diff --git a/.ci/docker/manywheel/build.sh b/.ci/docker/manywheel/build.sh
+--- a/.ci/docker/manywheel/build.sh
++++ b/.ci/docker/manywheel/build.sh
+@@ -43,6 +43,14 @@
+         DOCKER_GPU_BUILD_ARG=" --build-arg DEVTOOLSET_VERSION=13"
+         MANY_LINUX_VERSION="2_28_aarch64"
+         ;;
++    manylinux2_39_riscv64-builder:cpu-riscv64)
++        TARGET=final
++        GPU_IMAGE=riscv64/almalinux:10-kitten
++        # Use a custom PyPI index to get pre-built wheels for RISC-V
++        # See https://riseproject-dev.github.io/python-wheels/
++        DOCKER_GPU_BUILD_ARG=" --platform linux/riscv64 --build-arg DEVTOOLSET_VERSION=14 --build-arg PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple --build-arg PIP_PREFER_BINARY=1"
++        MANY_LINUX_VERSION="2_39_riscv64"
++        ;;
+     manylinuxs390x-builder:cpu-s390x)
+         TARGET=final
+         GPU_IMAGE=s390x/almalinux:8
+--
+2.39.0
