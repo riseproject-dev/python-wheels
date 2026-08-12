@@ -1,0 +1,249 @@
+---
+name: Repro sentencepiece 1303 (riscv64 free-threading)
+
+# Diagnostic workflow for https://github.com/google/sentencepiece/issues/1303
+# (intermittent abort in test_trainer_with_normalizer under
+# `pytest -v --parallel-threads 4` on free-threaded CPython 3.14, riscv64).
+#
+# The maintainer asked whether master head still reproduces it, since
+# 76d28d6b6 moved every test onto tempfile.TemporaryDirectory. The abort is
+# intermittent, so a single green run answers nothing: this runs the same
+# command N times against master head AND N times against the exact 0.2.2
+# wheel that aborted, so the master result can be read against a control on
+# the same runner pool. Without the control arm, "master passed 25 times"
+# cannot be told apart from "we did not reproduce it today".
+#
+# Temporary. Delete this file and its branch once the question is answered.
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: 'Iterations of the pytest command per arm'
+        required: true
+        default: '25'
+  # build-sentencepiece.yml lives only on this repo's sentencepiece branch,
+  # not on main, so dispatch-from-branch is not something to rely on here.
+  push:
+    branches:
+      - sentencepiece-1303-repro
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # master head at the time the maintainer asked, which includes 76d28d6b6
+  # "use tempfile.TemporaryDirectory in test".
+  MASTER_REF: 66415574ea544516e2d1250117f63d618d2be66b
+  # The run whose free-threading job aborted. Its cp314t artifact is the
+  # literal binary that failed, so the control arm reuses it rather than
+  # rebuilding something subtly different.
+  CONTROL_RUN_ID: '30362326241'
+  CONTROL_VERSION: '0.2.2'
+  ITERATIONS: ${{ inputs.iterations || '25' }}
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  CIBUILDWHEEL_VERSION: '3.4.0'
+
+jobs:
+  build_master:
+    name: Build sentencepiece master cp314t
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout sentencepiece master head
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: google/sentencepiece
+          ref: ${{ env.MASTER_REF }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install cibuildwheel
+        run: uv pip install "cibuildwheel==${{ env.CIBUILDWHEEL_VERSION }}"
+
+      - name: Build wheel
+        working-directory: python
+        run: |
+          mkdir -p src/sentencepiece/package_data
+          cp ../data/*.bin src/sentencepiece/package_data
+          # Master added this step to its own wheel.yml. It vendors the C++
+          # tree into python/, without which build_bundled.sh fails with
+          # "SentencePiece C++ source files not found in ./sentencepiece or ../".
+          python build_sdist.py
+          python -m cibuildwheel --output-dir wheelhouse
+        env:
+          CIBW_BUILD: "cp314t-*"
+          CIBW_ARCHS_LINUX: auto
+          CIBW_SKIP: "*-musllinux_*"
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BUILD_VERBOSITY: 1
+          CIBW_ENVIRONMENT: >-
+            CMAKE_BUILD_PARALLEL_LEVEL=8
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sentencepiece-master-cp314t-manylinux_riscv64
+          path: ./python/wheelhouse/*.whl
+          if-no-files-found: error
+
+  loop_control:
+    name: Loop v0.2.2 control (${{ inputs.iterations || '25' }}x)
+    runs-on: ubuntu-24.04-riscv
+    permissions:
+      contents: read
+      actions: read  # to pull the wheel from the earlier run
+
+    steps:
+      # Same sparse checkout as the job that aborted. Cone mode also brings in
+      # python/pyproject.toml, which carries the thread_unsafe marker
+      # registration and testpaths.
+      - name: Checkout sentencepiece v0.2.2 tests
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: google/sentencepiece
+          ref: v${{ env.CONTROL_VERSION }}
+          persist-credentials: false
+          sparse-checkout: |
+            python/test
+            python/tools
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: '3.14t'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Download the wheel that aborted
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: sentencepiece-${{ env.CONTROL_VERSION }}-cp314t-manylinux_riscv64
+          path: wheelhouse
+          run-id: ${{ env.CONTROL_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install
+        run: |
+          uv pip install --find-links=wheelhouse sentencepiece
+          uv pip install pytest pytest-run-parallel numpy protobuf
+
+      - name: Loop
+        working-directory: python
+        env:
+          ARM: control-0.2.2
+        run: |
+          mkdir -p /tmp/sp-loop-logs
+          python -c "import sys, sentencepiece as s; \
+            print('python  :', sys.version); \
+            print('gil     :', sys._is_gil_enabled()); \
+            print('spm     :', s.__version__, s.__file__)"
+          pass=0; abort=0; fail=0
+          for i in $(seq 1 "$ITERATIONS"); do
+            log="/tmp/sp-loop-logs/${ARM}-$(printf '%03d' "$i").log"
+            set +e
+            pytest -v --parallel-threads 4 >"$log" 2>&1
+            rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              pass=$((pass + 1)); verdict=PASS; rm -f "$log"
+            elif grep -qE "Fatal Python error|Aborted|core dumped" "$log"; then
+              abort=$((abort + 1)); verdict=ABORT
+            else
+              fail=$((fail + 1)); verdict="FAIL(rc=$rc)"
+            fi
+            echo "[$ARM $i/$ITERATIONS] $verdict"
+          done
+          echo "**$ARM**: pass=$pass abort=$abort fail=$fail of $ITERATIONS" \
+            >>"$GITHUB_STEP_SUMMARY"
+          echo "$ARM: pass=$pass abort=$abort fail=$fail of $ITERATIONS"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: logs-control
+          path: /tmp/sp-loop-logs
+          if-no-files-found: ignore
+
+  loop_master:
+    name: Loop master head (${{ inputs.iterations || '25' }}x)
+    needs: [build_master]
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout sentencepiece master tests
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: google/sentencepiece
+          ref: ${{ env.MASTER_REF }}
+          persist-credentials: false
+          sparse-checkout: |
+            python/test
+            python/tools
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: '3.14t'
+          activate-environment: true
+          enable-cache: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: sentencepiece-master-cp314t-manylinux_riscv64
+          path: wheelhouse
+
+      - name: Install
+        run: |
+          uv pip install --find-links=wheelhouse sentencepiece
+          uv pip install pytest pytest-run-parallel numpy protobuf
+
+      - name: Loop
+        working-directory: python
+        env:
+          ARM: master-head
+        run: |
+          mkdir -p /tmp/sp-loop-logs
+          python -c "import sys, sentencepiece as s; \
+            print('python  :', sys.version); \
+            print('gil     :', sys._is_gil_enabled()); \
+            print('spm     :', s.__version__, s.__file__)"
+          pass=0; abort=0; fail=0
+          for i in $(seq 1 "$ITERATIONS"); do
+            log="/tmp/sp-loop-logs/${ARM}-$(printf '%03d' "$i").log"
+            set +e
+            pytest -v --parallel-threads 4 >"$log" 2>&1
+            rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              pass=$((pass + 1)); verdict=PASS; rm -f "$log"
+            elif grep -qE "Fatal Python error|Aborted|core dumped" "$log"; then
+              abort=$((abort + 1)); verdict=ABORT
+            else
+              fail=$((fail + 1)); verdict="FAIL(rc=$rc)"
+            fi
+            echo "[$ARM $i/$ITERATIONS] $verdict"
+          done
+          echo "**$ARM**: pass=$pass abort=$abort fail=$fail of $ITERATIONS" \
+            >>"$GITHUB_STEP_SUMMARY"
+          echo "$ARM: pass=$pass abort=$abort fail=$fail of $ITERATIONS"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: logs-master
+          path: /tmp/sp-loop-logs
+          if-no-files-found: ignore
