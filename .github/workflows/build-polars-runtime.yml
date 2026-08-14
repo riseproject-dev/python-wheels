@@ -1,0 +1,203 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# This workflow is based on: https://github.com/pola-rs/polars/blob/main/.github/workflows/release-python.yml
+
+name: Build polars-runtime wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'polars version to build (git tag without leading v, e.g. 1.42.1)'
+        required: true
+        default: '1.42.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-polars-runtime.yml'
+      - '.github/workflows/test-polars-runtime.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.42.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  POLARS_VERSION: ${{ inputs.version || '1.42.1' }}
+  PYTHON_VERSION: '3.12'
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  # `--profile dist-release` (see "Build wheel" below) inherits fat LTO +
+  # codegen-units=1 from py-polars' Cargo.toml. Overriding it here keeps the
+  # dist-release profile name/other settings intact without patching
+  # Cargo.toml.
+  CARGO_PROFILE_DIST_RELEASE_LTO: 'off'
+  CARGO_PROFILE_DIST_RELEASE_CODEGEN_UNITS: '16'
+  CARGO_PROFILE_DIST_RELEASE_OPT_LEVEL: '2'
+  # Limit the number of build jobs to help avoid resource exhaustion. This may
+  # need to be adjusted if the runners change.
+  CARGO_BUILD_JOBS: '2'
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # The build_wheels' "Test wheel" step needs this polars package installed for
+  # `import polars` to work.
+  base-package:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+
+    steps:
+      - name: Checkout polars py-${{ env.POLARS_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: pola-rs/polars
+          ref: py-${{ env.POLARS_VERSION }}
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install yq
+        run: uv pip install yq
+
+      - name: Check runtime versions
+        env:
+          POLARS_PYPROJECT_TOML: py-polars/pyproject.toml
+        run: |
+          set -e
+
+          VERSION=$(tomlq '.project.version' "$POLARS_PYPROJECT_TOML" | tr -d '"')
+          CARGO_32_VERSION=$(tomlq '.package.version' py-polars/runtime/polars-runtime-32/Cargo.toml | tr -d '"')
+          CARGO_64_VERSION=$(tomlq '.package.version' py-polars/runtime/polars-runtime-64/Cargo.toml | tr -d '"')
+
+          RT32_VERSION=($(tomlq '.project.dependencies[0]' "$POLARS_PYPROJECT_TOML" | tr -d '"'))
+          RT64_VERSION=($(tomlq '.project."optional-dependencies".rt64[0]' "$POLARS_PYPROJECT_TOML" | tr -d '"'))
+
+          [[ "$VERSION" == "$(echo $CARGO_32_VERSION | sed 's/-beta\./b/')" ]] || (echo "Incorrect cargo 32 version" && exit 1)
+          [[ "$VERSION" == "$(echo $CARGO_64_VERSION | sed 's/-beta\./b/')" ]] || (echo "Incorrect cargo 64 version" && exit 1)
+          [[ "$VERSION" == "${RT32_VERSION[2]}" ]] || (echo "Incorrect rt32 version" && exit 1)
+          [[ "$VERSION" == "${RT64_VERSION[2]}" ]] || (echo "Incorrect rt64 version" && exit 1)
+
+      - name: Build sdist and wheel
+        run: uv build py-polars --out-dir dist
+
+      - name: Upload base package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          path: dist
+
+  build_wheels:
+    needs: [base-package]
+    name: Build ${{ matrix.package }} ${{ inputs.version || '1.42.1' }} ${{ matrix.job_config }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [polars-runtime-32, polars-runtime-64]
+        job_config: [linux-riscv64]
+        include:
+          - job_config: linux-riscv64
+            os: ubuntu-24.04-riscv
+            architecture: riscv64
+            target: riscv64gc-unknown-linux-gnu
+
+    steps:
+      # Checked out at the workspace root: the runtime crate is a member of
+      # the polars Cargo workspace and needs its sibling crates present.
+      - name: Checkout polars py-${{ env.POLARS_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: pola-rs/polars
+          ref: py-${{ env.POLARS_VERSION }}
+          persist-credentials: false
+
+      - name: Free some disk space (remove unused packages)
+        uses: jlumbroso/free-disk-space@v1.3.1
+        if: ${{ runner.os == 'Linux' }}
+
+      # Avoid potential out-of-memory errors
+      - name: Set swap space for Linux
+        if: runner.os == 'Linux'
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 10
+
+      - name: Download base package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install yq
+        run: |
+          uv pip install --force-reinstall --no-deps dist/polars-*.whl
+          rm -rf dist/*
+          uv pip install yq
+
+      # The manylinux riscv64 support relied on below needs a maturin-action
+      # newer than the `v1` tag upstream pins, and there's no `manylinux: auto`
+      # mapping for riscv64 yet either - both pinned explicitly here. Left
+      # `maturin-version` unset (upstream pins 1.8.3): unverified against the
+      # newer action/riscv64 combination, so deferring to the action's default.
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: ${{ matrix.target }}
+          args: >
+            --profile dist-release
+            --manifest-path py-polars/runtime/${{ matrix.package }}/Cargo.toml
+            --out dist
+          manylinux: '2_39'
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - name: Test wheel
+        run: |
+          uv pip install --force-reinstall --verbose dist/*.whl
+          python -c 'import polars; polars.show_versions()'
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ matrix.package }}-${{ env.POLARS_VERSION }}-${{ matrix.job_config }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish ${{ matrix.package }} ${{ inputs.version || '1.42.1' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        package: [polars-runtime-32, polars-runtime-64]
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: ${{ matrix.package }}-${{ env.POLARS_VERSION }}-*
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
