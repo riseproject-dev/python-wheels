@@ -1,0 +1,107 @@
+---
+# Experiment, not a publishing workflow. Tracks the musllinux gap noted in #163.
+#
+# build-zstandard.yml builds manylinux only. Upstream builds both, and
+# quay.io/pypa/musllinux_1_2_riscv64 exists and is tagged daily, so the image is
+# not the blocker. This runs one Python version against it to find out what is,
+# and deliberately publishes nothing.
+#
+# Three things are handled up front rather than discovered one run at a time:
+#
+# 1. build-frontend. zstandard's pyproject sets "build[uv]" globally. uv has no
+#    musl riscv64 binary to install in the container, so this overrides to plain
+#    "build". Upstream hits the same thing on their musllinux cross builds and
+#    leaves a comment saying so.
+# 2. cffi. test-groups = ["dev"] pulls cffi, and our registry carries riscv64
+#    cffi as manylinux only (checked 2026-08-04), so it builds from source here.
+# 3. libffi headers. Building cffi from source needs them, and zstandard's
+#    before-all is guarded on /usr/bin/yum, which a musl image does not have, so
+#    it installs nothing. This overrides before-all to cover apk as well.
+#
+# If this goes green, the jobs fold into build-zstandard.yml as a follow-up PR.
+# If it does not, the failure is the answer and gets written up on #163.
+name: Test zstandard musllinux (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'zstandard version to build (git tag, e.g. 0.25.0)'
+        required: true
+        default: '0.25.0'
+  pull_request:
+    paths:
+      - '.github/workflows/test-zstandard-musllinux.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  ZSTANDARD_VERSION: ${{ inputs.version || '0.25.0' }}
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_ONLY_BINARY: ':all:'
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+  CIBUILDWHEEL_VERSION: '4.1.0'
+
+jobs:
+  # One Python version on purpose. The question is whether musllinux riscv64
+  # works at all, and cp312 answers that as well as four would.
+  musllinux:
+    name: Build zstandard ${{ inputs.version || '0.25.0' }} cp312-musllinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout zstandard ${{ env.ZSTANDARD_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: indygreg/python-zstandard
+          ref: ${{ env.ZSTANDARD_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # Same patch build-zstandard.yml applies: 0.25.0 still lists the
+      # cpython-freethreading enable group, which cibuildwheel 4.x rejects.
+      - name: Patch zstandard source
+        run: |
+          git apply python-wheels/patches/zstandard/${{ env.ZSTANDARD_VERSION }}/00*.patch
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build wheels
+        run: uvx cibuildwheel@${{ env.CIBUILDWHEEL_VERSION }}
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: cp312-musllinux_riscv64
+          CIBW_BUILD_VERBOSITY: '1'
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # See note 1 above.
+          CIBW_BUILD_FRONTEND: build
+          # See note 3 above. Keeps the yum branch so the override stays honest
+          # about what upstream does on manylinux.
+          CIBW_BEFORE_ALL_LINUX: >-
+            if [ -x /sbin/apk ] || [ -x /usr/bin/apk ]; then apk add --no-cache libffi-dev;
+            elif [ -x /usr/bin/yum ]; then yum install -y libffi-devel; fi
+          CIBW_ENVIRONMENT_PASS_LINUX: PIP_EXTRA_INDEX_URL
+          PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+
+      # Uploaded for inspection only. Nothing here feeds the publish action.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: zstandard-${{ env.ZSTANDARD_VERSION }}-cp312-musllinux_riscv64-EXPERIMENT
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
