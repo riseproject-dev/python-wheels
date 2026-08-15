@@ -1,0 +1,213 @@
+From 0000000000000000000000000000000000000002 Mon Sep 17 00:00:00 2001
+From: RISE Project CI <ci@riseproject.dev>
+Date: Thu, 10 Jul 2026 00:00:00 +0000
+Subject: [PATCH 2/2] [CI] Add cpu-riscv64 support to manywheel scripts
+
+Add riscv64 support to the manywheel build scripts:
+- build.sh: add cpu-riscv64 to GPU_ARCH_TYPE case
+- build_env_setup.py: add manylinux_2_39_riscv64 PLATFORM_TAG and cpu-riscv64 env setup
+- build_wheel.py: add riscv64 BLAS configuration (OpenBLAS, no MKLDNN)
+- repair_wheel.py: generalise aarch64_extra_deps -> arch_extra_deps for multi-arch
+
+Upstream-Status: Submitted [https://github.com/pytorch/pytorch/pull/191657]
+
+Signed-off-by: RISE Project CI <ci@riseproject.dev>
+---
+diff --git a/.ci/manywheel/build.sh b/.ci/manywheel/build.sh
+--- a/.ci/manywheel/build.sh
++++ b/.ci/manywheel/build.sh
+@@ -6,7 +6,7 @@
+ PYTORCH_ROOT="${PYTORCH_ROOT:-$(cd "${SCRIPTPATH}/../.." && pwd)}"
+ 
+ case "${GPU_ARCH_TYPE:-BLANK}" in
+-    cuda|cuda-aarch64|cpu|cpu-aarch64|cpu-cxx11-abi|xpu|rocm)
++    cuda|cuda-aarch64|cpu|cpu-aarch64|cpu-riscv64|cpu-cxx11-abi|xpu|rocm)
+         # New pipeline: pyproject-driven build via `python -m build`
+         # then patchelf-based wheel repair.
+         source "${SCRIPTPATH}/set_desired_python.sh"
+
+diff --git a/.ci/manywheel/build_env_setup.py b/.ci/manywheel/build_env_setup.py
+--- a/.ci/manywheel/build_env_setup.py
++++ b/.ci/manywheel/build_env_setup.py
+@@ -186,6 +186,7 @@
+ PLATFORM_TAGS: dict[str, str] = {
+     "x86_64": "manylinux_2_28_x86_64",
+     "aarch64": "manylinux_2_28_aarch64",
++    "riscv64": "manylinux_2_39_riscv64",
+ }
+ 
+ 
+@@ -453,7 +454,13 @@
+         setup_cuda(cuda_version)
+         env_out.update(cuda_build_env(cuda_version, arch))
+         print(f"CUDA {cuda_version} environment configured")
+-    elif gpu_arch_type in ("cpu", "cpu-aarch64", "cpu-s390x", "cpu-cxx11-abi"):
++    elif gpu_arch_type in (
++        "cpu",
++        "cpu-aarch64",
++        "cpu-riscv64",
++        "cpu-s390x",
++        "cpu-cxx11-abi",
++    ):
+         cleanup_cuda_for_cpu_build()
+         env_out.update(CPU_BUILD_ENV)
+         print("CPU environment configured")
+
+diff --git a/.ci/manywheel/build_wheel.py b/.ci/manywheel/build_wheel.py
+--- a/.ci/manywheel/build_wheel.py
++++ b/.ci/manywheel/build_wheel.py
+@@ -36,26 +36,34 @@
+             os.environ["CMAKE_LIBRARY_PATH"] = "/opt/intel/lib:/lib"
+         return
+ 
+-    if arch != "aarch64":
+-        return
++    elif arch == "aarch64":
++        if not Path("/acl").is_dir():
++            sys.exit("ERROR: ARM Compute Library not found at /acl")
++        os.environ["USE_MKLDNN"] = "1"
++        os.environ["USE_MKLDNN_ACL"] = "1"
++        os.environ["ACL_ROOT_DIR"] = "/acl"
++
++        if gpu_arch_type == "cuda-aarch64":
++            nvpl = Path("/usr/local/lib/libnvpl_blas_lp64_gomp.so.0")
++            if not nvpl.is_file():
++                sys.exit(f"ERROR: NVPL BLAS not found at {nvpl}")
++            print("Using NVPL BLAS/LAPACK and ACL for MKLDNN on CUDA aarch64")
++            os.environ["BLAS"] = "NVPL"
++        elif gpu_arch_type in ("cpu-aarch64", "cpu"):
++            openblas = Path("/opt/OpenBLAS/lib/libopenblas.so.0")
++            if not openblas.is_file():
++                sys.exit(f"ERROR: OpenBLAS not found at {openblas}")
++            print("Using OpenBLAS and ACL for MKLDNN on CPU aarch64")
++            os.environ["BLAS"] = "OpenBLAS"
++            os.environ["OpenBLAS_HOME"] = "/opt/OpenBLAS"
+ 
+-    if not Path("/acl").is_dir():
+-        sys.exit("ERROR: ARM Compute Library not found at /acl")
+-    os.environ["USE_MKLDNN"] = "1"
+-    os.environ["USE_MKLDNN_ACL"] = "1"
+-    os.environ["ACL_ROOT_DIR"] = "/acl"
++    elif arch == "riscv64":
++        os.environ["USE_MKLDNN"] = "0"
+ 
+-    if gpu_arch_type == "cuda-aarch64":
+-        nvpl = Path("/usr/local/lib/libnvpl_blas_lp64_gomp.so.0")
+-        if not nvpl.is_file():
+-            sys.exit(f"ERROR: NVPL BLAS not found at {nvpl}")
+-        print("Using NVPL BLAS/LAPACK and ACL for MKLDNN on CUDA aarch64")
+-        os.environ["BLAS"] = "NVPL"
+-    elif gpu_arch_type in ("cpu-aarch64", "cpu"):
+         openblas = Path("/opt/OpenBLAS/lib/libopenblas.so.0")
+         if not openblas.is_file():
+             sys.exit(f"ERROR: OpenBLAS not found at {openblas}")
+-        print("Using OpenBLAS and ACL for MKLDNN on CPU aarch64")
++        print("Using OpenBLAS for MKLDNN on CPU riscv64")
+         os.environ["BLAS"] = "OpenBLAS"
+         os.environ["OpenBLAS_HOME"] = "/opt/OpenBLAS"
+ 
+
+diff --git a/.ci/manywheel/repair_wheel.py b/.ci/manywheel/repair_wheel.py
+--- a/.ci/manywheel/repair_wheel.py
++++ b/.ci/manywheel/repair_wheel.py
+@@ -24,6 +24,8 @@
+ from dataclasses import dataclass
+ from pathlib import Path
+ 
++from build_env_setup import PLATFORM_TAGS
++
+ 
+ PATCHELF = "/usr/local/bin/patchelf"
+ 
+@@ -85,19 +87,22 @@
+     )
+ 
+ 
+-def aarch64_extra_deps(use_cuda: bool) -> list[Path]:
++def arch_extra_deps(arch: str, use_cuda: bool) -> list[Path]:
+     """Libraries to bundle into torch/lib/ on aarch64.
+ 
+-    CPU builds link against OpenBLAS + libgfortran; CUDA builds link against
+-    NVPL. Both pick up ARM Compute Library (ACL) for oneDNN acceleration.
++    CPU builds link against OpenBLAS + libgfortran
++    CUDA builds link against NVPL.
+     """
+-    deps: list[Path] = []
+     candidates: list[Path] = [Path("/usr/lib64/libgfortran.so.5")]
+-    if Path("/acl/build").is_dir():
+-        candidates += [
+-            Path("/acl/build/libarm_compute.so"),
+-            Path("/acl/build/libarm_compute_graph.so"),
+-        ]
++    if arch == "aarch64":
++        # Both CPU and CUDA builds pick up ARM Compute Library (ACL) for
++        # oneDNN acceleration on AArch64.
++        if Path("/acl/build").is_dir():
++            candidates += [
++                Path("/acl/build/libarm_compute.so"),
++                Path("/acl/build/libarm_compute_graph.so"),
++            ]
++
+     if use_cuda:
+         candidates += [
+             Path(f"/usr/local/lib/{name}")
+@@ -110,7 +115,8 @@
+         ]
+     else:
+         candidates.append(Path("/opt/OpenBLAS/lib/libopenblas.so.0"))
+-    deps = [p for p in candidates if p.is_file()]
++
++    deps: list[Path] = [p for p in candidates if p.is_file()]
+     return deps
+ 
+ 
+@@ -295,7 +301,7 @@
+     wheel: Path,
+     output_dir: Path,
+     libgomp_path: Path,
+-    aarch64_deps: list[Path],
++    arch_deps: list[Path],
+     bundled_libs: list[BundledLib],
+     aux_files: list[AuxFile],
+     c_so_rpath: str,
+@@ -320,7 +326,7 @@
+                 )
+ 
+         # Bundle aarch64 BLAS/LAPACK/ACL dependencies (no-op on x86)
+-        for dep in aarch64_deps:
++        for dep in arch_deps:
+             shutil.copy(dep, torch_lib / dep.name)
+ 
+         # TODO: Remove when switching to ROCm wheels
+@@ -399,7 +405,7 @@
+         lib_so_rpath = "$ORIGIN"
+         force_rpath = False
+ 
+-    aarch64_deps = aarch64_extra_deps(use_cuda) if arch == "aarch64" else []
++    arch_deps = arch_extra_deps(arch, use_cuda)
+ 
+     args.output_dir.mkdir(parents=True, exist_ok=True)
+     wheels = sorted(args.input_dir.glob("*.whl"))
+@@ -411,7 +417,7 @@
+             whl,
+             args.output_dir,
+             libgomp_path,
+-            aarch64_deps,
++            arch_deps,
+             bundled_libs,
+             aux_files,
+             c_so_rpath,
+@@ -419,7 +425,9 @@
+             force_rpath,
+         )
+ 
+-    retag_wheels(args.output_dir, f"manylinux_2_28_{arch}")
++    if arch not in PLATFORM_TAGS:
++        sys.exit(f"Unknown arch {arch}")
++    retag_wheels(args.output_dir, PLATFORM_TAGS[arch])
+     repaired = list(args.output_dir.glob("*.whl"))
+     print(f"Repaired {len(repaired)} wheel(s) in {args.output_dir}")
+ 
+
+--
+2.39.0

@@ -1,0 +1,853 @@
+From 0c9f3678cca4262fa340e161d69864a46c2b9b80 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <lhenry@rivosinc.com>
+Date: Wed, 28 May 2026 00:00:00 +0000
+Subject: [PATCH 3/3] [CI] Add native build image for linux-riscv64 (#190887)
+
+This is used as part of the riseproject-dev out-of-tree CI, to get us
+closer to having native builds of PyTorch on RISC-V.
+
+Upstream-Status: Backport [https://github.com/pytorch/pytorch/commit/0c9f3678cca4262fa340e161d69864a46c2b9b80]
+
+Signed-off-by: RISE Project CI <ci@riseproject.dev>
+---
+ .ci/docker/build.sh                   | 127 +++++++++++++++++++++-----
+ .ci/docker/common/install_base.sh     |  10 +-
+ .ci/docker/common/install_cache.sh    |  35 +++----
+ .ci/docker/common/install_openblas.sh |  32 +++++--
+ .ci/docker/requirements-ci.txt        |  23 +++--
+ .ci/docker/ubuntu/Dockerfile          |  62 ++++++++-----
+ .ci/pytorch/build.sh                  | 102 ++++++++++-----------
+ 7 files changed, 245 insertions(+), 146 deletions(-)
+
+diff --git a/.ci/docker/build.sh b/.ci/docker/build.sh
+index 76cf888..ba3ed03 100644
+--- a/.ci/docker/build.sh
++++ b/.ci/docker/build.sh
+@@ -76,8 +76,8 @@ elif [[ "$image" == *cuda*linter* ]]; then
+ elif [[ "$image" == *linter* ]]; then
+   # Use a separate Dockerfile for linter to keep a small image size
+   DOCKERFILE="linter/Dockerfile"
+-elif [[ "$image" == *riscv* ]]; then
+-  # Use RISC-V specific Dockerfile
++elif [[ "$image" == *riscv*cross* ]]; then
++  # Use RISC-V cross-compilation specific Dockerfile
+   DOCKERFILE="ubuntu-cross-riscv/Dockerfile"
+ fi
+ 
+@@ -114,6 +114,22 @@ case "$tag" in
+     TRITON=yes
+     INSTALL_MINGW=yes
+     ;;
++  pytorch-linux-jammy-cuda13.2-cudnn9-py3-gcc11)
++    CUDA_VERSION=13.2.1
++    ANACONDA_PYTHON_VERSION=3.10
++    GCC_VERSION=11
++    KATEX=yes
++    TRITON=yes
++    INSTALL_MINGW=yes
++    ;;
++  pytorch-linux-jammy-cuda13.0-cudnn9-py3.12-gcc11)
++    CUDA_VERSION=13.0.2
++    ANACONDA_PYTHON_VERSION=3.12
++    GCC_VERSION=11
++    KATEX=yes
++    TRITON=yes
++    INSTALL_MINGW=yes
++    ;;
+   pytorch-linux-jammy-cuda13.0-cudnn9-py3-gcc11-inductor-benchmarks)
+     CUDA_VERSION=13.0.2
+     ANACONDA_PYTHON_VERSION=3.10
+@@ -122,6 +138,14 @@ case "$tag" in
+     TRITON=yes
+     INDUCTOR_BENCHMARKS=yes
+     ;;
++  pytorch-linux-jammy-cuda13.0-cudnn9-py3.12-gcc11-inductor-benchmarks)
++    CUDA_VERSION=13.0.2
++    ANACONDA_PYTHON_VERSION=3.12
++    GCC_VERSION=11
++    KATEX=yes
++    TRITON=yes
++    INDUCTOR_BENCHMARKS=yes
++    ;;
+   pytorch-linux-jammy-cuda13.0-cudnn9-py3.12-gcc11-vllm)
+     CUDA_VERSION=13.0.2
+     ANACONDA_PYTHON_VERSION=3.12
+@@ -129,29 +153,29 @@ case "$tag" in
+     KATEX=yes
+     TRITON=yes
+     ;;
+-  pytorch-linux-jammy-py3.10-clang18)
++  pytorch-linux-jammy-py3.10-clang21)
+     ANACONDA_PYTHON_VERSION=3.10
+-    CLANG_VERSION=18
++    CLANG_VERSION=21
+     GCC_VERSION=11
+     KATEX=yes
+     DOCS=yes
+     ONNX=yes
+     ;;
+-  pytorch-linux-jammy-py3.11-clang18)
++  pytorch-linux-jammy-py3.11-clang21)
+     ANACONDA_PYTHON_VERSION=3.11
+-    CLANG_VERSION=18
++    CLANG_VERSION=21
+     ;;
+-  pytorch-linux-jammy-py3.12-clang18)
++  pytorch-linux-jammy-py3.12-clang21)
+     ANACONDA_PYTHON_VERSION=3.12
+-    CLANG_VERSION=18
++    CLANG_VERSION=21
+     ;;
+-  pytorch-linux-jammy-py3.13-clang18)
++  pytorch-linux-jammy-py3.13-clang21)
+     ANACONDA_PYTHON_VERSION=3.13
+-    CLANG_VERSION=18
++    CLANG_VERSION=21
+     ;;
+-  pytorch-linux-jammy-py3.14-clang18)
++  pytorch-linux-jammy-py3.14-clang21)
+     ANACONDA_PYTHON_VERSION=3.14
+-    CLANG_VERSION=18
++    CLANG_VERSION=21
+     ;;
+   pytorch-linux-jammy-rocm-n-py3 | pytorch-linux-jammy-rocm-n-py3-benchmarks | pytorch-linux-noble-rocm-n-py3)
+     if [[ $tag =~ "jammy" ]]; then
+@@ -174,19 +198,20 @@ case "$tag" in
+     ROCM_VERSION=nightly
+     TRITON=yes
+     KATEX=yes
+-    PYTORCH_ROCM_ARCH="gfx942"
++    # rocm-nightly only runs on MI350 (gfx950) runners.
++    PYTORCH_ROCM_ARCH="gfx950"
+     ;;
+   pytorch-linux-jammy-xpu-n-1-py3)
+     ANACONDA_PYTHON_VERSION=3.10
+     GCC_VERSION=11
+-    XPU_VERSION=2025.3
++    XPU_VERSION=2026.0
+     XPU_DRIVER_TYPE=LTS
+     TRITON=yes
+     ;;
+   pytorch-linux-noble-xpu-n-py3 | pytorch-linux-noble-xpu-n-py3-client | pytorch-linux-noble-xpu-n-py3-inductor-benchmarks)
+     ANACONDA_PYTHON_VERSION=3.10
+     GCC_VERSION=13
+-    XPU_VERSION=2026.0
++    XPU_VERSION=2026.1
+     if [[ $tag =~ "client" ]]; then
+       XPU_DRIVER_TYPE=CLIENT
+     else
+@@ -210,9 +235,9 @@ case "$tag" in
+     CLANG_VERSION=18
+     TRITON=yes
+     ;;
+-  pytorch-linux-jammy-py3-clang18-executorch)
++  pytorch-linux-jammy-py3-clang21-executorch)
+     ANACONDA_PYTHON_VERSION=3.10
+-    CLANG_VERSION=18
++    CLANG_VERSION=21
+     EXECUTORCH=yes
+     ;;
+   pytorch-linux-jammy-py3.12-halide)
+@@ -222,11 +247,6 @@ case "$tag" in
+     HALIDE=yes
+     TRITON=yes
+     ;;
+-  pytorch-linux-jammy-py3.12-pallas)
+-    ANACONDA_PYTHON_VERSION=3.12
+-    GCC_VERSION=11
+-    PALLAS=yes
+-    ;;
+   pytorch-linux-jammy-cuda12.8-py3.12-pallas)
+     CUDA_VERSION=12.8.1
+     ANACONDA_PYTHON_VERSION=3.12
+@@ -248,10 +268,12 @@ case "$tag" in
+     ;;
+   pytorch-linux-jammy-linter)
+     PYTHON_VERSION=3.10
++    CLANG_VERSION=18
+     ;;
+   pytorch-linux-jammy-cuda13.0-cudnn9-py3.10-linter)
+     PYTHON_VERSION=3.10
+     CUDA_VERSION=13.0.2
++    CLANG_VERSION=18
+     ;;
+   pytorch-linux-jammy-aarch64-py3.10-gcc13)
+     ANACONDA_PYTHON_VERSION=3.10
+@@ -267,6 +289,18 @@ case "$tag" in
+     INDUCTOR_BENCHMARKS=yes
+     ;;
+   pytorch-linux-noble-riscv64-py3.12-gcc14)
++    GCC_VERSION=14
++    PYTHON_VERSION=3.12
++    OPENBLAS=yes
++    if [[ "$(uname -m)" != "riscv64" ]]; then
++      platform_flag="--platform linux/riscv64" # we are building using QEMU
++    fi
++    # Use a custom PyPI index to get pre-built wheels for RISC-V
++    # See https://riseproject-dev.github.io/python-wheels/
++    PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple
++    PIP_PREFER_BINARY=1
++    ;;
++  pytorch-linux-noble-riscv64-py3.12-gcc14-cross-build)
+     GCC_VERSION=14
+     ;;
+   *)
+@@ -307,6 +341,14 @@ case "$tag" in
+   ;;
+ esac
+ 
++# ubuntu/Dockerfile provisions Python from a deadsnakes venv keyed on
++# PYTHON_VERSION, while the rocm/xpu images still express it as
++# ANACONDA_PYTHON_VERSION (they keep conda). Mirror the value so both flavors
++# get what they expect.
++if [ -z "${PYTHON_VERSION}" ]; then
++  PYTHON_VERSION="${ANACONDA_PYTHON_VERSION}"
++fi
++
+ tmp_tag=$(basename "$(mktemp -u)" | tr '[:upper:]' '[:lower:]')
+ 
+ progress_flag=""
+@@ -333,8 +375,10 @@ if [[ -n "${REMOTE_BUILDKIT:-}" ]]; then
+ fi
+ 
+ # Build image
+-docker buildx build \
++build_image() {
++  docker buildx build \
+        ${progress_flag} \
++       ${platform_flag:-} \
+        ${cache_flag} \
+        --build-arg "BUILD_ENVIRONMENT=${image}" \
+        --build-arg "LLVMDEV=${LLVMDEV:-}" \
+@@ -367,10 +411,45 @@ docker buildx build \
+        --build-arg "OPENBLAS=${OPENBLAS:-}" \
+        --build-arg "SKIP_SCCACHE_INSTALL=${SKIP_SCCACHE_INSTALL:-}" \
+        --build-arg "INSTALL_MINGW=${INSTALL_MINGW:-}" \
++       --build-arg "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL:-}" \
++       --build-arg "PIP_PREFER_BINARY=${PIP_PREFER_BINARY:-}" \
+        -f $(dirname ${DOCKERFILE})/Dockerfile \
+        ${output_flag} \
+        "$@" \
+        .
++}
++
++if [[ -z "${REMOTE_BUILDKIT:-}" ]]; then
++  build_image "$@"
++else
++  # The autoscaled pool may be cold / at capacity at start, where buildx's ~20s
++  # connect (gRPC default) fails before scale-up. Retry connection failures (not
++  # build errors) for ~2h so a capacity-limited build waits for a free pod instead
++  # of hard-failing — still within the 240m job timeout.
++  attempts="${REMOTE_BUILDKIT_CONNECT_ATTEMPTS:-360}"
++  delay="${REMOTE_BUILDKIT_CONNECT_DELAY:-15}"
++  for attempt in $(seq 1 "${attempts}"); do
++    build_log="$(mktemp)"
++    set +e
++    build_image "$@" 2>&1 | tee "${build_log}"
++    rc="${PIPESTATUS[0]}"
++    set -e
++    if [[ "${rc}" -eq 0 ]]; then
++      rm -f "${build_log}"
++      break
++    fi
++    if [[ "${attempt}" -lt "${attempts}" ]] && grep -qiE \
++      "waiting for connection|context deadline exceeded|server preface|failed to (dial|list workers)|connection (refused|reset)|no such host|transport: Error|i/o timeout|use of closed network connection|EOF" \
++      "${build_log}"; then
++      echo "Remote BuildKit not ready yet (attempt ${attempt}/${attempts}); retrying in ${delay}s..." >&2
++      rm -f "${build_log}"
++      sleep "${delay}"
++      continue
++    fi
++    rm -f "${build_log}"
++    exit "${rc}"
++  done
++fi
+ 
+ # NVIDIA dockers for RC releases use tag names like `11.0-cudnn9-devel-ubuntu18.04-rc`,
+ # for this case we will set UBUNTU_VERSION to `18.04-rc` so that the Dockerfile could
+@@ -415,7 +494,7 @@ if [ -n "$ANACONDA_PYTHON_VERSION" ]; then
+ fi
+ 
+ if [ -n "$GCC_VERSION" ]; then
+-  if [[ "$image" == *riscv* ]]; then
++  if [[ "$image" == *riscv*cross* ]]; then
+     # Check RISC-V cross-compilation toolchain version
+     if !(drun riscv64-linux-gnu-gcc-${GCC_VERSION} --version 2>&1 | grep -q " $GCC_VERSION\\W"); then
+       echo "RISC-V GCC_VERSION=$GCC_VERSION, but:"
+diff --git a/.ci/docker/common/install_base.sh b/.ci/docker/common/install_base.sh
+index 27ce6ea..cad70b7 100644
+--- a/.ci/docker/common/install_base.sh
++++ b/.ci/docker/common/install_base.sh
+@@ -20,6 +20,12 @@ install_ubuntu() {
+     exit 1
+   fi
+ 
++  if [[ "$(uname -m)" == "riscv64" ]]; then
++    valgrind="" # it's not available on riscv64 yet
++  else
++    valgrind="valgrind"
++  fi
++
+   # Install common dependencies
+   apt-get update
+   # Install prerequisites for add-apt-repository (needs gpg-agent for PPA key import)
+@@ -34,6 +40,7 @@ install_ubuntu() {
+     $numpy_deps \
+     ${deploy_deps} \
+     ${cmake3} \
++    ${valgrind} \
+     apt-transport-https \
+     autoconf \
+     automake \
+@@ -62,8 +69,7 @@ install_ubuntu() {
+     gpg-agent \
+     gdb \
+     bc \
+-    zip \
+-    valgrind
++    zip
+ 
+   # Should resolve issues related to various apt package repository cert issues
+   # see: https://github.com/pytorch/pytorch/issues/65931
+diff --git a/.ci/docker/common/install_cache.sh b/.ci/docker/common/install_cache.sh
+index 837ba50..3f370d6 100644
+--- a/.ci/docker/common/install_cache.sh
++++ b/.ci/docker/common/install_cache.sh
+@@ -3,25 +3,21 @@
+ set -ex
+ 
+ install_ubuntu() {
+-  echo "Installing pkg-config and libssl-dev"
+-  apt-get update && apt-get install -y pkg-config libssl-dev curl
+-  echo "Installing rust"
+-  curl https://sh.rustup.rs -sSf | sh -s -- -y
+-  echo "Checking out sccache repo"
+-  git clone https://github.com/mozilla/sccache -b v0.13.0
+-  cd sccache
+-  echo "Patch dist build on aarch64"
+-  sed -i '/all(target_os = "linux", target_arch = "x86_64"),/{ p; s/x86_64/aarch64/; }' src/bin/sccache-dist/main.rs
+-  echo "Building sccache"
+-  . "$HOME/.cargo/env" && cargo build --release --features="dist-client dist-server"
+-  cp target/release/sccache /opt/cache/bin
+-  cp target/release/sccache-dist /opt/cache/bin
+-  echo "Cleaning up"
+-  cd ..
+-  rm -rf sccache
+-  rustup self uninstall -y
+-  apt-get remove -y pkg-config libssl-dev
+-  apt-get autoclean && apt-get clean
++  ARCH=$(uname -m)
++  VERSION=0.16.0
++  FEATURES="sccache sccache-dist"
++  if [[ "${ARCH}" == "riscv64" ]]; then
++    # Rust's riscv64 arch is riscv64gc
++    ARCH=riscv64gc
++    # sccache-dist is not available on riscv64, so we only install sccache
++    FEATURES="sccache"
++  fi
++  echo "Downloading sccache binaries from GitHub mozilla/sccache release"
++  for feature in $FEATURES; do
++    curl --retry 3 -fsSL https://github.com/mozilla/sccache/releases/download/v${VERSION}/${feature}-v${VERSION}-${ARCH}-unknown-linux-musl.tar.gz | \
++      tar -xz -C /opt/cache/bin --strip-components=1 ${feature}-v${VERSION}-${ARCH}-unknown-linux-musl/${feature}
++    chmod a+x /opt/cache/bin/${feature}
++  done
+ 
+   echo "Downloading old sccache binary from S3 repo for PCH builds"
+   curl --retry 3 https://s3.amazonaws.com/ossci-linux/sccache -o /opt/cache/bin/sccache-0.2.14a
+@@ -40,7 +36,6 @@ export PATH="/opt/cache/bin:$PATH"
+ 
+ # Setup compiler cache
+ install_ubuntu
+-chmod a+x /opt/cache/bin/sccache
+ 
+ function write_sccache_stub() {
+   # Unset LD_PRELOAD for ps because of asan + ps issues
+diff --git a/.ci/docker/common/install_openblas.sh b/.ci/docker/common/install_openblas.sh
+index bdb365d..400d10a 100644
+--- a/.ci/docker/common/install_openblas.sh
++++ b/.ci/docker/common/install_openblas.sh
+@@ -3,24 +3,36 @@
+ 
+ set -ex
+ 
+-OPENBLAS_VERSION=${OPENBLAS_VERSION:-"v0.3.33"}
++OPENBLAS_VERSION=${OPENBLAS_VERSION:-"v0.3.34"}
++OPENBLAS_CHECKOUT_DIR="OpenBLAS"
++
++if [[ "$(uname -m)" == "aarch64" ]]; then
++  OPENBLAS_TARGET="ARMV8"
++elif [[ "$(uname -m)" == "riscv64" && "${GCC_VERSION}" -lt 15 ]]; then
++  # FIXME: zvfbfwma (vector bfloat16 instructions) support has been added in GCC 15
++  OPENBLAS_BUILD_BFLOAT16=0
++fi
+ 
+ # Clone OpenBLAS
+-git clone https://github.com/OpenMathLib/OpenBLAS.git -b "${OPENBLAS_VERSION}" --depth 1 --shallow-submodules
++git clone https://github.com/OpenMathLib/OpenBLAS.git -b "${OPENBLAS_VERSION}" --depth 1 --shallow-submodules "${OPENBLAS_CHECKOUT_DIR}"
+ 
+-OPENBLAS_CHECKOUT_DIR="OpenBLAS"
+ OPENBLAS_BUILD_FLAGS="
+-CC=gcc
+-NUM_THREADS=128
++NUM_THREADS=256
+ USE_OPENMP=1
+ NO_SHARED=0
+ DYNAMIC_ARCH=1
+-TARGET=ARMV8
++TARGET=${OPENBLAS_TARGET:-}
+ CFLAGS=-O3
+-BUILD_BFLOAT16=1
++FFLAGS=-Wno-maybe-uninitialized
++BUILD_BFLOAT16=${OPENBLAS_BUILD_BFLOAT16:-1}
++BUILD_HFLOAT16=0
++BUILD_SINGLE=1
++BUILD_DOUBLE=1
++BUILD_COMPLEX=1
++BUILD_COMPLEX16=1
+ "
+ 
+-make -j8 ${OPENBLAS_BUILD_FLAGS} -C $OPENBLAS_CHECKOUT_DIR
+-sudo make install -C $OPENBLAS_CHECKOUT_DIR
++make shared -j8 ${OPENBLAS_BUILD_FLAGS} -C $OPENBLAS_CHECKOUT_DIR
++make install ${OPENBLAS_BUILD_FLAGS} -C $OPENBLAS_CHECKOUT_DIR
+ 
+-rm -rf $OPENBLAS_CHECKOUT_DIR
+\ No newline at end of file
++rm -rf $OPENBLAS_CHECKOUT_DIR
+diff --git a/.ci/docker/requirements-ci.txt b/.ci/docker/requirements-ci.txt
+index e80e2de..6be6ccd 100644
+--- a/.ci/docker/requirements-ci.txt
++++ b/.ci/docker/requirements-ci.txt
+@@ -68,8 +68,8 @@ lark==0.12.0
+ #Pinned versions: 0.12.0
+ #test that import:
+ 
+-librosa>=0.6.2 ; python_version < "3.11" and platform_machine != "s390x"
+-librosa==0.10.2 ; python_version == "3.12" and platform_machine != "s390x"
++librosa>=0.6.2 ; python_version < "3.11" and platform_machine != "s390x" and platform_machine != "riscv64"
++librosa==0.10.2 ; python_version == "3.12" and platform_machine != "s390x" and platform_machine != "riscv64"
+ #Description: A python package for music and audio analysis
+ #Pinned versions: >=0.6.2
+ #test that import: test_spectral_ops.py
+@@ -117,8 +117,8 @@ ninja==1.13.0
+ #Pinned versions: 1.13.0
+ #test that import: run_test.py, test_cpp_extensions_aot.py,test_determination.py
+ 
+-numba==0.57.1 ; python_version == "3.10" and platform_machine != "s390x"
+-numba==0.64.0 ; python_version == "3.12" and platform_machine != "s390x"
++numba==0.57.1 ; python_version == "3.10" and platform_machine != "s390x" and platform_machine != "riscv64"
++numba==0.64.0 ; python_version == "3.12" and platform_machine != "s390x" and platform_machine != "riscv64"
+ #Description: Just-In-Time Compiler for Numerical Functions
+ #Pinned versions: 0.55.2, 0.60.0
+ #test that import: test_numba_integration.py
+@@ -126,7 +126,7 @@ numba==0.64.0 ; python_version == "3.12" and platform_machine != "s390x"
+ 
+ #numpy
+ #Description: Provides N-dimensional arrays and linear algebra
+-#Pinned versions: 1.26.2
++#Pinned versions: 1.26.4
+ #test that import: test_view_ops.py, test_unary_ufuncs.py, test_type_promotion.py,
+ #test_type_info.py, test_torch.py, test_tensorexpr_pybind.py, test_tensorexpr.py,
+ #test_tensorboard.py, test_tensor_creation_ops.py, test_static_runtime.py,
+@@ -137,7 +137,7 @@ numba==0.64.0 ; python_version == "3.12" and platform_machine != "s390x"
+ #test_jit.py, test_indexing.py, test_datapipe.py, test_dataloader.py,
+ #test_binary_ufuncs.py
+ numpy==1.23.2; python_version == "3.10"
+-numpy==1.26.2; python_version == "3.11" or python_version == "3.12"
++numpy==1.26.4; python_version == "3.11" or python_version == "3.12"
+ numpy==2.1.2; python_version >= "3.13" and python_version < "3.14"
+ numpy==2.3.4; python_version >= "3.14"
+ 
+@@ -169,7 +169,7 @@ optree==0.17.0 ; python_version >= "3.14"
+ #test_pointwise_ops.py, test_dtensor_ops.py, test_torchinductor.py, test_fx.py,
+ #test_fake_tensor.py, test_mps.py
+ 
+-pillow==12.2.0
++pillow==12.3.0
+ #Description:  Python Imaging Library fork
+ #Pinned versions: 11.0.0
+ #test that import:
+@@ -287,7 +287,8 @@ unittest-xml-reporting<=3.2.0,>=2.0.0
+ #test that import:
+ 
+ #lintrunner is supported on aarch64-linux only from 0.12.4 version
+-lintrunner==0.12.11
++#lintrunner is supported on riscv64-linux only from 0.13.0 version
++lintrunner==0.13.0
+ #Description: all about linters!
+ #Pinned versions: 0.12.11
+ #test that import:
+@@ -412,7 +413,11 @@ cupti-python>13.0 ; platform_system == "Linux" and (platform_machine == "x86_64"
+ #test that import: test_profiler.py
+ 
+ setuptools-git-versioning==2.1.0
++# scikit-build (non-core) is consumed by the FBGEMM / torchrec builds noted
++# below, not by PyTorch itself; PyTorch uses scikit-build-core. Keep both
++# pinned independently.
+ scikit-build==0.18.1
++scikit-build-core==1.0.0
+ pyre-extensions==0.0.32
+ tabulate==0.9.0
+ #Description: These package are needed to build FBGEMM and torchrec on PyTorch CI
+@@ -421,7 +426,7 @@ tqdm>=4.66.0
+ #Description: progress bar library required for dynamo benchmarks
+ #test that import: benchmarks/dynamo/*
+ 
+-aiohttp==3.13.4
++aiohttp==3.14.1
+ #Description: required for torch.distributed.debug
+ 
+ spin==0.17
+diff --git a/.ci/docker/ubuntu/Dockerfile b/.ci/docker/ubuntu/Dockerfile
+index 488eb5d..5877e85 100644
+--- a/.ci/docker/ubuntu/Dockerfile
++++ b/.ci/docker/ubuntu/Dockerfile
+@@ -1,10 +1,15 @@
+-ARG UBUNTU_VERSION
++ARG UBUNTU_VERSION=22.04
+ 
+-FROM ubuntu:${UBUNTU_VERSION} as base
++FROM ubuntu:${UBUNTU_VERSION} AS base
+ 
+ ARG UBUNTU_VERSION
+ 
+-ENV DEBIAN_FRONTEND noninteractive
++ENV DEBIAN_FRONTEND=noninteractive
++
++ARG PIP_EXTRA_INDEX_URL
++ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
++ARG PIP_PREFER_BINARY
++ENV PIP_PREFER_BINARY=${PIP_PREFER_BINARY}
+ 
+ ARG CLANG_VERSION
+ 
+@@ -29,19 +34,19 @@ ARG KATEX
+ COPY ./common/install_docs_reqs.sh install_docs_reqs.sh
+ RUN bash ./install_docs_reqs.sh && rm install_docs_reqs.sh
+ 
+-# Install conda and other packages (e.g., numpy, pytest)
+-ARG ANACONDA_PYTHON_VERSION
++# Install python (via deadsnakes) into a venv and the CI requirements
++ARG PYTHON_VERSION
+ ARG PYTHON_FREETHREADED
+ ARG DOCS
+-ENV ANACONDA_PYTHON_VERSION=$ANACONDA_PYTHON_VERSION
++ENV PYTHON_VERSION=$PYTHON_VERSION
+ ENV PYTHON_FREETHREADED=$PYTHON_FREETHREADED
+-ENV PATH /opt/conda/envs/py_$ANACONDA_PYTHON_VERSION/bin:/opt/conda/bin:$PATH
+ ENV DOCS=$DOCS
+-COPY requirements-ci.txt requirements-docs.txt /opt/conda/
+-COPY ./common/install_conda.sh install_conda.sh
+-COPY ./common/common_utils.sh common_utils.sh
+-COPY ./common/install_magma_conda.sh install_magma_conda.sh
+-RUN bash ./install_conda.sh && rm install_conda.sh install_magma_conda.sh common_utils.sh /opt/conda/requirements-ci.txt /opt/conda/requirements-docs.txt
++ENV VENV_PATH=/opt/python-${PYTHON_VERSION}-venv
++ENV VIRTUAL_ENV=${VENV_PATH}
++ENV PATH=${VENV_PATH}/bin:$PATH
++COPY requirements-ci.txt requirements-docs.txt /opt/
++COPY ./common/install_python.sh install_python.sh
++RUN bash ./install_python.sh && rm install_python.sh /opt/requirements-ci.txt /opt/requirements-docs.txt
+ 
+ # Install gcc
+ ARG GCC_VERSION
+@@ -59,8 +64,14 @@ COPY ./common/install_nccl.sh install_nccl.sh
+ COPY ./ci_commit_pins/nccl* /ci_commit_pins/
+ COPY ./common/install_cusparselt.sh install_cusparselt.sh
+ RUN bash ./install_cuda.sh ${CUDA_VERSION} && rm install_cuda.sh install_nccl.sh /ci_commit_pins/nccl* install_cusparselt.sh
+-ENV DESIRED_CUDA ${CUDA_VERSION}
+-ENV PATH /usr/local/nvidia/bin:/usr/local/cuda/bin:$PATH
++ENV DESIRED_CUDA=${CUDA_VERSION}
++ENV PATH=/usr/local/nvidia/bin:/usr/local/cuda/bin:$PATH
++
++# Install MAGMA into the CUDA toolkit dir (was previously pulled in via conda)
++COPY ./common/install_magma.sh install_magma.sh
++RUN if [ -n "${CUDA_VERSION}" ]; then bash ./install_magma.sh $(echo ${CUDA_VERSION} | cut -f1-2 -d'.'); fi
++RUN rm -f install_magma.sh
++ENV MAGMA_HOME=/usr/local/cuda/magma
+ # No effect if cuda not installed
+ ENV USE_SYSTEM_NCCL=1
+ ENV NCCL_INCLUDE_DIR="/usr/local/cuda/include/"
+@@ -76,7 +87,7 @@ COPY ci_commit_pins/huggingface-requirements.txt huggingface-requirements.txt
+ COPY ci_commit_pins/timm.txt timm.txt
+ COPY ci_commit_pins/torchbench.txt torchbench.txt
+ # Only build aoti cpp tests when INDUCTOR_BENCHMARKS is set to True
+-ENV BUILD_AOT_INDUCTOR_TEST ${INDUCTOR_BENCHMARKS}
++ENV BUILD_AOT_INDUCTOR_TEST=${INDUCTOR_BENCHMARKS}
+ RUN if [ -n "${INDUCTOR_BENCHMARKS}" ]; then bash ./install_inductor_benchmark_deps.sh; fi
+ RUN rm install_inductor_benchmark_deps.sh common_utils.sh timm.txt huggingface-requirements.txt torchbench.txt
+ 
+@@ -90,16 +101,16 @@ ARG TRITON_CPU
+ 
+ # Create a separate stage for building Triton and Triton-CPU.  install_triton
+ # will check for the presence of env vars
+-FROM base as triton-builder
++FROM base AS triton-builder
+ COPY ./common/install_triton.sh install_triton.sh
+ COPY ./common/common_utils.sh common_utils.sh
+ COPY ci_commit_pins/triton.txt triton.txt
+ COPY ci_commit_pins/triton-cpu.txt triton-cpu.txt
+ RUN bash ./install_triton.sh
+ 
+-FROM base as final
++FROM base AS final
+ COPY --from=triton-builder /opt/triton /opt/triton
+-RUN if [ -n "${TRITON}" ] || [ -n "${TRITON_CPU}" ]; then pip install /opt/triton/*.whl; chown -R jenkins:jenkins /opt/conda; fi
++RUN if [ -n "${TRITON}" ] || [ -n "${TRITON_CPU}" ]; then pip install /opt/triton/*.whl; chown -R jenkins:jenkins ${VENV_PATH}; fi
+ RUN rm -rf /opt/triton
+ 
+ ARG EXECUTORCH
+@@ -145,10 +156,11 @@ RUN rm install_onnx.sh common_utils.sh
+ 
+ # Build TSan-instrumented CPython for thread sanitizer testing
+ ARG TSAN
++ARG CLANG_VERSION
+ COPY ./common/install_cpython.sh install_cpython.sh
+ COPY requirements-ci.txt /tmp/requirements-ci.txt
+ RUN if [ -n "${TSAN}" ]; then \
+-      CC=clang-18 CXX=clang++-18 \
++      CC=clang-${CLANG_VERSION} CXX=clang++-${CLANG_VERSION} \
+       CPYTHON_VERSIONS="3.14.4t+tsan" bash ./install_cpython.sh && \
+       /opt/python/cp314-cp314t+tsan/bin/pip install -r /tmp/requirements-ci.txt; \
+     fi
+@@ -159,18 +171,18 @@ ARG ACL
+ COPY ./common/install_acl.sh install_acl.sh
+ RUN if [ -n "${ACL}" ]; then bash ./install_acl.sh; fi
+ RUN rm install_acl.sh
+-ENV INSTALLED_ACL ${ACL}
++ENV INSTALLED_ACL=${ACL}
+ 
+ ARG OPENBLAS
+ COPY ./common/install_openblas.sh install_openblas.sh
+ RUN if [ -n "${OPENBLAS}" ]; then bash ./install_openblas.sh; fi
+ RUN rm install_openblas.sh
+-ENV INSTALLED_OPENBLAS ${OPENBLAS}
++ENV INSTALLED_OPENBLAS=${OPENBLAS}
+ 
+ # Install ccache/sccache (do this last, so we get priority in PATH)
+ ARG SKIP_SCCACHE_INSTALL
+ COPY ./common/install_cache.sh install_cache.sh
+-ENV PATH /opt/cache/bin:$PATH
++ENV PATH=/opt/cache/bin:$PATH
+ RUN if [ -z "${SKIP_SCCACHE_INSTALL}" ]; then bash ./install_cache.sh; fi
+ RUN rm install_cache.sh
+ 
+@@ -186,11 +198,11 @@ RUN rm install_openmpi.sh
+ 
+ # Include BUILD_ENVIRONMENT environment variable in image
+ ARG BUILD_ENVIRONMENT
+-ENV BUILD_ENVIRONMENT ${BUILD_ENVIRONMENT}
++ENV BUILD_ENVIRONMENT=${BUILD_ENVIRONMENT}
+ 
+ # AWS specific CUDA build guidance
+-ENV TORCH_NVCC_FLAGS "-Xfatbin -compress-all"
+-ENV CUDA_PATH /usr/local/cuda
++ENV TORCH_NVCC_FLAGS="-Xfatbin -compress-all"
++ENV CUDA_PATH=/usr/local/cuda
+ 
+ USER jenkins
+ CMD ["bash"]
+diff --git a/.ci/pytorch/build.sh b/.ci/pytorch/build.sh
+index 855ad14..74791f0 100644
+--- a/.ci/pytorch/build.sh
++++ b/.ci/pytorch/build.sh
+@@ -13,6 +13,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/common-build.sh"
+ if [[ "$BUILD_ENVIRONMENT" == *rocm* ]]; then
+   # shellcheck source=./rocm_utils.sh
+   source "$(dirname "${BASH_SOURCE[0]}")/rocm_utils.sh"
++  export PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH};gfx1033"
+ fi
+ 
+ echo "Python version:"
+@@ -35,6 +36,15 @@ if [[ "$BUILD_ENVIRONMENT" == *cuda* ]]; then
+   fi
+   echo "NVCC version:"
+   nvcc --version
++
++  # The CUPTI field-id codegen (tools/gen_cupti_stubs.py) parses cupti_activity.h with
++  # libclang's python bindings. Install libclang only when a sufficiently-new CUPTI header is
++  # actually resolvable (find_cupti_header applies the CUPTI_API_VERSION floor) -- so non-13.x
++  # / CPU builds, which have no such header, don't pull it in. Skip it too when LIBCLANG_PATH
++  # already points the codegen at a libclang.so (that env supplies the clang bindings itself).
++  if [ -z "${LIBCLANG_PATH:-}" ] && python -c "import sys; from tools.setup_helpers.cupti import find_cupti_header as f; sys.exit(0 if f() else 1)"; then
++    python -mpip install libclang
++  fi
+ fi
+ 
+ if [[ "$BUILD_ENVIRONMENT" == *cuda13* ]]; then
+@@ -47,39 +57,26 @@ if [[ ${BUILD_ENVIRONMENT} == *"parallelnative"* ]]; then
+ fi
+ 
+ 
+-if ! which conda; then
+-  # In ROCm CIs, we are doing cross compilation on build machines with
+-  # intel cpu and later run tests on machines with amd cpu.
+-  # Also leave out two builds to make sure non-mkldnn builds still work.
++# mkl-static/mkl-include are pip-installed into the active Python environment
++# (a conda env or a venv), not provided by conda. Detect MKL directly rather
++# than guessing from the presence of conda.
++if ! python -m pip show mkl-static >/dev/null 2>&1; then
++  # No MKL (e.g. aarch64/s390x, or ROCm cross compilation on intel build
++  # machines that later run on amd). Enable MKLDNN, except for ROCm where we
++  # deliberately keep some non-mkldnn builds working.
+   if [[ "$BUILD_ENVIRONMENT" != *rocm* ]]; then
+     export USE_MKLDNN=1
+   else
+     export USE_MKLDNN=0
+   fi
+ else
+-  # CMAKE_PREFIX_PATH precedences
+-  # 1. $CONDA_PREFIX, if defined. This follows the pytorch official build instructions.
+-  # 2. /opt/conda/envs/py_${ANACONDA_PYTHON_VERSION}, if ANACONDA_PYTHON_VERSION defined.
+-  #    This is for CI, which defines ANACONDA_PYTHON_VERSION but not CONDA_PREFIX.
+-  # 3. $(conda info --base). The fallback value of pytorch official build
+-  #    instructions actually refers to this.
+-  #    Commonly this is /opt/conda/
+-  if [[ -v CONDA_PREFIX ]]; then
+-    export CMAKE_PREFIX_PATH=${CONDA_PREFIX}
+-  elif [[ -v ANACONDA_PYTHON_VERSION ]]; then
+-    export CMAKE_PREFIX_PATH="/opt/conda/envs/py_${ANACONDA_PYTHON_VERSION}"
+-  else
+-    # already checked by `! which conda`
+-    CMAKE_PREFIX_PATH="$(conda info --base)"
+-    export CMAKE_PREFIX_PATH
+-  fi
+-
+-  # Workaround required for MKL library linkage
+-  # https://github.com/pytorch/pytorch/issues/119557
+-  if [[ "$ANACONDA_PYTHON_VERSION" = "3.12" || "$ANACONDA_PYTHON_VERSION" = "3.13" ]]; then
+-    export CMAKE_LIBRARY_PATH="/opt/conda/envs/py_$ANACONDA_PYTHON_VERSION/lib/"
+-    export CMAKE_INCLUDE_PATH="/opt/conda/envs/py_$ANACONDA_PYTHON_VERSION/include/"
+-  fi
++  # Point CMAKE_PREFIX_PATH at the environment prefix (sys.prefix) so cmake can
++  # find the pip-installed mkl-static/mkl-include. FindMKL uses plain
++  # find_library/find_path, which already search <prefix>/lib and <prefix>/include
++  # for each CMAKE_PREFIX_PATH entry, so no extra CMAKE_LIBRARY_PATH/INCLUDE_PATH
++  # hints are needed.
++  CMAKE_PREFIX_PATH="$(python -c 'import sys; print(sys.prefix)')"
++  export CMAKE_PREFIX_PATH
+ fi
+ 
+ if [[ "$BUILD_ENVIRONMENT" == *aarch64* ]]; then
+@@ -88,7 +85,7 @@ if [[ "$BUILD_ENVIRONMENT" == *aarch64* ]]; then
+   export ACL_ROOT_DIR=/acl
+ fi
+ 
+-if [[ "$BUILD_ENVIRONMENT" == *riscv64* ]]; then
++if [[ "$BUILD_ENVIRONMENT" == *riscv64*cross* ]]; then
+   if [[ -f /opt/riscv-cross-env/bin/activate ]]; then
+     # shellcheck disable=SC1091
+     source /opt/riscv-cross-env/bin/activate
+@@ -118,6 +115,9 @@ if [[ "$BUILD_ENVIRONMENT" == *riscv64* ]]; then
+     fi
+   done
+ 
++elif [[ "$BUILD_ENVIRONMENT" == *riscv64* ]]; then
++  export USE_CUDA=0
++  export USE_MKLDNN=0
+ fi
+ 
+ # Use special scripts for Android builds
+@@ -161,8 +161,12 @@ if [[ "$BUILD_ENVIRONMENT" == *xpu* ]]; then
+   # Enable XCCL build
+   export USE_XCCL=1
+   export USE_MPI=0
+-  export TORCH_XPU_ARCH_LIST=pvc
+   export USE_STATIC_MKL=1
++  export TORCH_XPU_ARCH_LIST=pvc
++  # Use different AOT target list for different runner tests
++  if [[ "$BUILD_ENVIRONMENT" == *client* ]]; then
++    export TORCH_XPU_ARCH_LIST=bmg
++  fi
+ fi
+ 
+ # sccache will fail for CUDA builds if all cores are used for compiling
+@@ -179,19 +183,12 @@ if [[ "$BUILD_ENVIRONMENT" == *cuda* && -z "$TORCH_CUDA_ARCH_LIST" ]]; then
+   exit 1
+ fi
+ 
+-# We only build FlashAttention files for CUDA 8.0+, and they require large amounts of
+-# memory to build and will OOM
+-
+-if [[ "$BUILD_ENVIRONMENT" == *cuda* ]] && echo "${TORCH_CUDA_ARCH_LIST}" | tr ' ' '\n' | sed 's/$/>= 8.0/' | bc | grep -q 1; then
+-  J=2  # default to 2 jobs
+-  case "$RUNNER" in
+-    linux.12xlarge.memory|linux.24xlarge.memory)
+-      J=24
+-      ;;
+-  esac
+-  echo "Building FlashAttention with job limit $J"
+-  export BUILD_CUSTOM_STEP="ninja -C build flash_attention -j ${J}"
+-fi
++# FlashAttention CUDA kernels (built for CUDA 8.0+) need large amounts of memory
++# to compile and can OOM at full build parallelism. The previous mitigation set
++# BUILD_CUSTOM_STEP to pre-build the flash_attention target at a reduced job
++# count; it was consumed by the setuptools build path removed in this stack, so
++# it is dropped here. Re-homing the throttle as a CMake JOB_POOLS constraint is
++# tracked in https://github.com/pytorch/pytorch/issues/190663.
+ 
+ # TODO: Removeme once all the wrappers are gone
+ if [[ "$BUILD_ENVIRONMENT" == *clang* ]] && [[ "$BUILD_ENVIRONMENT" == *cuda* ]]; then
+@@ -232,7 +229,7 @@ fi
+ 
+ # Do not change workspace permissions for ROCm and s390x CI jobs
+ # as it can leave workspace with bad permissions for cancelled jobs
+-if [[ "$BUILD_ENVIRONMENT" != *rocm* && "$BUILD_ENVIRONMENT" != *s390x* && "$BUILD_ENVIRONMENT" != *riscv64* && -d /var/lib/jenkins/workspace ]]; then
++if [[ "$BUILD_ENVIRONMENT" != *rocm* && "$BUILD_ENVIRONMENT" != *s390x* && "$BUILD_ENVIRONMENT" != *riscv64*cross* && -d /var/lib/jenkins/workspace ]]; then
+   # Workaround for dind-rootless userid mapping (https://github.com/pytorch/ci-infra/issues/96)
+   WORKSPACE_ORIGINAL_OWNER_ID=$(stat -c '%u' "/var/lib/jenkins/workspace")
+   cleanup_workspace() {
+@@ -248,31 +245,24 @@ if [[ "$BUILD_ENVIRONMENT" != *rocm* && "$BUILD_ENVIRONMENT" != *s390x* && "$BUI
+   git config --global --add safe.directory /var/lib/jenkins/workspace
+ fi
+ 
+-# check that setup.py would fail with bad arguments
+-echo "The next three invocations are expected to fail with invalid command error messages."
+-( ! get_exit_code python setup.py bad_argument )
+-( ! get_exit_code python setup.py clean] )
+-( ! get_exit_code python setup.py clean bad_argument )
+-
+ if [[ "$BUILD_ENVIRONMENT" != *libtorch* ]]; then
+   # rocm builds fail when WERROR=1
+   # XLA test build fails when WERROR=1
+   # s390x builds currently fail when WERROR=1
++  # riscv64 builds currently fail when WERROR=1
++  # Release xpu build stress with WERROR=1
+   # set only when building other architectures
+   # or building non-XLA tests.
+-  if [[ "$BUILD_ENVIRONMENT" != *rocm*  && "$BUILD_ENVIRONMENT" != *xla* && "$BUILD_ENVIRONMENT" != *riscv64*  && "$BUILD_ENVIRONMENT" != *s390x* ]]; then
++  if [[ "$BUILD_ENVIRONMENT" != *rocm*  && "$BUILD_ENVIRONMENT" != *xla* && "$BUILD_ENVIRONMENT" != *riscv64*  && "$BUILD_ENVIRONMENT" != *s390x* && "$BUILD_ENVIRONMENT" != *xpu* ]]; then
+     # TODO: Remove me and may be just focus on numpy-2.x testing
+-    if [[ "$ANACONDA_PYTHON_VERSION" =~ ^3\.1[0-2]$ ]]; then
++    if [[ "$PYTHON_VERSION" =~ ^3\.1[0-2]$ ]]; then
+       # Install numpy-2.0.2 for builds which are backward compatible with 1.X
+       # In relality it's only needed for numpy_2_x and vllm shards (where vllm depends on numpy-2)
+       python -mpip install numpy==2.0.2
+     fi
+ 
+-    WERROR=1 python setup.py clean
+-
+     WERROR=1 python -m build --wheel --no-isolation
+   else
+-    python setup.py clean
+     if [[ "$BUILD_ENVIRONMENT" == *xla* ]]; then
+       source .ci/pytorch/install_cache_xla.sh
+     fi
+@@ -286,7 +276,7 @@ if [[ "$BUILD_ENVIRONMENT" != *libtorch* ]]; then
+   # CONFIGURE_DEPENDS glob scheme) silently breaking the tool, which only works
+   # on a from-source build that test jobs don't have. --dry-run reads the tree
+   # without rebuilding, so it leaves the checkout clean (assert_git_not_dirty).
+-  if [[ -f build/compile_commands.json ]] && command -v ninja > /dev/null && grep -q "csrc/Module.cpp" build/compile_commands.json; then
++  if [[ -f build/compile_commands.json ]] && command -v ninja > /dev/null && [[ "${USE_NINJA}" != "0" ]] && grep -q "csrc/Module.cpp" build/compile_commands.json; then
+     debinfo_plan="$(python tools/build_with_debinfo.py --dry-run torch/csrc/Module.cpp)"
+     echo "${debinfo_plan}"
+     grep -qE ' -g( |$)' <<< "$debinfo_plan" || { echo "ERROR: build_with_debinfo --dry-run emitted no -g debug compile flag"; exit 1; }
+@@ -439,6 +429,6 @@ if [[ "$BUILD_ENVIRONMENT" != *libtorch* ]]; then
+   PYTHONPATH=. python tools/stats/export_test_times.py
+ fi
+ # don't do this for s390x or riscv64 as they don't use sccache
+-if [[ "$BUILD_ENVIRONMENT" != *s390x* && "$BUILD_ENVIRONMENT" != *riscv64* ]]; then
++if [[ "$BUILD_ENVIRONMENT" != *s390x* && "$BUILD_ENVIRONMENT" != *riscv64*cross* ]]; then
+   print_sccache_stats
+ fi
+-- 
+2.43.0

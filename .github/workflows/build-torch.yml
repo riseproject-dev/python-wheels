@@ -1,0 +1,207 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/riseproject-dev/pytorch-ci/blob/main/.github/workflows/manywheel.yml
+name: Build torch wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'torch version to build (git tag without leading v, e.g. 2.13.0)'
+        required: true
+        default: '2.13.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-torch.yml'
+      - 'patches/torch/**'
+
+run-name: build-torch - ${{ inputs.version || '2.13.0' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.13.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+  packages: read
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -exo pipefail {0}
+
+env:
+  TORCH_VERSION: ${{ inputs.version || '2.13.0' }}
+
+jobs:
+  docker-builds:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360  # 6h
+    permissions:
+      packages: write
+    env:
+      DOCKER_IMAGE_NAME: manylinux2_39_riscv64-builder:cpu-riscv64
+    outputs:
+      docker-image: ${{ steps.tag.outputs.docker-image }}
+
+    steps:
+      - name: Checkout pytorch v${{ env.TORCH_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: pytorch/pytorch
+          ref: v${{ env.TORCH_VERSION }}
+          path: pytorch
+          submodules: false
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pytorch source
+        working-directory: pytorch
+        run: |
+          git apply ../python-wheels/patches/torch/${{ env.TORCH_VERSION }}/0001-CI-Add-manywheel-Dockerfile-for-riscv64.patch
+          git apply ../python-wheels/patches/torch/${{ env.TORCH_VERSION }}/0002-CI-Add-cpu-riscv64-support-to-manywheel-scripts.patch
+          git apply ../python-wheels/patches/torch/${{ env.TORCH_VERSION }}/0003-CI-Add-native-build-image-for-linux-riscv64.patch
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8  # v4.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
+
+      - name: Compute image tag
+        id: tag
+        working-directory: pytorch
+        run: |
+          echo "docker-image=ghcr.io/${{ github.repository_owner }}/python-wheels/${DOCKER_IMAGE_NAME}-$(git rev-parse HEAD:.ci/docker)" >> "${GITHUB_OUTPUT}"
+
+      - name: Build and push to GitHub Container Registry
+        env:
+          CI: "1"
+          DOCKER_IMAGE: ${{ steps.tag.outputs.docker-image }}
+        working-directory: pytorch
+        run: |
+          # Check if image already exists, if it does then skip building it
+          if docker manifest inspect "${DOCKER_IMAGE}"; then
+            exit 0
+          fi
+
+          cd .ci/docker
+          ./manywheel/build.sh "${DOCKER_IMAGE_NAME}" -t "${DOCKER_IMAGE}"
+          docker push "${DOCKER_IMAGE}"
+
+  build_wheels:
+    name: Build torch ${{ inputs.version || '2.13.0' }} ${{ matrix.python-version }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440  # 24h
+    needs:
+      - docker-builds
+    container:
+      image: ${{ needs.docker-builds.outputs.docker-image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14", "3.14t"]
+    env:
+      BUILD_ENVIRONMENT: linux-riscv64-binary-manywheel
+      PYTORCH_ROOT: ${{ github.workspace }}/pytorch
+      BINARY_ENV_FILE: /tmp/env
+      PACKAGE_TYPE: manywheel
+      DESIRED_CUDA: cpu
+      GPU_ARCH_VERSION: ""
+      GPU_ARCH_TYPE: cpu-riscv64
+      DOCKER_IMAGE: ${{ needs.docker-builds.outputs.docker-image }}
+      SKIP_ALL_TESTS: 1
+      DESIRED_PYTHONS: ${{ matrix.python-version }}
+      BUILD_NAME_PREFIX: "manywheel-py"
+      BUILD_NAME_SUFFIX: "-cpu-riscv64"
+
+    steps:
+      - name: Checkout pytorch v${{ env.TORCH_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: pytorch/pytorch
+          ref: v${{ env.TORCH_VERSION }}
+          path: pytorch
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pytorch source
+        working-directory: pytorch
+        run: |
+          git apply ../python-wheels/patches/torch/${{ env.TORCH_VERSION }}/0001-CI-Add-manywheel-Dockerfile-for-riscv64.patch
+          git apply ../python-wheels/patches/torch/${{ env.TORCH_VERSION }}/0002-CI-Add-cpu-riscv64-support-to-manywheel-scripts.patch
+          git apply ../python-wheels/patches/torch/${{ env.TORCH_VERSION }}/0003-CI-Add-native-build-image-for-linux-riscv64.patch
+
+      - name: Populate binary env
+        working-directory: pytorch
+        run: |
+          export MAX_JOBS=$(nproc)
+          echo "MAX_JOBS=${MAX_JOBS}" >> "${GITHUB_ENV}"
+
+          export PYTORCH_FINAL_PACKAGE_DIR="${RUNNER_TEMP}/artifacts"
+          mkdir -p "${PYTORCH_FINAL_PACKAGE_DIR}"
+          echo "PYTORCH_FINAL_PACKAGE_DIR=${PYTORCH_FINAL_PACKAGE_DIR}" >> "${GITHUB_ENV}"
+
+          bash .ci/pytorch/binary_populate_env.sh
+
+      - name: Build
+        id: build
+        working-directory: pytorch
+        run: |
+          # shellcheck disable=SC1091
+          source "${BINARY_ENV_FILE}"
+          bash .ci/manywheel/build_all.sh
+
+      # The artifact name follows the python-wheels convention
+      # (<package>-<version>-*) so publish-wheels' artifact-pattern can select
+      # it, while `dir` is where .ci/manywheel/build_all.sh actually writes the
+      # wheel: ${PYTORCH_FINAL_PACKAGE_DIR}/${BUILD_NAME_PREFIX}<py>${BUILD_NAME_SUFFIX}.
+      - name: Set manywheel artifact name
+        id: artifact-name
+        run: |
+          py=$(echo "${{ matrix.python-version }}" | tr '.' '_')
+          echo "wheel=torch-${{ env.TORCH_VERSION }}-py${py}-manylinux_riscv64" >> "${GITHUB_OUTPUT}"
+          echo "dir=${BUILD_NAME_PREFIX}${py}${BUILD_NAME_SUFFIX}" >> "${GITHUB_OUTPUT}"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: steps.build.outcome != 'skipped'
+        with:
+          name: ${{ steps.artifact-name.outputs.wheel }}
+          if-no-files-found: error
+          path: ${{ runner.temp }}/artifacts/${{ steps.artifact-name.outputs.dir }}/*.whl
+
+  publish:
+    name: Publish torch ${{ inputs.version || '2.13.0' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: torch-${{ env.TORCH_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
