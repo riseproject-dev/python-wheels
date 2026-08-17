@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# This workflow is based on: https://github.com/ijl/orjson/blob/master/.github/workflows/artifact.yaml
+name: Build orjson wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'orjson version to build (git tag without leading v, e.g. 3.12.0)'
+        required: true
+        default: '3.12.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-orjson.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '3.12.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 3.12.0 there.
+  ORJSON_VERSION: ${{ inputs.version || '3.12.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  RUST_TOOLCHAIN: "nightly-2026-08-01"
+
+jobs:
+  manylinux:
+    name: Build orjson ${{ inputs.version || '3.12.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        # No freethreaded (3.14t) entry: upstream only builds freethreaded
+        # wheels in manylinux_fedora, which forwards the
+        # ORJSON_BUILD_FREETHREADED/UNSAFE_PYO3_BUILD_FREE_THREADED env vars
+        # into its container automatically. This job's `podman run` only
+        # forwards the -e vars listed below, matching manylinux_pypa upstream.
+        python: ['python3.12', 'python3.13', 'python3.14']
+
+    steps:
+      - name: Checkout orjson v${{ env.ORJSON_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: ijl/orjson
+          ref: ${{ env.ORJSON_VERSION }}
+          persist-credentials: false
+
+      - name: Build and test
+        shell: bash
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v $(pwd):/workspace \
+            --workdir /workspace \
+            -e CFLAGS="-O2 -fstrict-aliasing" \
+            -e LDFLAGS="-Wl,--as-needed" \
+            -e PYTHON="${{ matrix.python }}" \
+            -e RUST_TOOLCHAIN="${{ env.RUST_TOOLCHAIN }}" \
+            -e ORJSON_COMPATIBILITY="manylinux_2_39" \
+            -e ORJSON_TAG="manylinux_2_39_riscv64" \
+            -e ORJSON_FEATURES="no_panic,optimize" \
+            -e RUSTFLAGS="-Z unstable-options -C panic=immediate-abort -Z mir-opt-level=4 -D warnings" \
+            -e TARGET="riscv64gc-unknown-linux-gnu" \
+            --pull=newer \
+            "${{ env.MANYLINUX_RISCV64_IMAGE }}" \
+            bash -c "ci/manylinux.sh"
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: "orjson-${{ env.ORJSON_VERSION }}-${{ matrix.python }}-manylinux_riscv64"
+          path: target/wheels
+          overwrite: true
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    name: Publish orjson ${{ inputs.version || '3.12.0' }} to GitLab
+    needs: [manylinux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: orjson-${{ env.ORJSON_VERSION }}-*
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
