@@ -22,8 +22,8 @@ website](https://riseproject.dev/).
 
 ## Sections
 
-- [Motivation](motivation.html)
-- [Installing the Packages](install.html)
-- [Manylinux_2_35 and Manylinux_2_39](manylinux.html)
-- [Supported Packages](packages/)
-- [Infrastructure](infrastructure.html)
+{% assign sections = site.html_pages | where_exp: "p", "p.nav_order" | where_exp: "p", "p.parent == nil" | sort: "nav_order" -%}
+{% for p in sections -%}
+{% if p.url == page.url %}{% continue %}{% endif -%}
+- [{{ p.title }}]({{ p.url | relative_url }})
+{% endfor %}
