@@ -146,10 +146,8 @@ def generate_md_page(yaml_file, output_md, package_list):
         ]
 
     if source_code:
-        lines.append(f"- **Source Code:** [{source_code}]({source_code})")
-
-    lines.append("- **Supported versions:**")
-    lines.append("")
+        lines.append(f"**Source code:** [{source_code}]({source_code})")
+        lines.append("")
 
     # Version picker: a dropdown that reveals one version panel at a time.
     # Without JavaScript every panel stays visible, so content degrades
@@ -191,7 +189,8 @@ def generate_md_page(yaml_file, output_md, package_list):
 
         lic = version.get("license", license_type)
         if lic:
-            lines.append(f"- **License:** {lic}")
+            lines.append(f"**License:** {lic}")
+            lines.append("")
 
         package_id = get_package_id(package_name, version_number, package_list)
         if package_id:
@@ -199,8 +198,9 @@ def generate_md_page(yaml_file, output_md, package_list):
                 f"https://gitlab.com/riseproject/python/wheel_builder/-/packages/{package_id}"
             )
             lines.append(
-                f"- **Download files:** [{registry_link}]({registry_link})"
+                f"**Download files:** [{registry_link}]({registry_link})"
             )
+            lines.append("")
 
         if "patched" in version and source_code:
             project_name = (
@@ -215,9 +215,10 @@ def generate_md_page(yaml_file, output_md, package_list):
                     f"{project_name}/patches/{upstream_tag}"
                 )
                 lines.append(
-                    f"- **Patch applied for this version:** "
+                    f"**Patch applied for this version:** "
                     f"[{patch_link}]({patch_link})"
                 )
+                lines.append("")
 
         if version.get("comment"):
             _callout(lines, "note", version["comment"])
