@@ -151,15 +151,34 @@ def generate_md_page(yaml_file, output_md, package_list):
     lines.append("- **Supported versions:**")
     lines.append("")
 
+    # Version picker: a dropdown that reveals one version panel at a time.
+    # Without JavaScript every panel stays visible, so content degrades
+    # gracefully; version-selector.js hides all but the selected panel.
+    lines.append('<div class="version-selector">')
+    lines.append(
+        '  <label for="version-select"><strong>Select version:</strong></label>'
+    )
+    lines.append('  <select id="version-select" class="version-select">')
     for version in versions:
         version_number = str(version["version"])
         is_latest = version_number == latest_version
-        summary_label = f"{version_number} (latest)" if is_latest else version_number
+        option_label = f"{version_number} (latest)" if is_latest else version_number
+        selected = " selected" if is_latest else ""
+        lines.append(
+            f'    <option value="{version_number}"{selected}>{option_label}</option>'
+        )
+    lines.append("  </select>")
+    lines.append("</div>")
+    lines.append("")
+
+    for version in versions:
+        version_number = str(version["version"])
+        is_latest = version_number == latest_version
 
         lines.append(
-            f'<details markdown="1"{" open" if is_latest else ""}>'
+            f'<div class="version-panel" markdown="1" '
+            f'data-version="{version_number}">'
         )
-        lines.append(f"<summary><strong>{summary_label}</strong></summary>")
         lines.append("")
 
         install_command = (
@@ -206,7 +225,7 @@ def generate_md_page(yaml_file, output_md, package_list):
         if version.get("warning"):
             _callout(lines, "warning", version["warning"])
 
-        lines += ["</details>", ""]
+        lines += ["</div>", ""]
 
     if comment:
         _callout(lines, "note", comment)
