@@ -141,7 +141,8 @@ def generate_md_page(yaml_file, output_md, package_list):
             ">",
             "> If you need a specific version between the latest available here",
             "> and the first available on PyPI, please open an",
-            "> [Issue](https://gitlab.com/riseproject/python/wheel_builder/-/issues).",
+            "> [Issue](https://github.com/riseproject-dev/python-wheels/issues)",
+            "> and select `Package build request`.",
             "",
         ]
 
