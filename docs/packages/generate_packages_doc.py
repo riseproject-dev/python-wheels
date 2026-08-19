@@ -17,6 +17,9 @@ GITLAB_REGISTRY_URL = (
 GITLAB_WHEEL_BUILDER_URL = (
     "https://gitlab.com/riseproject/python/wheel_builder/-/tree/main"
 )
+GITHUB_PYTHON_WHEELS_URL = (
+    "https://github.com/riseproject-dev/python-wheels/tree/main"
+)
 PYPI_INDEX_URL = "https://pypi.riseproject.dev/simple/"
 
 # Match RST inline external refs: `Label <url>`_ or `Label <url>`__
@@ -220,6 +223,18 @@ def generate_md_page(yaml_file, output_md, package_list):
                     f"[{patch_link}]({patch_link})"
                 )
                 lines.append("")
+            else:
+                # if upstream tag is not present, it means the package was uploaded from github action
+                # on github we changed the way we store patches: we use package_name and version
+                # instead of project_name and tag
+                patch_link = (
+                    f"{GITHUB_PYTHON_WHEELS_URL}/"
+                    f"patches/{package_name}/{version_number}"
+                )
+                lines.append(
+                    f"**Patch applied for this version:** "
+                    f"[{patch_link}]({patch_link})"
+                )
 
         if version.get("comment"):
             _callout(lines, "note", version["comment"])
