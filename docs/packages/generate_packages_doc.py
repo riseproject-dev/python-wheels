@@ -146,20 +146,37 @@ def generate_md_page(yaml_file, output_md, package_list):
         ]
 
     if source_code:
-        lines.append(f"- **Source Code:** [{source_code}]({source_code})")
+        lines.append(f"**Source code:** [{source_code}]({source_code})")
+        lines.append("")
 
-    lines.append("- **Supported versions:**")
+    # Version picker: a dropdown that reveals one version panel at a time.
+    # Without JavaScript every panel stays visible, so content degrades
+    # gracefully; version-selector.js hides all but the selected panel.
+    lines.append('<div class="version-selector">')
+    lines.append(
+        '  <label for="version-select"><strong>Select version:</strong></label>'
+    )
+    lines.append('  <select id="version-select" class="version-select">')
+    for version in versions:
+        version_number = str(version["version"])
+        is_latest = version_number == latest_version
+        option_label = f"{version_number} (latest)" if is_latest else version_number
+        selected = " selected" if is_latest else ""
+        lines.append(
+            f'    <option value="{version_number}"{selected}>{option_label}</option>'
+        )
+    lines.append("  </select>")
+    lines.append("</div>")
     lines.append("")
 
     for version in versions:
         version_number = str(version["version"])
         is_latest = version_number == latest_version
-        summary_label = f"{version_number} (latest)" if is_latest else version_number
 
         lines.append(
-            f'<details markdown="1"{" open" if is_latest else ""}>'
+            f'<div class="version-panel" markdown="1" '
+            f'data-version="{version_number}">'
         )
-        lines.append(f"<summary><strong>{summary_label}</strong></summary>")
         lines.append("")
 
         install_command = (
@@ -172,7 +189,8 @@ def generate_md_page(yaml_file, output_md, package_list):
 
         lic = version.get("license", license_type)
         if lic:
-            lines.append(f"- **License:** {lic}")
+            lines.append(f"**License:** {lic}")
+            lines.append("")
 
         package_id = get_package_id(package_name, version_number, package_list)
         if package_id:
@@ -180,8 +198,9 @@ def generate_md_page(yaml_file, output_md, package_list):
                 f"https://gitlab.com/riseproject/python/wheel_builder/-/packages/{package_id}"
             )
             lines.append(
-                f"- **Download files:** [{registry_link}]({registry_link})"
+                f"**Download files:** [{registry_link}]({registry_link})"
             )
+            lines.append("")
 
         if "patched" in version and source_code:
             project_name = (
@@ -196,9 +215,10 @@ def generate_md_page(yaml_file, output_md, package_list):
                     f"{project_name}/patches/{upstream_tag}"
                 )
                 lines.append(
-                    f"- **Patch applied for this version:** "
+                    f"**Patch applied for this version:** "
                     f"[{patch_link}]({patch_link})"
                 )
+                lines.append("")
 
         if version.get("comment"):
             _callout(lines, "note", version["comment"])
@@ -206,7 +226,7 @@ def generate_md_page(yaml_file, output_md, package_list):
         if version.get("warning"):
             _callout(lines, "warning", version["warning"])
 
-        lines += ["</details>", ""]
+        lines += ["</div>", ""]
 
     if comment:
         _callout(lines, "note", comment)
