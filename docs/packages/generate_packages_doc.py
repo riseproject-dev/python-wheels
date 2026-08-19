@@ -102,7 +102,7 @@ def generate_md_page(yaml_file, output_md, package_list):
     try:
         with open(yaml_file, "r", encoding="utf-8") as f:
             package_data = yaml.safe_load(f)
-    except (yaml.YAMLError, FileNotFoundError) as e:
+    except FileNotFoundError as e:
         print(f"Error reading {yaml_file}: {e}")
         return None, None
 
