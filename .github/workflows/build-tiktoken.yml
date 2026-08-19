@@ -1,0 +1,83 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/openai/tiktoken/blob/0.14.0/.github/workflows/build_wheels.yml
+name: Build tiktoken wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'tiktoken version to build (git tag without leading v)'
+        required: true
+        default: '0.14.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-tiktoken.yml'
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.14.0 there.
+  TIKTOKEN_VERSION:  ${{ inputs.version || '0.14.0' }}
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_ONLY_BINARY: ':all:'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.14.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build_wheels:
+    name: py${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # cibuildwheel builds linux wheels inside a manylinux container
+        # it also takes care of procuring the correct python version for us
+        # remove other os, and keep only riscv64
+        # os: [ubuntu-latest, windows-latest, macos-latest]
+        os : [ubuntu-24.04-riscv]
+        # we try to reduce the number of builds so only buidl for 3.12+
+        # see our documentation https://pypi.riseproject.dev/python-wheels/development.html#target-python-versions
+        # python-version: [39, 310, 311, 312, 313, 314, 314t, 315, 315t]
+        python-version: [ 312, 313, 314, 314t]
+
+    steps:
+      # we need to checkout upstream source
+      - name: Checkout tiktoken ${{ env.TIKTOKEN_VERSION }}
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: openai/tiktoken
+          ref: ${{ env.TIKTOKEN_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074 # v4.2.0
+        env:
+          CIBW_BUILD: "cp${{ matrix.python-version}}-*"
+          # skip musllinux for now, because  rustup.rs does not have installer for riscv64gc-unknown-linux-musl
+          CIBW_SKIP: "*-musllinux_*"
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: tiktoken-${{ env.TIKTOKEN_VERSION }}-cp${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+
+  publish:
+    name: Publish tiktoken ${{ inputs.version || '0.14.0' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: tiktoken-${{ env.TIKTOKEN_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
