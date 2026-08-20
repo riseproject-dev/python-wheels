@@ -55,7 +55,9 @@ Two build shapes exist in the repo — pick based on the package:
 - **sdist → bdist** (see `build-cffi.yml`, `build-protobuf.yml`): job 1 produces
   an sdist and uploads it + exposes `package_version` as a job output; job 2 (a
   matrix over `cp312/cp313/cp314/cp314t`) downloads the sdist, extracts it, and
-  runs `cibuildwheel ./extracted`; job 3 publishes.
+  runs `cibuildwheel ./extracted`; job 3 publishes. cibuildwheel also accepts the
+  sdist tarball directly as `package-dir` (it extracts internally), so you can skip
+  the manual `tar zxf` (see `build-apache-tvm-ffi.yml`).
 - **build-from-checkout** (see `build-onnx.yml`): job runs `cibuildwheel` directly
   on an upstream checkout, feeding native deps via `CIBW_ENVIRONMENT`/CMake.
 
@@ -119,7 +121,7 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
 
 6. **Wire up real testing** — mirror how upstream tests its wheels (gotcha 6).
 
-7. **Validate locally, then push** (gotcha 11). Open a PR; the `pull_request` path
+7. **Validate locally, then push** (gotcha 9). Open a PR; the `pull_request` path
    trigger runs CI. Watch, triage, iterate.
 
 ## Gotchas (the "wish I knew from the start" list)
@@ -174,6 +176,12 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
        | sed 's,[/\\],.,g' | sed -E 's,.py$,,g')"
      rc=0; for t in $tests; do python -m unittest -v "$t" || rc=1; done; exit $rc
      ```
+   - **The easy inverse: the sdist bundles both its tests and the `[tool.cibuildwheel]`
+     config** (apache-tvm-ffi ships `tests/` + `test-command`, `test-groups`,
+     `build-frontend`). Passing the sdist as `package-dir` inherits all of it unchanged
+     — you get upstream's exact test invocation for free and only add the riscv
+     overrides (`CIBW_ARCHS`, image, registry env; see gotchas 12–14). GPU-only tests
+     usually self-skip via `torch.cuda.is_available()`.
    - Collect **all** failures per run (`|| rc=1`), don't stop at the first — each CI
      cycle is expensive, so surface the whole list. For genuinely-incompatible tests,
      exclude with an explicit justification comment (build-onnx.yml documents its
@@ -229,6 +237,43 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
     - **musllinux can't build** — rustup.rs ships no riscv64 musl toolchain. Restrict
       `CIBW_BUILD` to `*-manylinux_riscv64`. PyO3 extensions are generally not abi3, so
       the matrix is per-interpreter `[cp312, cp313, cp314, cp314t]`.
+
+11. **abi3 wheels collapse the matrix.** If `pyproject.toml` sets `wheel.py-api = "cpXY"`
+    (or otherwise builds abi3/limited-API), one `cpXY` build loads on every newer
+    non-free-threaded CPython, so the matrix is just `[cpXY, cp3Nt]` — the abi3 build
+    plus a free-threaded build (free-threaded can't use the stable ABI). Tell from the
+    PyPI wheel names: `…-cp312-abi3-…` + `…-cp314-cp314t-…` = exactly two builds (same
+    shape as onnx/hf-xet, and apache-tvm-ffi). Don't add cp313/cp314 — they'd duplicate
+    the cp312 abi3 wheel.
+
+12. **Scope an env var to one phase with the right knob.** `CIBW_ENVIRONMENT` applies to
+    **both** build and test; `CIBW_TEST_ENVIRONMENT` is test-only. This bites with
+    `only-binary`: putting `PIP_ONLY_BINARY=:all:` in `CIBW_ENVIRONMENT` to stop a heavy
+    *test* dep (torch) from source-building also starves the **build backend**, and
+    `cython` (a common build requirement) has no riscv64 wheel anywhere — it must
+    compile from sdist. So keep registry index URLs in `CIBW_ENVIRONMENT` (both phases
+    need them) but put `only-binary` in `CIBW_TEST_ENVIRONMENT` alone.
+
+13. **`build-frontend = "build[uv]"` crashes the audit step on the riscv runner.**
+    cibuildwheel's post-build "Auditing wheel…" step makes a venv *on the host* and, for
+    a uv frontend, asserts a host `uv` exists (`venv.py: assert uv_path is not None`) —
+    the self-hosted runner has none, so the wheel builds and auditwheel-repairs fine and
+    *then* dies with a bare `AssertionError`. Fix: `CIBW_BUILD_FRONTEND: build` (plain
+    pip/virtualenv, the default onnx/cffi/tiktoken already use).
+
+14. **torch-dependent tests flake two ways on the riscv runner — deselect, don't chase.**
+    torch is usually gated `python_version < '3.14'`, so these bite your `cp312`/abi3
+    build but not `cp314t` — a tell it's torch, not your wheel. (a) torch's libcpuinfo
+    can't parse this runner's `/sys/.../core_id` (reads `-1`) and writes
+    `Error in cpuinfo: failed to parse … core_id` to **stderr**, so any test asserting a
+    subprocess's `stderr == ""` fails nondeterministically — deselect the whole module.
+    (b) tests spawning many workers under a hard timeout (16 subprocesses,
+    `wait(timeout=60)`) blow it on the slower runner. To drop tests, override
+    `CIBW_TEST_COMMAND` with **`--ignore <abspath>`** (whole module) and
+    **`-k "not <name>"`** (single test) — *not* path-based `--deselect {package}/…`,
+    which silently no-ops because pytest reports collected nodeids relative to its
+    rootdir while your path is absolute. Verify locally by running pytest from a
+    different cwd and checking the deselected count is non-zero.
 
 ## Environment / auth notes (this WSL setup)
 
