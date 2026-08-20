@@ -2,7 +2,8 @@
 
 Guidance for adding a new package's riscv64 wheel build to this repo. Written
 from the protobuf port; generalized so the next one is faster. Read the
-"Gotchas" section before you start — several cost a full ~12-min CI cycle each.
+"Gotchas" section before you start — several cost a full CI cycle each (minutes
+for a simple package, hours for one that compiles a C++ world like pyarrow).
 
 ## What this repo does
 
@@ -60,6 +61,9 @@ Two build shapes exist in the repo — pick based on the package:
   the manual `tar zxf` (see `build-apache-tvm-ffi.yml`).
 - **build-from-checkout** (see `build-onnx.yml`): job runs `cibuildwheel` directly
   on an upstream checkout, feeding native deps via `CIBW_ENVIRONMENT`/CMake.
+
+When cibuildwheel doesn't fit, drive the manylinux container yourself with a
+plain **`docker run`** (see `build-torch.yml`, `build-pyarrow.yml`; gotcha 15).
 
 The `publish` job is always the shared action — it dry-runs off `main`, so it's
 safe on PR branches:
@@ -142,6 +146,9 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
    ```bash
    package_version="$(echo "$sdist_name" | sed -En 's/<pkg>-(.+)\.tar\.gz/\1/p')"
    ```
+   For `setuptools_scm` projects built from a *shallow* checkout (no tag history),
+   `git describe` can't see the version — pin it with
+   `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_<PKG>=<ver>` instead.
 
 4. **Build arch-independent artifacts on `ubuntu-latest`, not the riscv runner.**
    The sdist and any `py3-none-any` helper wheels don't depend on arch — build them
@@ -214,7 +221,9 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
      `>>` redirects, etc.) to match repo cleanliness.
    - Simulate shell pipelines against sample input under `bash`.
    - Run the wheel's import/smoke line against a locally-built wheel in a venv.
-   - Use docker to run cibuildwheel on riscv64
+   - Use docker to run cibuildwheel on riscv64. For a heavy from-source C++ build
+     (gotcha 15), a `cmake` *configure* under `--platform linux/riscv64` is a cheap
+     proxy that catches flag/dep errors without the full multi-hour compile.
 
 10. **Rust/PyO3 (maturin) packages — three traps.**
     - **Floating deps in a locally-built sdist.** If upstream gitignores `Cargo.lock`
@@ -274,6 +283,40 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
     which silently no-ops because pytest reports collected nodeids relative to its
     rootdir while your path is absolute. Verify locally by running pytest from a
     different cwd and checking the deselected count is non-zero.
+
+15. **Heavy C++ ports (pyarrow): drive `docker run` yourself, build the C++ once.**
+    When the extension links a big C++ tree whose sources sit *beside* the Python
+    package (pyarrow = Cython over Arrow C++ in a sibling `cpp/`), cibuildwheel's
+    copy-the-package-dir model can't see them, and the manylinux image ships no
+    Node so a `container:` job can't run JS actions. So: checkout + upload-artifact
+    on the host, and a `docker run` step that bind-mounts the source and an
+    inline-written build script into `$MANYLINUX_RISCV64_IMAGE`. Build the C++ lib
+    **once** into a prefix, then loop the interpreters (`for pytag in $PYTHON_TAGS`)
+    building only the bindings against it — don't rebuild C++ per Python.
+    - **Feed dep sources from the OS, not vcpkg.** Upstreams that vcpkg their deps
+      rely on a binary cache baked into *their* x86/arm images; the riscv image has
+      none. Use the project's from-source path instead (Arrow:
+      `-DARROW_DEPENDENCY_SOURCE=BUNDLED`, which downloads+compiles each pinned dep).
+    - **The image is Rocky 10 (`dnf`), missing `ninja-build`, OpenSSL dev headers,
+      and `zip`** — `dnf install` them in the script; it already has cmake/gcc/
+      auditwheel/git. Enable heavy features (network storage, LLVM) incrementally
+      from a small green core, one env flag per feature — each drags in a dep tree
+      that may not have been built on riscv64 before.
+    - **A full qemu build is impractical, but `cmake` *configure* under
+      `--platform linux/riscv64` finishes in minutes** and catches most flag/dep/
+      toolchain mistakes (missing lib, unresolved target) before you spend a
+      multi-hour native CI cycle. Do that as your gotcha-9 local check for these.
+
+16. **All-static BUNDLED build + a dep the project can't bundle = link failure.**
+    An all-static dependency build (Arrow's `-DARROW_DEPENDENCY_USE_SHARED=OFF`)
+    tries to link *every* dep statically — including ones that only exist as shared
+    libs in the image. OpenSSL is the classic: Arrow can't vendor it, the Rocky
+    image ships only `libssl.so`/`libcrypto.so` (no `.a`), so the static lookup
+    yields `OPENSSL_CRYPTO_LIBRARY-NOTFOUND`, the `OpenSSL::SSL`/`::Crypto` imported
+    targets are never created, and the *generate* step dies with "target not found"
+    cascading through everything that links SSL (bundled gRPC, parquet). Fix: force
+    that one dep shared (`-DARROW_OPENSSL_USE_SHARED=ON`), keep the rest static.
+    Signature: configure succeeds, **generate** fails on a missing imported target.
 
 ## Environment / auth notes (this WSL setup)
 
