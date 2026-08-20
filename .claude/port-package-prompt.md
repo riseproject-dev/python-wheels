@@ -2,8 +2,10 @@ Port a new package to this repo (riscv64 wheel → pypi.riseproject.dev). Follow
 the porting playbook, working process, and gotchas in CLAUDE.md — that's the
 source of truth; everything below is just this package's coordinates.
 
+Create the branch and the worktree first then proceed with research.
+
 Package to port:
-- Name (PyPI distribution): <pkg>
+- Name (PyPI distribution):   <pkg>
 - Version/tag to build:       <version>          # latest stable unless told otherwise
 - Source repository:          <github url>
 - PyPI page:                  https://pypi.org/project/<pkg>/
