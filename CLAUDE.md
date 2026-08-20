@@ -100,9 +100,14 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
    ```
    If that succeeds with no special toolchain, the riscv bdist job can be minimal.
 
-3. **Decide where the sdist comes from** (only relevant for the sdist→bdist shape):
-   `python -m build --sdist` from the checkout if the project supports it; otherwise
-   whatever the project uses (protobuf: Bazel `//python/dist:source_wheel`).
+3. **Decide where the sdist comes from** (only relevant for the sdist→bdist shape).
+   **Always build the sdist yourself from an upstream checkout** — never wire the
+   prebuilt PyPI sdist in as the CI build input (fetch it only for the local
+   *inspection* in step 2). Use `python -m build --sdist` from the checkout if the
+   project supports it; otherwise whatever the project uses (protobuf: Bazel
+   `//python/dist:source_wheel`). Heads-up for Rust/maturin projects: a
+   locally-built sdist may pin dependencies *differently* than the released PyPI
+   sdist — see gotcha 10.
 
 4. **Map the git tag to the Python version** (see gotcha 3). Take the tag as the
    workflow input; derive `package_version` from the built sdist filename.
@@ -141,13 +146,14 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
    once on x86. Only the actual bdist needs `ubuntu-24.04-riscv`. Building a codegen
    toolchain (e.g. protoc via Bazel) on riscv is a dead-end; don't attempt it.
 
-5. **cibuildwheel `{project}` vs `{package}` (this cost a full CI cycle).**
-   `{project}` = the dir where cibuildwheel was invoked (copied to `/project` in the
-   container). `{package}` = the package path you passed on the CLI (e.g.
-   `cibuildwheel ./protobuf` → `/project/protobuf`). If you stage extra files (a test
-   wheel, a runner script) *inside the package dir you pass*, reference them via
-   **`{package}`**. Symptom of getting it wrong: test step fails with code **127**,
-   `bash: /project/.../run.sh: No such file or directory`.
+5. **cibuildwheel `{project}` vs `{package}`.**
+   `{project}` = invocation dir (`/project`); `{package}` = path passed to CLI
+   (`cibuildwheel ./<subdir>` → `/project/<subdir>`). When you pass a subdir,
+   **everything in it — including bundled `tests/` — is under `{package}`, not
+   `{project}`**. Reference test suites and staged helpers via `{package}`.
+   Symptoms: exit **127** (script not found) or exit **4** + `no tests ran` (pytest
+   aimed at wrong dir). **Local-repro trap:** `cd <subdir> && cibuildwheel .` makes
+   `{project}==subdir` and masks the bug — always invoke from the parent dir.
 
 6. **Running a real test suite through cibuildwheel:**
    - Stage helper files inside the package dir (cibuildwheel copies that tree into
@@ -201,6 +207,28 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
    - Simulate shell pipelines against sample input under `bash`.
    - Run the wheel's import/smoke line against a locally-built wheel in a venv.
    - Use docker to run cibuildwheel on riscv64
+
+10. **Rust/PyO3 (maturin) packages — three traps.**
+    - **Floating deps in a locally-built sdist.** If upstream gitignores `Cargo.lock`
+      (common for libraries), a fresh `python -m build --sdist` re-resolves crates to
+      today's latest semver-compatible versions. With `#![deny(warnings)]`, a newly
+      deprecated API in a bumped dep becomes a hard compile error. Fix: pin the
+      offending crate to the version upstream released against *before* building the
+      sdist, so maturin captures it into the bundled lock:
+      ```bash
+      cargo update -p <crate> --precise <version>
+      python -m build --sdist
+      ```
+      Diagnose: grep CI log for `use of deprecated` / `could not compile`.
+    - **Rust toolchain must be installed inside the manylinux container.** If the
+      project's `pyproject.toml` has a `[tool.cibuildwheel] before-all` that does this
+      (tiktoken does), it's inherited automatically. Otherwise supply it yourself:
+      `CIBW_BEFORE_ALL_LINUX: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y`
+      and `CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"`. rustup provisions a
+      native `riscv64gc-unknown-linux-gnu` toolchain in the container.
+    - **musllinux can't build** — rustup.rs ships no riscv64 musl toolchain. Restrict
+      `CIBW_BUILD` to `*-manylinux_riscv64`. PyO3 extensions are generally not abi3, so
+      the matrix is per-interpreter `[cp312, cp313, cp314, cp314t]`.
 
 ## Environment / auth notes (this WSL setup)
 
