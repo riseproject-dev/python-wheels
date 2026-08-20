@@ -1,0 +1,260 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+name: Build protobuf wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'protobuf version to build (e.g. 7.35.1)'
+        required: true
+        default: '7.35.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-protobuf.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '7.35.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PROTOBUF_VERSION: ${{ inputs.version || '7.35.1' }}
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_ONLY_BINARY: ':all:'
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  python_sdist:
+    # protobuf's setup.py CANNOT build from the git checkout - its python
+    # README is explicit: "You cannot build from setup.py using the GitHub repo
+    # or the GitHub source tarball." The self-contained sdist (which bundles the
+    # upb and utf8_range C sources plus the generated *_pb2.py / *.upb.c files)
+    # is assembled by Bazel via //python/dist:source_wheel. That sdist is
+    # architecture-independent ("always the same and does not depend on a local
+    # version of Python"), so we build it once here on x86 - building protoc
+    # with Bazel on riscv64 is not a path worth maintaining. The riscv64 bdist
+    # is then built from this sdist in the `linux` job below, mirroring
+    # build-cffi.yml's sdist -> bdist split.
+    #
+    # Note: the package version (7.NN.M) and git tag (vNN.M) differ - a "derive
+    # git tag" step strips the leading "7." to get the tag used for checkout.
+    runs-on: ubuntu-latest
+    outputs:
+      sdist_artifact_name: ${{ steps.build_sdist.outputs.sdist_artifact_name }}
+      testwheel_artifact_name: ${{ steps.build_sdist.outputs.testwheel_artifact_name }}
+      package_version: ${{ steps.build_sdist.outputs.package_version }}
+    env:
+      # No .bazelversion is committed at the release tags, so bazelisk would
+      # otherwise track "latest". Pin to the version protobuf's own CI uses,
+      # which satisfies its MODULE.bazel (bazel_compatibility = ">=8.0.0").
+      USE_BAZEL_VERSION: '8.7.0'
+    steps:
+      - name: derive git tag
+        # protobuf package versions are 7.NN.M but git tags are vNN.M (no major).
+        # Strip the leading "7." to get the tag, then export it for downstream steps.
+        id: tag
+        run: |
+          tag="${PROTOBUF_VERSION#7.}"
+          echo "value=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: checkout protobuf v${{ steps.tag.outputs.value }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: protocolbuffers/protobuf
+          ref: v${{ steps.tag.outputs.value }}
+          # protobuf uses bzlmod, not git submodules, so a plain checkout is
+          # enough (unlike build-cffi.yml, which needs submodules: true).
+          persist-credentials: false
+
+      - name: setup python
+        # Bazel's system_python extension resolves the host interpreter from
+        # PATH; //python/dist:source_wheel is target_compatible_with a found
+        # system python, so one must be present for the target to build.
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: install bazelisk
+        # Don't rely on Bazel being pre-installed on the runner image.
+        run: |
+          set -eux
+          curl -fsSL \
+            https://github.com/bazelbuild/bazelisk/releases/download/v1.20.0/bazelisk-linux-amd64 \
+            -o "${RUNNER_TEMP}/bazel"
+          chmod +x "${RUNNER_TEMP}/bazel"
+          echo "${RUNNER_TEMP}" >> "$GITHUB_PATH"
+
+      - name: build sdist
+        id: build_sdist
+        run: |
+          set -eux
+
+          # Bazel assembles the self-contained Python source distribution
+          # (compiles protoc to generate the bootstrap *_pb2.py, bundles upb).
+          # //python/dist:test_wheel produces protobuftests-<ver>-py3-none-any.whl,
+          # an architecture-independent wheel bundling the *_test.py suite plus
+          # the generated test protos/testdata. The riscv64 `linux` job installs
+          # it to run protobuf's real test suite (see test_upb.yml upstream), so
+          # we build it here once on x86 alongside the sdist.
+          bazel build //python/dist:source_wheel //python/dist:test_wheel
+
+          rm -rf dist/
+          mkdir -p dist
+          cp bazel-bin/python/dist/protobuf-*.tar.gz dist/
+          cp "$(find bazel-bin/python/dist -name 'protobuftests-*.whl' | head -1)" dist/
+
+          sdist_name="$(basename "$(echo dist/protobuf-*.tar.gz)")"
+          testwheel_name="$(basename "$(echo dist/protobuftests-*.whl)")"
+          package_version="$(echo "${sdist_name}" | sed -En 's/protobuf-(.+)\.tar\.gz/\1/p')"
+          {
+            echo "sdist_artifact_name=${sdist_name}"
+            echo "testwheel_artifact_name=${testwheel_name}"
+            echo "package_version=${package_version}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ steps.build_sdist.outputs.sdist_artifact_name }}
+          path: dist/${{ steps.build_sdist.outputs.sdist_artifact_name }}
+          if-no-files-found: error
+      # always upload the sdist artifact- the wheel build job requires it
+
+      - name: upload test wheel artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ steps.build_sdist.outputs.testwheel_artifact_name }}
+          path: dist/${{ steps.build_sdist.outputs.testwheel_artifact_name }}
+          if-no-files-found: error
+      # the riscv64 build job installs this to run the test suite
+
+  linux:
+    # Unlike upstream (which builds a large cross-compiled matrix via Bazel), we
+    # build the riscv64 bdist from the sdist with cibuildwheel. protobuf's
+    # setup.py compiles the bundled upb/utf8_range C sources into the
+    # google._upb._message extension - no protoc or Bazel is needed at this
+    # stage, and no external native dependency (so, no CIBW_BEFORE_BUILD).
+    needs: [python_sdist]
+    name: Build protobuf ${{ needs.python_sdist.outputs.package_version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+    - name: fetch sdist artifact
+      id: fetch_sdist
+      uses: actions/download-artifact@v8
+      with:
+        name: ${{ needs.python_sdist.outputs.sdist_artifact_name }}
+        path: sdist
+
+    - name: fetch test wheel artifact
+      id: fetch_testwheel
+      uses: actions/download-artifact@v8
+      with:
+        name: ${{ needs.python_sdist.outputs.testwheel_artifact_name }}
+        path: testwheel
+
+    - name: setup uv
+      uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+      with:
+        python-version: '3.12'
+        activate-environment: true
+        enable-cache: false
+
+    - name: build/test wheels
+      id: build
+      env:
+        CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+        CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+        # Run protobuf's real Python test suite against the freshly built wheel,
+        # the same way upstream's test_upb.yml does: install the protobuftests
+        # wheel, then discover and run every *_test.py via unittest (excluding
+        # the two C++/pybind11-backend modules, which don't apply to upb). The
+        # runner script and test wheel are staged under {package}/_testwheel so
+        # cibuildwheel copies them into the manylinux container.
+        CIBW_TEST_REQUIRES: numpy<=2.3.4 absl-py==2.* setuptools<=78.1.1
+        # cibuildwheel expands {package} to the package dir we pass below
+        # (./protobuf, copied to /project/protobuf in the container), which is
+        # where we stage the runner and test wheel. ({project} is its parent.)
+        CIBW_TEST_COMMAND: bash {package}/_testwheel/run_tests.sh
+        # numpy has no riscv64 wheel on public PyPI; pull it (and anything else
+        # missing) from our registry inside the test venv. Same mechanism as
+        # build-onnx.yml.
+        CIBW_ENVIRONMENT_PASS_LINUX: PIP_EXTRA_INDEX_URL
+        PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+      run: |
+        set -eux
+
+        mkdir protobuf
+
+        tar zxf sdist/protobuf-*.tar.gz --strip-components=1 -C protobuf
+
+        # Stage the arch-independent protobuftests wheel and the test runner
+        # inside the package dir so both are available at {package} in-container.
+        # The runner mirrors upstream test_upb.yml: verify the upb extension is
+        # importable, install the test wheel, then run every discovered *_test.py
+        # module (minus the C++/pybind11-backend ones) and fail if any fails.
+        mkdir protobuf/_testwheel
+        cp testwheel/protobuftests-*.whl protobuf/_testwheel/
+        cat > protobuf/_testwheel/run_tests.sh <<'EOF'
+        #!/usr/bin/env bash
+        set -eu
+        here="$(cd "$(dirname "$0")" && pwd)"
+
+        # Sanity-check the upb C extension is present and wired up before testing.
+        python -c "from google._upb import _message; assert 'google._upb._message.MessageMeta' in str(_message.MessageMeta)"
+
+        pip install --no-deps "$here"/protobuftests-*.whl
+
+        tests="$(pip show -f protobuftests \
+          | grep _test.py \
+          | grep --invert-match -e _pybind11_test.py -e proto_api_test.py \
+          | sed 's,[/\\],.,g' \
+          | sed -E 's,.py$,,g')"
+
+        rc=0
+        for t in $tests; do
+          echo "::group::$t"
+          python -m unittest -v "$t" || rc=1
+          echo "::endgroup::"
+        done
+        exit $rc
+        EOF
+
+        uv pip install --upgrade cibuildwheel
+
+        python -m cibuildwheel --output-dir dist ./protobuf
+
+        echo "artifact_name=$(ls ./dist/)" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: protobuf-${{ needs.python_sdist.outputs.package_version }}-${{ matrix.python }}-manylinux_riscv64
+        path: ./dist/*.whl
+        if-no-files-found: error
+
+  publish:
+    name: Publish protobuf ${{ needs.python_sdist.outputs.package_version }} to GitLab
+    needs: [python_sdist, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: protobuf-${{ needs.python_sdist.outputs.package_version }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
