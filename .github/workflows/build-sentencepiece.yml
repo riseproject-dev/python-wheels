@@ -1,0 +1,111 @@
+---
+name: Build sentencepiece wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'sentencepiece version to build (git tag without leading v, e.g. 0.2.2)'
+        required: true
+        default: '0.2.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-sentencepiece.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.2.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  SENTENCEPIECE_VERSION: ${{ inputs.version || '0.2.2' }}
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_ONLY_BINARY: ':all:'
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # The version upstream pins in .github/workflows/requirements/cibuildwheel.txt
+  CIBUILDWHEEL_VERSION: '3.4.0'
+
+jobs:
+  build_wheels:
+    name: Build sentencepiece ${{ inputs.version || '0.2.2' }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout sentencepiece v${{ env.SENTENCEPIECE_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: google/sentencepiece
+          ref: v${{ env.SENTENCEPIECE_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      # Upstream installs from requirements/base.txt and requirements/cibuildwheel.txt
+      # with --require-hashes. Those files also pin twine and its dependency chain
+      # (cffi, cryptography), which we would have to build from source here, so we
+      # install cibuildwheel on its own at the version upstream pins.
+      - name: Install cibuildwheel
+        run: uv pip install "cibuildwheel==${{ env.CIBUILDWHEEL_VERSION }}"
+
+      # Copying data/*.bin into the package is upstream's step, and the tests need
+      # it. Build and test settings come from [tool.cibuildwheel] in
+      # python/pyproject.toml (test-requires pytest/numpy/protobuf, test-command
+      # "pytest -v {project}/test"), so only the riscv64-specific parts are set
+      # here. This mirrors upstream's single cibuildwheel invocation per
+      # platform: CIBW_ARCHS_LINUX resolves to riscv64 on this runner, and
+      # CIBW_SKIP carries the version selection rather than a matrix, so the
+      # diff against upstream's wheel.yml stays readable.
+      - name: Build wheels
+        working-directory: python
+        run: |
+          mkdir -p src/sentencepiece/package_data
+          cp ../data/*.bin src/sentencepiece/package_data
+          python -m cibuildwheel --output-dir wheelhouse
+        env:
+          CIBW_ARCHS_LINUX: auto
+          # Upstream skips musllinux and win32. We skip musllinux for the same
+          # reason, plus cp39/cp310/cp311: those predate riscv64 being a target
+          # anyone ships for, and building them here would roughly double the
+          # runtime of an already serialized job for no consumer.
+          CIBW_SKIP: "cp39-* cp310-* cp311-* *-musllinux_*"
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BUILD_VERBOSITY: 1
+          # PIP_EXTRA_INDEX_URL covers the test-requires install inside the
+          # container, where numpy has riscv64 wheels in our registry but not on
+          # PyPI.
+          CIBW_ENVIRONMENT: >-
+            CMAKE_BUILD_PARALLEL_LEVEL=8
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sentencepiece-${{ env.SENTENCEPIECE_VERSION }}-cibw-wheels-manylinux_riscv64
+          path: ./python/wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish sentencepiece ${{ inputs.version || '0.2.2' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: sentencepiece-${{ env.SENTENCEPIECE_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
