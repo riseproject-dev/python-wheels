@@ -206,8 +206,13 @@ def create_deprecation_pr(package: str, reason: str) -> Optional[str]:
         deprecated_file = Path("ci_scripts/deprecated.txt")
         lines = deprecated_file.read_text().splitlines()
 
-        comments = lines[:7]
-        deprecated_packages = lines[7:]
+        i = next(
+                i for i, line in enumerate(lines)
+                if line.strip() and not line.lstrip().startswith("#")
+        )
+
+        comments = lines[:i]
+        deprecated_packages = lines[i:]
 
         if package not in deprecated_packages:
             deprecated_packages.append(package)
