@@ -1,0 +1,126 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on upstream's own wheel build/publish setup:
+#   https://github.com/mlc-ai/xgrammar/blob/v0.2.4/.github/workflows/build_and_release.yaml
+name: Build xgrammar wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'xgrammar version to build (git tag without leading v, e.g. 0.2.4)'
+        required: true
+        default: '0.2.4'
+  pull_request:
+    paths:
+      - '.github/workflows/build-xgrammar.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.2.4' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  XGRAMMAR_VERSION: ${{ inputs.version || '0.2.4' }}
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_ONLY_BINARY: ':all:'
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build xgrammar ${{ inputs.version || '0.2.4' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        # One wheel per Python version: xgrammar is not abi3.
+        # torch riscv64 is available for cp312/313/314/314t in our registry.
+        python: [cp312, cp313, cp314, cp314t]
+
+    steps:
+      - name: Checkout xgrammar v${{ env.XGRAMMAR_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: mlc-ai/xgrammar
+          ref: v${{ env.XGRAMMAR_VERSION }}
+          # 3rdparty/dlpack and 3rdparty/googletest are needed at build time;
+          # dlpack headers are referenced by CMake, googletest by the C++ tests.
+          # cpptrace is only used when XGRAMMAR_ENABLE_CPPTRACE=ON (off by default).
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install cibuildwheel
+        run: uv pip install cibuildwheel
+
+      - name: Build wheels
+        run: python -m cibuildwheel --output-dir wheelhouse
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          # pyproject pins [tool.cibuildwheel.linux] archs to x86_64+aarch64;
+          # override so this native riscv runner builds the riscv64 wheel.
+          CIBW_ARCHS: riscv64
+          CIBW_SKIP: '*-musllinux_*'
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Override upstream's build-frontend = "build[uv]". cibuildwheel's audit
+          # step creates a venv on the *host* runner (not in the container) and,
+          # when the frontend is build[uv], insists on a host `uv` binary.
+          # The self-hosted riscv runner has no host uv, so use plain `build`
+          # (pip/virtualenv on the host) instead.
+          CIBW_BUILD_FRONTEND: build
+          # CIBW_ENVIRONMENT applies to both build and test phases.
+          # Point pip/uv at our registry so build-time deps (apache-tvm-ffi
+          # riscv64 wheel) and test-time deps resolve correctly.
+          # Do NOT set ONLY_BINARY here: scikit-build-core itself is a build dep
+          # that installs from sdist if needed.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            UV_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            UV_INDEX_STRATEGY=unsafe-best-match
+          # Test phase only: force wheels-only so a missing riscv64 wheel for a
+          # heavy test dep (torch, tokenizers) fails fast instead of silently
+          # kicking off a multi-hour source build on the runner.
+          CIBW_TEST_ENVIRONMENT: >-
+            PIP_ONLY_BINARY=:all:
+            UV_ONLY_BINARY=:all:
+          # Mirror upstream's test-command from pyproject.toml
+          # (pytest {project}/tests -m "not hf_token_required"), but omit the
+          # hf_token_required marker filter: conftest.py already auto-skips those
+          # tests when no HF_TOKEN is present, so it's redundant here and we get
+          # a cleaner "SKIP" record instead of "not collected".
+          CIBW_TEST_COMMAND: pytest {project}/tests -vvs
+          CIBW_TEST_EXTRAS: test
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: xgrammar-${{ env.XGRAMMAR_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish xgrammar ${{ inputs.version || '0.2.4' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: xgrammar-${{ env.XGRAMMAR_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
