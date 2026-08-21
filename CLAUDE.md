@@ -200,7 +200,14 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
      `>>` redirects, etc.) to match repo cleanliness.
    - Simulate shell pipelines against sample input under `bash`.
    - Run the wheel's import/smoke line against a locally-built wheel in a venv.
-   - Use docker to run cibuildwheel on riscv64
+   - Use docker to run cibuildwheel on riscv64 (use a venv for pip installs; don't
+     install into the system Python).
+
+10. **Free-threaded (cp314t) test-install often fails when test deps lack riscv64
+    wheels.** The wheel itself builds and links correctly; only the test step fails
+    because heavy test deps (numpy, tokenizers, safetensors) have no cp314t riscv64
+    wheel on any index. Fix: `CIBW_TEST_SKIP: cp314t-*` and document why. Re-enable
+    once the deps land.
 
 ## Environment / auth notes (this WSL setup)
 
