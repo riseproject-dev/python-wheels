@@ -110,10 +110,11 @@ def open_issues_for_missing(packages: list[str]) -> dict[str, int]:
     return issues
 
 
-def open_summary_issue(report: str, issue_map: dict[str, int]) -> None:
-    """Open (or skip, if one already exists) a monthly summary issue linking
+def open_summary_issue(report: str, issue_map: dict[str, int], title: str | None = None) -> None:
+    """Open (or skip, if one already exists) a summary issue linking
     to each per-package issue and notifying the maintainers."""
-    title = f"PyPI riscv64 check - {time.strftime('%Y-%m')}"
+    if title is None:
+        title = f"PyPI riscv64 check - {time.strftime('%Y-%m')}"
     if find_existing_issue(title) is not None:
         print(f"    [=] Summary issue for {title!r} already open, skipping")
         return
@@ -175,11 +176,15 @@ def fetch_json(url: str) -> dict | list:
         return json.loads(r.read())
 
 
-def analyse_package(name: str, download_count: int) -> dict | None:
+def analyse_package(
+    name: str, download_count: int | None = None, require_binary: bool = True
+) -> dict | None:
     """
-    Returns a result dict if the package ships at least one binary wheel,
-    otherwise None (pure-Python or fetch error).
- 
+    Returns a result dict describing the package's wheel situation, or None on
+    fetch error (or, when require_binary, if it ships no binary wheel at all —
+    pure-Python packages need no riscv64 wheel and are dropped from the top-N
+    binary-wheel report).
+
     A binary wheel is any .whl file whose filename does NOT end with
     'none-any.whl' (the platform-independent tag).
     """
@@ -188,7 +193,7 @@ def analyse_package(name: str, download_count: int) -> dict | None:
     except Exception as exc:
         print(f"  [WARN] Could not fetch {name}: {exc}")
         return None
- 
+
     wheel_files = [
         u["filename"]
         for u in info.get("urls", [])
@@ -197,7 +202,15 @@ def analyse_package(name: str, download_count: int) -> dict | None:
 
     binary_wheels = [f for f in wheel_files if not f.endswith("none-any.whl")]
     if not binary_wheels:
-        return None   # pure-Python or no wheels at all
+        if require_binary:
+            return None   # pure-Python or no wheels at all
+        return {
+            "project": name,
+            "download_count": download_count,
+            "pure_python": True,
+            "has_riscv64": False,
+            "in_rise_registry": None,
+        }
 
     riscv64_wheels = [f for f in wheel_files if "riscv64" in f.lower()]
     has_riscv64 = len(riscv64_wheels) > 0
@@ -205,9 +218,48 @@ def analyse_package(name: str, download_count: int) -> dict | None:
     return {
         "project": name,
         "download_count": download_count,
+        "pure_python": False,
         "has_riscv64": has_riscv64,
         "in_rise_registry": None if has_riscv64 else in_rise_registry(name),
     }
+
+
+def check_package_list(names: list[str], create_issues: bool) -> None:
+    """Check a maintainer-supplied package list: OK if it has a riscv64 wheel
+    or is pure-Python (nothing to build), otherwise flagged as needing a port."""
+    report_lines = [
+        f"{'Package':<35} {'Status':<40}",
+        "-" * 76,
+    ]
+    needs_work = []
+    for name in names:
+        result = analyse_package(name, require_binary=False)
+        if result is None:
+            report_lines.append(f"{name:<35} {'ERROR (could not fetch from PyPI)':<40}")
+            continue
+
+        if result["has_riscv64"]:
+            status = "OK - riscv64 wheel on PyPI"
+        elif result["pure_python"]:
+            status = "OK - pure Python (py3-none-any)"
+        elif result["in_rise_registry"]:
+            status = "NEEDS PORT - already in RISE registry"
+        else:
+            status = "NEEDS PORT - no riscv64 wheel, not in registry"
+            needs_work.append(name)
+        report_lines.append(f"{name:<35} {status:<40}")
+
+    report_lines += ["", f"{len(needs_work)}/{len(names)} package(s) need a riscv64 port and are untracked."]
+    report = "\n".join(report_lines)
+    print(report)
+
+    if create_issues and needs_work:
+        print()
+        issue_map = open_issues_for_missing(needs_work)
+        open_summary_issue(
+            report, issue_map,
+            title=f"PyPI riscv64 check (custom list) - {time.strftime('%Y-%m-%d')}",
+        )
 
 
 def fmt_count(n: int) -> str:
@@ -234,7 +286,31 @@ def main():
         help="Open a GitHub issue for each package missing riscv64 wheels "
              "upstream and in the RISE registry, unless one is already open"
     )
+    parser.add_argument(
+        "--packages",
+        help="Comma-separated package names to check instead of the top-N "
+             "list (e.g. a maintainer-supplied audit list)"
+    )
+    parser.add_argument(
+        "--packages-file",
+        help="Path to a file with one package name per line (# comments and "
+             "blank lines ignored), instead of the top-N list"
+    )
     args = parser.parse_args()
+
+    if args.packages or args.packages_file:
+        names = []
+        if args.packages:
+            names += [n.strip() for n in args.packages.split(",") if n.strip()]
+        if args.packages_file:
+            with open(args.packages_file) as f:
+                names += [
+                    line.split("#", 1)[0].strip()
+                    for line in f
+                    if line.split("#", 1)[0].strip()
+                ]
+        check_package_list(names, create_issues=args.create_issues)
+        return
 
     print("Fetching top-packages dataset …")
     dataset = fetch_json(TOP_PACKAGES_URL)
