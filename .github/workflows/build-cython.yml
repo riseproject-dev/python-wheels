@@ -1,0 +1,117 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job in:
+# https://github.com/cython/cython/blob/3.3.0/.github/workflows/wheels.yml
+#
+# Cython is self-hosting: setup.py compiles Cython's own modules with the
+# in-tree Cython, so no external build tool is needed. Upstream ships
+# per-interpreter compiled wheels (cp39-cp315) plus a py3-none-any fallback,
+# but no riscv64 -- which every source build of a Cython-using package needs.
+name: Build cython wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'cython version to build (git tag, e.g. 3.3.0)'
+        required: true
+        default: '3.3.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-cython.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '3.3.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default there.
+  CYTHON_VERSION: ${{ inputs.version || '3.3.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build cython ${{ inputs.version || '3.3.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # Per-interpreter (not abi3), matching upstream's primary-platform wheels.
+        # No cp314t: setup.py disables self-compilation under Py_GIL_DISABLED (a
+        # compiled Cython would force the GIL back on), so a free-threaded build
+        # would silently ship the pure-Python fallback.
+        python: ["cp312", "cp313", "cp314"]
+
+    steps:
+      - name: Checkout cython ${{ env.CYTHON_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: cython/cython
+          ref: ${{ env.CYTHON_VERSION }}
+          persist-credentials: false
+
+      # Staged into the checkout root so cibuildwheel copies it under {package}.
+      # Upstream's wheel workflow only runs twine/abi3audit, not the (huge) test
+      # suite; this asserts the self-compiled .so shipped (a silent failure ships
+      # the pure-Python fallback) and that the wheel works as a compiler.
+      - name: Stage wheel test
+        run: |
+          cat > testwheel.py <<'EOF'
+          import sys, tempfile, subprocess, os
+          import Cython
+          from Cython.Compiler import Scanning
+          assert Scanning.__file__.endswith(".so"), \
+              "expected compiled .so, got %r (pure-Python fallback)" % Scanning.__file__
+          print("Cython", Cython.__version__, "compiled:", Scanning.__file__)
+
+          with tempfile.TemporaryDirectory() as d:
+              with open(os.path.join(d, "greet.pyx"), "w") as f:
+                  f.write("def hi():\n    cdef int n = 41\n    return n + 1\n")
+              subprocess.run([sys.executable, "-m", "Cython.Build.Cythonize",
+                              "-i", "greet.pyx"], cwd=d, check=True)
+              subprocess.run([sys.executable, "-c",
+                              "import greet; assert greet.hi() == 42"],
+                             cwd=d, check=True)
+          print("cythonize + compile + import OK")
+          EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # cythonize -i needs a build backend; the manylinux base interpreter
+          # ships neither setuptools nor distutils (dropped in 3.12).
+          CIBW_TEST_REQUIRES: setuptools
+          CIBW_TEST_COMMAND: python {package}/testwheel.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cython-${{ env.CYTHON_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cython ${{ inputs.version || '3.3.0' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: cython-${{ env.CYTHON_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
