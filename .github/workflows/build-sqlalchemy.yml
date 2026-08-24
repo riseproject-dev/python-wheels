@@ -1,0 +1,187 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# SQLAlchemy is pure Python with *optional* Cython speedups (5 .pyx modules under
+# lib/sqlalchemy/cyextension/). PyPI already ships the py3-none-any wheel plus a
+# per-interpreter compiled wheel for every arch except riscv64 - so the value we
+# add here is exactly those compiled riscv64 wheels.
+#
+# Build shape: sdist -> bdist. We build a clean sdist once on x86 (arch-independent;
+# CLAUDE.md gotcha 4) and feed the tarball straight to cibuildwheel on the riscv
+# runner. The sdist bundles the .pyx sources, the whole test/ tree, and upstream's
+# own [tool.cibuildwheel] config (test-requires + test-command), so we inherit
+# upstream's exact test invocation and only layer on the riscv overrides - the
+# "easy inverse" of CLAUDE.md gotcha 6, same as build-apache-tvm-ffi.yml.
+#
+# Modelled on upstream's release pipeline:
+#   https://github.com/sqlalchemy/sqlalchemy/blob/rel_2_0_52/.github/workflows/create-wheels.yaml
+name: Build sqlalchemy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'SQLAlchemy version to build (PyPI version, e.g. 2.0.52)'
+        required: true
+        default: '2.0.52'
+  pull_request:
+    paths:
+      - '.github/workflows/build-sqlalchemy.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.0.52' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 2.0.52 there.
+  # This is the plain PyPI version (nightly check_versions.py compares this input
+  # default against PyPI). SQLAlchemy's git tags are rel_X_Y_Z, so the checkout
+  # job derives the tag from this by s/./_/g and prefixing rel_.
+  SQLALCHEMY_VERSION: ${{ inputs.version || '2.0.52' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_sdist:
+    # Arch-independent, so build it once on x86 rather than burning a scarce riscv
+    # runner (CLAUDE.md gotcha 4). We build the sdist ourselves from the upstream
+    # checkout (never wire in the prebuilt PyPI sdist as the build input) and expose
+    # package_version derived from the resulting filename (CLAUDE.md gotcha 3).
+    name: Build sqlalchemy ${{ inputs.version || '2.0.52' }} sdist
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
+      package_version: ${{ steps.sdist.outputs.package_version }}
+    steps:
+      - name: Compute git tag
+        id: tag
+        run: echo "ref=rel_$(echo "$SQLALCHEMY_VERSION" | tr . _)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout SQLAlchemy ${{ steps.tag.outputs.ref }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: sqlalchemy/sqlalchemy
+          ref: ${{ steps.tag.outputs.ref }}
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build sdist
+        id: sdist
+        run: |
+          set -eux
+          # SQLAlchemy keeps `tag_build = dev` in setup.cfg on release branches, so
+          # a plain `python -m build` produces sqlalchemy-<ver>.dev0.tar.gz and every
+          # wheel built from it inherits the .dev0 suffix. Upstream's release job
+          # strips this line before building; the released PyPI sdist has it blank.
+          # We must do the same or the wheel filename version stops matching PyPI and
+          # the docs YAML / patches path (CLAUDE.md gotcha 18).
+          sed -i '/tag_build = dev/d' setup.cfg
+
+          uv pip install build twine
+          python -m build --sdist
+          twine check dist/*
+
+          sdist_name="$(ls dist)"
+          echo "sdist_name=${sdist_name}" >> "$GITHUB_OUTPUT"
+          echo "package_version=$(echo "$sdist_name" | sed -En 's/sqlalchemy-(.+)\.tar\.gz/\1/p')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sqlalchemy-${{ env.SQLALCHEMY_VERSION }}-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: build_sdist
+    name: Build sqlalchemy ${{ inputs.version || '2.0.52' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # SQLAlchemy's cyextension is a plain per-interpreter C extension (not
+        # abi3), so each CPython needs its own wheel - same matrix as cffi/numpy/
+        # zstandard. Upstream's `build = "*"` (skip cp36 + pypy) maps to these four
+        # here; naming cp314t explicitly overrides the skip and makes cibuildwheel
+        # 4.x auto-enable free-threading (no CIBW_ENABLE needed).
+        python: [cp312, cp313, cp314, cp314t]
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: sqlalchemy-${{ env.SQLALCHEMY_VERSION }}-sdist
+          path: dist/
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          # cibuildwheel accepts the sdist tarball directly: it extracts it and
+          # builds from the self-contained tree. {project} in the inherited
+          # test-command then points at that extracted tree, which bundles both
+          # pyproject.toml and test/.
+          package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          # pyproject pins [tool.cibuildwheel.linux] archs to x86_64+aarch64;
+          # override so this native riscv runner builds the riscv64 wheel.
+          CIBW_ARCHS: riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # The cyextension modules are declared `optional=not REQUIRE_SQLALCHEMY_CEXT`
+          # in setup.py: without this flag a Cython/compile failure is swallowed and
+          # setuptools silently ships a *pure-Python* wheel still tagged
+          # cp3XX-...-manylinux_riscv64 - a broken artifact that looks fine. Forcing
+          # REQUIRE makes any extension-build failure hard-fail the build. It applies
+          # to the test phase too, where SQLAlchemy's own test plugin re-checks it
+          # (__ensure_cext) - a useful guard that the installed wheel's extensions
+          # actually import, now that PYTHONNOUSERSITE (below) makes the workers load
+          # the wheel rather than the source tree.
+          CIBW_ENVIRONMENT: REQUIRE_SQLALCHEMY_CEXT=1
+          # test-requires + test-command are inherited from the sdist's
+          # [tool.cibuildwheel]. Upstream's test-command is
+          #   python -s -m pytest -c {project}/pyproject.toml -n4 -q ... {project}/test
+          # The `-s` (no-user-site) is load-bearing: SQLAlchemy's test/conftest.py
+          # injects {project}/lib onto sys.path *unless* sys.flags.no_user_site is
+          # set, so without it pytest imports the pure-Python source tree instead of
+          # the compiled wheel we just built. But the `-s` *flag* does NOT propagate
+          # to pytest-xdist (-n4) workers - they respawn with no_user_site=0 and
+          # import {project}/lib anyway. Set it as the PYTHONNOUSERSITE *env var*,
+          # which xdist does inherit into workers, so every worker tests the
+          # installed compiled wheel. Test-phase only (CIBW_TEST_ENVIRONMENT), so it
+          # can't affect the build. See CLAUDE.md gotcha 12 (phase-scoping).
+          CIBW_TEST_ENVIRONMENT: PYTHONNOUSERSITE=1
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sqlalchemy-${{ env.SQLALCHEMY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish sqlalchemy ${{ inputs.version || '2.0.52' }} to GitLab
+    needs: [build_sdist, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: sqlalchemy-${{ needs.build_sdist.outputs.package_version }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
