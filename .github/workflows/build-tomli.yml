@@ -4,14 +4,10 @@
 # This workflow is based on the `binary-wheels` job in:
 # https://github.com/hukkin/tomli/blob/2.4.1/.github/workflows/tests.yaml
 #
-# tomli ships a pure-Python `py3-none-any` wheel *and* mypyc-compiled binary
-# wheels for common platforms - but none for riscv64. This builds the compiled
-# riscv64 wheels. The compiled build is opt-in: upstream's pyproject.toml
-# declares the flit_core backend (pure-Python only), and `setup.py` only invokes
-# mypyc when TOMLI_USE_MYPYC=1. Upstream's own `scripts/use_setuptools.py`
-# rewrites the [build-system] table to setuptools + mypy[mypyc]; we run that same
-# swap on the host before cibuildwheel and forward TOMLI_USE_MYPYC into the
-# manylinux container so the mypycify() path fires there.
+# tomli publishes mypyc-compiled wheels for common platforms but not riscv64.
+# The compiled build is upstream's own opt-in path: scripts/use_setuptools.py
+# swaps the flit_core backend to setuptools + mypy[mypyc], and setup.py compiles
+# when TOMLI_USE_MYPYC=1.
 name: Build tomli wheels (riscv64)
 
 on:
@@ -44,15 +40,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # mypyc emits per-interpreter (non-abi3) wheels, so every CPython needs
-        # its own build - same shape as upstream's binary-wheels matrix minus
-        # the versions we don't target (cp38/39/310).
+        # mypyc emits per-interpreter (non-abi3) wheels, one build each.
         python: ["cp312", "cp313", "cp314", "cp314t"]
 
     steps:
-      # tomli's tests/ (incl. the committed toml-test corpus) and the
-      # backend-swap script both ship in the source tree, so a plain checkout
-      # is self-contained - no submodules, no python-wheels checkout needed.
       - name: Checkout tomli ${{ env.TOMLI_VERSION }}
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -60,8 +51,6 @@ jobs:
           ref: ${{ env.TOMLI_VERSION }}
           persist-credentials: false
 
-      # Host Python is only used to run tomli's backend-swap script below; the
-      # wheels themselves are compiled inside the manylinux container.
       - name: Install Python
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
         with:
@@ -69,9 +58,7 @@ jobs:
           activate-environment: true
           enable-cache: false
 
-      # pyproject.toml uses flit_core (pure-Python only). This is upstream's own
-      # script; it rewrites [build-system] to setuptools + mypy[mypyc] in place.
-      # scripts/requirements.txt is just tomli-w (pure Python, on public PyPI).
+      # Upstream's own backend swap: flit_core -> setuptools + mypy[mypyc].
       - name: Switch build backend to setuptools + mypyc
         run: |
           uv pip install -r scripts/requirements.txt
@@ -83,12 +70,10 @@ jobs:
           only: ${{ matrix.python }}-manylinux_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # setup.py reads TOMLI_USE_MYPYC=1 to compile via mypyc
-          CIBW_ENVIRONMENT: >-
-            TOMLI_USE_MYPYC=1
-          # Upstream's exact wheel test: run the bundled unittest suite. {project}
-          # is the tomli checkout root; cibuildwheel runs this from a temp cwd so
-          # `import tomli` resolves to the installed compiled wheel, not ./src.
+          # setup.py reads TOMLI_USE_MYPYC=1 to compile via mypyc.
+          CIBW_ENVIRONMENT_PASS_LINUX: TOMLI_USE_MYPYC
+          TOMLI_USE_MYPYC: '1'
+          # Upstream's wheel test: run the bundled unittest suite.
           CIBW_TEST_COMMAND: python -m unittest discover --start-directory {project}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
