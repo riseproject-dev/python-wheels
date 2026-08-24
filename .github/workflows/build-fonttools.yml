@@ -26,6 +26,17 @@ env:
   # `inputs.version` is empty on pull_request events; default to 4.63.0 there.
   FONTTOOLS_VERSION: ${{ inputs.version || '4.63.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # fonttools pins Cython nowhere (setup_requires=["cython"], no [build-system]
+  # table), so a fresh build grabs the newest Cython. Cython 3.3.0 (2026-08-22)
+  # started enforcing PEP-484 argument annotations like `quads: List[List[Point]]`
+  # as strict runtime type checks; qu2cu passes a list-of-tuples there, so its
+  # compiled extension raises `TypeError: Expected list, got tuple` and 9 qu2cu
+  # tests fail. Upstream's 4.63.0 wheels (sdist dated 2026-05-14) were built with
+  # Cython 3.2.x, which ignores the annotation. Pin below 3.3.0 to reproduce
+  # upstream's release-era toolchain (validated: 3.2.4 and 3.2.9 both pass, 3.3.0
+  # fails - the bug reproduces on x86 too, it is not riscv64-specific). Revisit
+  # this ceiling when bumping FONTTOOLS_VERSION.
+  CYTHON_SPEC: 'cython<3.3.0'
 
 jobs:
   build_wheels:
@@ -68,9 +79,24 @@ jobs:
           # makes a compile failure a hard error - without it, setup.py silently
           # falls back to a pure-python wheel (see its cython_build_ext), which
           # would defeat the point of building here. This is exactly upstream's
-          # wheels.yml CIBW_ENVIRONMENT. Cython comes from setup_requires (public
-          # PyPI, pure-python), so no registry plumbing is needed for the build.
+          # wheels.yml CIBW_ENVIRONMENT.
           CIBW_ENVIRONMENT: FONTTOOLS_WITH_CYTHON=1
+          # Preinstall the pinned Cython into the build interpreter and turn off
+          # build isolation. Two reasons this is load-bearing: (1) setup.py only
+          # appends "cython" to setup_requires when it is *not* already importable,
+          # and that setup_requires fetch is an easy_install that ignores pip
+          # version specifiers - so the only way to control the Cython version is
+          # to have the pinned one already present and let setup.py's has_cython
+          # path find it; (2) --no-build-isolation makes the build use this
+          # preinstalled Cython instead of a fresh isolated env that would resolve
+          # to the latest again. Cython is a pure-python wheel on public PyPI, so
+          # no registry plumbing is needed. (This mirrors the gotcha-17 preinstall
+          # + no-build-isolation shape, here to pin a build *tool* rather than link
+          # a prebuilt dep wheel.) setuptools+wheel are installed alongside because
+          # --no-build-isolation stops pip from providing the build backend itself.
+          CIBW_BEFORE_BUILD: pip install "${CYTHON_SPEC}" setuptools wheel
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          CIBW_ENVIRONMENT_PASS_LINUX: CYTHON_SPEC
           # Test each wheel the way upstream's wheels.yml does: the py-cy-noextra
           # tox env asserts the extensions actually compiled
           # (`from fontTools.cu2qu.cu2qu import COMPILED; assert COMPILED`) and
