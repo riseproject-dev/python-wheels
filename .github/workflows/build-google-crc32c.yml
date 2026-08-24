@@ -1,0 +1,97 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/googleapis/python-crc32c/blob/v1.8.0/scripts/manylinux/build_on_centos.sh
+name: Build google-crc32c wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'google-crc32c version to build (git tag without leading v, e.g. 1.8.0)'
+        required: true
+        default: '1.8.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-google-crc32c.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.8.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  GOOGLE_CRC32C_VERSION: ${{ inputs.version || '1.8.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build google-crc32c ${{ inputs.version || '1.8.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout python-crc32c v${{ env.GOOGLE_CRC32C_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: googleapis/python-crc32c
+          ref: v${{ env.GOOGLE_CRC32C_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_BUILD_VERBOSITY: '1'
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Build libcrc32c into the default prefix so setup.py's -lcrc32c resolves.
+          # POLICY_VERSION_MINIMUM: the pinned crc32c still declares cmake_minimum 3.1.
+          CIBW_BEFORE_ALL_LINUX: >-
+            cmake -S {project}/google_crc32c -B /tmp/crc32c-build
+            -DCMAKE_BUILD_TYPE=Release
+            -DCRC32C_BUILD_TESTS=no
+            -DCRC32C_BUILD_BENCHMARKS=no
+            -DBUILD_SHARED_LIBS=yes
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.12
+            &&
+            cmake --build /tmp/crc32c-build --target install -j4
+            &&
+            ldconfig
+          # Force the C extension; without this setup.py silently ships a pure-Python
+          # wheel on any compile/link failure (gotcha 20).
+          CIBW_ENVIRONMENT: CRC32C_PURE_PYTHON=0
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: >-
+            python -c "import google_crc32c; assert google_crc32c.implementation == 'c', google_crc32c.implementation" &&
+            pytest -v {package}/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: google-crc32c-${{ env.GOOGLE_CRC32C_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish google-crc32c ${{ inputs.version || '1.8.0' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: google-crc32c-${{ env.GOOGLE_CRC32C_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
