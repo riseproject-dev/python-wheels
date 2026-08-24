@@ -92,10 +92,22 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
-      - name: Write build script
+      - name: Build Arrow C++ and pyarrow wheel
         run: |
-          mkdir -p output
-          cat > pyarrow_build.sh <<'PYARROW_BUILD_EOF'
+          mkdir -p output "$HOME/.cache/pyarrow-ccache"
+          docker run -i --rm \
+            -v "$PWD/arrow:/arrow" \
+            -v "$PWD/output:/output" \
+            -v "$HOME/.cache/pyarrow-ccache:/ccache" \
+            -e CCACHE_DIR=/ccache \
+            -e ARROW_VERSION="$PYARROW_VERSION" \
+            -e PIP_EXTRA_INDEX_URL \
+            -e ARROW_DATASET -e ARROW_ACERO -e ARROW_PARQUET \
+            -e PARQUET_REQUIRE_ENCRYPTION -e ARROW_ORC -e ARROW_SUBSTRAIT \
+            -e ARROW_FLIGHT -e ARROW_S3 -e ARROW_GCS -e ARROW_AZURE \
+            -e ARROW_HDFS -e ARROW_GANDIVA -e ARROW_JEMALLOC -e ARROW_MIMALLOC \
+            -e ARROW_WITH_OPENTELEMETRY -e ARROW_TENSORFLOW \
+            "$MANYLINUX_RISCV64_IMAGE" bash -s <<'PYARROW_BUILD_EOF'
           #!/usr/bin/env bash
           # Build Arrow C++ (bundled third-party deps) then the pyarrow wheel for
           # one interpreter (${{ matrix.python }}). Runs inside
@@ -247,24 +259,6 @@ jobs:
           ls -la /output
           PYARROW_BUILD_EOF
 
-      - name: Build Arrow C++ and pyarrow wheels
-        run: |
-          mkdir -p "$HOME/.cache/pyarrow-ccache"
-          docker run --rm \
-            -v "$PWD/arrow:/arrow" \
-            -v "$PWD/output:/output" \
-            -v "$PWD/pyarrow_build.sh:/pyarrow_build.sh:ro" \
-            -v "$HOME/.cache/pyarrow-ccache:/ccache" \
-            -e CCACHE_DIR=/ccache \
-            -e ARROW_VERSION="$PYARROW_VERSION" \
-            -e PIP_EXTRA_INDEX_URL \
-            -e ARROW_DATASET -e ARROW_ACERO -e ARROW_PARQUET \
-            -e PARQUET_REQUIRE_ENCRYPTION -e ARROW_ORC -e ARROW_SUBSTRAIT \
-            -e ARROW_FLIGHT -e ARROW_S3 -e ARROW_GCS -e ARROW_AZURE \
-            -e ARROW_HDFS -e ARROW_GANDIVA -e ARROW_JEMALLOC -e ARROW_MIMALLOC \
-            -e ARROW_WITH_OPENTELEMETRY -e ARROW_TENSORFLOW \
-            "$MANYLINUX_RISCV64_IMAGE" bash /pyarrow_build.sh
-
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           # One artifact per matrix job; the interpreter tag keeps parallel jobs
@@ -274,9 +268,17 @@ jobs:
           path: output/*.whl
           if-no-files-found: error
 
-      - name: Write test script
+      - name: Test pyarrow wheel
         run: |
-          cat > pyarrow_test.sh <<'PYARROW_TEST_EOF'
+          docker run -i --rm \
+            -v "$PWD/arrow:/arrow" \
+            -v "$PWD/output:/output" \
+            -e PIP_EXTRA_INDEX_URL \
+            -e ARROW_DATASET -e ARROW_ACERO -e ARROW_PARQUET \
+            -e PARQUET_REQUIRE_ENCRYPTION -e ARROW_ORC -e ARROW_SUBSTRAIT \
+            -e ARROW_FLIGHT -e ARROW_S3 -e ARROW_GCS -e ARROW_AZURE \
+            -e ARROW_HDFS -e ARROW_GANDIVA \
+            "$MANYLINUX_RISCV64_IMAGE" bash -s <<'PYARROW_TEST_EOF'
           #!/usr/bin/env bash
           # Test the repaired pyarrow wheel for one interpreter (${{ matrix.python }})
           # the way upstream's python_wheel_unix_test.sh does: import smoke test for
@@ -352,19 +354,6 @@ jobs:
           "$pybin" -c 'import pyarrow; pyarrow.create_library_symlinks()'
           "$pybin" -m pytest -r s --pyargs pyarrow
           PYARROW_TEST_EOF
-
-      - name: Test pyarrow wheels
-        run: |
-          docker run --rm \
-            -v "$PWD/arrow:/arrow" \
-            -v "$PWD/output:/output" \
-            -v "$PWD/pyarrow_test.sh:/pyarrow_test.sh:ro" \
-            -e PIP_EXTRA_INDEX_URL \
-            -e ARROW_DATASET -e ARROW_ACERO -e ARROW_PARQUET \
-            -e PARQUET_REQUIRE_ENCRYPTION -e ARROW_ORC -e ARROW_SUBSTRAIT \
-            -e ARROW_FLIGHT -e ARROW_S3 -e ARROW_GCS -e ARROW_AZURE \
-            -e ARROW_HDFS -e ARROW_GANDIVA \
-            "$MANYLINUX_RISCV64_IMAGE" bash /pyarrow_test.sh
 
   publish:
     name: Publish pyarrow ${{ inputs.version || '25.0.1' }} to GitLab
