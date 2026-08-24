@@ -1,0 +1,98 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/fonttools/fonttools/blob/4.63.0/.github/workflows/wheels.yml
+name: Build fonttools wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'fonttools version to build (git tag, e.g. 4.63.0)'
+        required: true
+        default: '4.63.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-fonttools.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '4.63.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 4.63.0 there.
+  FONTTOOLS_VERSION: ${{ inputs.version || '4.63.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Pin below Cython 3.3.0, which enforces PEP-484 arg annotations as strict type
+  # checks and breaks qu2cu; fonttools pins Cython nowhere, so a build grabs latest.
+  CYTHON_SPEC: 'cython<3.3.0'
+
+jobs:
+  build_wheels:
+    name: Build fonttools ${{ inputs.version || '4.63.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # Per-interpreter (not abi3): the extensions link the version-specific ABI.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      - name: Checkout fonttools ${{ env.FONTTOOLS_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: fonttools/fonttools
+          ref: ${{ env.FONTTOOLS_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BUILD_VERBOSITY: '1'
+          # Force the Cython extensions to compile (else setup.py ships a pure wheel).
+          CIBW_ENVIRONMENT: FONTTOOLS_WITH_CYTHON=1
+          # setup.py's setup_requires fetches Cython via easy_install (ignores pip
+          # pins), so preinstall the pinned one and disable isolation to use it.
+          CIBW_BEFORE_BUILD: pip install "${CYTHON_SPEC}" setuptools wheel
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          CIBW_ENVIRONMENT_PASS_LINUX: CYTHON_SPEC
+          # Upstream's wheels.yml test command: asserts extensions compiled, then
+          # runs the full suite with no optional extras (several lack riscv64 wheels).
+          CIBW_TEST_REQUIRES: tox
+          CIBW_TEST_COMMAND: "tox -c {package}/tox.ini -e py-cy-noextra --installpkg {wheel}"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fonttools-${{ env.FONTTOOLS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish fonttools ${{ inputs.version || '4.63.0' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: fonttools-${{ env.FONTTOOLS_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
