@@ -25,10 +25,6 @@ permissions:
 
 env:
   XGRAMMAR_VERSION: ${{ inputs.version || '0.2.4' }}
-  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
-  UV_INDEX_STRATEGY: unsafe-best-match
-  UV_ONLY_BINARY: ':all:'
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   build_wheels:
@@ -53,25 +49,15 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
-      - name: Install Python
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
-        with:
-          python-version: '3.12'
-          activate-environment: true
-          enable-cache: false
-
-      - name: Install cibuildwheel
-        run: uv pip install cibuildwheel
-
       - name: Build wheels
-        run: python -m cibuildwheel --output-dir wheelhouse
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
         env:
-          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
           # pyproject pins [tool.cibuildwheel.linux] archs to x86_64+aarch64;
           # override so this native riscv runner builds the riscv64 wheel.
           CIBW_ARCHS: riscv64
-          CIBW_SKIP: '*-musllinux_*'
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           # Override upstream's build-frontend = "build[uv]". cibuildwheel's audit
           # step creates a venv on the *host* runner (not in the container) and,
           # when the frontend is build[uv], insists on a host `uv` binary.
@@ -79,14 +65,12 @@ jobs:
           # (pip/virtualenv on the host) instead.
           CIBW_BUILD_FRONTEND: build
           # CIBW_ENVIRONMENT applies to both build and test phases.
-          # Point pip/uv at our registry so build-time deps (apache-tvm-ffi
-          # riscv64 wheel) and test-time deps resolve correctly.
+          # Point pip at our registry so build-time deps (apache-tvm-ffi riscv64
+          # wheel) and test-time deps resolve correctly.
           # Do NOT set ONLY_BINARY here: scikit-build-core itself is a build dep
           # that installs from sdist if needed.
           CIBW_ENVIRONMENT: >-
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            UV_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            UV_INDEX_STRATEGY=unsafe-best-match
           # Skip tests for cp314t: numpy, tokenizers and safetensors (runtime
           # deps pulled in via transformers) have no free-threaded riscv64
           # wheels on any index yet, so the test-install step fails. The wheel
@@ -95,9 +79,7 @@ jobs:
           # Test phase only: force wheels-only so a missing riscv64 wheel for a
           # heavy test dep (torch, tokenizers) fails fast instead of silently
           # kicking off a multi-hour source build on the runner.
-          CIBW_TEST_ENVIRONMENT: >-
-            PIP_ONLY_BINARY=:all:
-            UV_ONLY_BINARY=:all:
+          CIBW_TEST_ENVIRONMENT: "PIP_ONLY_BINARY=:all:"
           # Mirror upstream's test-command from pyproject.toml
           # (pytest {project}/tests -m "not hf_token_required"), but omit the
           # hf_token_required marker filter: conftest.py already auto-skips those
