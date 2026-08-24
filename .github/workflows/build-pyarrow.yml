@@ -80,8 +80,8 @@ jobs:
           - cp314-cp314
           - cp314-cp314t
     env:
-      # The build/test scripts loop over PYTHON_TAGS; here it's a single tag.
-      PYTHON_TAGS: ${{ matrix.python-tag }}
+      # The build/test scripts build+test this one interpreter.
+      PYTHON_TAG: ${{ matrix.python-tag }}
 
     steps:
       - name: Checkout apache/arrow apache-arrow-${{ env.PYARROW_VERSION }}
@@ -100,14 +100,15 @@ jobs:
           mkdir -p output
           cat > pyarrow_build.sh <<'PYARROW_BUILD_EOF'
           #!/usr/bin/env bash
-          # Build Arrow C++ once (bundled third-party deps) then a pyarrow wheel
-          # per Python. Runs inside quay.io/pypa/manylinux_2_39_riscv64 on a
-          # native riscv64 runner. Configuration comes from the environment
-          # (docker run -e); the defaults below are the safe riscv64 baseline.
+          # Build Arrow C++ (bundled third-party deps) then the pyarrow wheel for
+          # one interpreter ($PYTHON_TAG). Runs inside
+          # quay.io/pypa/manylinux_2_39_riscv64 on a native riscv64 runner.
+          # Configuration comes from the environment (docker run -e); the defaults
+          # below are the safe riscv64 baseline.
           set -euxo pipefail
 
           ARROW_VERSION="${ARROW_VERSION:?must be set, e.g. 25.0.1}"
-          PYTHON_TAGS="${PYTHON_TAGS:?space-separated /opt/python tags}"
+          PYTHON_TAG="${PYTHON_TAG:?/opt/python interpreter tag, e.g. cp312-cp312}"
           PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL:?riscv64 wheel registry index URL}"
 
           ARROW_DATASET="${ARROW_DATASET:-ON}"
@@ -134,7 +135,7 @@ jobs:
           # ninja and OpenSSL headers are not in the base image; add them.
           dnf install -y --setopt=install_weak_deps=False ninja-build openssl-devel
 
-          # --- 1. Build Arrow C++ ONCE into $DIST ---------------------------
+          # --- 1. Build Arrow C++ into $DIST --------------------------------
           mkdir -p "$BUILD"
           pushd "$BUILD"
           # All bundled deps are static (DEPENDENCY_USE_SHARED=OFF), but OpenSSL
@@ -211,7 +212,7 @@ jobs:
               exit 1
           fi
 
-          # --- 2. Build a wheel per Python against the shared C++ build ------
+          # --- 2. Build the wheel for $PYTHON_TAG against the C++ build ------
           export PYARROW_BUNDLE_ARROW_CPP=ON
           export ARROW_HOME="$DIST"
           export CMAKE_PREFIX_PATH="$DIST"
@@ -230,24 +231,21 @@ jobs:
           # Shallow checkout → setuptools_scm git-describe is unreliable; pin it.
           export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PYARROW="${ARROW_VERSION}"
 
+          pybin="/opt/python/${PYTHON_TAG}/bin/python"
+          echo "=== (${PYTHON_TAG}) Building pyarrow wheel ==="
+          # numpy and libcst have riscv64 wheels only in our registry; cython
+          # and the build frontends are pure-Python / build from sdist.
+          "$pybin" -m pip install -U --extra-index-url "$PIP_EXTRA_INDEX_URL" \
+              --only-binary=numpy,libcst "numpy>=2.0.0" "libcst>=1.8.6"
+          "$pybin" -m pip install -U "cython>=3.1" scikit-build-core setuptools_scm wheel build
           mkdir -p /output
-          for pytag in ${PYTHON_TAGS}; do
-              pybin="/opt/python/${pytag}/bin/python"
-              echo "=== ($pytag) Building pyarrow wheel ==="
-              # numpy and libcst have riscv64 wheels only in our registry; cython
-              # and the build frontends are pure-Python / build from sdist.
-              "$pybin" -m pip install -U --extra-index-url "$PIP_EXTRA_INDEX_URL" \
-                  --only-binary=numpy,libcst "numpy>=2.0.0" "libcst>=1.8.6"
-              "$pybin" -m pip install -U "cython>=3.1" scikit-build-core setuptools_scm wheel build
-              rm -rf "$ARROW_SRC/python/build" "$ARROW_SRC/python/dist" "$ARROW_SRC/python/_skbuild"
-              pushd "$ARROW_SRC/python"
-              "$pybin" -m build --wheel --no-isolation \
-                  -C build.verbose=true \
-                  -C cmake.build-type=release \
-                  -C cmake.args="-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF"
-              auditwheel repair --strip dist/pyarrow-*.whl -w /output
-              popd
-          done
+          pushd "$ARROW_SRC/python"
+          "$pybin" -m build --wheel --no-isolation \
+              -C build.verbose=true \
+              -C cmake.build-type=release \
+              -C cmake.args="-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF"
+          auditwheel repair --strip dist/pyarrow-*.whl -w /output
+          popd
 
           echo "=== Built wheels ==="
           ls -la /output
@@ -263,7 +261,7 @@ jobs:
             -v "$HOME/.cache/pyarrow-ccache:/ccache" \
             -e CCACHE_DIR=/ccache \
             -e ARROW_VERSION="$PYARROW_VERSION" \
-            -e PYTHON_TAGS \
+            -e PYTHON_TAG \
             -e PIP_EXTRA_INDEX_URL \
             -e ARROW_DATASET -e ARROW_ACERO -e ARROW_PARQUET \
             -e PARQUET_REQUIRE_ENCRYPTION -e ARROW_ORC -e ARROW_SUBSTRAIT \
@@ -285,13 +283,13 @@ jobs:
         run: |
           cat > pyarrow_test.sh <<'PYARROW_TEST_EOF'
           #!/usr/bin/env bash
-          # Test each repaired pyarrow wheel the way upstream's
-          # python_wheel_unix_test.sh does: import smoke test for enabled
-          # modules, then pytest --pyargs pyarrow with feature gating via
+          # Test the repaired pyarrow wheel for one interpreter ($PYTHON_TAG) the
+          # way upstream's python_wheel_unix_test.sh does: import smoke test for
+          # enabled modules, then pytest --pyargs pyarrow with feature gating via
           # PYARROW_TEST_* env. Runs inside the manylinux container.
           set -euxo pipefail
 
-          PYTHON_TAGS="${PYTHON_TAGS:?space-separated /opt/python tags}"
+          PYTHON_TAG="${PYTHON_TAG:?/opt/python interpreter tag, e.g. cp312-cp312}"
           PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL:?riscv64 wheel registry index URL}"
 
           ARROW_DATASET="${ARROW_DATASET:-ON}"
@@ -327,40 +325,38 @@ jobs:
           export ARROW_TEST_DATA="$ARROW_SRC/testing/data"
           export PARQUET_TEST_DATA="$ARROW_SRC/cpp/submodules/parquet-testing/data"
 
-          for pytag in ${PYTHON_TAGS}; do
-              pybin="/opt/python/${pytag}/bin/python"
-              echo "=== ($pytag) Testing pyarrow wheel ==="
-              "$pybin" -m pip install --extra-index-url "$PIP_EXTRA_INDEX_URL" \
-                  /output/pyarrow-*-"${pytag}"-*.whl
+          pybin="/opt/python/${PYTHON_TAG}/bin/python"
+          echo "=== (${PYTHON_TAG}) Testing pyarrow wheel ==="
+          "$pybin" -m pip install --extra-index-url "$PIP_EXTRA_INDEX_URL" \
+              /output/pyarrow-*-"${PYTHON_TAG}"-*.whl
 
-              # Import smoke test — always-on modules, then feature modules.
-              "$pybin" -c "import pyarrow, pyarrow.csv, pyarrow.json, pyarrow.dataset, pyarrow.fs, pyarrow._hdfs; print('pyarrow', pyarrow.__version__)"
-              [ "${ARROW_PARQUET}" = ON ]   && "$pybin" -c "import pyarrow.parquet"
-              [ "${ARROW_ORC}" = ON ]       && "$pybin" -c "import pyarrow.orc"
-              [ "${ARROW_SUBSTRAIT}" = ON ] && "$pybin" -c "import pyarrow.substrait"
-              [ "${ARROW_FLIGHT}" = ON ]    && "$pybin" -c "import pyarrow.flight"
-              [ "${ARROW_S3}" = ON ]        && "$pybin" -c "import pyarrow._s3fs"
-              [ "${ARROW_GCS}" = ON ]       && "$pybin" -c "import pyarrow._gcsfs"
+          # Import smoke test — always-on modules, then feature modules.
+          "$pybin" -c "import pyarrow, pyarrow.csv, pyarrow.json, pyarrow.dataset, pyarrow.fs, pyarrow._hdfs; print('pyarrow', pyarrow.__version__)"
+          [ "${ARROW_PARQUET}" = ON ]   && "$pybin" -c "import pyarrow.parquet"
+          [ "${ARROW_ORC}" = ON ]       && "$pybin" -c "import pyarrow.orc"
+          [ "${ARROW_SUBSTRAIT}" = ON ] && "$pybin" -c "import pyarrow.substrait"
+          [ "${ARROW_FLIGHT}" = ON ]    && "$pybin" -c "import pyarrow.flight"
+          [ "${ARROW_S3}" = ON ]        && "$pybin" -c "import pyarrow._s3fs"
+          [ "${ARROW_GCS}" = ON ]       && "$pybin" -c "import pyarrow._gcsfs"
 
-              # numpy/cffi have riscv64 wheels only in our registry; --only-binary
-              # keeps pip from attempting a source build if one is missing.
-              "$pybin" -m pip install -U --only-binary=numpy,cffi \
-                  --extra-index-url "$PIP_EXTRA_INDEX_URL" \
-                  pytest hypothesis cffi pytz packaging "numpy>=2.0.0"
-              # pandas may lack a free-threaded riscv64 wheel; --only-binary makes
-              # pip fail fast (instead of a doomed sdist build) so we can cleanly
-              # fall back to disabling the pandas-dependent tests.
-              if "$pybin" -m pip install -U --only-binary=pandas \
-                  --extra-index-url "$PIP_EXTRA_INDEX_URL" pandas; then
-                  export PYARROW_TEST_PANDAS=ON
-              else
-                  echo "WARNING: pandas has no riscv64 wheel for ${pytag}; disabling pandas tests."
-                  export PYARROW_TEST_PANDAS=OFF
-              fi
+          # numpy/cffi have riscv64 wheels only in our registry; --only-binary
+          # keeps pip from attempting a source build if one is missing.
+          "$pybin" -m pip install -U --only-binary=numpy,cffi \
+              --extra-index-url "$PIP_EXTRA_INDEX_URL" \
+              pytest hypothesis cffi pytz packaging "numpy>=2.0.0"
+          # pandas may lack a free-threaded riscv64 wheel; --only-binary makes
+          # pip fail fast (instead of a doomed sdist build) so we can cleanly
+          # fall back to disabling the pandas-dependent tests.
+          if "$pybin" -m pip install -U --only-binary=pandas \
+              --extra-index-url "$PIP_EXTRA_INDEX_URL" pandas; then
+              export PYARROW_TEST_PANDAS=ON
+          else
+              echo "WARNING: pandas has no riscv64 wheel for ${PYTHON_TAG}; disabling pandas tests."
+              export PYARROW_TEST_PANDAS=OFF
+          fi
 
-              "$pybin" -c 'import pyarrow; pyarrow.create_library_symlinks()'
-              "$pybin" -m pytest -r s --pyargs pyarrow
-          done
+          "$pybin" -c 'import pyarrow; pyarrow.create_library_symlinks()'
+          "$pybin" -m pytest -r s --pyargs pyarrow
           PYARROW_TEST_EOF
 
       - name: Test pyarrow wheels
@@ -369,7 +365,7 @@ jobs:
             -v "$PWD/arrow:/arrow" \
             -v "$PWD/output:/output" \
             -v "$PWD/pyarrow_test.sh:/pyarrow_test.sh:ro" \
-            -e PYTHON_TAGS \
+            -e PYTHON_TAG \
             -e PIP_EXTRA_INDEX_URL \
             -e ARROW_DATASET -e ARROW_ACERO -e ARROW_PARQUET \
             -e PARQUET_REQUIRE_ENCRYPTION -e ARROW_ORC -e ARROW_SUBSTRAIT \
