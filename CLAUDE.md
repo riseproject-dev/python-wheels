@@ -3,7 +3,7 @@
 Guidance for adding a new package's riscv64 wheel build to this repo. Written
 from the protobuf port; generalized so the next one is faster. Read the
 "Gotchas" section before you start — several cost a full CI cycle each (minutes
-for a simple package, hours for one that compiles a C++ world like pyarrow).
+for a simple package, hours for one that compiles a large C++ world).
 
 ## What this repo does
 
@@ -59,15 +59,19 @@ Two build shapes exist in the repo — pick based on the package:
   runs `cibuildwheel ./extracted`; job 3 publishes. cibuildwheel also accepts the
   sdist tarball directly as `package-dir` (it extracts internally), so you can skip
   the manual `tar zxf` (see `build-apache-tvm-ffi.yml`).
-- **build-from-checkout** (see `build-onnx.yml`, `build-xgrammar.yml`, `build-sentencepiece.yml`, `build-torchaudio.yml`):
+- **build-from-checkout** (see `build-onnx.yml`, `build-sentencepiece.yml`, `build-tiktoken.yml`, `build-fonttools.yml`):
   check out the upstream tag with submodules, then use `uses: pypa/cibuildwheel@<sha>` directly
   (no `setup-uv` / `uv pip install cibuildwheel` step needed — the action bundles its own
   Python). Pass `only: ${{ matrix.python }}-manylinux_riscv64` and feed native deps via
   `CIBW_ENVIRONMENT`/CMake, or a prebuilt dependency wheel from our registry via
-  `CIBW_BEFORE_BUILD` (torchaudio pulls `torch` this way — see gotcha 17).
+  `CIBW_BEFORE_BUILD` (see gotcha 17 for the dep-wheel pattern).
 
-When cibuildwheel doesn't fit, drive the manylinux container yourself with a
-plain **`docker run`** (see `build-torch.yml`, `build-pyarrow.yml`; gotcha 15).
+When cibuildwheel doesn't fit, drive the build container yourself. Two sub-shapes:
+- **`container:`** (see `build-torch.yml`): the GHA `container:` key on the job — works when the
+  build is a self-contained shell script inside a known image.
+- **`podman run` or `docker run`** (see `build-orjson.yml`): explicit container invocation on the
+  runner — used when the build script already lives in the upstream repo or when orjson-style
+  per-interpreter looping is needed. See gotcha 15 for the heavy C++ variant.
 
 The `publish` job is always the shared action — it dry-runs off `main`, so it's
 safe on PR branches:
@@ -125,9 +129,8 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
 5. **Identify native deps** the bdist needs at build time. Three cases: (a) none
    bundled → add `CIBW_BEFORE_BUILD` to build them in-container (cffi builds libffi
    that way); (b) the sdist bundles its C sources (protobuf bundles upb/utf8_range)
-   → no before-build needed; (c) the dep is another Python wheel we already ship
-   (torchaudio needs `torch`) → `pip install` it from our registry in
-   `CIBW_BEFORE_BUILD` (see gotcha 17).
+   → no before-build needed; (c) the dep is another Python wheel we already ship →
+   `pip install` it from our registry in `CIBW_BEFORE_BUILD` (see gotcha 17).
 
 6. **Wire up real testing** — mirror how upstream tests its wheels (gotcha 6).
 
@@ -230,8 +233,8 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
    - Use docker to run cibuildwheel on riscv64. For a heavy from-source C++ build
      (gotcha 15), a `cmake` *configure* under `--platform linux/riscv64` is a cheap
      proxy that catches flag/dep errors without the full multi-hour compile.
-   - **Run cibuildwheel under QEMU** on a non-riscv host (the whole torchaudio
-     build+smoke loop was done on aarch64 this way):
+   - **Run cibuildwheel under QEMU** on a non-riscv host (a full build+smoke loop
+     can be validated this way on an aarch64 machine):
      - Needs `qemu-riscv64` binfmt with the **`F` (fix-binary) flag** —
        `grep flags /proc/sys/fs/binfmt_misc/qemu-riscv64` should show `F`; that's
        what lets QEMU run *inside* the manylinux container.
@@ -252,12 +255,14 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
       today's latest semver-compatible versions. With `#![deny(warnings)]`, a newly
       deprecated API in a bumped dep becomes a hard compile error. Fix: pin the
       offending crate to the version upstream released against *before* building the
-      sdist, so maturin captures it into the bundled lock:
+      sdist, so maturin captures it into the bundled lock (see `build-fastuuid.yml`):
       ```bash
       cargo update -p <crate> --precise <version>
       python -m build --sdist
       ```
-      Diagnose: grep CI log for `use of deprecated` / `could not compile`.
+      Diagnose: grep CI log for `use of deprecated` / `could not compile`. If upstream
+      commits `Cargo.lock` into the repo (litellm does), this trap doesn't apply —
+      the lock is bundled into the sdist verbatim.
     - **Rust toolchain must be installed inside the manylinux container.** If the
       project's `pyproject.toml` has a `[tool.cibuildwheel] before-all` that does this
       (tiktoken does), it's inherited automatically. Otherwise supply it yourself:
@@ -275,6 +280,10 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
     PyPI wheel names: `…-cp312-abi3-…` + `…-cp314-cp314t-…` = exactly two builds (same
     shape as onnx/hf-xet, and apache-tvm-ffi). Don't add cp313/cp314 — they'd duplicate
     the cp312 abi3 wheel.
+    Some packages ship **only** the abi3 wheel with no cp314t variant (litellm: upstream
+    publishes `cp310-abi3` only, no free-threaded wheel). In that case the matrix
+    collapses to a single build; run it on cp312 (our minimum) and test-reuse on
+    cp313/cp314 via cibuildwheel's `find_compatible_wheel` logic.
 
 12. **Scope an env var to one phase with the right knob.** `CIBW_ENVIRONMENT` applies to
     **both** build and test; `CIBW_TEST_ENVIRONMENT` is test-only. This bites with
@@ -305,15 +314,15 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
     rootdir while your path is absolute. Verify locally by running pytest from a
     different cwd and checking the deselected count is non-zero.
 
-15. **Heavy C++ ports (pyarrow): drive `docker run` yourself, build the C++ once.**
+15. **Heavy C++ ports: drive the build container yourself, build the C++ once.**
     When the extension links a big C++ tree whose sources sit *beside* the Python
-    package (pyarrow = Cython over Arrow C++ in a sibling `cpp/`), cibuildwheel's
-    copy-the-package-dir model can't see them, and the manylinux image ships no
-    Node so a `container:` job can't run JS actions. So: checkout + upload-artifact
-    on the host, and a `docker run` step that bind-mounts the source and an
-    inline-written build script into `$MANYLINUX_RISCV64_IMAGE`. Build the C++ lib
-    **once** into a prefix, then loop the interpreters (`for pytag in $PYTHON_TAGS`)
-    building only the bindings against it — don't rebuild C++ per Python.
+    package (e.g. Cython over a sibling `cpp/`), cibuildwheel's copy-the-package-dir
+    model can't see them, and the manylinux image ships no Node so a `container:` job
+    can't run JS actions. So: checkout + upload-artifact on the host, and a `docker run`
+    step that bind-mounts the source and an inline-written build script into
+    `$MANYLINUX_RISCV64_IMAGE`. Build the C++ lib **once** into a prefix, then loop the
+    interpreters (`for pytag in $PYTHON_TAGS`) building only the bindings against it —
+    don't rebuild C++ per Python.
     - **Feed dep sources from the OS, not vcpkg.** Upstreams that vcpkg their deps
       rely on a binary cache baked into *their* x86/arm images; the riscv image has
       none. Use the project's from-source path instead (Arrow:
@@ -339,17 +348,17 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
     that one dep shared (`-DARROW_OPENSSL_USE_SHARED=ON`), keep the rest static.
     Signature: configure succeeds, **generate** fails on a missing imported target.
 
-17. **Building an extension that links another wheel we ship (the torch /
-    domain-library pattern; see `build-torchaudio.yml`).** torchaudio's extension
-    links `libtorch`/`libc10`/… which come from the `torch` wheel — a 130MB riscv64
-    wheel that exists only on our registry. Four pieces have to line up:
+17. **Building an extension that links another wheel we ship (the dep-wheel pattern).**
+    When an extension links shared libraries from a heavy Python wheel that only exists
+    on our registry (e.g. a domain library linking `libtorch`/`libc10`), four pieces
+    have to line up:
     - **Install the dep from our registry in `CIBW_BEFORE_BUILD`:**
-      `pip install --only-binary=:all: torch>=2.11 setuptools wheel ninja`.
+      `pip install --only-binary=:all: <dep>>=<min_ver> setuptools wheel ninja`.
       `--only-binary=:all:` is load-bearing — without it pip silently falls back to
       building the dep from source in-container when public PyPI has no riscv64
-      wheel. Prefer a range (`torch>=2.11`) over a hard pin so it resolves to
-      whatever's latest on the registry (torchaudio targets torch's stable ABI and
-      pins no version at runtime; confirm your package's compat policy).
+      wheel. Prefer a range (`<dep>>=<ver>`) over a hard pin so it resolves to
+      whatever's latest on the registry (confirm your package's compat policy with
+      the dep first).
     - **Pass `PIP_EXTRA_INDEX_URL` into the build**, not just the test step:
       `CIBW_ENVIRONMENT: … PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/`,
       so the dep and its own deps resolve from our registry inside the container.
@@ -358,22 +367,21 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
       `CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"`. Otherwise the build
       env can't see the preinstalled dep.
     - **Exclude the dep's shared libs from the auditwheel repair**, or auditwheel
-      vendors all of them in (a 1.2MB wheel becomes ~130MB). Find the list by
-      unzipping the dep wheel and listing `*/lib/*.so`; then:
+      vendors all of them in (a small wheel balloons to the full dep size). Find the
+      list by unzipping the dep wheel and listing `*/lib/*.so`; then:
       ```
       CIBW_REPAIR_WHEEL_COMMAND: >-
         auditwheel repair -w {dest_dir} {wheel}
-        --exclude libtorch.so --exclude libtorch_cpu.so --exclude libtorch_python.so
-        --exclude libtorch_global_deps.so --exclude libc10.so
-        --exclude libgomp.so.1 --exclude libgfortran.so.5 --exclude libopenblas.so.0
+        --exclude lib<dep_a>.so --exclude lib<dep_b>.so ...
       ```
-      This mirrors how upstream ships domain-library wheels — libtorch is assumed
-      present at runtime (torch is imported first and loads them `RTLD_GLOBAL`).
+      This mirrors how upstream ships domain-library wheels — the dep's libs are
+      assumed present at runtime (the dep is imported first and loads them
+      `RTLD_GLOBAL`).
     - Note: `py_limited_api=True` does **not** guarantee a single abi3 wheel here.
-      torchaudio sets it but still needs a per-CPython build because it links the
-      version-specific `libtorch_python.so`. Check what the extension links before
-      trimming the matrix (build-onnx.yml *does* get one abi3 wheel; torchaudio
-      doesn't).
+      An extension may set it but still need a per-CPython build because it links a
+      version-specific shared lib from the dep. Check what the extension links before
+      trimming the matrix (build-onnx.yml *does* get one abi3 wheel by avoiding
+      version-specific links).
 
 18. **The wheel-filename version is canonical; keep three places in sync** (see
     PR #246, which fixed broken doc links from exactly this). Whatever version ends
@@ -384,11 +392,126 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
     links patches as the literal path `patches/{name}/{version}`, so a mismatch is a
     404. torch ships a **local segment** (`2.13.0+cpu`, pytorch's CPU-index
     convention) so its patches live under `patches/torch/2.13.0+cpu/`.
-    **Match upstream's own PyPI filename convention:** torchaudio ships plain
-    `2.11.0` on PyPI, so we build plain `2.11.0` (`BUILD_VERSION=<tag>`), no `+cpu`.
+    **Match upstream's own PyPI filename convention** — if a package ships plain
+    `X.Y.Z` on PyPI, build plain `X.Y.Z` (no `+cpu` or other local segment).
     Decoupled from all this: the nightly `check_versions.py` compares the workflow's
     `version:` **input default** against PyPI — keep that the plain upstream version,
     regardless of any local segment `BUILD_VERSION` adds.
+
+19. **mypyc-compiled wheels behind a `flit_core` pyproject (the tomli pattern; see
+    `build-tomli.yml`).** Some pure-Python-*looking* packages publish
+    mypyc-compiled binary wheels (a `.so` per module, big speedup) *alongside* the
+    `py3-none-any` wheel — so riscv64 is worth building even though the sdist is
+    pure Python. The compiled build is **opt-in and gated on an env var**, and the
+    committed `pyproject.toml` declares `flit_core` (which can only make
+    pure-Python wheels). Tell-tale: a `setup.py` sits next to the flit pyproject
+    doing `if os.environ.get("<PKG>_USE_MYPYC")=="1": ext_modules =
+    mypycify(glob("src/**/*.py"))`, plus a `scripts/use_setuptools.py`-style helper
+    that rewrites `[build-system]` to `setuptools + mypy[mypyc]`. Two things must
+    both happen to get compiled wheels — reproduce upstream's release job exactly:
+    - **Run upstream's backend-swap script on the host** before cibuildwheel
+      (`uv pip install -r scripts/requirements.txt && python
+      scripts/use_setuptools.py`). It edits the checkout's `pyproject.toml` in
+      place; the host interpreter (setup-uv) only runs the swap — the wheels
+      compile in-container.
+    - **Forward the mypyc env var into the container:**
+      `CIBW_ENVIRONMENT_PASS_LINUX: <PKG>_USE_MYPYC` + `<PKG>_USE_MYPYC: '1'`.
+      Without the pass-through the container build silently produces a *pure-Python*
+      wheel (mypycify never fires) — you'd ship a no-op.
+    There's usually **no `[tool.cibuildwheel]` table**, so supply
+    `CIBW_MANYLINUX_RISCV64_IMAGE` and the test command yourself from the upstream
+    release workflow's `env:` (grep `.github/workflows/*.y*ml` for `mypyc` /
+    `use_setuptools` / `cibuildwheel`). Matrix is **per-interpreter**
+    `[cp312, cp313, cp314, cp314t]` — mypyc wheels are *not* abi3 (confirm: PyPI
+    shows separate `cpXY-cpXY` wheels, no `-abi3-` tag). The manylinux image already
+    has the C toolchain + `Python.h`, so no `before-build`/`dnf` is needed — but a
+    bare host (WSL) that lacks Python dev headers *will* fail the local `python -m
+    build` with `fatal error: Python.h`; validate under QEMU/docker instead, where
+    the container has them.
+
+20. **Optional C extensions silently degrade to a mislabeled pure-Python wheel
+    (the SQLAlchemy pattern; see `build-sqlalchemy.yml`).** When `setup.py` declares
+    `Extension(..., optional=True)` — or gates it on an env var, SQLAlchemy uses
+    `optional=not REQUIRE_SQLALCHEMY_CEXT` over 5 `.pyx` modules — a Cython/compile
+    failure is **swallowed**: setuptools finishes and ships a wheel that still
+    carries the `cp3XX-…-manylinux_riscv64` tag but contains **no `.so`**, just the
+    pure-Python fallback. The job goes green and the "riscv64 wheel" is worthless
+    (identical to the `py3-none-any` PyPI already ships). Fix: force the project's
+    "require extension" knob so any build failure hard-fails — SQLAlchemy:
+    `CIBW_ENVIRONMENT: REQUIRE_SQLALCHEMY_CEXT=1` (build phase needs it). **Always
+    verify the `.so` is actually in the output wheel** (`unzip -l wheel.whl | grep
+    '\.so$'`) — a green build is not proof. (These packages are pure-Python +
+    *optional* speedups, so PyPI ships both a `py3-none-any` wheel *and*
+    per-interpreter compiled wheels; the compiled riscv64 ones are the value-add,
+    and the matrix is per-interpreter `[cp312, cp313, cp314, cp314t]`, not abi3.)
+
+21. **`python -s` (no-user-site) does NOT propagate to pytest-xdist workers.** A
+    project whose `test-command` runs `python -s -m pytest -n4` to force importing
+    the *installed* wheel over a local source tree has a latent bug on riscv:
+    the `-s` flag sets `sys.flags.no_user_site=1` on the **controller**, but execnet
+    respawns each `-n` worker **without** it (`no_user_site=0`). SQLAlchemy's
+    `test/conftest.py` injects `{project}/lib` onto `sys.path` *unless* no_user_site
+    is set — so on the workers pytest imports the **pure-Python source** (no `.so`),
+    not the compiled wheel. Combined with gotcha 20's `REQUIRE_*_CEXT` (whose test
+    plugin then asserts the extension is present) every worker hard-crashes at
+    `pytest_sessionstart` → `RuntimeError: Unexpectedly no active workers available`.
+    Fix: set no-user-site as the **`PYTHONNOUSERSITE=1` env var**, which xdist *does*
+    inherit into workers, and scope it to the test phase (`CIBW_TEST_ENVIRONMENT`,
+    gotcha 12) so it can't touch the build. Verify arch-independently on any host: a
+    5-line `conftest.py` that prints `sys.flags.no_user_site` from inside a test,
+    run under `python -s -m pytest -n2` — the workers report `0`, the env var flips
+    them to `1`.
+
+22. **A release-branch checkout can carry `[egg_info] tag_build = dev` in
+    `setup.cfg`, poisoning the wheel version with `.dev0`** (the SQLAlchemy variant
+    of gotcha 3/18). `python -m build --sdist` from the tag then emits
+    `<pkg>-<ver>.dev0.tar.gz`, and every wheel built from it inherits `.dev0` —
+    breaking the wheel-filename-is-canonical rule (gotcha 18: docs YAML `version:`
+    and `patches/<pkg>/<version>/` path both derive from it, and the nightly PyPI
+    check compares against the clean upstream version). The released PyPI sdist has
+    the tag blank because upstream strips it at release; do the same before building:
+    ```bash
+    sed -i '/tag_build = dev/d' setup.cfg
+    ```
+    Tell-tale: your locally-built sdist version has a `.dev0`/`.devN` suffix the PyPI
+    sdist doesn't. Distinct from setuptools_scm dev suffixes (missing tag history —
+    fix with `SETUPTOOLS_SCM_PRETEND_VERSION`, gotcha 3); this one is a literal line
+    in `setup.cfg`. Confirm by diffing your sdist's `setup.cfg` against the released
+    PyPI sdist's.
+
+23. **A floating *build tool* can break code the release-era tool compiled fine
+    (the Cython version-drift variant of gotcha 10; see `build-fonttools.yml`).**
+    Gotcha 10 is about a package's *dependencies* floating; the same trap applies to
+    the **build tool itself**. A project that compiles Cython extensions but pins
+    Cython nowhere (`setup_requires=["cython"]`, no `[build-system]` table) will, on a
+    fresh build, pull whatever Cython is newest *today* — often much newer than what
+    upstream cut their wheels with. A newer Cython can change codegen semantics and
+    break unchanged source. fonttools tripped this: **Cython 3.3.0** began enforcing
+    PEP-484 argument annotations like `def f(quads: List[List[Point]])` as **strict
+    runtime type checks** in compiled code; `qu2cu` passes a list-of-tuples there, so
+    the compiled extension raised `TypeError: Expected list, got tuple` — 9 test
+    failures on **all** interpreters. Cython 3.2.x (current when the release shipped)
+    ignored the annotation.
+    - **Looks like a port bug but reproduces on x86** — it's toolchain drift, not
+      arch. Diagnose by comparing the package's sdist date against the tool's release
+      timeline (`curl -s https://pypi.org/pypi/Cython/json`), then reproduce natively
+      across the boundary versions (`pip install "cython==X"`) — far faster than QEMU
+      and proves it's arch-independent.
+    - **Fix mirrors the gotcha-17 preinstall shape, applied to a build tool:** pin
+      below the breaking version (`CYTHON_SPEC: 'cython<3.3.0'`), preinstall it, and
+      disable build isolation so the build actually uses it:
+      ```yaml
+      CIBW_BEFORE_BUILD: pip install "${CYTHON_SPEC}" setuptools wheel
+      CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+      CIBW_ENVIRONMENT_PASS_LINUX: CYTHON_SPEC
+      ```
+      **Preinstall + `--no-build-isolation` is load-bearing, a pip pin alone is not:**
+      `setup.py` appends `"cython"` to `setup_requires` only when Cython isn't already
+      importable, and that fetch is an **easy_install that ignores pip specifiers** —
+      so the pinned Cython must already be present for `setup.py`'s `has_cython` path
+      to use it, and `--no-build-isolation` stops a fresh isolated env re-resolving to
+      newest. Quote the spec so the shell doesn't read `<` as redirection. Revisit the
+      ceiling when bumping the package version.
 
 ## Environment / auth notes (this WSL setup)
 
