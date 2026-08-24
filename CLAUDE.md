@@ -51,6 +51,15 @@ Newer workflows start with an SPDX header:
 # SPDX-License-Identifier: MIT
 ```
 
+**Comment sparingly — these workflows are read as reference.** Reserve comments
+for the genuinely non-obvious: a deviation from the upstream recipe, a riscv-only
+workaround, a load-bearing env var. Do **not** narrate standard steps (checkout,
+Python install, the build matrix) or write multi-line explanations of what a line
+does — a reader mines our workflows to copy patterns, and verbose commentary makes
+it look like we customized far more than we did. Keep each note to a single "why"
+line; if a comment restates the YAML it's on, cut it. (PR #308 review: the tomli
+workflow's per-step paragraphs were trimmed for exactly this.)
+
 Two build shapes exist in the repo — pick based on the package:
 
 - **sdist → bdist** (see `build-cffi.yml`, `build-protobuf.yml`): job 1 produces
