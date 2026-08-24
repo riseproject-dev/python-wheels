@@ -37,8 +37,6 @@ env:
   # riscv64 wheels for build/test deps (numpy, libcst, pandas, ...) that public
   # PyPI doesn't ship; consumed by pip inside the container.
   PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
-  # Space-separated /opt/python interpreter tags to build+test, in one C++ build.
-  PYTHON_TAGS: "cp312-cp312 cp313-cp313 cp314-cp314 cp314-cp314t"
 
   # ── Arrow feature set (single source of truth) ──────────────────────────────
   # ON now. COMPUTE/CSV/JSON/FILESYSTEM are always-on in the build script.
@@ -66,9 +64,24 @@ env:
 
 jobs:
   build_wheels:
-    name: Build pyarrow ${{ inputs.version || '25.0.1' }} manylinux_riscv64
+    name: Build pyarrow ${{ inputs.version || '25.0.1' }} ${{ matrix.python-tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 1440  # 24h — Arrow C++ + all deps built from source on riscv64
+    strategy:
+      fail-fast: false
+      # One job per interpreter. Arrow C++ is rebuilt in each (the ccache mount
+      # below means parallel jobs sharing a runner still hit warm cache), so a
+      # single Python failing doesn't block the others and the four run in
+      # roughly the wall-clock of one.
+      matrix:
+        python-tag:
+          - cp312-cp312
+          - cp313-cp313
+          - cp314-cp314
+          - cp314-cp314t
+    env:
+      # The build/test scripts loop over PYTHON_TAGS; here it's a single tag.
+      PYTHON_TAGS: ${{ matrix.python-tag }}
 
     steps:
       - name: Checkout apache/arrow apache-arrow-${{ env.PYARROW_VERSION }}
@@ -261,10 +274,10 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          # The -wheels- segment lets publish-wheels' artifact-pattern
-          # (pyarrow-<ver>-*-manylinux_riscv64) select this single artifact,
-          # which holds every Python's wheel from the one build job.
-          name: pyarrow-${{ env.PYARROW_VERSION }}-wheels-manylinux_riscv64
+          # One artifact per matrix job; the python-tag keeps parallel jobs from
+          # clobbering each other's upload. publish-wheels' artifact-pattern
+          # (pyarrow-<ver>-*-manylinux_riscv64) + merge-multiple recombines them.
+          name: pyarrow-${{ env.PYARROW_VERSION }}-${{ matrix.python-tag }}-manylinux_riscv64
           path: output/*.whl
           if-no-files-found: error
 
