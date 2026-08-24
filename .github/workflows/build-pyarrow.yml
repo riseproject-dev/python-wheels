@@ -64,7 +64,7 @@ env:
 
 jobs:
   build_wheels:
-    name: Build pyarrow ${{ inputs.version || '25.0.1' }} ${{ matrix.python-tag }}-manylinux_riscv64
+    name: Build pyarrow ${{ inputs.version || '25.0.1' }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 1440  # 24h — Arrow C++ + all deps built from source on riscv64
     strategy:
@@ -74,14 +74,11 @@ jobs:
       # single Python failing doesn't block the others and the four run in
       # roughly the wall-clock of one.
       matrix:
-        python-tag:
+        python:
           - cp312-cp312
           - cp313-cp313
           - cp314-cp314
           - cp314-cp314t
-    env:
-      # The build/test scripts build+test this one interpreter.
-      PYTHON_TAG: ${{ matrix.python-tag }}
 
     steps:
       - name: Checkout apache/arrow apache-arrow-${{ env.PYARROW_VERSION }}
@@ -101,14 +98,13 @@ jobs:
           cat > pyarrow_build.sh <<'PYARROW_BUILD_EOF'
           #!/usr/bin/env bash
           # Build Arrow C++ (bundled third-party deps) then the pyarrow wheel for
-          # one interpreter ($PYTHON_TAG). Runs inside
-          # quay.io/pypa/manylinux_2_39_riscv64 on a native riscv64 runner.
-          # Configuration comes from the environment (docker run -e); the defaults
-          # below are the safe riscv64 baseline.
+          # one interpreter (${{ matrix.python }}). Runs inside
+          # quay.io/pypa/manylinux_2_39_riscv64 on a native riscv64 runner. Feature
+          # flags come from the environment (docker run -e); the defaults below are
+          # the safe riscv64 baseline.
           set -euxo pipefail
 
           ARROW_VERSION="${ARROW_VERSION:?must be set, e.g. 25.0.1}"
-          PYTHON_TAG="${PYTHON_TAG:?/opt/python interpreter tag, e.g. cp312-cp312}"
           PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL:?riscv64 wheel registry index URL}"
 
           ARROW_DATASET="${ARROW_DATASET:-ON}"
@@ -212,7 +208,7 @@ jobs:
               exit 1
           fi
 
-          # --- 2. Build the wheel for $PYTHON_TAG against the C++ build ------
+          # --- 2. Build the wheel for ${{ matrix.python }} against the C++ build ---
           export PYARROW_BUNDLE_ARROW_CPP=ON
           export ARROW_HOME="$DIST"
           export CMAKE_PREFIX_PATH="$DIST"
@@ -231,8 +227,8 @@ jobs:
           # Shallow checkout → setuptools_scm git-describe is unreliable; pin it.
           export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PYARROW="${ARROW_VERSION}"
 
-          pybin="/opt/python/${PYTHON_TAG}/bin/python"
-          echo "=== (${PYTHON_TAG}) Building pyarrow wheel ==="
+          pybin="/opt/python/${{ matrix.python }}/bin/python"
+          echo "=== (${{ matrix.python }}) Building pyarrow wheel ==="
           # numpy and libcst have riscv64 wheels only in our registry; cython
           # and the build frontends are pure-Python / build from sdist.
           "$pybin" -m pip install -U --extra-index-url "$PIP_EXTRA_INDEX_URL" \
@@ -261,7 +257,6 @@ jobs:
             -v "$HOME/.cache/pyarrow-ccache:/ccache" \
             -e CCACHE_DIR=/ccache \
             -e ARROW_VERSION="$PYARROW_VERSION" \
-            -e PYTHON_TAG \
             -e PIP_EXTRA_INDEX_URL \
             -e ARROW_DATASET -e ARROW_ACERO -e ARROW_PARQUET \
             -e PARQUET_REQUIRE_ENCRYPTION -e ARROW_ORC -e ARROW_SUBSTRAIT \
@@ -272,10 +267,10 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          # One artifact per matrix job; the python-tag keeps parallel jobs from
-          # clobbering each other's upload. publish-wheels' artifact-pattern
+          # One artifact per matrix job; the interpreter tag keeps parallel jobs
+          # from clobbering each other's upload. publish-wheels' artifact-pattern
           # (pyarrow-<ver>-*-manylinux_riscv64) + merge-multiple recombines them.
-          name: pyarrow-${{ env.PYARROW_VERSION }}-${{ matrix.python-tag }}-manylinux_riscv64
+          name: pyarrow-${{ env.PYARROW_VERSION }}-${{ matrix.python }}-manylinux_riscv64
           path: output/*.whl
           if-no-files-found: error
 
@@ -283,13 +278,12 @@ jobs:
         run: |
           cat > pyarrow_test.sh <<'PYARROW_TEST_EOF'
           #!/usr/bin/env bash
-          # Test the repaired pyarrow wheel for one interpreter ($PYTHON_TAG) the
-          # way upstream's python_wheel_unix_test.sh does: import smoke test for
+          # Test the repaired pyarrow wheel for one interpreter (${{ matrix.python }})
+          # the way upstream's python_wheel_unix_test.sh does: import smoke test for
           # enabled modules, then pytest --pyargs pyarrow with feature gating via
           # PYARROW_TEST_* env. Runs inside the manylinux container.
           set -euxo pipefail
 
-          PYTHON_TAG="${PYTHON_TAG:?/opt/python interpreter tag, e.g. cp312-cp312}"
           PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL:?riscv64 wheel registry index URL}"
 
           ARROW_DATASET="${ARROW_DATASET:-ON}"
@@ -325,10 +319,10 @@ jobs:
           export ARROW_TEST_DATA="$ARROW_SRC/testing/data"
           export PARQUET_TEST_DATA="$ARROW_SRC/cpp/submodules/parquet-testing/data"
 
-          pybin="/opt/python/${PYTHON_TAG}/bin/python"
-          echo "=== (${PYTHON_TAG}) Testing pyarrow wheel ==="
+          pybin="/opt/python/${{ matrix.python }}/bin/python"
+          echo "=== (${{ matrix.python }}) Testing pyarrow wheel ==="
           "$pybin" -m pip install --extra-index-url "$PIP_EXTRA_INDEX_URL" \
-              /output/pyarrow-*-"${PYTHON_TAG}"-*.whl
+              /output/pyarrow-*-"${{ matrix.python }}"-*.whl
 
           # Import smoke test — always-on modules, then feature modules.
           "$pybin" -c "import pyarrow, pyarrow.csv, pyarrow.json, pyarrow.dataset, pyarrow.fs, pyarrow._hdfs; print('pyarrow', pyarrow.__version__)"
@@ -351,7 +345,7 @@ jobs:
               --extra-index-url "$PIP_EXTRA_INDEX_URL" pandas; then
               export PYARROW_TEST_PANDAS=ON
           else
-              echo "WARNING: pandas has no riscv64 wheel for ${PYTHON_TAG}; disabling pandas tests."
+              echo "WARNING: pandas has no riscv64 wheel for ${{ matrix.python }}; disabling pandas tests."
               export PYARROW_TEST_PANDAS=OFF
           fi
 
@@ -365,7 +359,6 @@ jobs:
             -v "$PWD/arrow:/arrow" \
             -v "$PWD/output:/output" \
             -v "$PWD/pyarrow_test.sh:/pyarrow_test.sh:ro" \
-            -e PYTHON_TAG \
             -e PIP_EXTRA_INDEX_URL \
             -e ARROW_DATASET -e ARROW_ACERO -e ARROW_PARQUET \
             -e PARQUET_REQUIRE_ENCRYPTION -e ARROW_ORC -e ARROW_SUBSTRAIT \
