@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/fonttools/fonttools/blob/4.63.0/.github/workflows/wheels.yml
+name: Build fonttools wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'fonttools version to build (git tag, e.g. 4.63.0)'
+        required: true
+        default: '4.63.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-fonttools.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '4.63.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 4.63.0 there.
+  FONTTOOLS_VERSION: ${{ inputs.version || '4.63.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build fonttools ${{ inputs.version || '4.63.0' }} ${{ matrix.build }}
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # fonttools ships per-interpreter compiled wheels on PyPI (the six Cython
+        # extensions link the version-specific CPython ABI, so no abi3 collapse -
+        # cf. gotcha 11), plus a py3-none-any pure fallback. We build the compiled
+        # riscv64 wheel for the repo-standard interpreter set; pip already falls
+        # back to the pure wheel on riscv64, this adds the speedups. cp314t (free-
+        # threaded) is a real upstream target - setup.py sets Cython's
+        # freethreading_compatible=True for py>=3.13.
+        build:
+          - "cp312-manylinux_riscv64"
+          - "cp313-manylinux_riscv64"
+          - "cp314-manylinux_riscv64"
+          - "cp314t-manylinux_riscv64"
+
+    steps:
+      - name: Checkout fonttools ${{ env.FONTTOOLS_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: fonttools/fonttools
+          ref: ${{ env.FONTTOOLS_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.build }}
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BUILD_VERBOSITY: '1'
+          # FONTTOOLS_WITH_CYTHON=1 forces the six Cython extensions to compile and
+          # makes a compile failure a hard error - without it, setup.py silently
+          # falls back to a pure-python wheel (see its cython_build_ext), which
+          # would defeat the point of building here. This is exactly upstream's
+          # wheels.yml CIBW_ENVIRONMENT. Cython comes from setup_requires (public
+          # PyPI, pure-python), so no registry plumbing is needed for the build.
+          CIBW_ENVIRONMENT: FONTTOOLS_WITH_CYTHON=1
+          # Test each wheel the way upstream's wheels.yml does: the py-cy-noextra
+          # tox env asserts the extensions actually compiled
+          # (`from fontTools.cu2qu.cu2qu import COMPILED; assert COMPILED`) and
+          # then runs the full pytest suite (Tests + fontTools) with no optional
+          # extras - the extras (lxml, scipy, ...) pull too large a dependency
+          # matrix and several lack riscv64 wheels. All test deps (tox, pytest,
+          # pytest-randomly) are pure-python wheels on public PyPI, so again no
+          # registry is needed. Tests ship in the checkout we hand cibuildwheel,
+          # so {package} == {project} == /project here (no subdir; cf. gotcha 5).
+          CIBW_TEST_REQUIRES: tox
+          CIBW_TEST_COMMAND: "tox -c {package}/tox.ini -e py-cy-noextra --installpkg {wheel}"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fonttools-${{ env.FONTTOOLS_VERSION }}-${{ matrix.build }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish fonttools ${{ inputs.version || '4.63.0' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: fonttools-${{ env.FONTTOOLS_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
