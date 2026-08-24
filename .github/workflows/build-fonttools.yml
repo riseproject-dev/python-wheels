@@ -26,16 +26,8 @@ env:
   # `inputs.version` is empty on pull_request events; default to 4.63.0 there.
   FONTTOOLS_VERSION: ${{ inputs.version || '4.63.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-  # fonttools pins Cython nowhere (setup_requires=["cython"], no [build-system]
-  # table), so a fresh build grabs the newest Cython. Cython 3.3.0 (2026-08-22)
-  # started enforcing PEP-484 argument annotations like `quads: List[List[Point]]`
-  # as strict runtime type checks; qu2cu passes a list-of-tuples there, so its
-  # compiled extension raises `TypeError: Expected list, got tuple` and 9 qu2cu
-  # tests fail. Upstream's 4.63.0 wheels (sdist dated 2026-05-14) were built with
-  # Cython 3.2.x, which ignores the annotation. Pin below 3.3.0 to reproduce
-  # upstream's release-era toolchain (validated: 3.2.4 and 3.2.9 both pass, 3.3.0
-  # fails - the bug reproduces on x86 too, it is not riscv64-specific). Revisit
-  # this ceiling when bumping FONTTOOLS_VERSION.
+  # Pin below Cython 3.3.0, which enforces PEP-484 arg annotations as strict type
+  # checks and breaks qu2cu; fonttools pins Cython nowhere, so a build grabs latest.
   CYTHON_SPEC: 'cython<3.3.0'
 
 jobs:
@@ -46,13 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # fonttools ships per-interpreter compiled wheels on PyPI (the six Cython
-        # extensions link the version-specific CPython ABI, so no abi3 collapse -
-        # cf. gotcha 11), plus a py3-none-any pure fallback. We build the compiled
-        # riscv64 wheel for the repo-standard interpreter set; pip already falls
-        # back to the pure wheel on riscv64, this adds the speedups. cp314t (free-
-        # threaded) is a real upstream target - setup.py sets Cython's
-        # freethreading_compatible=True for py>=3.13.
+        # Per-interpreter (not abi3): the extensions link the version-specific ABI.
         python:
           - "cp312"
           - "cp313"
@@ -75,37 +61,15 @@ jobs:
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           CIBW_BUILD_VERBOSITY: '1'
-          # FONTTOOLS_WITH_CYTHON=1 forces the six Cython extensions to compile and
-          # makes a compile failure a hard error - without it, setup.py silently
-          # falls back to a pure-python wheel (see its cython_build_ext), which
-          # would defeat the point of building here. This is exactly upstream's
-          # wheels.yml CIBW_ENVIRONMENT.
+          # Force the Cython extensions to compile (else setup.py ships a pure wheel).
           CIBW_ENVIRONMENT: FONTTOOLS_WITH_CYTHON=1
-          # Preinstall the pinned Cython into the build interpreter and turn off
-          # build isolation. Two reasons this is load-bearing: (1) setup.py only
-          # appends "cython" to setup_requires when it is *not* already importable,
-          # and that setup_requires fetch is an easy_install that ignores pip
-          # version specifiers - so the only way to control the Cython version is
-          # to have the pinned one already present and let setup.py's has_cython
-          # path find it; (2) --no-build-isolation makes the build use this
-          # preinstalled Cython instead of a fresh isolated env that would resolve
-          # to the latest again. Cython is a pure-python wheel on public PyPI, so
-          # no registry plumbing is needed. (This mirrors the gotcha-17 preinstall
-          # + no-build-isolation shape, here to pin a build *tool* rather than link
-          # a prebuilt dep wheel.) setuptools+wheel are installed alongside because
-          # --no-build-isolation stops pip from providing the build backend itself.
+          # setup.py's setup_requires fetches Cython via easy_install (ignores pip
+          # pins), so preinstall the pinned one and disable isolation to use it.
           CIBW_BEFORE_BUILD: pip install "${CYTHON_SPEC}" setuptools wheel
           CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
           CIBW_ENVIRONMENT_PASS_LINUX: CYTHON_SPEC
-          # Test each wheel the way upstream's wheels.yml does: the py-cy-noextra
-          # tox env asserts the extensions actually compiled
-          # (`from fontTools.cu2qu.cu2qu import COMPILED; assert COMPILED`) and
-          # then runs the full pytest suite (Tests + fontTools) with no optional
-          # extras - the extras (lxml, scipy, ...) pull too large a dependency
-          # matrix and several lack riscv64 wheels. All test deps (tox, pytest,
-          # pytest-randomly) are pure-python wheels on public PyPI, so again no
-          # registry is needed. Tests ship in the checkout we hand cibuildwheel,
-          # so {package} == {project} == /project here (no subdir; cf. gotcha 5).
+          # Upstream's wheels.yml test command: asserts extensions compiled, then
+          # runs the full suite with no optional extras (several lack riscv64 wheels).
           CIBW_TEST_REQUIRES: tox
           CIBW_TEST_COMMAND: "tox -c {package}/tox.ini -e py-cy-noextra --installpkg {wheel}"
 
