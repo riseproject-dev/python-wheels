@@ -1,0 +1,218 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on upstream's own wheel build/publish setup:
+#   https://github.com/pyca/bcrypt/blob/5.0.0/.github/workflows/wheel-builder.yml
+#
+# bcrypt 5.0.0 is a PyO3/Rust extension built with **setuptools-rust** (NOT
+# maturin, unlike build-fastuuid/build-litellm): pyproject's build-backend is
+# setuptools.build_meta and the crate lives in src/_bcrypt (PyO3 0.26, MSRV
+# 1.74). The sdist bundles a committed Cargo.lock (crate versions are pinned,
+# so no floating-dep resolve - contrast build-fastuuid) plus tests/, and a plain
+# `python -m build --sdist` from the checkout reproduces the PyPI sdist
+# byte-for-byte. bcrypt has zero runtime deps and links no C libraries (no
+# OpenSSL), so the riscv64 build needs only a Rust toolchain in-container.
+#
+# Wheel shapes upstream publishes on PyPI: abi3 (cp38-abi3, cp39-abi3) + a
+# free-threaded build per new CPython (cp313t, cp314t). We collapse to the two
+# that matter for RISE (see the two build jobs below).
+name: Build bcrypt wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'bcrypt version to build (git tag, e.g. 5.0.0)'
+        required: true
+        default: '5.0.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-bcrypt.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '5.0.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 5.0.0 there.
+  BCRYPT_VERSION: ${{ inputs.version || '5.0.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # cibuildwheel does NOT set setuptools-rust's --py-limited-api itself, and
+  # bcrypt's ext has py-limited-api = "auto" (which only turns on the pyo3
+  # abi3-pyNN feature when the bdist_wheel flag is passed). Without this the
+  # build produces per-interpreter cpNN-cpNN wheels; with it, one cpXX-abi3
+  # wheel. We pin the floor to cp312 - RISE's minimum published Python - so the
+  # single wheel loads on 3.12/3.13/3.14 (we intentionally do NOT mirror
+  # upstream's 3.8/3.9 floors). See the build_abi3 job.
+  ABI3_FLOOR: cp312
+
+jobs:
+  # Build the sdist ourselves from an upstream checkout (never consume the
+  # prebuilt PyPI sdist). bcrypt's sdist is arch-independent and self-contained:
+  # `python -m build --sdist` just packages the source tree + the committed
+  # src/_bcrypt/Cargo.lock + tests/, and needs no Rust toolchain (setuptools-rust
+  # only invokes cargo at *wheel* build time). Build it once on ubuntu-latest
+  # (see CLAUDE.md gotcha 4); both riscv64 wheel jobs consume this one sdist.
+  build_sdist:
+    name: Build bcrypt ${{ inputs.version || '5.0.0' }} sdist
+    runs-on: ubuntu-latest
+    outputs:
+      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
+      package_version: ${{ steps.sdist.outputs.package_version }}
+    steps:
+      - name: Checkout bcrypt ${{ env.BCRYPT_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: pyca/bcrypt
+          ref: ${{ env.BCRYPT_VERSION }}
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build sdist
+        id: sdist
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          uv pip install build twine
+          python -m build --sdist --outdir dist
+          twine check dist/*
+
+          sdist_name="$(ls dist)"
+          {
+            echo "sdist_name=${sdist_name}"
+            echo "package_version=$(echo "${sdist_name}" | sed -En 's/bcrypt-(.+)\.tar\.gz/\1/p')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ steps.sdist.outputs.sdist_name }}
+          path: dist/${{ steps.sdist.outputs.sdist_name }}
+          if-no-files-found: error
+
+  # abi3 build: one cp312-abi3 wheel, loadable on every non-free-threaded
+  # CPython >= 3.12. Selecting cp312/cp313/cp314 does NOT rebuild three times -
+  # with the abi3 floor pinned, setuptools-rust tags the first build cp312-abi3
+  # and cibuildwheel's find_compatible_wheel reuses it for cp313/cp314 ("Skipping
+  # build step...") while STILL running the test phase on each. So we emit ONE
+  # wheel but get genuine load-and-test coverage on 3.12/3.13/3.14.
+  build_abi3:
+    needs: [build_sdist]
+    name: Build bcrypt ${{ inputs.version || '5.0.0' }} cp312-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ needs.build_sdist.outputs.sdist_name }}
+          path: dist/
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          # cibuildwheel accepts the sdist tarball directly: it extracts it and
+          # builds from the self-contained tree (Cargo.lock + tests/ bundled).
+          package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: 'cp312-* cp313-* cp314-*'
+          # rustup.rs has no riscv64 musl host toolchain (same reason
+          # build-fastuuid/build-tiktoken skip musllinux).
+          CIBW_SKIP: '*-musllinux_*'
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BUILD_VERBOSITY: '1'
+          # Turn the setuptools-rust ext (py-limited-api = "auto") into an abi3
+          # build pinned at the cp312 floor. cibuildwheel forwards config-settings
+          # to the build frontend; --build-option=--py-limited-api=cp312 reaches
+          # bdist_wheel, which makes setuptools-rust add pyo3/abi3-py312 and tag
+          # the wheel cp312-abi3.
+          CIBW_CONFIG_SETTINGS: --build-option=--py-limited-api=${{ env.ABI3_FLOOR }}
+          # No Rust in the manylinux image, and bcrypt ships no [tool.cibuildwheel]
+          # before-all, so install the toolchain in-container and put cargo on
+          # PATH for the build. bcrypt's MSRV is 1.74 with no nightly features, so
+          # default stable rustup satisfies it.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT: 'PATH="$PATH:$HOME/.cargo/bin"'
+          # Test each interpreter the way upstream does - run the bundled pytest
+          # suite (147 tests). pytest is bcrypt's only test dep and is a pure-Python
+          # wheel on public PyPI, so no registry plumbing is needed. Tests live
+          # inside the sdist tree cibuildwheel builds from, so reference them via
+          # {package} (the extracted sdist dir), NOT {project} - see gotcha 5.
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: pytest -q {package}/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bcrypt-${{ env.BCRYPT_VERSION }}-cp312-abi3-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  # Free-threaded build: abi3 has no stable ABI for free-threaded CPython, so
+  # this is a per-interpreter wheel with NO --py-limited-api (pyo3 auto-disables
+  # its abi3 feature under Py_GIL_DISABLED). Upstream ships cp313t + cp314t, but
+  # the manylinux_2_39_riscv64 image has no cp313t interpreter (it has cp314t /
+  # cp315t), so cp314t is the only free-threaded target we can build here.
+  build_freethreaded:
+    needs: [build_sdist]
+    name: Build bcrypt ${{ inputs.version || '5.0.0' }} cp314t-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ needs.build_sdist.outputs.sdist_name }}
+          path: dist/
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: 'cp314t-*'
+          CIBW_SKIP: '*-musllinux_*'
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BUILD_VERBOSITY: '1'
+          # NB: no CIBW_CONFIG_SETTINGS here - a free-threaded wheel must not be
+          # built abi3 (pyo3 refuses abi3 + Py_GIL_DISABLED).
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT: 'PATH="$PATH:$HOME/.cargo/bin"'
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: pytest -q {package}/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bcrypt-${{ env.BCRYPT_VERSION }}-cp314t-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish bcrypt ${{ inputs.version || '5.0.0' }} to GitLab
+    needs: [build_sdist, build_abi3, build_freethreaded]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: bcrypt-${{ needs.build_sdist.outputs.package_version }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
