@@ -65,6 +65,11 @@ Two build shapes exist in the repo — pick based on the package:
   Python). Pass `only: ${{ matrix.python }}-manylinux_riscv64` and feed native deps via
   `CIBW_ENVIRONMENT`/CMake, or a prebuilt dependency wheel from our registry via
   `CIBW_BEFORE_BUILD` (see gotcha 17 for the dep-wheel pattern).
+  Prefer the `build-fastuuid.yml`/`build-fonttools.yml` matrix convention: entries are
+  **bare interpreter tags** (`python: ["cp312", "cp313", "cp314", "cp314t"]`) and the
+  `-manylinux_riscv64` suffix is appended at each use site (job `name:`, cibuildwheel
+  `only:`, artifact `name:`) — cleaner than embedding the full `cp312-manylinux_riscv64`
+  tag in the matrix (the older `build-onnx.yml` `matrix.build` style).
 
 When cibuildwheel doesn't fit, drive the build container yourself. Two sub-shapes:
 - **`container:`** (see `build-torch.yml`): the GHA `container:` key on the job — works when the
@@ -249,7 +254,12 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
        validate the import in a raw `docker run --platform linux/riscv64 …`
        container — far quicker than a full cibuildwheel rebuild to re-run tests.
 
-10. **Rust/PyO3 (maturin) packages — three traps.**
+10. **Rust/PyO3 packages (maturin *or* setuptools-rust) — traps.** Two build
+    backends show up: **maturin** (fastuuid, litellm, tiktoken, hf-xet) and
+    **setuptools-rust** (bcrypt, and the whole pyca/cryptography family —
+    `build-backend = setuptools.build_meta`, crate wired via
+    `[[tool.setuptools-rust.ext-modules]]`). The toolchain/musl traps below apply
+    to both; the abi3 mechanism differs (see gotcha 11).
     - **Floating deps in a locally-built sdist.** If upstream gitignores `Cargo.lock`
       (common for libraries), a fresh `python -m build --sdist` re-resolves crates to
       today's latest semver-compatible versions. With `#![deny(warnings)]`, a newly
@@ -270,8 +280,10 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
       and `CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"`. rustup provisions a
       native `riscv64gc-unknown-linux-gnu` toolchain in the container.
     - **musllinux can't build** — rustup.rs ships no riscv64 musl toolchain. Restrict
-      `CIBW_BUILD` to `*-manylinux_riscv64`. PyO3 extensions are generally not abi3, so
-      the matrix is per-interpreter `[cp312, cp313, cp314, cp314t]`.
+      `CIBW_BUILD` to `*-manylinux_riscv64` (or `CIBW_SKIP: '*-musllinux_*'`). Whether
+      the matrix is per-interpreter `[cp312, cp313, cp314, cp314t]` or collapses to
+      `[cpXY-abi3, cp3Nt]` depends on whether the extension is built abi3 — see
+      gotcha 11, which covers both maturin and setuptools-rust.
 
 11. **abi3 wheels collapse the matrix.** If `pyproject.toml` sets `wheel.py-api = "cpXY"`
     (or otherwise builds abi3/limited-API), one `cpXY` build loads on every newer
@@ -284,6 +296,25 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
     publishes `cp310-abi3` only, no free-threaded wheel). In that case the matrix
     collapses to a single build; run it on cp312 (our minimum) and test-reuse on
     cp313/cp314 via cibuildwheel's `find_compatible_wheel` logic.
+    - **maturin abi3 is a pyproject/Cargo feature; setuptools-rust abi3 is a
+      build-time *flag* you must inject.** For maturin the abi3 tag comes from
+      `wheel.py-api`/the `pyo3/abi3-pyNN` crate feature — set once, inherited. But
+      **setuptools-rust** projects (bcrypt, pyca/cryptography) commonly set
+      `py-limited-api = "auto"` on the ext, which only turns on abi3 **when
+      `bdist_wheel` is passed `--py-limited-api=cpNN`** — and *cibuildwheel does not
+      set that itself*. So a plain cibuildwheel run of such a project yields
+      per-interpreter `cpNN-cpNN` wheels despite the "auto"; you must inject the flag:
+      `CIBW_CONFIG_SETTINGS: --build-option=--py-limited-api=cp312`. It works *with*
+      build isolation (setuptools-rust comes from `build-system.requires`), so no
+      `--no-build-isolation` needed. Verify locally: build once with the flag (→
+      `cpNN-abi3`) and once without (→ `cpNN-cpNN`). The abi3 + free-threaded split
+      then needs **two build configs, not one matrix**: the abi3 job passes the flag
+      and selects `cp312-* cp313-* cp314-*` (one wheel, reused+tested on each); the
+      free-threaded job passes **no** flag and selects `cp314t-*` (pyo3 auto-disables
+      abi3 under `Py_GIL_DISABLED`, so it can't be forced). See `build-bcrypt.yml`.
+      Heads-up: the `manylinux_2_39_riscv64` image ships cp39–cp315 incl. cp314t/cp315t
+      but **no cp313t**, so cp314t is the only free-threaded target even when upstream
+      also publishes cp313t.
 
 12. **Scope an env var to one phase with the right knob.** `CIBW_ENVIRONMENT` applies to
     **both** build and test; `CIBW_TEST_ENVIRONMENT` is test-only. This bites with
