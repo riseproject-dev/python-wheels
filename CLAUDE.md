@@ -28,7 +28,7 @@ name, repo, version, upstream build docs — come from the invoking prompt):
 
 ## Anatomy of a build-<pkg>.yml
 
-Standard triggers and env (copy from an existing workflow):
+Standard triggers (copy from an existing workflow):
 
 ```yaml
 on:
@@ -37,13 +37,13 @@ on:
       version: { description: '<pkg> version/tag', required: true, default: '<latest stable>' }
   pull_request:
     paths: ['.github/workflows/build-<pkg>.yml']   # CI runs when you edit the workflow itself
-
-env:
-  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
-  UV_INDEX_STRATEGY: unsafe-best-match
-  UV_ONLY_BINARY: ':all:'
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 ```
+
+UV env vars (`UV_EXTRA_INDEX_URL`, `UV_INDEX_STRATEGY`, `UV_ONLY_BINARY`) are **only** needed
+if the workflow has steps that actually invoke `uv` (e.g. an sdist-build job on `ubuntu-latest`
+that uses `setup-uv`). For pure cibuildwheel build-from-checkout workflows with no `uv` steps,
+skip them entirely — pass the registry to the container via
+`CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/` instead.
 
 Newer workflows start with an SPDX header:
 ```
@@ -59,8 +59,12 @@ Two build shapes exist in the repo — pick based on the package:
   runs `cibuildwheel ./extracted`; job 3 publishes. cibuildwheel also accepts the
   sdist tarball directly as `package-dir` (it extracts internally), so you can skip
   the manual `tar zxf` (see `build-apache-tvm-ffi.yml`).
-- **build-from-checkout** (see `build-onnx.yml`): job runs `cibuildwheel` directly
-  on an upstream checkout, feeding native deps via `CIBW_ENVIRONMENT`/CMake.
+- **build-from-checkout** (see `build-onnx.yml`, `build-xgrammar.yml`, `build-sentencepiece.yml`, `build-torchaudio.yml`):
+  check out the upstream tag with submodules, then use `uses: pypa/cibuildwheel@<sha>` directly
+  (no `setup-uv` / `uv pip install cibuildwheel` step needed — the action bundles its own
+  Python). Pass `only: ${{ matrix.python }}-manylinux_riscv64` and feed native deps via
+  `CIBW_ENVIRONMENT`/CMake, or a prebuilt dependency wheel from our registry via
+  `CIBW_BEFORE_BUILD` (torchaudio pulls `torch` this way — see gotcha 17).
 
 When cibuildwheel doesn't fit, drive the manylinux container yourself with a
 plain **`docker run`** (see `build-torch.yml`, `build-pyarrow.yml`; gotcha 15).
@@ -118,10 +122,12 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
 4. **Map the git tag to the Python version** (see gotcha 3). Take the tag as the
    workflow input; derive `package_version` from the built sdist filename.
 
-5. **Identify native deps** the bdist needs at build time. If none are bundled in
-   the sdist, add `CIBW_BEFORE_BUILD` to build them in-container (cffi builds libffi
-   that way). If the sdist bundles its C sources (protobuf bundles upb/utf8_range),
-   no before-build is needed.
+5. **Identify native deps** the bdist needs at build time. Three cases: (a) none
+   bundled → add `CIBW_BEFORE_BUILD` to build them in-container (cffi builds libffi
+   that way); (b) the sdist bundles its C sources (protobuf bundles upb/utf8_range)
+   → no before-build needed; (c) the dep is another Python wheel we already ship
+   (torchaudio needs `torch`) → `pip install` it from our registry in
+   `CIBW_BEFORE_BUILD` (see gotcha 17).
 
 6. **Wire up real testing** — mirror how upstream tests its wheels (gotcha 6).
 
@@ -224,6 +230,21 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
    - Use docker to run cibuildwheel on riscv64. For a heavy from-source C++ build
      (gotcha 15), a `cmake` *configure* under `--platform linux/riscv64` is a cheap
      proxy that catches flag/dep errors without the full multi-hour compile.
+   - **Run cibuildwheel under QEMU** on a non-riscv host (the whole torchaudio
+     build+smoke loop was done on aarch64 this way):
+     - Needs `qemu-riscv64` binfmt with the **`F` (fix-binary) flag** —
+       `grep flags /proc/sys/fs/binfmt_misc/qemu-riscv64` should show `F`; that's
+       what lets QEMU run *inside* the manylinux container.
+     - Needs **cibuildwheel ≥ 3** (4.2.0 works) — older versions don't know the
+       `manylinux_riscv64` arch and error out. `uv tool install cibuildwheel` may
+       fetch a stale one; check `--print-build-identifiers --archs riscv64`.
+     - Fetch a riscv64 wheel on a non-riscv host to inspect it with plain
+       `pip download --platform manylinux_2_39_riscv64 --python-version 313
+       --implementation cp --abi cp313 --only-binary=:all: <pkg>` (`uv pip
+       download` does not exist).
+     - Iterate fast: first pass with `CIBW_TEST_SKIP="*"` (build only), then
+       validate the import in a raw `docker run --platform linux/riscv64 …`
+       container — far quicker than a full cibuildwheel rebuild to re-run tests.
 
 10. **Rust/PyO3 (maturin) packages — three traps.**
     - **Floating deps in a locally-built sdist.** If upstream gitignores `Cargo.lock`
@@ -317,6 +338,57 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
     cascading through everything that links SSL (bundled gRPC, parquet). Fix: force
     that one dep shared (`-DARROW_OPENSSL_USE_SHARED=ON`), keep the rest static.
     Signature: configure succeeds, **generate** fails on a missing imported target.
+
+17. **Building an extension that links another wheel we ship (the torch /
+    domain-library pattern; see `build-torchaudio.yml`).** torchaudio's extension
+    links `libtorch`/`libc10`/… which come from the `torch` wheel — a 130MB riscv64
+    wheel that exists only on our registry. Four pieces have to line up:
+    - **Install the dep from our registry in `CIBW_BEFORE_BUILD`:**
+      `pip install --only-binary=:all: torch>=2.11 setuptools wheel ninja`.
+      `--only-binary=:all:` is load-bearing — without it pip silently falls back to
+      building the dep from source in-container when public PyPI has no riscv64
+      wheel. Prefer a range (`torch>=2.11`) over a hard pin so it resolves to
+      whatever's latest on the registry (torchaudio targets torch's stable ABI and
+      pins no version at runtime; confirm your package's compat policy).
+    - **Pass `PIP_EXTRA_INDEX_URL` into the build**, not just the test step:
+      `CIBW_ENVIRONMENT: … PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/`,
+      so the dep and its own deps resolve from our registry inside the container.
+    - **Disable build isolation** when `setup.py` imports the dep at module top and
+      declares no `[build-system]` table (legacy setuptools):
+      `CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"`. Otherwise the build
+      env can't see the preinstalled dep.
+    - **Exclude the dep's shared libs from the auditwheel repair**, or auditwheel
+      vendors all of them in (a 1.2MB wheel becomes ~130MB). Find the list by
+      unzipping the dep wheel and listing `*/lib/*.so`; then:
+      ```
+      CIBW_REPAIR_WHEEL_COMMAND: >-
+        auditwheel repair -w {dest_dir} {wheel}
+        --exclude libtorch.so --exclude libtorch_cpu.so --exclude libtorch_python.so
+        --exclude libtorch_global_deps.so --exclude libc10.so
+        --exclude libgomp.so.1 --exclude libgfortran.so.5 --exclude libopenblas.so.0
+      ```
+      This mirrors how upstream ships domain-library wheels — libtorch is assumed
+      present at runtime (torch is imported first and loads them `RTLD_GLOBAL`).
+    - Note: `py_limited_api=True` does **not** guarantee a single abi3 wheel here.
+      torchaudio sets it but still needs a per-CPython build because it links the
+      version-specific `libtorch_python.so`. Check what the extension links before
+      trimming the matrix (build-onnx.yml *does* get one abi3 wheel; torchaudio
+      doesn't).
+
+18. **The wheel-filename version is canonical; keep three places in sync** (see
+    PR #246, which fixed broken doc links from exactly this). Whatever version ends
+    up in the `.whl` filename (driven by `BUILD_VERSION`) must match, byte for byte:
+    (1) the wheel filename, (2) the `docs/packages/<pkg>.yaml` `version:` key
+    (auto-populated by `update_doc.py` from the wheel), and (3) the
+    `patches/<pkg>/<version>/` directory name — `docs/.../generate_packages_doc.py`
+    links patches as the literal path `patches/{name}/{version}`, so a mismatch is a
+    404. torch ships a **local segment** (`2.13.0+cpu`, pytorch's CPU-index
+    convention) so its patches live under `patches/torch/2.13.0+cpu/`.
+    **Match upstream's own PyPI filename convention:** torchaudio ships plain
+    `2.11.0` on PyPI, so we build plain `2.11.0` (`BUILD_VERSION=<tag>`), no `+cpu`.
+    Decoupled from all this: the nightly `check_versions.py` compares the workflow's
+    `version:` **input default** against PyPI — keep that the plain upstream version,
+    regardless of any local segment `BUILD_VERSION` adds.
 
 ## Environment / auth notes (this WSL setup)
 
