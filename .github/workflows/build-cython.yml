@@ -4,10 +4,9 @@
 # This workflow is based on the `build_wheels` job in:
 # https://github.com/cython/cython/blob/3.3.0/.github/workflows/wheels.yml
 #
-# Cython is self-hosting: setup.py compiles Cython's own modules with the
-# in-tree Cython, so no external build tool is needed. Upstream ships
-# per-interpreter compiled wheels (cp39-cp315) plus a py3-none-any fallback,
-# but no riscv64 -- which every source build of a Cython-using package needs.
+# Cython is self-hosting (setup.py compiles its own modules with the in-tree
+# Cython), so no external build tool is needed. It ships per-interpreter
+# compiled wheels + a py3-none-any fallback on PyPI, but no riscv64.
 name: Build cython wheels (riscv64)
 
 on:
@@ -20,6 +19,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/build-cython.yml'
+      - 'patches/cython/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.version || '3.3.0' }}-${{ github.head_ref || github.run_id }}
@@ -37,14 +37,12 @@ jobs:
   build_wheels:
     name: Build cython ${{ inputs.version || '3.3.0' }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
+    timeout-minutes: 600
     strategy:
       fail-fast: false
       matrix:
-        # Per-interpreter (not abi3), matching upstream's primary-platform wheels.
-        # No cp314t: setup.py disables self-compilation under Py_GIL_DISABLED (a
-        # compiled Cython would force the GIL back on), so a free-threaded build
-        # would silently ship the pure-Python fallback.
+        # No cp314t: setup.py disables self-compilation under Py_GIL_DISABLED, so
+        # a free-threaded build would silently ship the pure-Python fallback.
         python: ["cp312", "cp313", "cp314"]
 
     steps:
@@ -55,30 +53,16 @@ jobs:
           ref: ${{ env.CYTHON_VERSION }}
           persist-credentials: false
 
-      # Staged into the checkout root so cibuildwheel copies it under {package}.
-      # Upstream's wheel workflow only runs twine/abi3audit, not the (huge) test
-      # suite; this asserts the self-compiled .so shipped (a silent failure ships
-      # the pure-Python fallback) and that the wheel works as a compiler.
-      - name: Stage wheel test
-        run: |
-          cat > testwheel.py <<'EOF'
-          import sys, tempfile, subprocess, os
-          import Cython
-          from Cython.Compiler import Scanning
-          assert Scanning.__file__.endswith(".so"), \
-              "expected compiled .so, got %r (pure-Python fallback)" % Scanning.__file__
-          print("Cython", Cython.__version__, "compiled:", Scanning.__file__)
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
 
-          with tempfile.TemporaryDirectory() as d:
-              with open(os.path.join(d, "greet.pyx"), "w") as f:
-                  f.write("def hi():\n    cdef int n = 41\n    return n + 1\n")
-              subprocess.run([sys.executable, "-m", "Cython.Build.Cythonize",
-                              "-i", "greet.pyx"], cwd=d, check=True)
-              subprocess.run([sys.executable, "-c",
-                              "import greet; assert greet.hi() == 42"],
-                             cwd=d, check=True)
-          print("cythonize + compile + import OK")
-          EOF
+      # Adds a riscv64 [tool.cibuildwheel] override; without it the build inherits
+      # upstream's x86 CFLAGS (-march=core2) and the C compile fails.
+      - name: Patch cython source
+        run: git apply python-wheels/patches/cython/${{ env.CYTHON_VERSION }}/*.patch
 
       - name: Build wheels
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
@@ -87,10 +71,14 @@ jobs:
           only: ${{ matrix.python }}-manylinux_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # cythonize -i needs a build backend; the manylinux base interpreter
-          # ships neither setuptools nor distutils (dropped in 3.12).
+          # Upstream's own suite (Tools/ci-run.sh), C and C++ backends. Copy in only
+          # runtests.py + tests/ (not the source Cython/) so it imports the installed
+          # wheel, not the checkout's pure-Python source (gotcha 21).
           CIBW_TEST_REQUIRES: setuptools
-          CIBW_TEST_COMMAND: python {package}/testwheel.py
+          CIBW_TEST_COMMAND: >-
+            cp -r {package}/runtests.py {package}/tests . &&
+            python runtests.py -vv --no-code-style --no-cleanup
+            -x Debugger --backends=c,cpp -j$(nproc) --work-dir=TEST_TMP
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
