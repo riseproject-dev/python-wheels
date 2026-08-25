@@ -48,17 +48,37 @@ jobs:
           ref: ${{ env.RUAMEL_YAML_CLIB_VERSION }}
           persist-credentials: false
 
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # The extension compiles in libyaml, whose MIT terms want the notice to
+      # travel with the binary; upstream's wheel carries only its own LICENSE.
+      - name: Patch ruamel.yaml.clib source
+        run: |
+          git apply python-wheels/patches/ruamel-yaml-clib/${{ env.RUAMEL_YAML_CLIB_VERSION }}/00*.patch
+
       # Upstream ships no test suite; exercise the extension the way ruamel.yaml uses it.
       - name: Stage smoke test
         run: |
           mkdir -p tests
           cat > tests/test_clib.py <<'EOF'
+          import importlib.metadata
           import io
 
           import ruamel.yaml
           from ruamel.yaml.cyaml import __yaml_lib
 
           assert __yaml_lib == 'clib', __yaml_lib
+
+          licenses = sorted(
+              str(path).rsplit('/', 1)[-1]
+              for path in importlib.metadata.files('ruamel-yaml-clib')
+              if '.dist-info/licenses/' in str(path)
+          )
+          assert licenses == ['LICENSE', 'LICENSE.libyaml'], licenses
 
           yaml = ruamel.yaml.YAML(typ='safe', pure=False)
           assert yaml.Parser.__name__ == 'CParser', yaml.Parser
