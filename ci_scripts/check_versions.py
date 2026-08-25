@@ -17,6 +17,7 @@ import re
 import subprocess
 import sys
 import os
+import time
 from typing import Dict, List, Optional
 from packaging import version
 from pathlib import Path
@@ -49,40 +50,49 @@ def read_packages() -> List[str]:
     return packages
 
 
-def get_registry_latest_version(package: str) -> Optional[str]:
-    """Get the latest version available in the riscv64 registry."""
-    try:
-        result = subprocess.run([
-            "pip", "index", "versions", package,
-            "--index-url", REGISTRY_URL,
-            "--platform", "manylinux_2_34_riscv64",
-            "--platform", "manylinux_2_35_riscv64",
-            "--platform", "manylinux_2_39_riscv64",
-            "--python-version", "3.12"
-        ], capture_output=True, text=True, timeout=30)
+def get_registry_latest_version(package: str, retries: int = 3) -> Optional[str]:
+    """Get the latest version available in the riscv64 registry, retrying on transient failures."""
+    for attempt in range(retries):
+        try:
+            result = subprocess.run([
+                "pip", "index", "versions", package,
+                "--index-url", REGISTRY_URL,
+                "--platform", "manylinux_2_34_riscv64",
+                "--platform", "manylinux_2_35_riscv64",
+                "--platform", "manylinux_2_39_riscv64",
+                "--python-version", "3.12"
+            ], capture_output=True, text=True, timeout=30)
 
-        if result.returncode != 0:
+            if result.returncode != 0:
+                if attempt < retries - 1:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                return None
+
+            for line in result.stdout.split('\n'):
+                if "Available versions:" in line:
+                    versions_part = line.split("Available versions:")[1].strip()
+                    if versions_part:
+                        versions = [v.strip() for v in versions_part.split(',')]
+                        return versions[0] if versions else None
             return None
-
-        for line in result.stdout.split('\n'):
-            if "Available versions:" in line:
-                versions_part = line.split("Available versions:")[1].strip()
-                if versions_part:
-                    versions = [v.strip() for v in versions_part.split(',')]
-                    return versions[0] if versions else None
-        return None
-    except (subprocess.TimeoutExpired, subprocess.SubprocessError):
-        return None
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+            if attempt < retries - 1:
+                time.sleep(2 * (attempt + 1))
+    return None
 
 
-def get_pypi_package_info(package: str) -> Optional[Dict]:
-    """Get package information from PyPI API."""
-    try:
-        response = requests.get(f"https://pypi.org/pypi/{package}/json", timeout=30)
-        response.raise_for_status()
-        return response.json()
-    except requests.RequestException:
-        return None
+def get_pypi_package_info(package: str, retries: int = 3) -> Optional[Dict]:
+    """Get package information from PyPI API, retrying on transient failures."""
+    for attempt in range(retries):
+        try:
+            response = requests.get(f"https://pypi.org/pypi/{package}/json", timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException:
+            if attempt < retries - 1:
+                time.sleep(2 * (attempt + 1))
+    return None
 
 
 def get_pypi_latest_version(package_info: Dict) -> str:
@@ -160,8 +170,42 @@ def extract_pr_url(stdout: str) -> Optional[str]:
     return None
 
 
+def find_open_pr_for_branch(branch: str, retries: int = 3) -> Optional[str]:
+    """Return the URL of an open PR with the given head branch, if any. Retries on transient failures."""
+    for attempt in range(retries):
+        try:
+            result = subprocess.run([
+                "gh", "pr", "list",
+                "--repo", REPO,
+                "--head", branch,
+                "--state", "open",
+                "--json", "url",
+                "--jq", ".[0].url",
+            ], capture_output=True, text=True, timeout=30)
+
+            if result.returncode != 0:
+                if attempt < retries - 1:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                return None
+
+            return result.stdout.strip() or None
+
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+            if attempt < retries - 1:
+                time.sleep(2 * (attempt + 1))
+    return None
+
+
 def create_deprecation_pr(package: str, reason: str) -> Optional[str]:
     """Create a pull request to deprecate a package."""
+    branch = f"github-actions/deprecate-{package}"
+
+    existing_pr = find_open_pr_for_branch(branch)
+    if existing_pr:
+        print(f"    [=] PR already open for {package}: {existing_pr}")
+        return existing_pr
+
     try:
         git_run("fetch", "origin")
         git_run("switch", "main")
@@ -184,8 +228,6 @@ def create_deprecation_pr(package: str, reason: str) -> Optional[str]:
             print(f"    [+] Found upstream issue #{upstream_issue} for {package}")
         else:
             print(f"    [!] No upstream issue found for {package}")
-
-        branch = f"github-actions/deprecate-{package}"
 
         configure_git_identity()
         git_run("switch", "-c", branch)
@@ -244,6 +286,8 @@ def create_deprecation_pr(package: str, reason: str) -> Optional[str]:
 
     except subprocess.CalledProcessError as e:
         print(f"    [X] Error creating PR for {package}: {e.stderr or e}")
+        print(f"    [?] Could not confirm whether a PR already exists for {package} "
+              "— please check open PRs manually")
         return None
     except Exception as e:
         print(f"    [X] Unexpected error creating PR for {package}: {e}")
@@ -366,6 +410,12 @@ def create_upgrade_pr(package: str, package_info: Dict, new_versions: List[str])
         return None
 
     latest_version = new_versions[-1]
+    branch = f"github-actions/upgrade-{package}-{latest_version}"
+
+    existing_pr = find_open_pr_for_branch(branch)
+    if existing_pr:
+        print(f"    [=] PR already open for {package}: {existing_pr}")
+        return existing_pr
 
     try:
         configure_git_identity()
@@ -373,7 +423,6 @@ def create_upgrade_pr(package: str, package_info: Dict, new_versions: List[str])
         git_run("fetch", "origin")
         git_run("switch", "main")
 
-        branch = f"github-actions/upgrade-{package}-{latest_version}"
         git_run("switch", "-c", branch)
 
         pypi_package_url = get_pypi_package_url(package_info)
@@ -473,6 +522,8 @@ def create_upgrade_pr(package: str, package_info: Dict, new_versions: List[str])
 
     except subprocess.CalledProcessError as e:
         print(f"    [X] Error creating upgrade PR for {package}: {e.stderr or e}")
+        print(f"    [?] Could not confirm whether a PR already exists for {package} "
+              "— please check open PRs manually")
         return None
     except Exception as e:
         print(f"    [X] Unexpected error creating upgrade PR for {package}: {e}")
@@ -656,9 +707,11 @@ def main():
             if r["status"] in ("need_upgrade", "can_deprecate") and r.get("pr_url") is None
         ]
         if pr_failures:
-            print(f"\n[X] PR creation failed for {len(pr_failures)} package(s): "
+            print(f"\n[?] Could not create (or confirm an existing) PR for "
+                  f"{len(pr_failures)} package(s): "
                   + ", ".join(r["package"] for r in pr_failures))
-            sys.exit(1)
+            print("    Please review open PRs to check whether one already exists "
+                  "for these packages.")
 
 
 if __name__ == "__main__":
