@@ -81,16 +81,24 @@ jobs:
           rm dist/*.whl
           mv dist-repaired/*.whl dist/
 
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sglang-${{ env.SGLANG_VERSION }}-${{ matrix.python-version }}-riscv64
+          path: python/dist/*.whl
+          if-no-files-found: error
+
       # sglang's ~300 runtime dependencies (torch, transformers, the CUDA stack)
       # are not installable on riscv64, so `import sglang` is out of reach: load
       # each compiled PyO3 module straight off disk instead.
       - name: Smoke-test the extension modules
         env:
-          PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+          UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+          UV_INDEX_STRATEGY: unsafe-best-match
+          UV_ONLY_BINARY: ':all:'
         run: |
           cd python
           uv pip install numpy
-          unzip -q -o dist/*.whl -d unpacked
+          python -m zipfile -e dist/*.whl unpacked/
           python - <<'EOF'
           import importlib.machinery
           import importlib.util
@@ -107,12 +115,6 @@ jobs:
               loader.exec_module(module)
               print(name, sorted(a for a in dir(module) if not a.startswith("_")))
           EOF
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: sglang-${{ env.SGLANG_VERSION }}-${{ matrix.python-version }}-riscv64
-          path: python/dist/*.whl
-          if-no-files-found: error
 
   publish:
     name: Publish sglang ${{ inputs.version || '0.5.18' }} to GitLab
