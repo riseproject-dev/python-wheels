@@ -1,0 +1,189 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/microsoft/onnxruntime/blob/v1.29.0/tools/ci_build/github/azure-pipelines/templates/py-linux.yml
+# and the two scripts it drives inside the build container,
+# tools/ci_build/github/linux/build_linux_python_package.sh and
+# tools/ci_build/github/linux/run_python_tests.sh.
+name: Build onnxruntime wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'onnxruntime version to build (git tag without leading v, e.g. 1.29.0)'
+        required: true
+        default: '1.29.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-onnxruntime.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.29.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  ONNXRUNTIME_VERSION: ${{ inputs.version || '1.29.0' }}
+  # Upstream builds in an internal AzureCR image we can't pull; the manylinux
+  # image is the closest public equivalent and is what the rest of this repo uses.
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build onnxruntime ${{ inputs.version || '1.29.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440  # 24h
+    strategy:
+      fail-fast: false
+      matrix:
+        # onnxruntime is not abi3: upstream publishes one wheel per interpreter.
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout onnxruntime v${{ env.ONNXRUNTIME_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: microsoft/onnxruntime
+          ref: v${{ env.ONNXRUNTIME_VERSION }}
+          submodules: none
+          persist-credentials: false
+
+      - name: Write container script
+        run: |
+          mkdir -p build
+          cat > riscv64-build-and-test.sh <<'EOF'
+          #!/bin/bash
+          set -e -x
+
+          case "${PYTHON_TAG}" in
+            *t) python_dir="/opt/python/${PYTHON_TAG%t}-${PYTHON_TAG}/bin" ;;
+            *) python_dir="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin" ;;
+          esac
+          # Upstream prepends it too: some dependency CMakeLists invoke a bare `python3`.
+          export PATH="${python_dir}:${PATH}"
+          python_exe="${python_dir}/python"
+
+          # The manylinux image ships CMake 4, which several of onnxruntime's
+          # FetchContent'ed dependencies predate. Rocky's 3.31 matches the CMake
+          # upstream installs into its own build images.
+          dnf install -y cmake
+
+          export ONNX_ML=1
+          export CMAKE_ARGS="-DONNX_GEN_PB_TYPE_STUBS=ON -DONNX_WERROR=OFF"
+          "${python_exe}" -m pip install -r /onnxruntime_src/tools/ci_build/github/linux/python/requirements.txt
+
+          case "$1" in
+          build)
+            # Upstream's flag list, minus --use_vcpkg/--use_vcpkg_ms_internal_asset_cache
+            # (the asset cache is MS-internal, and the deps build from cmake/deps.txt
+            # without it) and minus --enable_lto (keeps peak link memory and build time
+            # down on the riscv runner). --compile_no_warning_as_error reproduces what
+            # SYSTEM_COLLECTIONURI does for upstream's own CI, see build.py:use_dev_mode.
+            "${python_exe}" /onnxruntime_src/tools/ci_build/build.py \
+              --build_dir /build \
+              --config Release \
+              --update \
+              --build \
+              --skip_submodule_sync \
+              --use_binskim_compliant_compile_flags \
+              --build_wheel \
+              --compile_no_warning_as_error \
+              --cmake_path /usr/bin/cmake \
+              --parallel
+
+            # setup.py's manylinux allow-list has no riscv64 entry, so it tags the wheel
+            # linux_riscv64 and skips the auditwheel repair it runs on other platforms.
+            auditwheel repair -w /build/dist /build/Release/dist/*.whl
+            ;;
+          test)
+            "${python_exe}" -m pip install --no-index --find-links /build/dist onnxruntime
+            (cd /tmp && "${python_exe}" -c "
+          import onnxruntime, onnxruntime.capi._pybind_state as s
+          print(onnxruntime.__version__, s.__file__)
+          assert s.__file__.endswith('.so'), s.__file__
+          print(onnxruntime.get_available_providers())")
+
+            # run_python_tests.sh also runs onnxruntime_test_all / _mlas_test /
+            # _provider_test, which test the library rather than the wheel and read the
+            # ONNX node corpus from /data/onnx (see onnxruntime/test/providers/cpu/
+            # model_tests.cc) that upstream mounts from its agents. The python suite
+            # below is build.py's own CPU list (build.py:run_onnxruntime_tests).
+            cd /build/Release
+            rc=0
+            for test in onnxruntime_test_python.py \
+                        onnxruntime_test_python_global_threadpool.py \
+                        onnxruntime_test_python_autoep.py \
+                        onnxruntime_test_python_sparse_matmul.py \
+                        onnxruntime_test_python_mlops.py \
+                        onnxruntime_test_python_symlink_data.py \
+                        onnxruntime_test_python_backend.py; do
+              "${python_exe}" "${test}" || rc=1
+            done
+            "${python_exe}" -m unittest discover -s quantization -v || rc=1
+            "${python_exe}" onnxruntime_test_python_backend_mlops.py || rc=1
+            "${python_exe}" /onnxruntime_src/onnxruntime/test/onnx/gen_test_models.py --output_dir test_models || rc=1
+            "${python_exe}" onnxruntime_test_python_compile_api.py || rc=1
+            ./onnx_test_runner test_models || rc=1
+            "${python_exe}" onnx_backend_test_series.py || rc=1
+            exit "${rc}"
+            ;;
+          *)
+            echo "usage: $0 <build|test>" >&2
+            exit 1
+            ;;
+          esac
+          EOF
+
+      - name: Build wheel
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "${PWD}":/onnxruntime_src \
+            -v "${PWD}/build":/build \
+            --workdir /onnxruntime_src \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            --pull=newer \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /onnxruntime_src/riscv64-build-and-test.sh build
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: build/dist/*.whl
+          if-no-files-found: error
+
+      - name: Test wheel
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "${PWD}":/onnxruntime_src \
+            -v "${PWD}/build":/build \
+            --workdir /onnxruntime_src \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /onnxruntime_src/riscv64-build-and-test.sh test
+
+  publish:
+    name: Publish onnxruntime ${{ inputs.version || '1.29.0' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
