@@ -10,22 +10,30 @@ on:
 permissions:
   contents: read
   actions: write
-  pull-requests: read
+  checks: write
 
 jobs:
-  dispatch-triggers:
+  trigger:
     runs-on: ubuntu-latest
     if: contains(github.event.pull_request.body, 'Trigger:')
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Dispatch build/test workflows for Trigger directives
+      # Every build-*.yml/test-*.yml is workflow_dispatch-only (no pull_request
+      # trigger of its own), so a Trigger: line is the *only* thing that ever
+      # starts a build. A dispatched run has no native PR check of its own, so
+      # each directive gets one posted via the Checks API instead of a relay
+      # job — a properly named check whose "Details" link goes straight to the
+      # dispatched run's log.
+      - name: Dispatch Trigger directives and relay status via the Checks API
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_BODY: ${{ github.event.pull_request.body }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           BASE_REPO: ${{ github.repository }}
         run: |
@@ -43,7 +51,50 @@ jobs:
             exit 0
           fi
 
-          printf '%s\n' "$triggers" | while IFS= read -r line; do
+          relay() {
+            local wf="$1" ver="$2" name="$3"
+            local check_id since run_id url conclusion
+
+            check_id=$(gh api "repos/$BASE_REPO/check-runs" -f name="$name" -f head_sha="$HEAD_SHA" \
+              -f status=queued --jq .id)
+
+            since=$(date -u -d '-5 seconds' +%Y-%m-%dT%H:%M:%SZ)
+            if ! gh workflow run "$wf" --repo "$BASE_REPO" --ref "$HEAD_REF" -f "version=$ver"; then
+              gh api "repos/$BASE_REPO/check-runs/$check_id" -X PATCH -f status=completed -f conclusion=failure \
+                -f "output[title]=Dispatch failed" -f "output[summary]=gh workflow run failed for $wf @ $ver" >/dev/null
+              return
+            fi
+
+            run_id="" url=""
+            for _ in $(seq 1 30); do
+              row=$(gh run list --repo "$BASE_REPO" --workflow "$wf" --branch "$HEAD_REF" --limit 5 \
+                --json databaseId,url,createdAt \
+                -q "[.[] | select(.createdAt >= \"$since\")] | sort_by(.createdAt) | .[0]")
+              run_id=$(jq -r '.databaseId // empty' <<< "$row")
+              url=$(jq -r '.url // empty' <<< "$row")
+              [ -n "$run_id" ] && break
+              sleep 5
+            done
+
+            if [ -z "$run_id" ]; then
+              gh api "repos/$BASE_REPO/check-runs/$check_id" -X PATCH -f status=completed -f conclusion=failure \
+                -f "output[title]=Run not found" -f "output[summary]=Dispatched $wf @ $ver but couldn't find the run." >/dev/null
+              return
+            fi
+
+            gh api "repos/$BASE_REPO/check-runs/$check_id" -X PATCH -f status=in_progress -f details_url="$url" >/dev/null
+
+            gh run watch "$run_id" --repo "$BASE_REPO" >/dev/null || true
+            conclusion=$(gh run view "$run_id" --repo "$BASE_REPO" --json conclusion -q .conclusion | tr '[:upper:]' '[:lower:]')
+            [ -z "$conclusion" ] && conclusion=failure
+
+            gh api "repos/$BASE_REPO/check-runs/$check_id" -X PATCH -f status=completed -f conclusion="$conclusion" \
+              -f details_url="$url" >/dev/null
+          }
+
+          pids=()
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
             directive=${line#Trigger:}
             directive=${directive# }
             package_name=${directive%:*}
@@ -68,11 +119,13 @@ jobs:
               continue
             fi
 
-            echo "Dispatching build-${package_name}.yml on $HEAD_REF with version=$package_version"
-            gh workflow run "build-${package_name}.yml" --ref "$HEAD_REF" -f "version=$package_version"
+            relay "build-${package_name}.yml" "$package_version" "build-${package_name}.yml @ ${package_version}" &
+            pids+=($!)
 
             if [ -f "$test_wf" ]; then
-              echo "Dispatching test-${package_name}.yml on $HEAD_REF with version=$package_version"
-              gh workflow run "test-${package_name}.yml" --ref "$HEAD_REF" -f "version=$package_version"
+              relay "test-${package_name}.yml" "$package_version" "test-${package_name}.yml @ ${package_version}" &
+              pids+=($!)
             fi
-          done
+          done <<< "$triggers"
+
+          wait "${pids[@]}"
