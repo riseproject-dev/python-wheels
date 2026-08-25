@@ -1,0 +1,267 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# This workflow is based on: https://github.com/ray-project/ray/blob/master/python/build-wheel-manylinux2014.sh
+---
+name: Build ray wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'ray version to build (git tag without leading ray-, e.g. 2.58.0)'
+        required: true
+        default: '2.58.0'
+
+run-name: build-ray - ${{ inputs.version || '2.58.0' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.58.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  RAY_VERSION: ${{ inputs.version || '2.58.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Upstream fetches this version through bazelisk, which publishes no riscv64
+  # binary, so it is bootstrapped from the dist archive instead.
+  BAZEL_VERSION: '7.5.0'
+  RULES_PYTHON_VERSION: '0.33.2'  # the version bazel 7.5.0's MODULE.bazel pins
+  # ci/build/build-manylinux-forge.sh pins this node for the dashboard build.
+  NODE_VERSION: '14.21.3'
+
+jobs:
+  dashboard:
+    name: Build ray dashboard
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      # The dashboard is a React app: its build output is arch-independent, and
+      # node.js publishes no riscv64 release to run the build with natively.
+      - name: Checkout ray ${{ inputs.version || '2.58.0' }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: ray-project/ray
+          ref: ray-${{ env.RAY_VERSION }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903  # v6.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Build dashboard
+        working-directory: python/ray/dashboard/client
+        run: |
+          npm ci
+          npm run build
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ray-dashboard-${{ env.RAY_VERSION }}
+          path: python/ray/dashboard/client/build
+          if-no-files-found: error
+
+  bazel:
+    name: Bootstrap bazel (riscv64)
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+
+    steps:
+      - name: Restore bazel binary
+        id: cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: bazel-bin
+          key: bazel-${{ env.BAZEL_VERSION }}-manylinux_riscv64
+
+      - name: Bootstrap bazel ${{ env.BAZEL_VERSION }}
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p bazel-bin
+          cat > bootstrap-bazel.sh <<'SCRIPT'
+          #!/bin/bash
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+
+          # bazel 7.x pins rules_python 0.33.2, whose PLATFORMS table has no
+          # riscv64 entry, so fetching @pythons_hub aborts the bootstrap
+          # (bazelbuild/bazel#23018). The host toolchain it names is never
+          # selected here — its constraint_values don't match a riscv64 host, so
+          # the autodetecting toolchain wins — which makes any linux entry a
+          # safe stand-in. Fixed upstream in bazel 8.2.0 (bazelbuild/bazel#25745);
+          # the 7.x backport (bazelbuild/bazel#26986) is still open.
+          mkdir -p /tmp/rules_python
+          curl -fsSLo /tmp/rules_python.tar.gz "https://github.com/bazel-contrib/rules_python/releases/download/${RULES_PYTHON_VERSION}/rules_python-${RULES_PYTHON_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_python.tar.gz -C /tmp/rules_python --strip-components=1
+          sed -i 's|fail("No platform declared for host OS {} on arch {}".format(os_name, arch))|return "x86_64-unknown-linux-gnu"|' \
+            /tmp/rules_python/python/private/toolchains_repo.bzl
+
+          mkdir -p /tmp/bazel-src
+          cd /tmp/bazel-src
+          curl -fsSLo dist.zip "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-dist.zip"
+          unzip -q dist.zip
+
+          EXTRA_BAZEL_ARGS="--tool_java_runtime_version=local_jdk --override_module=rules_python=/tmp/rules_python" \
+            bash ./compile.sh
+          install -m 0755 output/bazel /work/bazel-bin/bazel
+          SCRIPT
+
+          docker run --rm --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e BAZEL_VERSION="${BAZEL_VERSION}" \
+            -e RULES_PYTHON_VERSION="${RULES_PYTHON_VERSION}" \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /work/bootstrap-bazel.sh
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin/bazel
+          if-no-files-found: error
+
+  build_wheels:
+    name: Build ray ${{ inputs.version || '2.58.0' }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440  # 24h
+    needs: [bazel, dashboard]
+
+    steps:
+      - name: Checkout ray ${{ inputs.version || '2.58.0' }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: ray-project/ray
+          ref: ray-${{ env.RAY_VERSION }}
+          path: ray
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download bazel
+        uses: actions/download-artifact@abefc31eb6b1145473c0d2569b98d1e6b6c5aeee  # v6.0.0
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin
+
+      - name: Download dashboard
+        uses: actions/download-artifact@abefc31eb6b1145473c0d2569b98d1e6b6c5aeee  # v6.0.0
+        with:
+          name: ray-dashboard-${{ env.RAY_VERSION }}
+          path: ray/python/ray/dashboard/client/build
+
+      - name: Build wheels
+        run: |
+          mkdir -p wheelhouse
+          cat > build-ray.sh <<'SCRIPT'
+          #!/bin/bash
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+          install -m 0755 /work/bazel-bin/bazel /usr/local/bin/bazel
+          git config --global --add safe.directory '*'
+
+          export BAZEL_PATH=/usr/local/bin/bazel
+          export RAY_INSTALL_JAVA=0
+          export RAY_DISABLE_EXTRA_CPP=1
+          # Upstream sets RAY_BUILD_ENV per interpreter; it is an --action_env,
+          # so varying it rebuilds the whole C++ core once per wheel.
+          export RAY_BUILD_ENV=manylinux_riscv64
+
+          cd /work/ray
+          sed -i "s/{{RAY_COMMIT_SHA}}/$(git rev-parse HEAD)/g" python/ray/_version.py
+
+          for python in cp312-cp312 cp313-cp313 cp314-cp314; do
+            git clean -f -f -x -d -e python/ray/dashboard/client
+            "/opt/python/${python}/bin/pip" install -q cython==3.0.12 setuptools==80.9.0
+            # bazel actions run with a fixed PATH (--incompatible_strict_action_env),
+            # so the interpreter they compile against is picked up from here.
+            ln -sf "/opt/python/${python}/bin/python3" /usr/local/bin/python3
+            (
+              cd python
+              PATH="/opt/python/${python}/bin:$PATH" \
+                "/opt/python/${python}/bin/python" -m pip wheel -w dist . --no-deps
+            )
+            # Mirrors upstream's rename: the wheels are built in the
+            # manylinux_2_39 image, but `pip wheel` tags them linux_riscv64.
+            for wheel in python/dist/*.whl; do
+              mv "${wheel}" "/work/wheelhouse/$(basename "${wheel}" | sed 's/-linux_riscv64\.whl$/-manylinux_2_39_riscv64.whl/')"
+            done
+          done
+          SCRIPT
+
+          docker run --rm --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /work/build-ray.sh
+
+      - name: Test wheels
+        run: |
+          cat > test-ray.sh <<'SCRIPT'
+          #!/bin/bash
+          set -eux
+
+          for python in cp312-cp312 cp313-cp313 cp314-cp314; do
+            "/opt/python/${python}/bin/pip" install /work/wheelhouse/ray-*-"${python%%-*}"-*.whl
+            # Run from a directory that holds nothing but the script: the
+            # checkout's python/ray would otherwise shadow the installed wheel.
+            "/opt/python/${python}/bin/python" /work/smoke/smoke_test.py
+          done
+          SCRIPT
+
+          mkdir -p smoke
+          cat > smoke/smoke_test.py <<'SCRIPT'
+          import ray
+
+          ray.init(num_cpus=1, include_dashboard=False)
+
+
+          @ray.remote
+          def double(x):
+              return 2 * x
+
+
+          assert ray.get([double.remote(i) for i in range(4)]) == [0, 2, 4, 6]
+          ray.shutdown()
+          SCRIPT
+
+          docker run --rm --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            --shm-size=1g \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /work/test-ray.sh
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ray-${{ env.RAY_VERSION }}-wheels-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    name: Publish ray ${{ inputs.version || '2.58.0' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: ray-${{ env.RAY_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
