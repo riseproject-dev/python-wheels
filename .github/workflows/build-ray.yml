@@ -32,7 +32,9 @@ env:
   # Upstream fetches this version through bazelisk, which publishes no riscv64
   # binary, so it is bootstrapped from the dist archive instead.
   BAZEL_VERSION: '7.5.0'
-  RULES_PYTHON_VERSION: '0.33.2'  # the version bazel 7.5.0's MODULE.bazel pins
+  # versions bazel 7.5.0's MODULE.bazel pins; both need a riscv64 fix below
+  RULES_PYTHON_VERSION: '0.33.2'
+  RULES_JAVA_VERSION: '7.6.5'
   # ci/build/build-manylinux-forge.sh pins this node for the dashboard build.
   NODE_VERSION: '14.21.3'
 
@@ -94,25 +96,36 @@ jobs:
           JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
           export JAVA_HOME
 
-          # bazel 7.x pins rules_python 0.33.2, whose PLATFORMS table has no
-          # riscv64 entry, so fetching @pythons_hub aborts the bootstrap
-          # (bazelbuild/bazel#23018). The host toolchain it names is never
-          # selected here — its constraint_values don't match a riscv64 host, so
-          # the autodetecting toolchain wins — which makes any linux entry a
-          # safe stand-in. Fixed upstream in bazel 8.2.0 (bazelbuild/bazel#25745);
-          # the 7.x backport (bazelbuild/bazel#26986) is still open.
+          # rules_python 0.33.2's PLATFORMS table has no riscv64 entry, so
+          # fetching @pythons_hub aborts the bootstrap (bazelbuild/bazel#23018).
+          # The host toolchain it names is never selected here — its
+          # constraint_values don't match a riscv64 host, so the autodetecting
+          # toolchain wins — which makes any linux entry a safe stand-in.
+          # Bootstrapping riscv64 was fixed upstream in bazel 8.2.0
+          # (bazelbuild/bazel#25745); the 7.x backport (#26986) is still open.
           mkdir -p /tmp/rules_python
           curl -fsSLo /tmp/rules_python.tar.gz "https://github.com/bazel-contrib/rules_python/releases/download/${RULES_PYTHON_VERSION}/rules_python-${RULES_PYTHON_VERSION}.tar.gz"
           tar -xzf /tmp/rules_python.tar.gz -C /tmp/rules_python --strip-components=1
           sed -i 's|fail("No platform declared for host OS {} on arch {}".format(os_name, arch))|return "x86_64-unknown-linux-gnu"|' \
             /tmp/rules_python/python/private/toolchains_repo.bzl
 
+          # rules_java 7.x maps riscv64 (and mips64) to a stray-colon include
+          # path, so //src/main/java/net/starlark/java/eval:libcpu_profiler.so
+          # compiles with -isystem .../toolchains/:include/linux and can't find
+          # jni_md.h. Fixed in rules_java 8.x, never backported to 7.x.
+          mkdir -p /tmp/rules_java
+          curl -fsSLo /tmp/rules_java.tar.gz "https://github.com/bazelbuild/rules_java/releases/download/${RULES_JAVA_VERSION}/rules_java-${RULES_JAVA_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_java.tar.gz -C /tmp/rules_java
+          sed -i 's|\[":include/linux"\]|["include/linux"]|g' /tmp/rules_java/toolchains/BUILD
+
           mkdir -p /tmp/bazel-src
           cd /tmp/bazel-src
           curl -fsSLo dist.zip "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-dist.zip"
           unzip -q dist.zip
 
-          EXTRA_BAZEL_ARGS="--tool_java_runtime_version=local_jdk --override_module=rules_python=/tmp/rules_python" \
+          EXTRA_BAZEL_ARGS="--tool_java_runtime_version=local_jdk \
+            --override_module=rules_python=/tmp/rules_python \
+            --override_module=rules_java=/tmp/rules_java" \
             bash ./compile.sh
           install -m 0755 output/bazel /work/bazel-bin/bazel
           SCRIPT
@@ -122,6 +135,7 @@ jobs:
             -w /work \
             -e BAZEL_VERSION="${BAZEL_VERSION}" \
             -e RULES_PYTHON_VERSION="${RULES_PYTHON_VERSION}" \
+            -e RULES_JAVA_VERSION="${RULES_JAVA_VERSION}" \
             "${MANYLINUX_RISCV64_IMAGE}" \
             bash /work/bootstrap-bazel.sh
 
