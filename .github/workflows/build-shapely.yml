@@ -25,7 +25,8 @@ permissions:
 env:
   SHAPELY_VERSION: ${{ inputs.version || '2.1.2' }}
   GEOS_VERSION: '3.13.1'
-  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  BASEIMAGE: manylinux_2_39_riscv64
+  BASETAG: '2026.08.24-1'
 
 jobs:
   build_wheels:
@@ -46,6 +47,31 @@ jobs:
           fetch-depth: 0  # versioneer derives the version from the tag history
           persist-credentials: false
 
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+        with:
+          install: true
+          buildkitd-flags: --debug
+
+      - name: Build Docker image with GEOS
+        # using build-push-action (without push) to make use of cache arguments
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: .
+          file: ci/Dockerfile
+          platforms: linux/riscv64
+          tags: ${{ env.BASEIMAGE }}_geos:${{ env.GEOS_VERSION }}
+          build-args: |
+            BASEIMAGE=quay.io/pypa/${{ env.BASEIMAGE }}:${{ env.BASETAG }}
+            GEOS_VERSION=${{ env.GEOS_VERSION }}
+          push: false
+          load: true
+          cache-from: type=gha,scope=${{ env.BASEIMAGE }}
+          cache-to: type=gha,mode=max,scope=${{ env.BASEIMAGE }}
+        env:
+          BUILDKIT_PROGRESS: plain
+
       - name: Add GEOS LICENSE
         run: cp ci/wheelbuilder/LICENSE_GEOS .
 
@@ -58,21 +84,9 @@ jobs:
           output-dir: wheelhouse/
           only: ${{ matrix.python }}-manylinux_riscv64
         env:
-          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Upstream bakes GEOS into a derived manylinux image (ci/Dockerfile);
-          # building it in the container instead avoids a riscv64 image build.
-          CIBW_BEFORE_ALL_LINUX: >-
-            cd /tmp &&
-            curl -OL --retry 5 https://download.osgeo.org/geos/geos-$GEOS_VERSION.tar.bz2 &&
-            tar xfj geos-$GEOS_VERSION.tar.bz2 &&
-            cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
-            -S geos-$GEOS_VERSION -B geos-build &&
-            cmake --build geos-build -j "$(nproc)" &&
-            cmake --install geos-build &&
-            ldconfig
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.BASEIMAGE }}_geos:${{ env.GEOS_VERSION }}
           CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
           CIBW_BEFORE_BUILD: pip install cython numpy setuptools wheel
-          CIBW_ENVIRONMENT_PASS_LINUX: GEOS_VERSION
           CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
 
       - name: Check the wheel ships the GEOS licence and the compiled extensions
