@@ -12,6 +12,18 @@ publishes them to `pypi.riseproject.dev`. Each package gets a
 `.github/workflows/build-<pkg>.yml`. Wheels are consumed on `ubuntu-24.04-riscv`
 self-hosted runners.
 
+Four structural goals (from the [development guide](https://pypi.riseproject.dev/python-wheels/development.html)):
+1. give users a simple index to install riscv64 wheels from;
+2. build them with workflows that **closely mirror each upstream project's own CI**,
+   narrowed to riscv64;
+3. carry tooling that tracks upstream releases, automates version bumps, and makes
+   deprecation easy once upstream ships riscv64 itself;
+4. serve as evidence to upstream maintainers that riscv64 support is cheap to add.
+
+Goal 2 is the one that constrains daily work: **a workflow that diverges from upstream's
+for no reason is a defect**, because these files are meant to be handed to upstream as a
+working precedent.
+
 ## Working process
 
 Given a package to port, the loop is always the same (project-specific inputs —
@@ -19,8 +31,11 @@ name, repo, version, upstream build docs — come from the invoking prompt):
 
 1. Branch `<pkg>` from `origin/main` and work in a dedicated git worktree.
 2. Add `.github/workflows/build-<pkg>.yml` following the playbook below.
-3. Validate locally (gotcha 9), then push to `origin` and open a PR. The
-   `pull_request: paths` trigger runs the workflow on the PR branch.
+3. Validate locally (gotcha 9), then push to `origin` and open a PR. Two
+   things can start a build: the `pull_request: paths` trigger (fires when you touch the
+   workflow file itself), and a `Trigger: <pkg>:<tag>` line in the **PR description** —
+   one per version you want built (`Trigger: numpy:v2.5.1`), which `pr-trigger.yml` picks
+   up. Use the `Trigger:` lines to build a version without editing the workflow.
 4. Watch CI, triage failures, iterate until every matrix job is green and the
    `publish` job dry-runs cleanly.
 5. When the wheels build and tests pass, reply to any review threads, then
@@ -51,14 +66,56 @@ Newer workflows start with an SPDX header:
 # SPDX-License-Identifier: MIT
 ```
 
-**Comment sparingly — these workflows are read as reference.** Reserve comments
-for the genuinely non-obvious: a deviation from the upstream recipe, a riscv-only
+**Default to NO comments — these workflows are read as reference.** Add one only
+when it is absolutely necessary, i.e. genuinely non-obvious: a deviation from the upstream recipe, a riscv-only
 workaround, a load-bearing env var. Do **not** narrate standard steps (checkout,
 Python install, the build matrix) or write multi-line explanations of what a line
 does — a reader mines our workflows to copy patterns, and verbose commentary makes
 it look like we customized far more than we did. Keep each note to a single "why"
 line; if a comment restates the YAML it's on, cut it. (PR #308 review: the tomli
 workflow's per-step paragraphs were trimmed for exactly this.)
+
+**Never set `CIBW_BUILD_VERBOSITY`.** Do not add it to a new workflow, and drop it if
+you inherit one from a template or an existing workflow you copied.
+
+**Start from upstream's own workflow, then delete.** Find their build/test workflow
+(`wheels.yml`, `build.yml`, `release.yml`, `python.yml`, …), copy the Linux glibc/musl
+parts to `.github/workflows/build-<pkg>.yml`, and strip everything else: other
+architectures, macOS/Windows, and the sdist job unless a build or test step consumes it.
+Repeat for the test workflow if upstream keeps it separate. Only then apply the riscv64
+changes below.
+
+**Default interpreter matrix is `["cp312", "cp313", "cp314", "cp314t"]`.** RISE used to
+track the four newest `major.minor` plus free-threaded variants, but numpy (as of 2.5.0)
+sets 3.12 as its floor, and enough of the registry depends on numpy that everything
+follows it. `3.13t` is deliberately excluded — it was experimental with limited support
+(and the riscv64 manylinux image ships no cp313t either, gotcha 11). Deviating is allowed,
+but weigh similarity-to-upstream against maintenance cost.
+
+**Check the upstream repo out at the workspace root** — `actions/checkout` with
+`repository:`/`ref:` and no `path:`. It replaces the default python-wheels checkout so the
+workflow behaves as if it lived in the upstream tree, which cibuildwheel needs since it
+treats the root as the project to build. When you also need *this* repo (patches, actions),
+check it out **second** into a subdir (`path: python-wheels`), as `build-zstandard.yml` does.
+
+**`actions/setup-python` does not support riscv64** — it silently falls back to whatever
+host interpreter matches the requested `major.minor`. Replace it with `astral-sh/setup-uv`:
+
+```yaml
+- uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+  with:
+    python-version: '3.12'
+    activate-environment: true
+    enable-cache: false
+```
+
+`activate-environment: true` reproduces setup-python's behaviour for our purposes;
+`enable-cache: false` is load-bearing — the cache has broken builds before.
+
+**Dropping musllinux is an accepted outcome.** Building both glibc and musl is desirable,
+but if the musl jobs fail with no obvious fix, strip them and open an issue tracking the
+incompatibility rather than blocking the port. Dependent packages then can't rely on musl
+either, which is the expected consequence.
 
 Two build shapes exist in the repo — pick based on the package:
 
@@ -109,6 +166,10 @@ publish:
 first publish (`ci_scripts/update_doc.py`). Nightly checks and docs are driven off
 that YAML, so **a new package needs no manual registration anywhere** — just the
 workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
+`permissions` needs `contents: write` **and** `pull-requests: write` (not `contents: read`)
+because that docs step pushes a branch and opens a PR with the default `GITHUB_TOKEN`.
+Reach for the lower-level `publish-to-gitlab` action directly only when a workflow needs the
+upload without the docs-PR side effect.
 
 ## Porting playbook (do these in order)
 
@@ -293,6 +354,13 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
       the matrix is per-interpreter `[cp312, cp313, cp314, cp314t]` or collapses to
       `[cpXY-abi3, cp3Nt]` depends on whether the extension is built abi3 — see
       gotcha 11, which covers both maturin and setuptools-rust.
+    - **The rustc target triple is not `riscv64`.** Upstream maturin matrices usually carry
+      a short `target:` field (`x86_64`, `aarch64`, `armv7`, `ppc64le`); there is no
+      `riscv64` target, it is `riscv64gc-unknown-linux-gnu` (`rustup target list | grep
+      riscv64`), so adding `target: riscv64` just fails. Make the matrix entries explicit
+      instead — `{runner: ubuntu-24.04-riscv, target: riscv64gc-unknown-linux-gnu,
+      arch: riscv64}` — and switch the upload step's artifact name to interpolate the new
+      `arch` field rather than `target`.
 
 11. **abi3 wheels collapse the matrix.** If `pyproject.toml` sets `wheel.py-api = "cpXY"`
     (or otherwise builds abi3/limited-API), one `cpXY` build loads on every newer
@@ -553,6 +621,109 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
       newest. Quote the spec so the shell doesn't read `<` as redirection. Revisit the
       ceiling when bumping the package version.
 
+24. **Feasibility triage: some "binary-looking" packages never compile anything —
+    check before you port (the multiprocess case).** A package can carry C sources in
+    its sdist *and* publish platform-tagged wheels on PyPI and still be 100%
+    pure Python. multiprocess bundles a full copy of CPython's
+    `Modules/_multiprocessing` C sources under `py3.NN/Modules/_multiprocess/` and
+    ships `…-pp311-pypy311_pp73-manylinux_2_28_x86_64.whl`, which looks like a port
+    target. It isn't: `setup.py` defines `run_setup(with_extensions=True)` but calls
+    `run_setup(False)` at **both** call sites, so the `Extension` is dead code; the
+    installed `_multiprocess/__init__.py` is a one-line shim
+    (`from _multiprocessing import *`) delegating to CPython's own builtin. The
+    CPython wheels are `pyNN-none-any` and already install on riscv64 unmodified.
+    Three cheap checks settle it in minutes — run all three before writing any YAML:
+    - **`unzip -l <plat-tagged wheel> | grep '\.so'`** — a platform tag with *zero*
+      `.so` means the tag is a packaging artifact (a `Distribution.has_ext_modules`
+      override or a manual `--plat-name`), not compiled content.
+    - **`pip wheel <sdist> --no-deps --no-build-isolation`** on any host, then read
+      the generated `dist-info/WHEEL`: `Root-Is-Purelib: true` + `Tag: py3-none-any`
+      means there is no arch-specific artifact to build, on any architecture.
+    - **grep `setup.py` for how the `Extension` list is actually reached** — a
+      defaulted-True parameter proves nothing if every caller passes False.
+    Distinct from gotcha 20 (SQLAlchemy): there the extension is *attempted* and
+    silently degrades on failure, so forcing `REQUIRE_*_CEXT` is the right fix. Here
+    it is never attempted for **any** platform, so forcing it on would ship riscv64 a
+    binary upstream ships nowhere else — a divergence, not a port. Report
+    `not-feasible` and move on. (Contrast gotcha 19/20, where PyPI *does* show real
+    `cpXY-cpXY` wheels — that is the signal that a compiled build genuinely exists.)
+
+25. **Build-from-checkout + pytest = the repo's source package shadows the wheel you
+    just built (the pymongo case; fix with `test-sources`).** In the
+    build-from-checkout shape the importable package sits at the **repo root**
+    (`bson/`, `pymongo/`), and cibuildwheel runs `test-command` from the checkout. If
+    the suite is a *package* (`test/__init__.py` exists — check it), pytest's default
+    prepend import mode puts the **rootdir** on `sys.path[0]`, so `import <pkg>`
+    resolves to the source tree and never touches the installed wheel. The job goes
+    green having tested pure Python — the exact failure gotcha 20 warns about, reached
+    by a different route (there the `.so` was never built; here it was built and then
+    not imported). Fix: `CIBW_TEST_SOURCES: test tools pyproject.toml` — cibuildwheel
+    ≥3 copies just those paths into an empty temp cwd, so the shadowing source packages
+    aren't there. Then use **paths relative to that cwd** in `CIBW_TEST_COMMAND`
+    (`python -m pytest test/...`), not `{project}`/`{package}` (gotcha 5) — those
+    still point at the full checkout. Stage `pyproject.toml` too or `[tool.pytest.ini_options]`
+    is lost.
+    - **Verify, don't assume** — same rule as gotcha 20's `unzip -l | grep '\.so$'`,
+      one level up: assert the *import* is the compiled one. Many projects ship a
+      ready-made probe (pymongo: `tools/fail_if_no_c.py`, which asserts `bson.has_c()`);
+      chain it with `&&` ahead of pytest so a shadowed import is fatal.
+    - **Reproduces on any host in 30 seconds**, no QEMU: two dirs with the same package
+      name (one "SOURCE" at a fake repo root, one "INSTALLED" on `PYTHONPATH`) plus a
+      `test/__init__.py` — run pytest from the repo root (imports SOURCE) and from a
+      staged cwd holding only `test/` (imports INSTALLED).
+    - Distinct from gotcha 21, which is about `python -s` failing to reach xdist
+      workers and a conftest that *explicitly* injects a lib dir. This one is pytest's
+      own rootdir insertion and needs no conftest cooperation at all.
+    - While you're there, **pin floating test deps the same way gotcha 23 pins build
+      tools**. A project with `filterwarnings = ["error", ...]` turns any new
+      DeprecationWarning from a freshly-resolved plugin into a hard failure — pymongo
+      needed `pytest-asyncio==1.3.0` (upstream's `uv.lock` version) because 1.4 made
+      its own `event_loop_policy` override warn. Take the version from upstream's lock
+      file, not from "latest".
+
+26. **The riscv64 runners ship GCC 13; some packages need GCC 14 or later.** The compiler
+    that matters is the one in the *build container*, not on the runner — a cibuildwheel
+    build against the manylinux_riscv64 image gets a newer toolchain for free. A project
+    that builds directly on the runner does not: if it needs GCC 14+, either move the build
+    into the container or provision a newer toolchain explicitly.
+
+27. **`py3-none-<platform>` is a hand-set `--plat-name`, never compiled content (the
+    watchdog variant of gotcha 24).** Gotcha 24's tell-tale was a *platform-tagged
+    wheel with zero `.so`*; the sharper, faster signal is the **interpreter/ABI half
+    of the tag**. A wheel that actually contains an extension module is tagged
+    `cpXY-cpXY-<platform>` (or `cpXY-abi3-…`) — the ABI tag is what pins it to a
+    CPython build. `py3-none-<platform>` is a contradiction on its face: `py3-none`
+    says "no interpreter-specific, no ABI-specific content", so the platform half can
+    only have been forced by hand. watchdog 6.0.0 publishes
+    `watchdog-6.0.0-py3-none-manylinux2014_{x86_64,aarch64,armv7l,i686,ppc64,ppc64le,s390x}.whl`
+    plus per-CPython **macOS** wheels (`cp312-cp312-macosx_…`) — the split is the whole
+    story: only macOS compiles anything (`_watchdog_fsevents.c`, linking
+    `-framework CoreFoundation -framework CoreServices`), and `setup.py` builds
+    `ext_modules = []` unless `sys.platform == "darwin"`. On Linux watchdog drives
+    inotify through pure-Python `ctypes`. Upstream's release workflow does it in the
+    open — on `ubuntu-latest`, with only `setuptools wheel` installed and no compiler:
+    ```bash
+    for platform in manylinux2014_x86_64 … win_amd64; do
+      python setup.py bdist_wheel --plat-name $platform
+    done
+    ```
+    **Triage rule: read the ABI tag before downloading anything.** All-`py3-none-*`
+    Linux wheels ⇒ nothing to compile ⇒ `not-feasible`; stop before writing YAML.
+    Confirm in one step with `unzip -p <whl> '*/WHEEL'` (`Root-Is-Purelib: true`).
+    - **Distinct from gotcha 24 in what happens on riscv64 today.** multiprocess's
+      CPython wheels were `pyNN-none-**any**`, so riscv64 already got a wheel. watchdog
+      publishes **no `-any` wheel at all** — deliberately, so that a macOS user on a new
+      Python falls back to the sdist rather than to a pure wheel missing the extension
+      (the upstream workflow's header comment says exactly this). So on riscv64
+      `pip install watchdog` builds from the sdist. That is **not** a reason to port it:
+      the sdist build is pure Python, needs no compiler and no riscv64 anything, and
+      finishes in seconds. Publishing a `py3-none-manylinux_2_39_riscv64` wheel would
+      ship zero arch-specific content — a packaging convenience, not a port.
+    - **Generalizes past this repo's macOS case:** whenever upstream's compiled
+      extension is gated on one OS (`sys.platform == …`, a `-framework`/`Win32` link
+      line), the other platforms' wheels are pure-Python by construction. Grep the
+      gate in `setup.py` *before* the download loop — it settles feasibility on its own.
+
 ## Environment / auth notes (this WSL setup)
 
 - **Pushing workflow files needs `workflow` scope** on the gh token, else the push is
@@ -562,6 +733,60 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
   `upstream` remote. Branch from `origin/main`.
 - Use `gh` extensively for anything requiring access to GitHub.
 
+## Patching a project
+
+Patching is decided case by case and reviewed as such — test as much real functionality as
+possible rather than patching failures away. A patch is justified when the failure is:
+
+- in a narrow part of the module, or dependent on external resources (large downloads);
+- caused by software unavailable on riscv64;
+- an artificial test limitation (a fixed timeout, say) rather than a real defect;
+- from build scripts calling host tooling absent on the runners or in the riscv64 manylinux
+  image (`apt` vs `dnf`);
+- a missing LICENSE the project or a dependency requires (see Licensing below).
+
+Mechanics: put the patch under `patches/<pkg>/<version_tag>/`, add a `git apply` step before
+the build/test step, document the change on the package's docs entry, and give every patch an
+`Upstream-Status:` tag — `ci_scripts/check_patch.py` enforces its presence on PRs. Extra
+detail in the commit message beyond the tag pays for itself at maintenance time. The five
+valid types:
+
+| Type | Use when | Must include |
+|---|---|---|
+| `Issue` | build/test found a bug, reported upstream | link to the issue |
+| `Submitted` | fix sent upstream, carried until merged + released | link to the PR/commit |
+| `To upstream` | needs upstreaming, but submission is blocked | why it's blocked |
+| `Inappropriate` | needed for riscv64/our infra, irrelevant upstream | short reason |
+| `Backport` | already fixed in a later upstream release | link + description |
+
+## Licensing and GPL sources
+
+RISE distributes these wheels, so licence compliance is ours. Check two things per port:
+
+- the built wheel carries the LICENSE file(s) from the upstream source;
+- if it ships statically or dynamically linked libraries from other projects, their licence
+  requirements are met too.
+
+If either fails, patch the build (above) and send the fix upstream as well.
+
+When a build links GPL components that come from **our build environment** rather than the
+project — most often the `gcc` baked into the manylinux_riscv64 image — we must make those
+sources available permanently, not just for CI's artifact retention window. Add a
+`gpl_sources` job beside `build_wheels` using the `collect-gpl-sources` action, give it the
+**same pinned `MANYLINUX_RISCV64_IMAGE`** the build used (otherwise the sources don't
+correspond to the toolchain that produced the wheels), add it to the publish job's `needs:`,
+and pass the artifact through:
+
+```yaml
+gpl-sources-artifact: <pkg>-<version>-gpl-sources
+gpl-sources-release-tag: <pkg>-v<version>
+gpl-sources-description: gcc
+```
+
+`publish-wheels` attaches the tar to a GitHub Release (creating it if needed) and hands the
+download URL to `update_doc.py`, which renders it as that version's `comment:` — no manual
+docs edit. `build-numpy.yml` is the complete example.
+
 ## PR / CI conventions
 
 - `pr-checks.yml` rejects commits starting with `revertme`/`revert me`/`DO NOT MERGE`
@@ -569,3 +794,9 @@ workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
 - Sanity that the `publish` job **dry-ran** on your PR branch (grep its log for
   "Dry run (not on main branch …)"); it should list the wheels it *would* upload
   without uploading.
+- **Merging does not publish.** `publish-wheels`/`publish-to-gitlab` only do the real thing
+  (twine upload, GPL-sources release, docs PR) when the run's ref is `main`; on any other
+  ref they print a dry run — resolved globs, the twine command, the branch/PR title
+  `update_doc.py` would have used. That is deliberate: only reviewed, merged workflows push
+  packages. After your PR merges, **re-trigger the workflow from `main`** for the wheels to
+  actually reach the registry.
