@@ -51,14 +51,15 @@ jobs:
           ref: v${{ env.SNOWFLAKE_CONNECTOR_VERSION }}
           persist-credentials: false
 
-      - name: Drop prebuilt minicore libraries
-        # ci/build_linux.sh keeps only the host platform's minicore blob; upstream
-        # ships none for riscv64, and a foreign-arch .so would break auditwheel.
-        # A missing minicore is a non-fatal error in _utils._CoreLoader._load.
-        run: rm -rf src/snowflake/connector/minicore/*/
-
-      - name: Fetch Wiremock
+      - name: Prepare the checkout
         run: |
+          # ci/build_linux.sh keeps only the host platform's prebuilt minicore blob;
+          # there is none for riscv64, and a foreign-arch .so breaks auditwheel repair
+          # (a missing one is non-fatal — _utils._CoreLoader._load swallows it).
+          rm -rf src/snowflake/connector/minicore/*/
+          # cibuildwheel 4 dropped the cpython-freethreading enable group and errors
+          # out on the stale name; free-threaded builds are always selectable now.
+          sed -i '/^enable = \["cpython-freethreading"\]$/d' pyproject.toml
           curl -fsSL --retry 5 --retry-all-errors \
             "https://repo1.maven.org/maven2/org/wiremock/wiremock-standalone/${WIREMOCK_VERSION}/wiremock-standalone-${WIREMOCK_VERSION}.jar" \
             --output .wiremock/wiremock-standalone.jar
@@ -82,7 +83,7 @@ jobs:
           CIBW_BEFORE_ALL: dnf install -y java-21-openjdk-headless
           CIBW_TEST_REQUIRES: >-
             pytest<7.5.0 pytest-asyncio pytest-timeout pytest-rerunfailures<16.0
-            more-itertools numpy responses
+            pytest-xdist more-itertools numpy responses
           # Mirrors tox's py3XX-unit-parallel-ci env, minus coverage. The aio suite
           # needs aiohttp/aioboto extras that have no riscv64 wheels.
           CIBW_TEST_COMMAND: >-
