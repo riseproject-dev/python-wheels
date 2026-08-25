@@ -33,10 +33,16 @@ name, repo, version, upstream build docs — come from the invoking prompt):
    **`.claude/worktrees/<pkg>`** inside this repo (locally ignored via `.git/info/exclude`).
    Never put a worktree — or anything else — outside the repository.
 2. Add `.github/workflows/build-<pkg>.yml` following the playbook below.
-3. Validate locally (gotcha 9), then push to `origin` and open a PR. A build only
-   starts from a `Trigger: <pkg>:<tag>` line in the **PR description** — one per
-   version you want built (`Trigger: numpy:v2.5.1`), which `pr-trigger.yml` picks
-   up. Editing the workflow file alone does not start a build.
+3. Validate locally (gotcha 9), then push to `origin` and open a PR with a
+   `Trigger: <pkg>:<tag>` line in the **PR description** for every version you want
+   built (`Trigger: numpy:v2.5.1`). `build-<pkg>.yml` is `workflow_dispatch`-only —
+   it has no `pull_request` trigger of its own, so a `Trigger:` line is the only
+   thing that ever starts a run; editing the workflow file alone does nothing.
+   `pr-trigger.yml` parses the directives, dispatches each via `workflow_dispatch`,
+   and posts one GitHub Check Run per directive through the Checks API — a
+   properly named, real check on the PR (`build-<pkg>.yml @ <version>`) whose
+   "Details" link goes straight to the dispatched run, with real
+   pending/success/failure/cancelled status mirrored via `gh run watch`.
 4. Watch CI, triage failures, iterate until every matrix job is green and the
    `publish` job dry-runs cleanly.
 5. When the wheels build and tests pass, reply to any review threads, then
@@ -44,7 +50,12 @@ name, repo, version, upstream build docs — come from the invoking prompt):
 
 ## Anatomy of a build-<pkg>.yml
 
-Standard triggers (copy from an existing workflow):
+Standard trigger (copy from an existing workflow) — `workflow_dispatch` only, no
+`pull_request` block. A per-package `pull_request: paths` trigger was tried and
+dropped: with 40+ package workflows, any PR touching several of their files fired
+that many separate (mostly skipped) runs, flooding the Actions list for no benefit
+— `pr-trigger.yml`'s Checks-API relay (step 3 above) gives the same visible,
+per-directive status without it:
 
 ```yaml
 on:
@@ -52,10 +63,6 @@ on:
     inputs:
       version: { description: '<pkg> version/tag', required: true, default: '<latest stable>' }
 ```
-
-`workflow_dispatch` is the only trigger — no `pull_request` trigger. A build only ever starts
-via a manual dispatch or a `Trigger: <pkg>:<tag>` line in a PR description, which `pr-trigger.yml`
-turns into a `workflow_dispatch` call. Editing/pushing the workflow file itself must not start a build.
 
 UV env vars (`UV_EXTRA_INDEX_URL`, `UV_INDEX_STRATEGY`, `UV_ONLY_BINARY`) are **only** needed
 if the workflow has steps that actually invoke `uv` (e.g. an sdist-build job on `ubuntu-latest`
@@ -212,8 +219,8 @@ upload without the docs-PR side effect.
 
 6. **Wire up real testing** — mirror how upstream tests its wheels (gotcha 6).
 
-7. **Validate locally, then push** (gotcha 9). Open a PR, add a `Trigger:
-   <pkg>:<tag>` line to its description to start CI. Watch, triage, iterate.
+7. **Validate locally, then push** (gotcha 9). Open a PR; the `pull_request` path
+   trigger runs CI. Watch, triage, iterate.
 
 ## Gotchas (the "wish I knew from the start" list)
 
