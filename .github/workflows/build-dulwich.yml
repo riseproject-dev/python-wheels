@@ -1,0 +1,95 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/dulwich/dulwich/blob/dulwich-1.2.13/.github/workflows/python-distributions.yml
+# Test invocation mirrors upstream's pythontest.yml / `make check`.
+name: Build dulwich wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'dulwich version to build (e.g. 1.2.13)'
+        required: true
+        default: '1.2.13'
+  pull_request:
+    paths:
+      - '.github/workflows/build-dulwich.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.2.13' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.2.13 there.
+  DULWICH_VERSION: ${{ inputs.version || '1.2.13' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build dulwich ${{ inputs.version || '1.2.13' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        # Per-interpreter (not abi3): setuptools-rust is not passed --py-limited-api.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      - name: Checkout dulwich ${{ env.DULWICH_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: dulwich/dulwich
+          ref: dulwich-${{ env.DULWICH_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream's extras minus paramiko/colordiff (unexercised by tests/) and
+          # patiencediff (no riscv64 wheel; test_patch skips without it).
+          CIBW_TEST_EXTRAS: merge,fastimport,https,range_diff
+          CIBW_TEST_SOURCES: tests testdata docs
+          # The suite resolves testdata/ and the source tree relative to the dulwich
+          # package dir, so the installed wheel goes where the checkout's would be.
+          # test_local_modifications_ioerror cannot fail as root: mode 0 still reads.
+          CIBW_TEST_COMMAND: >-
+            cp -a "$(python -c 'import dulwich, os; print(os.path.dirname(dulwich.__file__))')" dulwich &&
+            python -c "import dulwich._objects, dulwich._pack, dulwich._diff_tree" &&
+            python -c "import sys, unittest, tests; flat = lambda s: [t for x in s for t in (flat(x) if isinstance(x, unittest.TestSuite) else [x])]; sys.exit(not unittest.TextTestRunner().run(unittest.TestSuite(t for t in flat(tests.test_suite()) if not t.id().endswith('.test_local_modifications_ioerror'))).wasSuccessful())"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dulwich-${{ env.DULWICH_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish dulwich ${{ inputs.version || '1.2.13' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: dulwich-${{ env.DULWICH_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
