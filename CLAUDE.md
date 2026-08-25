@@ -29,7 +29,9 @@ working precedent.
 Given a package to port, the loop is always the same (project-specific inputs —
 name, repo, version, upstream build docs — come from the invoking prompt):
 
-1. Branch `<pkg>` from `origin/main` and work in a dedicated git worktree.
+1. Branch `<pkg>` from `origin/main` and work in a dedicated git worktree, created at
+   **`.claude/worktrees/<pkg>`** inside this repo (locally ignored via `.git/info/exclude`).
+   Never put a worktree — or anything else — outside the repository.
 2. Add `.github/workflows/build-<pkg>.yml` following the playbook below.
 3. Validate locally (gotcha 9), then push to `origin` and open a PR. Two
    things can start a build: the `pull_request: paths` trigger (fires when you touch the
@@ -724,7 +726,472 @@ upload without the docs-PR side effect.
       line), the other platforms' wheels are pure-Python by construction. Grep the
       gate in `setup.py` *before* the download loop — it settles feasibility on its own.
 
-## Environment / auth notes (this WSL setup)
+28. **mypyc-by-default is the other half of gotcha 19 — verify the `.so`, don't add
+    the env var (the pytokens case; see `build-pytokens.yml`).** Gotcha 19's tomli
+    shape has the mypyc build *opt-in* (`<PKG>_USE_MYPYC=1`) behind a `flit_core`
+    pyproject with no `[tool.cibuildwheel]` table. The commoner shape inverts all
+    three: `setup.py` sets
+    `USE_MYPYC = platform.python_implementation() == "CPython"` unless the env var
+    is present, `build-system.requires` already lists `mypy`, and upstream ships a
+    real `[tool.cibuildwheel]` table (`build-frontend`, `MYPYC_OPT_LEVEL`, `skip`).
+    The port is then a plain build-from-checkout with **one** override,
+    `CIBW_MANYLINUX_RISCV64_IMAGE` — forcing `<PKG>_USE_MYPYC=1` yourself would be
+    divergence, not insurance. What does need doing is gotcha 20's proof that the
+    wheel is compiled: mypyc turns `src/<pkg>/__init__.py` into
+    `<pkg>/__init__.cpython-3XX-….so`, so chain
+    `python -c "import <pkg>; assert <pkg>.__file__.endswith('.so'), <pkg>.__file__"`
+    ahead of pytest — `__file__` is the direct tell, no `has_c()`-style probe needed.
+    - **`CIBW_TEST_SOURCES` cuts both ways on `pyproject.toml` (refines gotcha 25).**
+      Gotcha 25 says stage it or lose `[tool.pytest.ini_options]`. The mirror trap:
+      staging it imports `addopts` wholesale, and a dev-oriented
+      `addopts = "--cov --cov-report=term-missing"` then kills the run with
+      `unrecognized arguments: --cov` unless `pytest-cov` is also in
+      `CIBW_TEST_REQUIRES`. Read `addopts` before deciding: stage `pyproject.toml`
+      only if the suite needs its config, otherwise leave it out
+      (`CIBW_TEST_SOURCES: tests`) and the coverage flags go with it. Upstream's tox
+      `commands = pytest` is the reference for what the suite actually needs.
+
+29. **setuptools 82 deleted `pkg_resources`; any `setup.py` importing it breaks under
+    build isolation (the asyncpg case).** The setuptools instance of gotcha 23's
+    floating-*build-tool* trap, and a common one — `pkg_resources` was removed outright
+    in **setuptools 82.0.0** (2026-02-08). A project whose `pyproject.toml` only
+    *floors* setuptools (`requires = ["setuptools>=77.0.3", ...]`) resolves to today's
+    latest in the isolated build env, so a legacy `setup.py` that imports
+    `pkg_resources` — asyncpg does, to version-check Cython on the cythonise path —
+    dies inside `finalize_options` with `ModuleNotFoundError: No module named
+    'pkg_resources'`, surfacing only as the generic `ERROR Backend subprocess exited
+    when trying to invoke build_wheel`.
+    - **Reproduces on any host** — drift, not arch. Settle the boundary without
+      building anything: `unzip -l setuptools-8{1,2}.0.0-*.whl | grep -c 'pkg_resources/'`
+      → 19 files on 81.0.0, 0 on 82.0.0.
+    - **Fix is gotcha 23's shape** — preinstall the pin, disable isolation:
+      ```yaml
+      CIBW_BEFORE_BUILD: pip install "setuptools<82" "Cython>=3.2.1,<4.0.0" wheel
+      CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
+      ```
+      **The flag name is frontend-specific**: `build` takes `--no-isolation`, pip takes
+      `--no-build-isolation`. Copying pip's spelling into a `build` frontend is an
+      immediate argument error — match the frontend upstream declares in
+      `[tool.cibuildwheel] build-frontend` (gotcha 13 explains why `build[uv]` is the
+      one to avoid). Mirror the project's whole `build-system.requires` in the
+      preinstall: `build --no-isolation` still *verifies* those requirements and fails
+      on a missing one.
+    - Revisit the ceiling when bumping the package version — upstream will eventually
+      stop importing `pkg_resources`.
+
+30. **Check our own registry before dropping a dependency as "no riscv64 wheel".**
+    `pypi.riseproject.dev` **302-redirects to pypi.org for anything it doesn't host**, so
+    one call answers the question: `curl -s https://pypi.riseproject.dev/simple/<dep>/` —
+    an HTML link list means we ship it (read the filenames for the interpreter tags), a
+    302 means we don't. asyncpg's port initially deleted `uvloop` from upstream's `test`
+    dependency-group and hand-copied the remaining requirements, assuming no riscv64
+    uvloop existed; we ship 0.22.1 for cp312/cp313/cp314/cp314t. Inheriting upstream's
+    `test-groups` unchanged and adding
+    `CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/` was both
+    less YAML and closer to upstream — the divergence goal 2 warns about, introduced for
+    a reason that wasn't true.
+    - **The version has to line up, not just the name.** With `PIP_EXTRA_INDEX_URL` pip
+      picks the highest version across *both* indexes and only then picks a file, so our
+      riscv64 wheel gets used only when our version is the one pip resolves to. If PyPI's
+      latest is newer than what we host, pip takes that and compiles it from sdist (or
+      fails). Check with
+      `curl -s https://pypi.org/pypi/<dep>/json | python3 -c 'import json,sys;print(json.load(sys.stdin)["info"]["version"])'`
+      before relying on it.
+
+31. **`git apply` onto a `setuptools_scm` checkout renames the wheel (the lz4 case).**
+    A third route to a poisoned version, distinct from gotcha 3 (shallow checkout, no tag
+    history) and gotcha 22 (`tag_build = dev` in `setup.cfg`): patching the upstream tree
+    leaves it **dirty**, and `setuptools_scm` reads a dirty tree at a tag as post-release —
+    `4.4.5` silently becomes `4.4.6.dev0+g59b2d817.d20260825`. That flows straight into the
+    wheel filename and breaks gotcha 18's three-way match (the docs YAML `version:`, the
+    `patches/<pkg>/<version>/` directory the patch itself lives in, and the nightly PyPI
+    check all key off it). Committing the patch instead of leaving it unstaged does **not**
+    help — `git describe` then reports `4.4.6.dev1+g<sha>`. Pin the version explicitly:
+    ```yaml
+    CIBW_ENVIRONMENT: >-
+      ... SETUPTOOLS_SCM_PRETEND_VERSION_FOR_<PKG>=${{ env.<PKG>_VERSION }}
+    ```
+    `<PKG>` is the *distribution* name upper-cased with `-`/`.` → `_`. Once it's set
+    setuptools_scm never consults git, so a `fetch-depth: 0` that existed only to make the
+    tag reachable becomes dead weight — drop it in the same commit rather than leaving two
+    mechanisms fighting over the version. **Costs nothing to catch**: a `pip wheel .` on any
+    host prints the filename, so the wrong version is visible before you push.
+
+32. **Vendored C libraries are the usual licensing gap — and upstream often has the fix
+    already.** The Licensing section's "does the wheel carry the licences of what it links"
+    check almost always fails the same way: the wheel ships the *wrapper's* LICENSE while a
+    bundled C tree (`lz4libs/`, a vendored zlib/zstd/xxHash) is compiled straight into the
+    extension under its own BSD/MIT terms, whose binary-redistribution clause requires the
+    copyright notice to travel with the binary. Two-command check on any host:
+    ```bash
+    unzip -l <wheel> | grep -i licen     # what actually ships
+    ls <vendored-dir>                    # what got linked in
+    ```
+    setuptools only globs `LICEN[CS]E*` etc. at the **project root**, so a licence file
+    inside the vendored subdir is *not* picked up automatically — it needs an explicit
+    `license_files=[...]` listing every file, the wrapper's own included, or you drop the
+    original while adding the new ones.
+    - **Search upstream before writing anything**: `gh search issues --repo <upstream>
+      license --include-prs`. python-lz4 had both an open issue *and* an open PR fixing
+      exactly this; carrying that PR turned a hand-rolled patch into
+      `Upstream-Status: Submitted [url]` — the strongest tag available, and it drops out
+      cleanly when upstream merges. Refresh it onto the tag you build (theirs was anchored
+      on a `license=` line added after the release) and note the refresh in the commit
+      message.
+    - **Reproduce the copyright notice the vendored source actually carries**, not the one
+      in the dependency's current `LICENSE` — the bundled copy is usually several releases
+      old and the year range differs.
+
+33.  **One green interpreter beside identically-failing others is a CPython feature
+    gate, not a build bug (the debugpy case).** When a per-interpreter matrix comes back
+    with cp314 fully green while cp312 and cp313 each fail the *same* N tests, suspect a
+    runtime capability that newer CPython provides natively and older ones reach through
+    arch-specific native code that has no riscv64 build. debugpy attaches to a running
+    process by injecting a shim from a prebuilt per-arch library —
+    `pydevd_attach_to_process/add_code_to_python_process.py` accepts only
+    `arm64/amd64/x86/x86_64/i386` — but on 3.14 it goes through **`sys.remote_exec()`
+    (PEP 768)** and needs no shim, so the 100 `attach_pid` failures were riscv64-real on
+    3.12/3.13 and genuinely absent on 3.14.
+    - **Read the failure *set* before any failure text.**
+      `grep -oE 'FAILED [^ ]+' <log> | sort -u` then count how many carry the suspect
+      parametrisation — 100 of 100 is a gate, a scattered mix is not. That one command
+      separates "upstream doesn't support this on riscv64" from "our wheel is broken",
+      and it costs nothing next to re-reading tracebacks.
+    - **Deselect per matrix entry, not globally.** Turn `python: [cp312, ...]` into
+      `include:` with a per-entry filter and interpolate it into the test command
+      (`-k "${{ matrix.pytest_k }}"`), so the interpreter that *can* exercise the
+      feature keeps testing it — dropping it everywhere would have thrown away 105
+      real tests on cp314. `-k ""` is a valid no-op filter, so the unrestricted entry
+      needs no second command shape.
+    - **Free-threading is settled by upstream signals, not by debugging the crashes.**
+      Three cheap checks decide whether `cp314t` belongs in the matrix at all: does PyPI
+      list a `cp3XXt` wheel, does `tox.ini`/upstream CI carry a free-threaded env, do the
+      classifiers mention free threading. debugpy answers no to all three, and its cp314t
+      job crashed 40 pytest-xdist workers spread evenly over *every* test module —
+      breakage of that shape means the configuration is unsupported, not that one feature
+      is broken. Shipping it would give riscv64 a build upstream ships nowhere; drop the
+      entry and say why in a one-line comment. (A *coherent subset* of failures would
+      mean the opposite — keep digging.)
+
+33. **Not every `.so` in a wheel is an extension module — some are ctypes/cffi-loaded
+    raw shared libraries (the pycryptodome case; see `build-pycryptodome.yml`).**
+    Gotchas 20/25/28 all reach for an import probe to prove the wheel is compiled
+    (`import <pkg>; assert <pkg>.__file__.endswith('.so')`). That probe is invalid for a
+    project that declares `Extension(...)` purely to get the C compiled and then `dlopen`s
+    the result itself: pycryptodome's 40 `Crypto/*/_raw_*.abi3.so` have no `PyInit_*`, so
+    `from Crypto.Cipher import _raw_aes` dies with **`ImportError: dynamic module does not
+    define module export function (PyInit__raw_aes)`** — a probe failure that looks like a
+    broken build but isn't. Tell-tale in 5 seconds: `grep -rl PyInit src/` returns nothing
+    while the project has dozens of `Extension`s, and the loader (`Crypto/Util/_raw_api.py`)
+    uses `ctypes.CDLL`/`cffi.dlopen`.
+    - **The same fact removes the need for a probe.** Such a loader has no pure-Python
+      fallback — it raises `OSError: Cannot load native module` — and the `Extension`s are
+      not `optional=`, so a missing or unbuilt `.so` is a hard failure the moment the test
+      suite imports anything. Use upstream's own test command unmodified and keep the
+      gotcha-20 `unzip -l <whl> | grep '\.so$'` check as your proof instead.
+
+34. **A third way a project gets abi3: `setup.py` sets the `bdist_wheel` option itself.**
+    Gotcha 11 splits abi3 into maturin (pyproject/Cargo feature, inherited) vs
+    setuptools-rust (a `--py-limited-api` flag *you* must inject via
+    `CIBW_CONFIG_SETTINGS`). Plain setuptools has a third form — `setup(options={'bdist_wheel':
+    {'py_limited_api': 'cpNN'}})` computed in `setup.py` — which needs **no** cibuildwheel
+    config at all, and which upstream commonly guards with
+    `if not sysconfig.get_config_var('Py_GIL_DISABLED')` so the free-threaded build silently
+    drops back to a per-interpreter wheel. Two consequences:
+    - Don't add `CIBW_CONFIG_SETTINGS` "to be safe" — it's redundant divergence. Settle it by
+      building the sdist once on any host: pycryptodome yields
+      `pycryptodome-3.23.0-cp37-abi3-macosx_....whl` with no flags.
+    - **The abi3 floor is upstream's, not ours.** The wheel is tagged `cp37-abi3` even when
+      cibuildwheel builds it on cp312, so name the job/artifact after the tag the wheel
+      actually carries (`cp37-abi3-manylinux_riscv64`), not after the interpreter that built
+      it — `build-bcrypt.yml`'s `cp312-abi3` naming only fits when *we* pick the floor.
+
+35. **A `py3-none-<platform>` wheel whose platform tag is real: a downloaded prebuilt
+    runtime (the playwright case).** Gotcha 27 reads an all-`py3-none-*` wheel set as
+    "the platform half was forced by hand, nothing is compiled, stop". Half of that is
+    always right — no ABI tag means no extension module — but the *reason* has two
+    shapes, and they end in different statuses. watchdog's tag was cosmetic
+    (`--plat-name` on an otherwise identical pure wheel). playwright's is **load-bearing**:
+    each of its 8 wheels is ~40 MB because `setup.py` extracts a per-platform bundle into
+    `playwright/driver/` containing a prebuilt **Node.js binary** plus the prebuilt
+    `playwright-core` npm package. Nothing in the wheel is *compiled by the build*, yet the
+    wheels genuinely differ per platform. That is `vendored-binary`, not `not-feasible`.
+    - **Find the fetch, then find its platform table.** Two greps settle it: the download
+      base (playwright: `NODEJS_DIST = "https://nodejs.org/dist"` in
+      `scripts/build_driver.py`) and the hardcoded platform list beside it
+      (`PLATFORMS = [Platform("linux", "linux-x64", ...), Platform("linux-arm64", ...)]`,
+      mirrored by `base_wheel_bundles` in `setup.py`). Then ask the *upstream artifact*
+      index whether our arch exists at all:
+      `curl -s https://nodejs.org/dist/v<ver>/SHASUMS256.txt | grep -c riscv` → 0.
+      No upstream artifact to bundle ⇒ nothing a workflow could assemble.
+    - **An unofficial build of the runtime is not a green light.**
+      `unofficial-builds.nodejs.org` *does* publish `node-v24.18.1-linux-riscv64.tar.gz`,
+      so the bundle is technically assemblable — and it would still be worthless. Check
+      what the vendored payload does at *runtime* before chasing the binary: playwright's
+      own browser registry (`playwright-core`'s `lib/coreBundle.js`) enumerates only
+      `{ubuntu,debian}NN.NN-{x64,arm64}` host platforms and contains zero `riscv`
+      strings, and Microsoft publishes no riscv64 Chromium/Firefox/WebKit — so
+      `playwright install` resolves to `<unknown>` and fails. Swapping in an unofficial
+      runtime to ship a wheel upstream ships nowhere, that cannot then do its job, is
+      divergence twice over.
+
+36. **`test-sources` preserves each path's position relative to the project root —
+    which is what makes `__file__`-relative fixture lookups survive the staging (the
+    brotli case; see `build-brotli.yml`).** cibuildwheel (>=3, checked in 4.2.0
+    `platforms/linux.py`) runs `test-command` in an **empty** temp dir, not in the
+    checkout, and `copy_test_sources` copies each entry to `test_cwd/<same relative
+    path>`. So a suite that locates its data by walking up from its own file —
+    `project_dir = dirname(dirname(dirname(__file__)))` then `project_dir/tests/testdata`,
+    a common unittest idiom — keeps working if you stage the sibling data at its original
+    relative path: `CIBW_TEST_SOURCES: python/tests python/bro.py tests/testdata`.
+    Stage the data under a flattened name and every lookup breaks.
+    - **Choosing what *not* to stage is the shadowing fix (cheaper than gotcha 25's).**
+      brotli's importable `brotli.py` lives in `python/` beside `python/tests/`; staging
+      only `python/tests` leaves `test_cwd/python/` without it, so `import brotli` can
+      only resolve to the wheel. Same reasoning applies to `unittest discover -s <dir>`,
+      which inserts `<dir>` at `sys.path[0]` exactly like pytest's rootdir insertion —
+      so what sits in that directory decides which copy gets imported.
+    - **`setup.py test` is gone (removed in setuptools 72), so an upstream whose CI is
+      `python setup.py test` needs translating, not copying.** Read the `test_suite`
+      entry point and reproduce it directly — brotli's
+      `test_loader.discover("python", pattern="*_test.py")` becomes
+      `python -m unittest discover -s python -p '*_test.py'`. Closer to upstream than
+      inventing a pytest invocation, and it needs no test-requires at all.
+
+37. **pytest-xdist's controller can SIGSEGV under the free-threaded interpreter;
+    `-n 0` sidesteps it (the snowflake-connector-python case).** A suite that runs
+    green on `cp312`/`cp313`/`cp314` can kill the **cp314t** job with
+    `Fatal Python error: Segmentation fault`, and the traceback is entirely
+    *pure-Python execnet frames* — `gateway_base._read_int4` →
+    `_thread_receiver`, under `<Cannot show all threads while the GIL is
+    disabled>`, with `OSError: cannot send (already closed?)` from the workers
+    trailing behind it. No project code on the stack, no `.so` involved, and it
+    is **intermittent**: the same job on the same tree completed the whole suite
+    on an earlier run. That is xdist's own gateway machinery, which only exists
+    when `-n` is on, so the fix is to take execnet out of the picture for that
+    one interpreter rather than to chase the crash.
+    - **`-n 0` is the clean off switch, not `-p no:xdist`.** xdist's
+      `pytest_cmdline_main` special-cases it: `numprocesses == 0` forces
+      `dist = "no"` and `tx = []`, so no gateway is created and no receiver
+      thread spawns — while the plugin stays loaded, so `pytest.mark.xdist_group`
+      is still a registered marker (`-p no:xdist` deregisters it and trips
+      `--strict-markers`). It also overrides an inherited `--dist loadfile`, so
+      the flag can stay in a shared command string.
+    - **Vary it per matrix entry, not globally** — serial costs real time (30min
+      vs 18min here), so keep upstream's `-n auto` on the GIL-ful interpreters.
+      Switch the matrix from a bare `python:` list to `include:` entries carrying
+      the flags, and interpolate `${{ matrix.pytest_dist }}` into
+      `CIBW_TEST_COMMAND`.
+    - Distinct from gotchas 21 and 25, which are about what the xdist *workers*
+      import. This one is the **controller** process crashing outright, and no
+      amount of `PYTHONNOUSERSITE`/`test-sources` touches it.
+
+38. **A slow runner turns a latent test race into a hard failure — simulate the
+    slowness on your fast host instead of guessing.** Test suites are full of
+    timing assumptions that hold on the x86 CI upstream sizes them for. Three
+    shapes showed up in one port, all of them *arch-independent bugs* that only
+    riscv64 was slow enough to reach:
+    - **A fixed timeout constant sized for fast hardware** — a wiremock
+      standalone server given 12s to answer `/__admin/health` while four xdist
+      workers each boot their own JVM; a `platform_detection_timeout_seconds=1`
+      budget that a first `boto3.client("sts", …)` service-model load overshoots.
+      Both are the playbook's "artificial test limitation" patch case: raise the
+      ceiling, note that the wait returns early so faster hardware pays nothing.
+    - **A thread the code under test deliberately abandons.** The nastiest one:
+      `Auth.authenticate()` runs its MFA wait in a daemon `Thread` and gives up
+      with `t.join(timeout=…)`, so the request mock keeps running after the call
+      returns — and reaches its trailing `mock_cnt += 1` ~9s later, inside the
+      *next* sub-case, which has already reset that global to stage its own
+      response. Result: a wrong branch and a `KeyError` instead of the expected
+      exception. Fix the mock to complete its mutation of shared state **before**
+      it sleeps (read-and-advance in one step at the top), leaving branch
+      selection unchanged — not to widen the assertion.
+    - **Reproduce it on any host by inserting the delay yourself.** Find the
+      window the failure needs and `time.sleep()` it open — here, an 11s sleep
+      right after the next sub-case's counter reset reproduced the exact CI
+      `KeyError` on macOS/arm64, and the patch flipped it to green. Same
+      30-second, no-QEMU discipline as gotchas 23/25/29, applied to timing: it
+      proves the bug is upstream's rather than the port's, and it is the evidence
+      that justifies the patch in review.
+    - **Look for upstream's own admission.** A `skipif(IS_WINDOWS, reason="…race
+      condition issues with the global …")` on the very test that fails is
+      upstream telling you the race is known and merely platform-dependent —
+      quote it in the commit message and tag the patch `To upstream`, not
+      `Inappropriate`.
+    - **Keep `Upstream-Status:` on ONE physical line.** `ci_scripts/check_patch.py`
+      matches `^Upstream-Status: *(.*)$` and then validates the bracketed comment
+      with `^(\[.*\])?$` — a bracket wrapped across two lines leaves the value
+      unbalanced and fails `check_patches`, costing a push. Verify before pushing
+      with `uv run --python 3.13 python ci_scripts/check_patch.py origin/main HEAD`
+      (the script needs ≥3.12 for its nested-quote f-strings).
+
+39. **Testing a unittest-native suite against the installed wheel: three traps past
+    gotcha 25 (the dulwich case; see `build-dulwich.yml`).** `CIBW_TEST_SOURCES` stops the
+    checkout's source package from shadowing the wheel, but a suite written to run against
+    an *in-place* `build_ext -i` then breaks in three new ways.
+    - **Fixture data resolved relative to the package, not the rootdir.** dulwich's
+      *shipped* `dulwich/tests/utils.py` opens `<pkg>/tests/../../testdata`, and
+      `tests/test_source.py` walks `<rootdir>/dulwich` — with only `tests/` staged, 95
+      tests error. Staging the *installed* package into the test cwd fixes both at once
+      and still exercises the compiled wheel:
+      ```
+      cp -a "$(python -c 'import <pkg>, os; print(os.path.dirname(<pkg>.__file__))')" <pkg>
+      ```
+      Keep gotcha 20's proof beside it (`python -c "import <pkg>._ext"`) — the copy is
+      worth nothing if it has no `.so`.
+    - **An upstream `test_suite()` callable can't be filtered, and pytest is not the way
+      out.** `python -m unittest -k` has no negation and never reaches a suite built by a
+      module-level callable. Switching to pytest as the filtering runner loses tests
+      *silently*: **pytest never collects `__init__.py`, even when you name it explicitly**
+      — dulwich keeps 591 of its 4620 tests in `tests/porcelain/__init__.py`, and only
+      `-o python_files="test_*.py __init__.py"` sees them. Run upstream's exact suite minus
+      one test with a flatten-and-filter one-liner instead (flattening preserves order, so
+      `setUpClass` grouping survives):
+      ```
+      python -c "import sys, unittest, tests; flat = lambda s: [t for x in s for t in (flat(x) if isinstance(x, unittest.TestSuite) else [x])]; sys.exit(not unittest.TextTestRunner().run(unittest.TestSuite(t for t in flat(tests.test_suite()) if not t.id().endswith('.<test>'))).wasSuccessful())"
+      ```
+      Before switching runners at all, diff the two collections — `comm -13` over sorted
+      test ids exposed the missing 591 in one run.
+    - **The test phase runs as root, in a container that is not upstream's CI runner.**
+      Two symptoms: a test asserting a mode-0 file is unreadable can never fail for root
+      (deselect it), and tests shelling out to CLIs the image lacks *error* rather than
+      skip — dulwich's `test_signature` needs `ssh-keygen`/`gpgsm`. Install those in
+      `CIBW_BEFORE_TEST_LINUX` (`dnf -y install openssh-clients gnupg2-smime`) rather than
+      deselecting: upstream's runners have them, so installing is the smaller divergence.
+      And don't trust a local `docker run` of the image to settle what's present — the
+      self-hosted riscv64 runner used an older cached `manylinux_2_39_riscv64` than a fresh
+      `docker pull`, with `gpgsm` in one and not the other.
+
+40. **A port can be blocked by a *dependency* that is conda-produced, even when the
+    package itself builds cleanly (the numba case).** The early-skip triage asks whether
+    *upstream's* wheel repackages a conda artifact; the commoner shape is one level down.
+    numba's own wheel build is a plain manylinux `docker run` + `python -m build` with no
+    conda anywhere, its C extensions need only numpy, and nothing in it gates on the
+    architecture. It is still un-portable today because `install_requires` pins
+    `llvmlite>=0.49.0dev0,<0.50`, and llvmlite is the conda-blocked one: its wheels link a
+    patched LLVM that comes from the `llvmdev` **conda package** on the `numba` channel
+    (`buildscripts/manylinux/prepare_miniconda.sh` installs miniconda *inside* the
+    manylinux container, then `conda install llvmdev`), and `ffi/CMakeLists.txt` hard-fails
+    on any other LLVM major (`LLVMLITE_SUPPORTED_LLVM_VERSION_DEFAULT 22`) — so the
+    distro/manylinux LLVM is not a substitute, and upstream's install docs say in as many
+    words not to use a system LLVM. Report the *dependency's* status, not the package's.
+    - **Run the dependency check before reading any build script.** Take
+      `info.requires_dist` from the package's PyPI JSON, drop the extras, and for each
+      hard requirement ask (a) does PyPI publish a riscv64 wheel, (b) do we
+      (gotcha 30's `curl -s https://pypi.riseproject.dev/simple/<dep>/` — a 302 means no).
+      A `no` on both for a dependency imported at `import <pkg>` time means the wheel you
+      would publish cannot be installed *or* smoke-tested; there is no partial win in
+      shipping it.
+    - **"The dependency needs its own port" is a real answer.** It is not the same as the
+      port being merely hard: nothing in `build-<pkg>.yml` can fix it, because the
+      gotcha-17 dep-wheel pattern presupposes the dep is already on our registry. Say which
+      package must land first and why it is stuck, so the work can be sequenced.
+
+41. **Compiling a huge amount of real code does not make a package portable — check
+    what the compiled artifact *targets* (the triton case).** Gotchas 24/27/35 all
+    triage packages that compile *nothing*; the inverse trap is a package that compiles
+    an enormous C++ world and is still `not-feasible`, because the thing it builds is a
+    **cross-compiler for someone else's ISA** whose assembler and runtime are proprietary
+    vendor blobs. triton's wheel is ~190 MB: a 473 MB `triton/_C/libtriton.so` built from
+    a pinned LLVM revision (genuinely compiled — the "big C++ tree is a port, not a
+    blocker" rule would wave it through) sitting beside ~140 MB of *downloaded* NVIDIA
+    binaries — `bin/ptxas`, `bin/ptxas-blackwell`, `bin/nvdisasm`, `bin/cuobjdump`,
+    `lib/cupti/libcupti*`, `libnvperf_host.so`. Three cheap checks, in this order:
+    - **Read the wheel's big files before reading `setup.py`.** No download needed — the
+      zip central directory is enough, over HTTP range requests (cap each range at ~1 MB;
+      `files.pythonhosted.org` answers a whole-file range with `501 Unsupported client
+      range`). `bin/` entries and vendor-named `lib*.so` next to your own `.so` are the
+      tell.
+    - **Ask the vendor's own artifact index whether our arch exists**, the way gotcha 35
+      asks `nodejs.org/dist`: NVIDIA's
+      `https://developer.download.nvidia.com/compute/cuda/redist/redistrib_<ver>.json`
+      lists exactly `linux-x86_64`, `linux-sbsa`, `windows-x86_64`, `linux-all` — no
+      riscv64, in *any* release up to the newest. Same answer from triton's prebuilt-LLVM
+      blob store (`oaitriton.blob.core.windows.net/public/llvm-builds/llvm-<hash>-<os>-<arch>-1.tar.gz`
+      → 200 for `{ubuntu,almalinux}-{x64,arm64}`, 404 for anything riscv).
+    - **Then ask what the wheel would do at runtime if you built it anyway.** The backend
+      list is usually one line (`BackendInstaller.copy(["nvidia", "amd"])` — no CPU
+      backend upstream), and each backend `driver.py` names the shared library it dlopens
+      (`libcuda.so.1`, `libamdhip64.so`). Neither NVIDIA's driver nor ROCm ships riscv64,
+      so both backends report zero devices and nothing can be compiled.
+    An "offline build" escape hatch (`TRITON_OFFLINE_BUILD=1`, or presetting the
+    `TRITON_PTXAS_PATH`-style variables that make `download_and_copy` return early) makes
+    the 404s go away and is **not** a port: it ships a wheel with the vendor tools missing,
+    which is strictly worse than the honest failure. Report `not-feasible` with the redist
+    index and the `driver.py` dlopen line as evidence.
+
+42. **Settling "is this arch conda-blocked?" — ask the channel's subdir, and count
+    packages rather than trusting the HTTP status (the llvmlite case).** Gotcha 40
+    names llvmlite as numba's conda-blocked dependency; confirming it for a *new*
+    package takes two greps and one JSON read, and one of them has a trap.
+    - **Find the conda pull in the wheel script, not the CI yaml.** llvmlite's
+      `buildscripts/manylinux/build_llvmlite.sh` sources `prepare_miniconda.sh` (which
+      curls a Miniconda installer and installs it *inside* the manylinux container) and
+      then `conda install -y -c defaults numba/label/llvm_wheel::llvmdev=22 --no-deps`
+      before `python setup.py bdist_wheel`. The channel name is usually also an `env:`
+      key in upstream's workflow (`CONDA_CHANNEL_NUMBA: numba/label/llvm_wheel`).
+    - **`https://conda.anaconda.org/<channel>/<subdir>/repodata.json` returns `200` for
+      a subdir that does not exist** — anaconda.org synthesises an empty index rather
+      than 404ing, so a `curl -sI` status check says "yes" for every arch. Read the body
+      and count: `linux-64` and `linux-aarch64` each list `llvmdev-22.1.0-manylinux_1.conda`,
+      `linux-riscv64` lists **0** packages. (Distinct from gotcha 30, where our own
+      registry answers a missing package with a 302.)
+    - **Check the installer too, and the version gate.** repo.anaconda.com publishes
+      Miniconda3 for `x86_64`/`aarch64`/`s390x` only — no riscv64 — so even the
+      bootstrap step has no artifact. And confirm the project can't just use a system
+      LLVM: llvmlite's `ffi/CMakeLists.txt` hard-fails unless
+      `LLVM_VERSION_MAJOR == LLVMLITE_SUPPORTED_LLVM_VERSION_DEFAULT` (22), and the
+      conda recipe builds that LLVM from the `llvm-project` source tarball *with
+      patches*, so the distro copy is not a substitute. Report `waiting-on-conda`.
+
+43. **Upstream may not be on git at all — look for the author's own read-only git
+    mirror before building a fetch step (the ruamel.yaml.clib case).** PyPI's
+    `project_urls` pointed only at a SourceForge **Mercurial** repo, which
+    `actions/checkout` cannot fetch, and neither fallback is workable: SourceForge
+    serves the anonymous hg endpoint over **http only** (https answers 401), and its
+    snapshot-tarball URL returns the commit *page*, not an archive. Do not conclude
+    from that that the sdist must be the CI input — check whether upstream keeps a git
+    mirror, because a project whose own CI is GitHub Actions necessarily has one.
+    `gh api "search/repositories?q=<name>+in:name&sort=updated"` found `ruamel/yaml.clib`
+    (the author's, carrying every release tag and the `build_wheels.yaml` upstream
+    actually runs); checking it out is *closer* to upstream than any sdist route, so the
+    port collapses to the ordinary build-from-checkout shape.
+    - **Rank candidates by freshness, not by name.** The obvious-looking mirror
+      (`pycontribs/ruamel-yaml-clib`, "read-only git mirror from official hg repository")
+      had stopped at 0.2.8 in 2023. Sorting the search by `pushed_at` is what surfaced
+      the live one.
+    - **Prove the tag is the release before trusting it**: `gh api repos/<m>/tarball/<tag>`
+      and diff against the PyPI sdist (`setup.py`, `pyproject.toml`, `LICENSE`, the
+      vendored C) — identical files mean the mirror is a faithful export, not a fork.
+      Say so in the commit message; a reviewer will ask why the checkout isn't upstream.
+
+44. **Naming a vendored dependency's licence `LICENSE.<dep>` at the project root
+    needs no packaging change at all (refines gotcha 32).** Gotcha 32's fix is an
+    explicit `license_files=[...]`, which is only necessary when the file lives inside
+    the vendored subdirectory. setuptools' *default* `license_files` glob is
+    `LICEN[CS]E*`/`COPYING*`/`NOTICE*`/`AUTHORS*` **at the root**, so a file added there
+    as `LICENSE.libyaml` is picked up automatically and lands in
+    `dist-info/licenses/` beside the project's own — a one-file patch with no
+    `setup.cfg`/`setup.py` edit, and no way to accidentally drop the original by
+    replacing the default glob with a hand-written list.
+    - **Make the patch self-verifying**, since a licence patch that silently stops
+      applying still produces a green build: assert it from the test command via the
+      installed metadata rather than eyeballing the wheel —
+      `[p for p in importlib.metadata.files('<dist>') if '.dist-info/licenses/' in str(p)]`
+      compared against the expected set. Check it fails on an unpatched wheel before
+      trusting it.
+
+## Environment / auth notes
+
+- **Never write outside the repository.** Worktrees go in `.claude/worktrees/<pkg>`, scratch
+  files in `.git/pw-scratch/<pkg>`, local lock state in `.git/pw-locks/`. No files in `$HOME`,
+  `~/.local/bin`, `/tmp`, or sibling directories, and **no installing software** on the host
+  (brew/apt/dnf/npm/pip). If you think you need either, ask first.
+- **Commit identity is `Ludovic Henry <git@ludovic.dev>`** and is already configured. Never
+  pass `-c user.email`/`-c user.name` or set `GIT_AUTHOR_*`/`GIT_COMMITTER_*` — in particular
+  do not use the user's address from your own session context, which is a *different*
+  address. A `pre-commit` hook rejects any other identity (and any workflow adding
+  `BUILD_VERBOSITY`); if it fires, fix the command, don't bypass the hook.
 
 - **Pushing workflow files needs `workflow` scope** on the gh token, else the push is
   rejected ("refusing to allow an OAuth App to create or update workflow … without
