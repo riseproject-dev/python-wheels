@@ -1,0 +1,132 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's wheel builder:
+#   https://github.com/ruamel/yaml.clib/blob/0.2.15/.github/workflows/build_wheels.yaml
+name: Build ruamel-yaml-clib wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'ruamel.yaml.clib version to build (git tag, e.g. 0.2.15)'
+        required: true
+        default: '0.2.15'
+  pull_request:
+    paths:
+      - '.github/workflows/build-ruamel-yaml-clib.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.2.15' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  RUAMEL_YAML_CLIB_VERSION: ${{ inputs.version || '0.2.15' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build ruamel-yaml-clib ${{ inputs.version || '0.2.15' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # No cp314t: upstream's pyproject.toml has skip = "cp3??t-*".
+        python: ["cp312", "cp313", "cp314"]
+
+    steps:
+      # Development happens in Mercurial on SourceForge; ruamel/yaml.clib is the
+      # author's read-only git mirror and the repo upstream's own CI builds from.
+      - name: Checkout ruamel.yaml.clib ${{ env.RUAMEL_YAML_CLIB_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: ruamel/yaml.clib
+          ref: ${{ env.RUAMEL_YAML_CLIB_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # The extension compiles in libyaml, whose MIT terms want the notice to
+      # travel with the binary; upstream's wheel carries only its own LICENSE.
+      - name: Patch ruamel.yaml.clib source
+        run: |
+          git apply python-wheels/patches/ruamel-yaml-clib/${{ env.RUAMEL_YAML_CLIB_VERSION }}/00*.patch
+
+      # Upstream ships no test suite; exercise the extension the way ruamel.yaml uses it.
+      - name: Stage smoke test
+        run: |
+          mkdir -p tests
+          cat > tests/test_clib.py <<'EOF'
+          import importlib.metadata
+          import io
+
+          import ruamel.yaml
+          from ruamel.yaml.cyaml import __yaml_lib
+
+          assert __yaml_lib == 'clib', __yaml_lib
+
+          licenses = sorted(
+              str(path).rsplit('/', 1)[-1]
+              for path in importlib.metadata.files('ruamel-yaml-clib')
+              if '.dist-info/licenses/' in str(path)
+          )
+          assert licenses == ['LICENSE', 'LICENSE.libyaml'], licenses
+
+          yaml = ruamel.yaml.YAML(typ='safe', pure=False)
+          assert yaml.Parser.__name__ == 'CParser', yaml.Parser
+          assert yaml.Emitter.__name__ == 'CEmitter', yaml.Emitter
+
+          data = yaml.load('a: 1\nb: [x, "é"]\nc: &r {d: null}\ne: *r\n')
+          assert data == {'a': 1, 'b': ['x', 'é'], 'c': {'d': None}, 'e': {'d': None}}, data
+
+          buf = io.StringIO()
+          yaml.dump(data, buf)
+          assert yaml.load(buf.getvalue()) == data, buf.getvalue()
+
+          try:
+              yaml.load('a: [1, 2\n')
+          except ruamel.yaml.YAMLError:
+              pass
+          else:
+              raise AssertionError('the C parser accepted invalid YAML')
+          EOF
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_REQUIRES: ruamel.yaml
+          CIBW_TEST_COMMAND: python {project}/tests/test_clib.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ruamel-yaml-clib-${{ env.RUAMEL_YAML_CLIB_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish ruamel-yaml-clib ${{ inputs.version || '0.2.15' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: ruamel-yaml-clib-${{ env.RUAMEL_YAML_CLIB_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
