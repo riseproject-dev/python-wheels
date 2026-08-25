@@ -1,0 +1,79 @@
+From 8f1e5d9364b8a428176397545cf6b706f173c0d8 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Tue, 25 Aug 2026 16:41:34 +0200
+Subject: [PATCH] test: auth: fix the mock_cnt race that test_auth_mfa's
+ timeout case leaves behind
+
+Auth.authenticate() runs the MFA wait in a daemon Thread and gives up on it
+with t.join(timeout=timeout), so the request mock keeps running after the
+call returns. test_auth_mfa's third case relies on exactly that: the mock's
+mock_cnt == 1 branch sleeps 10 seconds, the test passes timeout=1, and the
+join returns while that thread is still sleeping.
+
+The abandoned thread then falls through to `mock_cnt += 1` at the bottom of
+the mock, roughly nine seconds later. By that time the fourth case has
+already set `mock_cnt = 2` to select the "data is None" response, so the
+stray increment turns it into 3, the mock returns the empty else-branch
+dict, and Auth.authenticate() raises KeyError: 'data' instead of the
+snowflake.connector.errors.Error the test expects.
+
+Whether the increment lands inside the fourth case is pure timing. It never
+does on a fast machine, which is why this only shows up where the fourth
+case's setup takes longer than the rest of the sleep. It is the same race
+the test is already skipped for on Windows.
+
+Read and advance mock_cnt in one step at the top of the mock instead, before
+the sleep, so a call's counter effect is complete before the caller can walk
+away from it. Branch selection is unchanged: calls still see 0, 1, 2, ... in
+order.
+
+Reproducible anywhere by inserting `time.sleep(11)` after the fourth case's
+`mock_cnt = 2`: KeyError: 'data' before this change, passing after.
+
+Upstream-Status: To upstream [not submitted yet; the race is upstream's own, not riscv64-specific -- the existing IS_WINDOWS skip documents it]
+---
+ test/unit/test_auth.py | 12 ++++++++----
+ 1 file changed, 8 insertions(+), 4 deletions(-)
+
+diff --git a/test/unit/test_auth.py b/test/unit/test_auth.py
+index fdb2a99..7b3fbe6 100644
+--- a/test/unit/test_auth.py
++++ b/test/unit/test_auth.py
+@@ -132,7 +132,12 @@ def _mock_auth_mfa_rest_response_timeout(url, headers, body, **kwargs):
+     _ = headers
+     _ = body
+     _ = kwargs.get("dummy")
+-    if mock_cnt == 0:
++    # Advance the shared counter up front: the sleeping branch below is reached
++    # from a daemon thread that Auth.authenticate() abandons on timeout, and a
++    # post-sleep increment lands after the caller has reset mock_cnt for the
++    # next case.
++    call_cnt, mock_cnt = mock_cnt, mock_cnt + 1
++    if call_cnt == 0:
+         ret = {
+             "success": True,
+             "message": None,
+@@ -141,10 +146,10 @@ def _mock_auth_mfa_rest_response_timeout(url, headers, body, **kwargs):
+                 "inFlightCtx": "inFlightCtx",
+             },
+         }
+-    elif mock_cnt == 1:
++    elif call_cnt == 1:
+         time.sleep(10)  # should timeout while here
+         ret = {}
+-    elif mock_cnt == 2:
++    elif call_cnt == 2:
+         ret = {
+             "success": True,
+             "message": None,
+@@ -153,7 +158,6 @@ def _mock_auth_mfa_rest_response_timeout(url, headers, body, **kwargs):
+     else:
+         ret = {}
+ 
+-    mock_cnt += 1
+     return ret
+ 
+ 
+-- 
+2.50.1 (Apple Git-155)
+
