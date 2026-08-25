@@ -81,15 +81,32 @@ jobs:
           CIBW_TEST_SKIP: ''
           # A JRE for the Wiremock server the auth/oauth/proxy unit tests spin up.
           CIBW_BEFORE_ALL: dnf install -y java-21-openjdk-headless
+          # The [development] extra minus mitmproxy, whose aioquic/pylsqpack deps
+          # have no riscv64 wheels (its fixtures skip when mitmdump is absent).
           CIBW_TEST_REQUIRES: >-
             pytest<7.5.0 pytest-asyncio pytest-timeout pytest-rerunfailures<16.0
-            pytest-xdist more-itertools numpy responses
-          # Mirrors tox's py3XX-unit-parallel-ci env, minus coverage. The aio suite
-          # needs aiohttp/aioboto extras that have no riscv64 wheels.
+            pytest-xdist more-itertools numpy responses azure-identity
+          # Mirrors tox's py3XX-unit-parallel-ci env, minus coverage. Dropped:
+          #   aio/            - aiohttp+aioboto extras have no riscv64 wheels
+          #   test_ocsp       - live OCSP responders, incl. an unreachable preprod
+          #                     host, so it stalls on TCP timeouts
+          #   test_proxies    - 2-3 Wiremock JVMs per test streaming large results;
+          #                     tens of minutes even on x86
+          #   ssl_..._handshake - real TLS handshake against an external host
+          # The three -k names all need a native minicore blob, which upstream
+          # ships for eight platforms but not riscv64.
           CIBW_TEST_COMMAND: >-
             python -c "from snowflake.connector.nanoarrow_arrow_iterator import PyArrowRowIterator" &&
             pytest -m "unit and not sso and not pandas and not lambda and not aio"
-            --ignore {package}/test/unit/aio {package}/test/unit
+            -k "not (TestCoreLoader and test_e2e)
+            and not test_get_present_binaries_contains_expected_paths
+            and not test_pruner_agrees_with_runtime_loader"
+            -n auto --dist loadfile
+            --ignore {package}/test/unit/aio
+            --ignore {package}/test/unit/test_ocsp.py
+            --ignore {package}/test/unit/test_proxies.py
+            --ignore {package}/test/unit/test_ssl_partial_chain_handshake.py
+            {package}/test/unit
 
       - name: Check the Cython extension made it into the wheel
         run: |
