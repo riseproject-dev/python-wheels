@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on: https://github.com/mongodb/mongo-python-driver/blob/4.17.0/.github/workflows/dist.yml
+# Build-from-checkout, inheriting upstream's [tool.cibuildwheel] (build-frontend, skip).
+name: Build pymongo wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pymongo version to build (git tag, e.g. 4.17.0)'
+        required: true
+        default: '4.17.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pymongo.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '4.17.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYMONGO_VERSION: ${{ inputs.version || '4.17.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build pymongo ${{ inputs.version || '4.17.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # bson._cbson / pymongo._cmessage are plain per-interpreter C extensions.
+        python: [cp312, cp313, cp314, cp314t]
+
+    steps:
+      - name: Checkout pymongo ${{ env.PYMONGO_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: mongodb/mongo-python-driver
+          ref: ${{ env.PYMONGO_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BUILD_VERBOSITY: '1'
+          # _setup.py swallows build_ext failures and ships a pure-Python wheel
+          # unless this is set (CLAUDE.md gotcha 20).
+          CIBW_ENVIRONMENT: PYMONGO_C_EXT_MUST_BUILD=1
+          # Staged into the (empty) test cwd so pytest imports the installed wheel
+          # rather than the checkout's pure-Python bson/ and pymongo/ packages.
+          CIBW_TEST_SOURCES: test tools pyproject.toml
+          # pytest-asyncio is pinned to upstream's uv.lock version; 1.4 turns
+          # conftest's event_loop_policy override into an error under
+          # pyproject's filterwarnings = error.
+          CIBW_TEST_REQUIRES: pytest>=8.2 pytest-asyncio==1.3.0
+          # Upstream's own wheel test is fail_if_no_c.py; the pytest modules are the
+          # subset of the suite that exercises the C extension without a mongod.
+          CIBW_TEST_COMMAND: >-
+            python tools/fail_if_no_c.py &&
+            python -m pytest
+            test/test_bson.py test/test_bson_corpus.py test/test_bson_binary_vector.py
+            test/test_raw_bson.py test/test_custom_types.py test/test_json_util.py
+            test/test_objectid.py test/test_decimal128.py test/test_timestamp.py
+            test/test_code.py test/test_binary.py test/test_son.py test/test_dbref.py
+            test/test_uri_parser.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pymongo-${{ env.PYMONGO_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pymongo ${{ inputs.version || '4.17.0' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: pymongo-${{ env.PYMONGO_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
