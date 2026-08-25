@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on: https://github.com/microsoft/debugpy/blob/v1.8.21/azure-pipelines/pipelines.yaml
+# (wheels come from a separate internal pipeline; the public one runs the tox
+# suite this workflow drives through cibuildwheel).
+name: Build debugpy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'debugpy version to build (e.g. 1.8.21)'
+        required: true
+        default: '1.8.21'
+  pull_request:
+    paths:
+      - '.github/workflows/build-debugpy.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.8.21' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  DEBUGPY_VERSION: ${{ inputs.version || '1.8.21' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build debugpy ${{ inputs.version || '1.8.21' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        # pydevd's Cython speedups are plain per-interpreter extensions.
+        python: [cp312, cp313, cp314, cp314t]
+
+    steps:
+      - name: Checkout debugpy ${{ env.DEBUGPY_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: microsoft/debugpy
+          ref: v${{ env.DEBUGPY_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # setup.py swallows the pydevd Cython build failure and ships a wheel
+          # with no .so unless this is set (CLAUDE.md gotcha 20).
+          CIBW_ENVIRONMENT: >-
+            REQUIRE_CYTHON_BUILD=1
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # tests/ is a package whose conftest registers tests.* plugins, so it has
+          # to sit in the (empty) test cwd; pytest.ini carries testpaths and -n8.
+          CIBW_TEST_SOURCES: tests pytest.ini
+          # tests/requirements.txt minus gevent (no riscv64 wheel; its one test is
+          # deselected below) and the Windows/build-only vswhere and Cython.
+          CIBW_TEST_REQUIRES: >-
+            pytest pytest-xdist pytest-timeout pytest-retry
+            importlib_metadata psutil untangle
+            django flask numpy requests typing_extensions
+          # PYDEVD_USE_CYTHON=yes makes pydevd raise instead of silently falling
+          # back to the pure-Python tracer, so the whole suite exercises the .so.
+          CIBW_TEST_ENVIRONMENT: >-
+            DEBUGPY_TEST=1
+            PYDEVD_USE_CYTHON=yes
+            DEBUGPY_PROCESS_SPAWN_TIMEOUT=180
+          CIBW_TEST_COMMAND: >-
+            python -c "import debugpy._vendored.force_pydevd;
+            import _pydevd_bundle.pydevd_cython_wrapper as w;
+            import _pydevd_sys_monitoring._pydevd_sys_monitoring_cython as m;
+            assert w.mod.__file__.endswith('.so'), w.mod.__file__;
+            assert m.__file__.endswith('.so'), m.__file__" &&
+            python -Xfrozen_modules=off -m pytest --timeout=600
+            --ignore=tests/debugpy/test_gevent.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: debugpy-${{ env.DEBUGPY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish debugpy ${{ inputs.version || '1.8.21' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: debugpy-${{ env.DEBUGPY_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
