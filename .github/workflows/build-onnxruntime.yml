@@ -66,9 +66,8 @@ jobs:
           export PATH="${python_dir}:${PATH}"
           python_exe="${python_dir}/python"
 
-          # The manylinux image ships CMake 4, which several of onnxruntime's
-          # FetchContent'ed dependencies predate. Rocky's 3.31 matches the CMake
-          # upstream installs into its own build images.
+          # Several FetchContent'ed dependencies predate the image's CMake 4; Rocky's
+          # 3.31 matches what upstream installs into its own build images.
           dnf install -y cmake
 
           export ONNX_ML=1
@@ -77,12 +76,11 @@ jobs:
 
           case "$1" in
           build)
-            # Upstream's flag list, minus --use_vcpkg/--use_vcpkg_ms_internal_asset_cache
-            # (the asset cache is MS-internal, and the deps build from cmake/deps.txt
-            # without it) and minus --enable_lto (keeps peak link memory and build time
-            # down on the riscv runner). --compile_no_warning_as_error reproduces what
-            # SYSTEM_COLLECTIONURI does for upstream's own CI, see build.py:use_dev_mode.
-            # --allow_running_as_root: upstream's image has a non-root build user, ours doesn't.
+            # Upstream's flag list minus --use_vcpkg* (its asset cache is MS-internal;
+            # the deps build from cmake/deps.txt without it) and minus --enable_lto (peak
+            # link memory and build time on the riscv runner). --compile_no_warning_as_error
+            # reproduces what SYSTEM_COLLECTIONURI does in ADO, see build.py:use_dev_mode;
+            # --allow_running_as_root because upstream's image has a non-root build user.
             "${python_exe}" /onnxruntime_src/tools/ci_build/build.py \
               --build_dir /build \
               --config Release \
@@ -101,6 +99,7 @@ jobs:
             auditwheel repair -w /build/dist /build/Release/dist/*.whl
             ;;
           test)
+            "${python_exe}" -m pip install -r /build/Release/requirements.txt
             "${python_exe}" -m pip install --no-index --find-links /build/dist onnxruntime
             (cd /tmp && "${python_exe}" -c "
           import onnxruntime, onnxruntime.capi._pybind_state as s
@@ -108,11 +107,9 @@ jobs:
           assert s.__file__.endswith('.so'), s.__file__
           print(onnxruntime.get_available_providers())")
 
-            # run_python_tests.sh also runs onnxruntime_test_all / _mlas_test /
-            # _provider_test, which test the library rather than the wheel and read the
-            # ONNX node corpus from /data/onnx (see onnxruntime/test/providers/cpu/
-            # model_tests.cc) that upstream mounts from its agents. The python suite
-            # below is build.py's own CPU list (build.py:run_onnxruntime_tests).
+            # The gtest binaries run_python_tests.sh also runs test the library rather
+            # than the wheel, and read the ONNX node corpus from the /data/onnx upstream
+            # mounts from its agents. Below is build.py:run_onnxruntime_tests' CPU list.
             cd /build/Release
             rc=0
             for test in onnxruntime_test_python.py \
