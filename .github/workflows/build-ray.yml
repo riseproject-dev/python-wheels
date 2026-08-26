@@ -88,8 +88,14 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p bazel-bin
-          cat > bootstrap-bazel.sh <<'SCRIPT'
-          #!/bin/bash
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e BAZEL_VERSION="${BAZEL_VERSION}" \
+            -e RULES_PYTHON_VERSION="${RULES_PYTHON_VERSION}" \
+            -e RULES_JAVA_VERSION="${RULES_JAVA_VERSION}" \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
           set -eux
 
           dnf install -y --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip
@@ -129,15 +135,6 @@ jobs:
             bash ./compile.sh
           install -m 0755 output/bazel /work/bazel-bin/bazel
           SCRIPT
-
-          docker run --rm --network=host \
-            -v "${GITHUB_WORKSPACE}:/work" \
-            -w /work \
-            -e BAZEL_VERSION="${BAZEL_VERSION}" \
-            -e RULES_PYTHON_VERSION="${RULES_PYTHON_VERSION}" \
-            -e RULES_JAVA_VERSION="${RULES_JAVA_VERSION}" \
-            "${MANYLINUX_RISCV64_IMAGE}" \
-            bash /work/bootstrap-bazel.sh
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -187,8 +184,12 @@ jobs:
       - name: Build wheels
         run: |
           mkdir -p wheelhouse
-          cat > build-ray.sh <<'SCRIPT'
-          #!/bin/bash
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
           set -eux
 
           dnf install -y --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip
@@ -226,29 +227,23 @@ jobs:
           done
           SCRIPT
 
-          docker run --rm --network=host \
-            -v "${GITHUB_WORKSPACE}:/work" \
-            -w /work \
-            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
-            "${MANYLINUX_RISCV64_IMAGE}" \
-            bash /work/build-ray.sh
-
       - name: Test wheels
         run: |
-          cat > test-ray.sh <<'SCRIPT'
-          #!/bin/bash
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            --shm-size=1g \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
           set -eux
+
+          # /work holds the ray checkout, whose root is importable as a
+          # namespace package and would shadow the installed wheel.
+          cd /tmp
 
           for python in cp312-cp312 cp313-cp313 cp314-cp314; do
             "/opt/python/${python}/bin/pip" install /work/wheelhouse/ray-*-"${python%%-*}"-*.whl
-            # Run from a directory that holds nothing but the script: the
-            # checkout's python/ray would otherwise shadow the installed wheel.
-            "/opt/python/${python}/bin/python" /work/smoke/smoke_test.py
-          done
-          SCRIPT
-
-          mkdir -p smoke
-          cat > smoke/smoke_test.py <<'SCRIPT'
+            "/opt/python/${python}/bin/python" - <<'PY'
           import ray
 
           ray.init(num_cpus=1, include_dashboard=False)
@@ -261,15 +256,9 @@ jobs:
 
           assert ray.get([double.remote(i) for i in range(4)]) == [0, 2, 4, 6]
           ray.shutdown()
+          PY
+          done
           SCRIPT
-
-          docker run --rm --network=host \
-            -v "${GITHUB_WORKSPACE}:/work" \
-            -w /work \
-            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
-            --shm-size=1g \
-            "${MANYLINUX_RISCV64_IMAGE}" \
-            bash /work/test-ray.sh
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
