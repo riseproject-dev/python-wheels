@@ -35,11 +35,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Upstream builds cp310-cp314 and publishes no free-threaded wheel.
-        python:
-          - "cp312"
-          - "cp313"
-          - "cp314"
+        # Upstream publishes no free-threaded wheel.
+        python: ["cp312", "cp313", "cp314"]
 
     steps:
       - name: Checkout duckdb-python v${{ env.DUCKDB_VERSION }}
@@ -59,24 +56,16 @@ jobs:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           # Upstream's build[uv] frontend crashes cibuildwheel's audit step here (no host uv).
           CIBW_BUILD_FRONTEND: build
-          # Drops upstream's `yum install -y ccache`: ccache is EPEL-only and manylinux
-          # ships no EPEL on riscv64. Nothing else is needed, cmake and ninja come from
-          # scikit-build-core's build requirements (both have riscv64 wheels on PyPI).
+          # Clears upstream's `yum install -y ccache`: ccache is EPEL-only, and the riscv64 manylinux image has no EPEL.
           CIBW_BEFORE_BUILD: ''
           # Upstream's release job pins the version the same way (packaging.yml set-version).
           CIBW_ENVIRONMENT: >-
             OVERRIDE_GIT_DESCRIBE=v${{ env.DUCKDB_VERSION }}
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # Test phase only (gotcha 12): fail loudly rather than source-building a
-          # test dependency that has no riscv64 wheel.
+          # Test phase only, so it can't starve the build backend (gotcha 12).
           CIBW_TEST_ENVIRONMENT: 'PIP_ONLY_BINARY=:all:'
           CIBW_TEST_SOURCES: tests
-          # Upstream's test group, minus the dependencies with no riscv64 wheel
-          # anywhere (pyarrow, polars, adbc-driver-manager, tensorflow) and the ones
-          # only its coverage/spark jobs need. The tests that use them are all behind
-          # pytest.importorskip, so they skip. pandas is pinned to the newest release
-          # our registry carries: pip resolves the highest version across both indexes
-          # and PyPI's newer ones are x86_64/aarch64 only.
+          # Upstream's test group minus deps with no riscv64 wheel; their tests are importorskip-guarded.
           CIBW_TEST_REQUIRES: >-
             pytest pytest-reraise pytest-timeout pytest-timestamper packaging psutil
             pytz requests typing-extensions urllib3 fsspec numpy pandas==3.0.3
