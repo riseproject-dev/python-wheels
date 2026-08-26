@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/explosion/spaCy/blob/release-v3.8.16/.github/workflows/cibuildwheel.yml
+# and the test invocation from .github/workflows/tests.yml
+name: Build spacy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'spaCy version to build (e.g. 3.8.16)'
+        required: true
+        default: '3.8.16'
+  pull_request:
+    paths:
+      - '.github/workflows/build-spacy.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '3.8.16' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  SPACY_VERSION: ${{ inputs.version || '3.8.16' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build spacy ${{ inputs.version || '3.8.16' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    strategy:
+      fail-fast: false
+      matrix:
+        # Upstream's [tool.cibuildwheel] skips `cp3??t-*`: no free-threaded wheels.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+
+    steps:
+      - name: Checkout spaCy ${{ env.SPACY_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: explosion/spaCy
+          ref: release-v${{ env.SPACY_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Replaces (not extends) pyproject's `environment`, so PIP_CONSTRAINT is
+          # repeated here; the registry serves numpy, which PyPI lacks for riscv64.
+          CIBW_ENVIRONMENT: >-
+            PIP_CONSTRAINT=build-constraints.txt
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Upstream leaves test-command empty and runs the suite from tests.yml
+          # instead; this is that invocation. setup.cfg carries [tool:pytest], so
+          # stage it as the rootdir of cibuildwheel's otherwise-empty test cwd.
+          CIBW_TEST_SOURCES: setup.cfg
+          CIBW_TEST_REQUIRES: pytest pytest-timeout mock hypothesis ml_datasets
+          CIBW_TEST_COMMAND: python -m pytest --pyargs spacy -W error -W 'ignore:Core Pydantic V1:UserWarning:pydantic'
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: spacy-${{ env.SPACY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish spacy ${{ inputs.version || '3.8.16' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: spacy-${{ env.SPACY_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
