@@ -1,0 +1,98 @@
+From: Ludovic Henry <git@ludovic.dev>
+Date: Wed, 26 Aug 2026 12:00:00 +0100
+Subject: [PATCH] tests: make pyarrow optional in the unit test suite
+
+Upstream-Status: To upstream [not submitted yet: this port is produced by an automated workflow that cannot open a pull request against ClickHouse/clickhouse-connect]
+
+pyarrow publishes no riscv64 wheel, on PyPI or anywhere else, so it cannot
+be installed when testing the riscv64 wheels.  Two unit test modules import
+it at module scope and therefore fail collection rather than skipping:
+
+  * tests/unit_tests/test_pyarrow_ddl.py already calls
+    pytest.importorskip("pyarrow"), but only *after* `import pyarrow as pa`
+    has already raised, so the guard is dead code.  Move it above the
+    import, which is what it was written to do.
+
+  * tests/unit_tests/test_driver/test_query.py needs pyarrow for 4 of its
+    60 tests.  Guard the import and skip just those, matching the idiom
+    tests/unit_tests/test_pandas.py and test_qbit_type.py already use for
+    pandas and numpy.
+
+With this, 85 more tests run on a machine without pyarrow and the rest skip
+cleanly instead of erroring.
+---
+diff --git a/tests/unit_tests/test_driver/test_query.py b/tests/unit_tests/test_driver/test_query.py
+index 11986a4..b52febf 100644
+--- a/tests/unit_tests/test_driver/test_query.py
++++ b/tests/unit_tests/test_driver/test_query.py
+@@ -1,9 +1,13 @@
+ import zoneinfo
+ from datetime import timedelta, timezone
+ 
+-import pyarrow as pa
+ import pytest
+ 
++try:
++    import pyarrow as pa
++except ImportError:
++    pa = None
++
+ from clickhouse_connect.driver import query as query_module
+ from clickhouse_connect.driver import tzutil
+ from clickhouse_connect.driver.client import _strip_utc_timezone_from_arrow
+@@ -432,6 +436,7 @@ def test_is_utc_timezone_string():
+     assert tzutil.is_utc_timezone("Europe/London") is False
+ 
+ 
++@pytest.mark.skipif(pa is None, reason="Pyarrow package not installed")
+ def test_strip_utc_timezone_from_arrow_strips_utc():
+     ts = pa.array([1705312200000000], type=pa.timestamp("us", "UTC"))
+     table = pa.Table.from_arrays([ts], names=["ts"])
+@@ -439,6 +444,7 @@ def test_strip_utc_timezone_from_arrow_strips_utc():
+     assert result.schema[0].type == pa.timestamp("us")
+ 
+ 
++@pytest.mark.skipif(pa is None, reason="Pyarrow package not installed")
+ def test_strip_utc_timezone_from_arrow_strips_etc_utc():
+     ts = pa.array([1705312200000000], type=pa.timestamp("us", "Etc/UTC"))
+     table = pa.Table.from_arrays([ts], names=["ts"])
+@@ -446,6 +452,7 @@ def test_strip_utc_timezone_from_arrow_strips_etc_utc():
+     assert result.schema[0].type == pa.timestamp("us")
+ 
+ 
++@pytest.mark.skipif(pa is None, reason="Pyarrow package not installed")
+ def test_strip_utc_timezone_from_arrow_preserves_non_utc():
+     ts = pa.array([1705312200000000], type=pa.timestamp("us", "America/Denver"))
+     table = pa.Table.from_arrays([ts], names=["ts"])
+@@ -453,6 +460,7 @@ def test_strip_utc_timezone_from_arrow_preserves_non_utc():
+     assert result.schema[0].type == pa.timestamp("us", "America/Denver")
+ 
+ 
++@pytest.mark.skipif(pa is None, reason="Pyarrow package not installed")
+ def test_strip_utc_timezone_from_arrow_preserves_naive():
+     ts = pa.array([1705312200000000], type=pa.timestamp("us"))
+     table = pa.Table.from_arrays([ts], names=["ts"])
+diff --git a/tests/unit_tests/test_pyarrow_ddl.py b/tests/unit_tests/test_pyarrow_ddl.py
+index 1da6c8e..58f8e4f 100644
+--- a/tests/unit_tests/test_pyarrow_ddl.py
++++ b/tests/unit_tests/test_pyarrow_ddl.py
+@@ -1,14 +1,15 @@
+-import pyarrow as pa
+ import pytest
+ 
+-from clickhouse_connect.driver.ddl import (
++pytest.importorskip("pyarrow")
++
++import pyarrow as pa  # noqa: E402
++
++from clickhouse_connect.driver.ddl import (  # noqa: E402
+     arrow_schema_to_column_defs,
+     create_table,
+     create_table_from_arrow_schema,
+ )
+ 
+-pytest.importorskip("pyarrow")
+-
+ 
+ def test_arrow_schema_to_column_defs_basic_mappings():
+     schema = pa.schema(
