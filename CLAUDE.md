@@ -2406,6 +2406,235 @@ upload without the docs-PR side effect.
       `cp3XX` matrix, and the job/artifact names should say `py3-none-…` rather than
       naming the interpreter that happened to build it (same reasoning as gotcha 34).
 
+91. **An optional C extension whose *release predates the interpreters we build* silently
+    degrades even when nothing about the port is wrong (the pyrsistent case; see
+    `build-pyrsistent.yml`).** Gotcha 20's SQLAlchemy shape and gotcha 49's simplejson
+    shape both assume the project offers a "the extension is mandatory here" knob you can
+    force. Many don't: pyrsistent's `setup.py` has only a *skip* knob
+    (`PYRSISTENT_SKIP_EXTENSION`) and a `custom_build_ext` that catches every exception
+    and prints a warning, so there is nothing to force on — the `.so` assertion is the
+    only defence, and it has to be a **separate host step** (a green cibuildwheel run
+    proves nothing). The failure here isn't riscv64 or our config: the newest PyPI wheel
+    for the version we build stops at an older `cpXY`, and the C source calls a private
+    CPython API that a later interpreter removed — `_PyList_Extend`, dropped from the
+    3.13 headers — so cp313/cp314 compile-fail, get swallowed, and ship a platform-tagged
+    wheel containing only the pure-Python fallback.
+    - **Pre-flight it on any host in two minutes, before writing YAML.** Whenever the
+      package's newest PyPI wheels stop below our matrix's newest interpreter, build the
+      tag once per matrix interpreter and diff which ones produce a `.so`:
+      `for v in 3.12 3.13 3.14; do uv build --wheel --python $v --out-dir out-$v .; unzip -l out-$v/*.whl | grep '\.so'; done`.
+      Silence on the newer ones *is* the bug; the compiler error is in the build log above
+      the swallowed-failure banner, not in the exit status.
+    - **The fix is a `Backport`, and the version you build is still the PyPI one.** Check
+      upstream's later tags for the fix (`git log <ourtag>..<newertag> -- <the C file>`) —
+      pyrsistent fixed it in `c876adc`, which sits in the **v0.21.0 tag that was never
+      released to PyPI**. Don't switch to the unreleased tag: gotcha 18's nightly
+      `check_versions.py` compares the workflow's `version:` default against PyPI, so
+      build the released version and carry the commit under
+      `patches/<pkg>/<ver>/`. (No `SETUPTOOLS_SCM_PRETEND_VERSION` needed here — gotcha 31
+      only bites projects that derive their version from git; pyrsistent's is a literal in
+      `_pyrsistent_version.py`.)
+    - **`sys._is_gil_enabled()` settles free-threading in one line** — a concrete probe to
+      put beside gotcha 33's three upstream signals. An extension built with single-phase
+      init (`PyModule_Create`, as opposed to `PyModuleDef_Init` + a `Py_mod_gil` slot)
+      makes the runtime re-enable the GIL at import:
+      `RuntimeWarning: The global interpreter lock (GIL) has been enabled to load module
+      '<mod>'` and `sys._is_gil_enabled()` → `True`. Grep the C file for `PyModule_Create`
+      before adding `cp314t` — a wheel that re-enables the GIL is a build upstream ships
+      nowhere with none of the benefit.
+
+92. **A root `conftest.py` that imports the world is optional — `test-sources` decides
+    whether pytest ever sees it (the pyiceberg case; see `build-pyiceberg.yml`).** Gotcha 25
+    reaches for `CIBW_TEST_SOURCES` to stop the checkout shadowing the wheel, and gotcha 36
+    notes that *what you leave out* is half the tool. The third use is the cheapest: pytest
+    only auto-loads a `conftest.py` that exists on the path from its rootdir down to the
+    test file, so a conftest you do not stage is a conftest that never runs. Upstream wheel
+    jobs commonly test **one** module (pyiceberg's runs `pytest tests/avro/test_decoder.py`,
+    which imports the Cython `CythonBinaryDecoder` directly) while `tests/conftest.py`
+    imports `boto3`, `moto` and `pytest-lazy-fixture` at module level for the *other*
+    thousands of tests. Staging `tests/avro/test_decoder.py pyproject.toml` instead of the
+    whole `tests` tree drops that dependency tree entirely — `CIBW_TEST_REQUIRES` collapses
+    to upstream's `pytest` pin — and keeps `[tool.pytest.ini_options]` (gotcha 28: check
+    `addopts` first).
+    - **Prove the module needs no fixture from it before you drop it**, in 30 seconds on any
+      host and with no QEMU: copy just that file plus `pyproject.toml` into an empty dir,
+      `pip install <pkg>==<ver>` from PyPI, and run it (gotcha 52's dry-run, narrowed). A
+      missing fixture shows up as an `E fixture '<name>' not found`, not as a silent skip.
+    - **The same run tells you where the real ceiling is.** Widening to the sibling modules
+      in that directory failed on `import pyiceberg.io.pyarrow`, and pyarrow has no riscv64
+      wheel on PyPI or on our registry (gotcha 30) — so "run more of the suite" was settled
+      by one local command rather than by a multi-hour riscv64 cycle.
+    - **Mirror upstream's own interpreter cap while you are reading their wheel job.**
+      pyiceberg's sets `CIBW_PROJECT_REQUIRES_PYTHON: ">=3.10,<3.14"` and
+      `CIBW_SKIP: "cp3*t-*"`, and the classifiers stop at 3.13 — so the matrix is
+      `[cp312, cp313]`, not the repo default. Building `cp314`/`cp314t` there would ship
+      riscv64 an interpreter upstream ships on no platform, which is the goal-2 divergence,
+      not extra coverage.
+
+93. **A `>-` folded scalar keeps the newline on any line indented *deeper* than the
+    first — which silently splits a cibuildwheel command into several (the pyodbc case).**
+    The repo's own examples write multi-word cibuildwheel options as
+    `CIBW_REPAIR_WHEEL_COMMAND: >-` followed by continuation lines, and the natural
+    instinct is to indent the flags under the command for readability. YAML folds a `>-`
+    block into spaces only across lines at the **same** indent; a more-indented line keeps
+    its `\n` verbatim. So
+
+    ```yaml
+    CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
+      auditwheel repair
+        --exclude "libodbc.so.*"      # extra indent => newline survives
+        --wheel-dir {dest_dir}
+        {wheel}
+    ```
+
+    reaches cibuildwheel as four `sh -c` lines, and the log reads
+    `auditwheel repair: error: the following arguments are required: WHEEL_FILE`,
+    `sh: line 2: --exclude: command not found`, `sh: line 3: --wheel-dir: command not
+    found`, exit code **126**. It looks like an auditwheel/permissions problem; it is
+    purely the YAML.
+    - **Neither `yaml.safe_load` nor `actionlint` catches it** — the document is valid and
+      the step is well-formed. Add one line to the gotcha-9 checklist that prints the
+      *resolved* values instead of just parsing:
+      ```
+      python3 -c "import yaml;[print(repr(k),'=>',repr(v)) for k,v in yaml.safe_load(open('<wf>'))['jobs']['<job>']['steps'][<i>]['env'].items()]"
+      ```
+      Any `\n` in the output is the bug. Cheaper than the CI cycle it costs, and it also
+      catches the inverse (a `|` literal block where you wanted folding).
+    - Distinct from gotcha 7, which is about a heredoc's `EOF` needing column 0 *after*
+      YAML strips the common indent. This one needs no heredoc and bites plain `env:`
+      values.
+
+94. **Upstream's wheel jobs testing nothing is not a reason to ship an import-only
+    smoke test — check whether the service its real suite needs is packaged for riscv64
+    (the pyodbc case; see `build-pyodbc.yml`).** A database/broker/server client library
+    typically splits its CI in two: cibuildwheel jobs with no `test-command` at all, and a
+    separate workflow that gets the servers as GitHub Actions `services:` on
+    `ubuntu-latest` — which the self-hosted riscv64 runner cannot provide. Copying the
+    wheel job verbatim then yields a green build that never executed a line of the
+    extension. The recoverable middle ground is to start the service **inside the
+    cibuildwheel container** in `before-test`: Linux builds run every phase in one
+    container, so a daemon started there is still up for `test-command`. pyodbc's suite
+    needs SQL Server, PostgreSQL and MySQL; Rocky 10 ships `postgresql-server` *and*
+    `postgresql-odbc` for riscv64, so one of the three upstream test files runs unmodified
+    (40 tests: connect, DDL, every type binding, unicode/bytea fenceposts, `executemany`,
+    transactions) against a server in the container.
+    ```yaml
+    CIBW_BEFORE_TEST_LINUX: >-
+      dnf -y install postgresql-server postgresql-odbc &&
+      install -d -o postgres -g postgres /run/postgresql /var/lib/pgsql/data &&
+      su postgres -c "/usr/bin/initdb -A trust -D /var/lib/pgsql/data" &&
+      su postgres -c "/usr/bin/pg_ctl -D /var/lib/pgsql/data -l /tmp/pg.log -o '-c listen_addresses=127.0.0.1' -w start" &&
+      su postgres -c "/usr/bin/createdb test"
+    ```
+    - **The client-side plugin usually registers itself** — installing `postgresql-odbc`
+      drops a `[PostgreSQL]` stanza into `/etc/odbcinst.ini`, so `odbcinst -q -d` lists it
+      with no config of our own. Check that before hand-writing a driver config, and use
+      the distro's name (`DRIVER=PostgreSQL`) rather than the Debian one upstream's CI uses
+      (`{PostgreSQL Unicode}`); **avoid the braces** in `CIBW_TEST_ENVIRONMENT` anyway,
+      since `{...}` is cibuildwheel's placeholder syntax elsewhere (gotcha 5).
+    - **Everything here is verifiable locally in one `docker run`** — the whole recipe
+      (dnf, `pip wheel`, `initdb`, 40 tests) finished under QEMU riscv64 in the manylinux
+      image before the first push, gotcha 9's discipline applied to the *test* environment
+      rather than the build.
+    - Related to gotcha 64 (a daemon refusing to run as root is a packaging question):
+      here `su postgres` plus `install -d -o postgres` is the whole answer, because the
+      `postgres` system user comes from the RPM.
+
+95. **OCaml/opam projects are ordinary ports — but the manylinux image is the wrong
+    container for them (the semgrep case; see `build-semgrep.yml`).** A package whose
+    wheel is a compiled OCaml binary reads like a blocker and is not: opam publishes an
+    official **`opam-<ver>-riscv64-linux`** release binary (checked on 2.5.2), and OCaml
+    has had a native riscv64 backend with natdynlink since the 5.x line —
+    `configure.ac` at 5.3.0 matches `riscv64-*-linux*` and sets `has_native_backend=yes`.
+    So `opam init --bare --disable-sandboxing` + `opam switch create` + the project's own
+    `make install-deps` works unchanged; the port is heavy (compiler, ~250 opam packages,
+    generated parsers), not infeasible.
+    - **A per-arch opam lockfile is one line of difference.** Projects that vendor
+      `opam-lockfiles/<pkg>.opam.linux-{amd64,arm64}.locked` and pick one from `uname -m`
+      have no riscv64 case, and the picker is usually called `--strict` so it hard-fails.
+      Diff the two committed lockfiles first — semgrep's differ in exactly
+      `"host-arch-x86_64"` vs `"host-arch-arm64"` — and derive yours with `sed`, after
+      confirming `packages/host-arch-riscv64/` exists at the *pinned* opam-repository
+      commit (raw.githubusercontent 200). That keeps every version pin upstream tested
+      against, where re-solving without `--locked` would not.
+    - **Rocky 10 riscv64 is missing dev packages Ubuntu 24.04 has**, and for a
+      non-cibuildwheel build there is no reason to suffer that: `libunwind-devel` and
+      `patchelf` are absent from Rocky's riscv64 repos (`libev-devel`, `gmp-devel`,
+      `pcre2-devel`, `libcurl-devel`, `elfutils-devel` are all present), while
+      `riscv64/ubuntu:24.04` carries every one of them in `main`. Ubuntu 24.04 is glibc
+      2.39 — the same as the `ubuntu-24.04-riscv` runner — so a `podman run` against it
+      still yields a legitimate `manylinux_2_39_riscv64` tag. It is also usually *closer*
+      to upstream, whose own core build runs on a bare `alpine`/`debian` image rather
+      than in manylinux.
+    - **`actions/collect-gpl-sources` is dnf/rpm-only**, so a Debian-based build needs the
+      `apt-get source` equivalent inline: flip `Types: deb` to `Types: deb deb-src` in
+      `/etc/apt/sources.list.d/ubuntu.sources`, map the shipped libraries back to source
+      packages with `dpkg -S` + `dpkg-query -W -f='${source:Package}\n'`, and tar the
+      result for `publish-wheels`' `gpl-sources-artifact`. ports.ubuntu.com does carry
+      `main/source/Sources.gz`, so this works on riscv64.
+    - **Validate the bootstrap half under QEMU even when the full build is impossible.**
+      The apt list, the opam binary, `opam init`, the repository pin and
+      `opam show <compiler-variant> <host-arch-riscv64>` all run in a
+      `riscv64/ubuntu:24.04` container in minutes and cover every step that fails *fast*
+      — which on a job measured in hours is most of the value a local check can give.
+
+96. **An abi3 wheel must be built on the OLDEST interpreter its tag claims — building
+    it on a newer one can silently produce a wheel that is broken on the older ones (the
+    zopfli case).** Gotchas 11/34 cover *how* a project gets its abi3 tag; this is about
+    *which interpreter you build it on*. The stable ABI guarantees a wheel built against
+    3.N headers runs on 3.N+, not on 3.10 — but the wheel is tagged `cpXY-abi3` from the
+    project's `py_limited_api` setting regardless, so pip on 3.10 will happily install it.
+    Concretely: `PY_SSIZE_T_CLEAN` selects the `PyArg_Parse*_SizeT` aliases, which CPython
+    **3.13 removed**, so an extension using a `"s#"` format compiled against 3.13+ headers
+    calls the plain entry point and every call dies at runtime with
+    `SystemError: PY_SSIZE_T_CLEAN macro must be defined for '#' formats` on 3.10-3.12.
+    The build is green, `abi3audit --strict` is clean, and the breakage only appears when
+    an *older* interpreter imports the wheel.
+    - **Mirror upstream's build list rather than starting at our cp312 floor.** Upstream
+      orders theirs oldest-first (`cp310-* cp311-* ... cp314-*`) precisely so cibuildwheel
+      builds once on the floor and then only *re-tests* on the rest via
+      `find_compatible_wheel`. Trimming the leading entries to match this repo's
+      per-interpreter default silently changes which headers compile the wheel. The
+      riscv64 manylinux image has cp310/cp311, and the extra entries cost one short test
+      run each.
+    - **Reproduces on any host in minutes, no QEMU** — same discipline as gotchas 23/29:
+      build the sdist once per interpreter (`uv build --wheel --python 3.1N`) and run the
+      suite from each of the others against each wheel. A full N x N grid of
+      pass/fail is the evidence; here only the 3.12-built wheel passed on 3.12, 3.13 and
+      3.14.
+    - **`abi3audit` does not catch it.** It answers "does this use only limited-API
+      symbols, and from which version" (`baseline 3.10, computed 3.10`) — the failing call
+      goes through `PyArg_ParseTupleAndKeywords`, which *is* in the 3.10 limited API. Only
+      running the suite on an old interpreter finds it.
+
+
+97. **A test dependency that went from pure Python to an abi3 extension strands the
+    free-threaded job alone (the pyroaring/hypothesis case).** Gotcha 25 says to pin
+    floating test deps; the version-drift shape it warns about is a new warning turning
+    into a hard failure. There is a second shape that is invisible until a matrix comes
+    back with cp312/cp313/cp314 green and **only** cp314t red, in the *test-requires
+    install*, before a single project test runs. A dependency that used to publish one
+    `py3-none-any` wheel can start shipping compiled wheels — hypothesis became a Rust
+    extension in 6.156 — and the riscv64 files it publishes are then typically
+    `cpNN-abi3-manylinux_..._riscv64` only. abi3 wheels do not load under free threading
+    (gotcha 11), so pip finds no compatible wheel for `cp314t` alone, falls back to the
+    sdist, and dies in the dependency's build backend. The traceback names the dependency,
+    not your package, and the wheel under test has already built and auditwheel-repaired
+    successfully by then.
+    - **Read the dependency's file list rather than its build error.** One PyPI JSON call
+      (`[f['filename'] for f in urls]`) shows the whole story: `cp310-abi3-…riscv64`
+      covers every GIL-ful interpreter you build, and the free-threaded tag is either
+      absent or gated behind a Python you do not have (hypothesis's is
+      `cp315-abi3.abi3t`). No need to work out why rustup was invoked.
+    - **Fix by pinning the last pure-Python release, per matrix entry.** Find it by
+      walking the releases for the newest one still shipping `-py3-none-any.whl`
+      (hypothesis: 6.155.7). Then use gotcha 33's `include:` shape so only the affected
+      entry carries the pin and the others keep resolving whatever upstream's own
+      workflow would — `CIBW_TEST_REQUIRES: ${{ matrix.hypothesis }} pytest`. Pinning
+      globally would be divergence on three jobs to fix one.
+    - `CIBW_TEST_REQUIRES` is passed to pip as argv, not through a shell, so a specifier
+      like `hypothesis<6.156` needs no quoting or escaping — unlike gotcha 23's
+      `CIBW_BEFORE_BUILD` string, which does.
 ## Environment / auth notes
 
 - **Never write outside the repository.** Worktrees go in `.claude/worktrees/<pkg>`, scratch
@@ -2487,7 +2716,10 @@ does them and is idempotent (`--no-trigger` skips the publish):
 1. **Publish**: `gh workflow run build-<pkg>.yml --ref main -f version=<v>`. Only a run whose ref is
    `main` performs the real twine upload; every other ref dry-runs. Take `<v>` from the workflow's
    `version` input default. Confirm afterwards with
-   `curl -s https://pypi.riseproject.dev/simple/<pkg>/ | grep riscv64`.
+   `curl -s -o /dev/null -w '%{http_code}' --max-redirs 0 https://pypi.riseproject.dev/simple/<pkg>/`:
+   **200 means we host it, 302 means we do not** (gotcha 30). Do not follow the redirect and grep
+   for `riscv64` — the redirect lands on PyPI, so any package whose upstream ships riscv64 wheels
+   (hypothesis' abi3 ones, say) reads as already published when it is not.
    **Check for an existing `main` run first.** These workflows have no `push` trigger, but a
    dispatch is usually fired within seconds of the merge, so a second one re-uploads files that
    are already there and GitLab answers `HTTPError: 400 Bad Request` — after the full build has
