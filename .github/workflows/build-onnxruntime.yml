@@ -2,9 +2,7 @@
 # SPDX-License-Identifier: MIT
 ---
 # This workflow is based on: https://github.com/microsoft/onnxruntime/blob/v1.29.0/tools/ci_build/github/azure-pipelines/templates/py-linux.yml
-# and the two scripts it drives inside the build container,
-# tools/ci_build/github/linux/build_linux_python_package.sh and
-# tools/ci_build/github/linux/run_python_tests.sh.
+# plus build_linux_python_package.sh / run_python_tests.sh, which it drives in-container.
 name: Build onnxruntime wheels (riscv64)
 
 on:
@@ -27,8 +25,7 @@ permissions:
 
 env:
   ONNXRUNTIME_VERSION: ${{ inputs.version || '1.29.0' }}
-  # Upstream builds in an internal AzureCR image we can't pull; the manylinux
-  # image is the closest public equivalent and is what the rest of this repo uses.
+  # Upstream's AzureCR build image isn't public; manylinux is the closest equivalent.
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
@@ -66,8 +63,7 @@ jobs:
           export PATH="${python_dir}:${PATH}"
           python_exe="${python_dir}/python"
 
-          # Several FetchContent'ed dependencies predate the image's CMake 4; Rocky's
-          # 3.31 matches what upstream installs into its own build images.
+          # Several FetchContent'ed deps predate CMake 4; 3.31 matches upstream's build images.
           dnf install -y cmake
 
           export ONNX_ML=1
@@ -76,11 +72,8 @@ jobs:
 
           case "$1" in
           build)
-            # Upstream's flag list minus --use_vcpkg* (its asset cache is MS-internal;
-            # the deps build from cmake/deps.txt without it) and minus --enable_lto (peak
-            # link memory and build time on the riscv runner). --compile_no_warning_as_error
-            # reproduces what SYSTEM_COLLECTIONURI does in ADO, see build.py:use_dev_mode;
-            # --allow_running_as_root because upstream's image has a non-root build user.
+            # Upstream's flags minus --use_vcpkg* (MS-internal asset cache) and --enable_lto
+            # (link memory/time on the riscv runner).
             "${python_exe}" /onnxruntime_src/tools/ci_build/build.py \
               --build_dir /build \
               --config Release \
@@ -94,8 +87,7 @@ jobs:
               --cmake_path /usr/bin/cmake \
               --parallel
 
-            # setup.py's manylinux allow-list has no riscv64 entry, so it tags the wheel
-            # linux_riscv64 and skips the auditwheel repair it runs on other platforms.
+            # setup.py's manylinux allow-list has no riscv64 entry, so it skips auditwheel repair.
             auditwheel repair -w /build/dist /build/Release/dist/*.whl
             ;;
           test)
@@ -107,9 +99,7 @@ jobs:
           assert s.__file__.endswith('.so'), s.__file__
           print(onnxruntime.get_available_providers())")
 
-            # The gtest binaries run_python_tests.sh also runs test the library rather
-            # than the wheel, and read the ONNX node corpus from the /data/onnx upstream
-            # mounts from its agents. Below is build.py:run_onnxruntime_tests' CPU list.
+            # build.py:run_onnxruntime_tests' CPU list; the gtest binaries need upstream's /data/onnx mount.
             cd /build/Release
             rc=0
             for test in onnxruntime_test_python.py \
