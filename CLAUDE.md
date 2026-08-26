@@ -1585,7 +1585,7 @@ upload without the docs-PR side effect.
       the PR shipped with evidence rather than hope. Contrast gotcha 48's sglang,
       where the build is hours long and this is not an option.
 
-71. **A SIGSEGV in a port's test run is usually an ordinary upstream refcount bug —
+60. **A SIGSEGV in a port's test run is usually an ordinary upstream refcount bug —
     reproduce it on your own host's interpreter before blaming riscv64 (the
     confluent-kafka case).** A cp314 job died with `Fatal Python error: Segmentation
     fault` whose Python traceback was entirely stdlib and pytest —
@@ -1632,7 +1632,7 @@ upload without the docs-PR side effect.
       the real story was that the script completed and faulted during interpreter
       shutdown, which is itself the tell that the damage was done earlier.
 
-72. **A callback that stays armed past the assertion fires again during teardown (the
+61. **A callback that stays armed past the assertion fires again during teardown (the
     event-API sub-shape of gotcha 38).** Gotcha 38's shapes are a fixed timeout
     constant, an abandoned thread reaching a trailing mutation, and "insert the delay
     yourself". A fourth recurs in wrappers around C event loops: the test registers a
@@ -1654,7 +1654,7 @@ upload without the docs-PR side effect.
       against upstream's released wheel. Fails unpatched, passes patched, on any host,
       in seconds — and that is the evidence a reviewer wants for the patch.
 
-76. **A multi-hour job's log can be dropped by GitHub entirely — quiet the build tool
+62. **A multi-hour job's log can be dropped by GitHub entirely — quiet the build tool
     and tee to an artifact *before* you spend the cycle (the ray/bazel case).** A build
     step that ran 3h43m and failed left **no** retrievable log: `gh run view --log-failed`
     said `log not found`, `gh api .../jobs/<id>/logs` answered `BlobNotFound`, and the
@@ -1688,6 +1688,723 @@ upload without the docs-PR side effect.
       *without* pipefail, so `tee` would otherwise report success and the step would go
       green on a failed build. Verify the pattern in 5 seconds on any host — a heredoc
       that `exit 7`s through `| tee` must still give `rc=7`.
+
+63. **Upstream's native dependency may live in a prebuilt CI Docker image built by a
+    *sibling repo* — that repo is the recipe (the h5py case; see `build-h5py.yml`).**
+    A `[tool.cibuildwheel]` table whose `manylinux-<arch>-image` points at
+    `ghcr.io/<org>/...` rather than `quay.io/pypa/...` means the native library is not
+    built by the workflow at all: it is baked into an image, and there is no riscv64
+    variant to inherit. h5py builds HDF5 + libaec into
+    `ghcr.io/h5py/manylinux_2_28_<arch>-hdf5`. Find the image repo with
+    `gh api "search/repositories?q=org:<org>&sort=updated"` — it holds the Dockerfiles
+    and the `install_<dep>.sh` scripts — and replay those scripts from
+    `CIBW_BEFORE_ALL_LINUX`, which is a plain multi-line shell script run under `sh -c`
+    with `CIBW_ENVIRONMENT` already in scope (checked in cibuildwheel 4.2.0
+    `platforms/linux.py`), so `$DEP_VERSION`/`$<DEP>_DIR` set there reach it.
+    - **Take the dependency versions from the image repo's history at the package's
+      release date, not from its HEAD.** `git log -- Dockerfile_manylinux_...` plus the
+      PyPI upload time pins them, and the published wheel confirms it in one command:
+      `unzip -l <upstream wheel> | grep '\.so'` showed `libhdf5-….so.320.0.0` and
+      `libaec-….so.0.1.4`, i.e. HDF5 2.0.0 + libaec 1.1.4, the pair the image carried
+      then — HEAD had already moved to 2.2.0.
+    - **Pin `CMAKE_INSTALL_LIBDIR=lib`.** GNUInstallDirs picks `lib64` on RedHat-family
+      hosts (the riscv64 manylinux image is Rocky 10), while a `<DEP>_DIR=/usr/local`
+      prefix is usually expanded by `setup.py` as `$<DEP>_DIR/lib` only — h5py's
+      `setup_configure.py` does exactly that. Upstream hit the same thing later and
+      pinned it identically (`h5py/hdf5-manylinux@5b15b5d`).
+    - **Read the image script before running it verbatim.** These scripts end with
+      image-size cleanup (`yum erase -y zlib-devel`) that is harmless in a throwaway
+      image layer but can cascade in a build container — on Rocky 10 `zlib-devel` is a
+      *provide* of the preinstalled `zlib-ng-compat-devel`. Mirror the build steps,
+      drop the cleanup.
+    - **`CIBW_TEST_GROUPS: ''` clears an inherited `test-groups`**, the same way gotcha
+      51's `CIBW_BEFORE_BUILD: ''` clears `before-build`: list options are read with
+      `ignore_empty=False` too, so the empty env var wins over the pyproject value.
+      That is how you drop an upstream wheel-test path built on `tox` + `tox-uv` +
+      a nightly wheel index (h5py's `test-groups = ["wheels"]` / `ci/cibw_test_command.sh`)
+      and run the suite the project's own tox `test` env runs instead.
+    - **The licence for such a dependency has a zero-packaging-change home more often
+      than gotcha 44 suggests**: a project that already vendors third-party licence
+      texts usually declares a directory glob (h5py: `license-files = [..., "licenses/*"]`),
+      so dropping `licenses/<dep>.txt` in is the whole patch. Verify it the gotcha-44 way,
+      and check the assertion actually fails against the *upstream* wheel first — h5py's
+      published Linux wheels bundle libaec and ship no libaec licence.
+
+64. **A daemon that refuses to run as root is usually a packaging question, not a patch
+    (the mysql-connector-python case), and QEMU cannot verify it locally.** Gotcha 39 notes
+    the test phase runs as root in the container. When the suite bootstraps a *server* that
+    refuses to start as root, patching in `--user=root` is the tempting fix, but check two
+    things first: (a) what upstream actually does — mysql-connector-python's `CONTRIBUTING.md`
+    says the suite can bootstrap a server or use an external one and that the external one is
+    **preferred**, with a `--use-external-server` flag, which is precisely why upstream never
+    hits this; and (b) whether the distro's *server* package exists for riscv64 — Rocky 10
+    ships `mysql8.4-server` and `mariadb-server` for riscv64, and installing either creates the
+    `mysql` system user (uid 27), so `mysqld --user=mysql` needs no patch at all.
+    - **File capabilities make a local QEMU check impossible, and the error looks like a
+      broken build.** `/usr/libexec/mysqld` carries `cap_sys_nice=ep`; QEMU user-mode emulation
+      cannot honour file caps, so `exec` fails with a bare
+      `/usr/sbin/mysqld: Operation not permitted` while every other binary from the same RPM
+      runs fine. That asymmetry — one binary failing to exec, its siblings working — is the
+      tell. Confirm with `rpm -q --filecaps <pkg> | grep <binary>` rather than concluding the
+      package is broken on riscv64, and verify on the real runner (gotcha 9's fallback).
+
+65. **Resuming another agent's in-flight port: re-check the branch against *today's*
+    main, and treat a maintainer hold as binding even when a fix must be pushed (the
+    sglang follow-up).** Two things bite when picking up an existing PR rather than
+    starting one.
+    - **A commit that followed a repo-wide convention can have been invalidated while
+      the PR sat open.** sglang's branch head was "drop pull_request trigger, build via
+      Trigger: directive", written to follow #364 — which #391 reverted. Diff the
+      workflow's `on:`/header against a *recently merged* sibling (not against the
+      workflow you copied from originally) before touching anything else; the branch,
+      not main, is the thing that drifted.
+    - **Under a hold (gotcha 48), a push that touches `build-<pkg>.yml` re-fires the
+      `pull_request` trigger whether you want it or not** — `paths` matches the PR's
+      diff against base, so *every* push to the branch starts the build again. That is
+      not a licence to let it run: land the fix, then `gh run cancel` the run you
+      caused, so the correction reaches the branch without taking the shared riscv64
+      runners back. Say in the report that you cancelled it and why; a cancelled run
+      you explain is cheaper than six runner-hours the maintainer already refused twice.
+
+66. **A wheel that vendors the image's `libgomp` is the standard GPL-sources trigger —
+    and there is no live example left in the tree to copy (the scikit-learn case).**
+    The Licensing section says to add a `gpl_sources` job when the build links GPL
+    components that come from *our* build environment, and names `build-numpy.yml` as
+    the complete example. It no longer is: #178 removed that job (numpy's GPL concern
+    was openblas, which upstream ships prebuilt), leaving only a dangling comment on
+    `MANYLINUX_RISCV64_IMAGE`, and **zero** of the 43 build workflows on `main` use
+    `actions/collect-gpl-sources` today. So the shape has to be reconstructed from
+    `git show 1c45d16 -- .github/workflows/build-numpy.yml`. Reconstruct it rather than
+    skipping — an OpenMP-using project is the commonest case and the check is two
+    commands on an artifact you already have:
+    ```bash
+    gh run download <run-id> -n <pkg>-<ver>-<tag>-manylinux_riscv64 -D whl
+    unzip -l whl/*.whl | grep -E '\.libs/|\.dylibs/'   # auditwheel's vendored-lib dir
+    ```
+    `<pkg>.libs/libgomp-<hash>.so.1.0.0` means the image's GCC OpenMP runtime is being
+    redistributed by us. GPLv3 **with** the GCC Runtime Library Exception still carries
+    the source-distribution obligation for the runtime library itself — the exception
+    only permits the *combination* with non-GPL modules — so the sources must be
+    published, not just the notice shipped.
+    - **The job runs natively, on `ubuntu-24.04-riscv`, not `ubuntu-latest`.**
+      `collect-gpl-sources` does `docker run` on the riscv64 manylinux image, which on
+      an x86 runner needs binfmt that isn't registered there.
+    - **Its artifact must not match the publish job's `artifact-pattern`.** Name it
+      `<pkg>-<ver>-gpl-sources` and keep the pattern anchored on `*-manylinux_riscv64`,
+      then pass it separately via `gpl-sources-artifact`/`-release-tag`/`-description`;
+      `publish-wheels` attaches it to a GitHub Release and renders the URL as the
+      version's docs `comment:`.
+    - **Upstream usually tells you first.** A project shipping a
+      `build_tools/wheels/LICENSE_*.txt` (or any "this binary distribution also bundles"
+      notice) that names `libgomp*`/`libgfortran*` has already done the audit for you —
+      and a `check_license.py`-style test asserting the notice made it into
+      `dist-info/licenses/` is worth inheriting unchanged, since it fails loudly if the
+      before-build step that appends it ever stops running.
+
+67. **A *build*-time dependency that we ship only for some interpreters caps the matrix
+    — and `PIP_ONLY_BINARY` is what makes the older registry version win (the
+    scikit-learn/scipy case).** Gotcha 30 says to check our registry before declaring a
+    dep unavailable, and gotcha 40 covers a dep that is unavailable outright. The middle
+    case is commoner and quieter: `pypi.riseproject.dev` carries the dep for `cp312`
+    and `cp313` but not `cp314`/`cp314t`, so the default four-entry matrix cannot be
+    used. Read the interpreter tags out of the index listing before writing `python:`:
+    ```
+    curl -s https://pypi.riseproject.dev/simple/<dep>/ | grep -oE '<dep>-[0-9.]+-cp[0-9t]+-[^"]*\.whl' | sort -u | tail
+    ```
+    Trim the matrix to those tags and say in a one-line comment *why*, naming the dep —
+    otherwise the next agent re-adds cp314 and burns a multi-hour cycle discovering it.
+    - **It is a build requirement, not just a runtime one, when the extension cimports
+      it** (`scipy.linalg.cython_blas`) — so `PIP_EXTRA_INDEX_URL` has to be in
+      `CIBW_ENVIRONMENT` (both phases, gotcha 12), not `CIBW_TEST_ENVIRONMENT`.
+    - **`PIP_ONLY_BINARY` scoped to the dep names is what makes gotcha 30's
+      "the version has to line up" bullet stop mattering.** PyPI's latest scipy is far
+      newer than the 1.15.2 we host, and pip picks the highest version across both
+      indexes — but with `PIP_ONLY_BINARY=numpy,scipy,pandas` the newer PyPI releases
+      have no riscv64 *binary*, so they are not candidates at all and resolution lands
+      on our wheel. Scope it to the dep names, never `:all:`: `cython` and
+      `meson-python` have no riscv64 wheel anywhere and must build from sdist in the
+      same build env.
+
+68. **A pinned action SHA that does not exist kills the job in "Set up job", after the
+    queue wait — verify every `uses:` pin before pushing.** `actionlint` checks the
+    *syntax* of `owner/repo@ref` and never asks GitHub whether the ref resolves, so a
+    mistyped or hallucinated 40-hex SHA passes every local check and then fails the job
+    with ``Unable to resolve action `actions/download-artifact@<sha>`, unable to find
+    version `<sha>` `` — before checkout, before any `run:` step. On a workflow whose
+    first jobs are cheap and whose expensive job is `needs:`-gated behind them, that is a
+    full cycle burnt on nothing (here: a queue wait plus a 100-minute bazel bootstrap
+    before the wheel job even started). One API call per pin settles it:
+    ```bash
+    grep -ohE 'uses: [^@]+@[a-f0-9]{40}' .github/workflows/build-<pkg>.yml | sort -u |
+      while read -r _ a; do gh api "repos/${a%@*}/commits/${a#*@}" --jq .sha >/dev/null \
+        || echo "BAD PIN: $a"; done
+    ```
+    Cheaper still, and the reason this is worth a rule rather than a habit: **copy the pin
+    from a workflow already on `main`** rather than from memory or from another action's
+    SHA — `grep -rhoE '<owner>/<action>@[a-f0-9]+ *# *v[0-9.]+' .github/workflows/ | sort |
+    uniq -c` shows what the repo already uses and how many workflows agree on it. A pin
+    that disagrees with every other workflow in the repo is a bug even when it resolves.
+
+69. **Looping interpreters inside one bazel output base: a repository rule re-runs
+    only when a var it declares in `environ` changes (the ray/`local_config_python`
+    case).** Building the heavy C++ core once and then looping `cpXY` for the bindings
+    (gotcha 15's shape, and what makes a bazel port affordable at all) means every
+    interpreter shares one output base. Bazel's *actions* re-run when their inputs or
+    `--action_env` change, but a **repository rule** is cached against the values of the
+    vars its `environ =` list names, and nothing else — not `PATH`, not what a symlink on
+    `PATH` points at. grpc's `python_configure` (which ray, and anything using
+    `pyx_library`, pulls in for `@local_config_python//:python_headers`) declares exactly
+    `["BAZEL_SH", "PYTHON3_BIN_PATH", "PYTHON3_LIB_PATH"]` and otherwise falls back to
+    `repository_ctx.which("python3")`. So upstream's `ln -sf /opt/python/$PY/bin/python3
+    /usr/local/bin/python3` re-points the *toolchain* but leaves `Python.h` resolved to
+    the first interpreter of the loop — every wheel gets a `.so` compiled against cp312
+    headers, and cp313/cp314 fail at import after the whole multi-hour build.
+    - **Export the declared var, don't rely on the symlink**: `export
+      PYTHON3_BIN_PATH="/opt/python/${python}/bin/python3"` inside the loop. ray's own
+      `.bazelrc` header asks for that variable by name — it is upstream's documented knob,
+      not a divergence.
+    - **Upstream varying a stamp var is not the invalidation mechanism**, so don't copy it
+      and assume you are covered. ray sets `RAY_BUILD_ENV=manylinux_py$PY` under
+      `build --action_env=RAY_BUILD_ENV`; that re-runs every action but never re-runs a
+      repository rule. Keeping it constant (so the C++ core is built once) is the right
+      call for a riscv64 port — it just is not what was making upstream's per-interpreter
+      `.so` correct.
+    - **Settle "is this artifact really per-interpreter?" from upstream's published wheels
+      without downloading them** — gotcha 41's HTTP-range trick applied to a correctness
+      question rather than a triage one. Read each wheel's zip central directory (last
+      ~1 MB, `Range:` request) and compare the **CRC32 and uncompressed size** of the
+      files you care about across the `cpXY` wheels. For ray 2.58.0 that showed
+      `ray/_raylet.so` differing in both CRC *and* size across cp312/cp313/cp314 (so it
+      must be rebuilt per interpreter) while `core/src/ray/raylet/raylet` was byte
+      identical on all five (so the C++ core genuinely is shared) — the two facts that
+      together justify the build-once-loop-bindings shape and expose the trap above.
+
+70. **`CIBW_TEST_EXTRAS` is a blunt instrument: an extra can drag in a *compiled*
+    transitive dependency whose newest release outruns our registry (the
+    confluent-kafka case).** Gotcha 30 says check `pypi.riseproject.dev` before writing a
+    dep off, and that the version has to line up as well as the name. The trap here is
+    that you never named the dep at all -- you named an *extra*, and pip resolved it three
+    levels down. confluent-kafka's `avro` extra pulls `authlib`, which requires
+    `cryptography`; PyPI's newest cryptography has no riscv64 wheel and our registry is
+    one release behind, so with `PIP_EXTRA_INDEX_URL` set pip picks PyPI's newer version
+    and tries a Rust build inside a container with no cargo. The extra looked like the
+    *closer-to-upstream* choice, which is what makes it easy to reach for.
+    - **Derive the minimum dep set from collection errors, not from the extras table.**
+      Run gotcha 52's dry-run against upstream's released wheel with only `pytest`
+      installed and read what collection actually complains about:
+      `pytest <paths> -q 2>&1 | grep -E "ModuleNotFoundError|ImportError" | sort -u`.
+      confluent-kafka wanted exactly `avro`, `requests`, `urllib3` and `pyflakes` -- all
+      pure Python, none of them `cryptography`. Naming those (plus upstream's own
+      `requirements-tests.txt`, which supplies urllib3 and pyflakes) ran the same 670
+      tests with no compiled test dep at all.
+    - **Then sweep every *resolved* dep, not just the ones you typed.** `pip freeze` the
+      dry-run venv and ask PyPI, per package, whether the latest release has a `-any.whl`
+      *or* a riscv64 wheel; anything with neither is a source build waiting to happen.
+      That surfaced `ast-serialize` and `librt` -- new `mypy` dependencies that are
+      compiled but do publish riscv64 wheels, so they were fine, and you only know that
+      because you looked.
+
+71. **A vendored 3rd-party library can gate its riscv64 SIMD path on the *parent*
+    project's dispatch probe and then re-probe with baseline flags — a guaranteed
+    `FATAL_ERROR` (the opencv-python case; see `build-opencv-python.yml`).** OpenCV probes
+    RVV twice: once with the baseline flags (`HAVE_CPU_RVV_SUPPORT` — **fails**, the
+    baseline is `-march=rv64gc`) and once with `-march=rv64gc_v`
+    (`HAVE_CXX_MARCH_RV64GC_V` — **succeeds**, which is all a *dispatch* target needs).
+    `CPU_RVV_SUPPORTED` therefore ends up ON, and `3rdparty/libpng/CMakeLists.txt` takes
+    it as the default for `PNG_RISCV_RVV` — then compiles `#include <riscv_vector.h>`
+    with the *baseline* flags, gets `COMPILER_SUPPORTS_RVV - Failed`, and calls
+    `message(FATAL_ERROR "Compiler does not support RISC-V Vector extension")`. Configure
+    dies before one object is built. Nothing is wrong with the toolchain — the image's
+    GCC 14.3.1 does support RVV; the two probes just disagree because only one passes
+    `-march`. Distinct from gotcha 26 (a genuinely too-old compiler).
+    - **Turn the vendored dep's SIMD off; do not add `-march` globally.** Raising the
+      baseline to `rv64gcv` would make every wheel require RVV hardware. And off is the
+      only correct answer anyway: the same block appends
+      `riscv/filter_rvv_intrinsics.c` with **no** per-source `-march`, so the path could
+      not compile even if the probe had passed. `off` is libpng's own documented default.
+    - **A `scikit-build` (classic) project takes extra `-D` flags from the `CMAKE_ARGS`
+      environment variable**, so this is a one-line `CIBW_ENVIRONMENT` entry
+      (`CMAKE_ARGS=-DPNG_RISCV_RVV=off`), not a patch: `setuptools_wrap.py` prepends them
+      to the `cmake_args` passed to `setup()` and `cmaker.py` appends them to the
+      configure command line — unless `SKBUILD_CONFIGURE_OPTIONS` is set, which wins and
+      makes `CMAKE_ARGS` a silent no-op. `scikit-build-core` reads `SKBUILD_CMAKE_ARGS`
+      instead. Check which backend `[build-system] build-backend` names before reaching
+      for either.
+    - **Grep the vendored tree for the other gates in the same pass** — each one you miss
+      is a full CI cycle: `grep -rn --include=CMakeLists.txt --include='*.cmake' -iE
+      'riscv|rvv' 3rdparty cmake`, then look for `FATAL_ERROR` in the hits. In OpenCV
+      5.0.0 only libpng is fatal; `zlib-ng` (`set(WITH_RVV OFF)`) and `mlas` degrade
+      quietly, which is why the failure looks isolated rather than systemic.
+    - **A `cmake` *configure* under `--platform linux/riscv64` settles it in ~4 minutes**
+      (gotcha 15): copy the exact `-D` list the failing CI log printed — skbuild echoes
+      the whole command — add the candidate flag, and read the "Configuring done" line.
+      Cheaper than the queue wait on the shared riscv64 runners, and it prints the
+      config summary so you can also check what got disabled (`GUI: NONE`, `FFMPEG: NO`).
+
+72. **A native dependency upstream gets from a vendor tarball may already be in the
+    manylinux image's own repos — and the aarch64 image is a native-speed rehearsal
+    host for the whole recipe (the mysql-connector-python case).** Gotcha 51 queries
+    Rocky's repos for a *build tool*; the same query settles the harder question of
+    where a **library** comes from. mysql-connector-python's C extension links the
+    MySQL C API, which Oracle publishes for x86_64/aarch64 only
+    (`dev.mysql.com/get/.../mysql-<ver>-linux-glibc2.28-riscv64.tar.xz` → 404,
+    `repo.mysql.com/yum/.../el/10/` lists only `aarch64/` and `x86_64/`) — that reads
+    like `not-feasible` or a multi-hour from-source port of MySQL itself. It is
+    neither: Rocky 10 CRB ships `mysql8.4-devel` for riscv64, and manylinux's
+    `install-runtime-packages.sh` already runs `dnf config-manager --set-enabled crb`,
+    so `CIBW_BEFORE_ALL_LINUX: dnf -y install <pkg>-devel` is the whole provisioning
+    step and auditwheel vendors the `.so` into the wheel.
+    - **Answer it from repo metadata, before pulling any image** — one gunzip per
+      repo, and it covers every arch at once:
+      ```bash
+      md=$(curl -s https://dl.rockylinux.org/pub/rocky/10/CRB/riscv64/os/repodata/repomd.xml \
+           | grep -oE 'repodata/[a-f0-9]+-primary\.xml\.gz' | head -1)
+      curl -s "https://dl.rockylinux.org/pub/rocky/10/CRB/riscv64/os/$md" | gunzip \
+           | grep -oE '<name>[^<]*<pkg>[^<]*</name>' | sort -u
+      ```
+      Check `CRB` as well as `AppStream`/`BaseOS`: `-devel` subpackages very often live
+      only in CRB (`mysql8.4` is in AppStream, `mysql8.4-devel` only in CRB). The same
+      trick against `.../AppStream/source/tree/` confirms the SRPM exists before you
+      wire up a `gpl_sources` job.
+    - **`manylinux_2_39_aarch64` is AlmaLinux 10, `manylinux_2_39_riscv64` is Rocky 10**
+      (pypa/manylinux's README says "AlmaLinux/RockyLinux 10 based"). Same package set,
+      same paths, same `dnf`. So on an arm64 host the *entire* recipe — before-all,
+      compile, `auditwheel repair`, venv install, before-test, and the real test
+      command run from an empty cwd — replays natively in minutes, no QEMU. That caught
+      three distinct failures here (link error, missing `setuptools`, `EPERM` on
+      `execve`) that would each have cost a riscv64 CI cycle. Confirm the one thing
+      aarch64 cannot tell you — that the package exists for riscv64 — with a single
+      `dnf install` in the riscv64 image.
+    - **The version you get is the distro's, not upstream's.** Check the C source is
+      version-gated before accepting it (`grep -n 'MYSQL_VERSION_ID' src/*.c` showed
+      every newer-API use behind `#if`, and `MYSQL_TYPE_VECTOR` `#define`d when the
+      header predates it), and say in the commit message which features compile out.
+
+73. **A project that links its dependency *statically* silently produces no `-L` when
+    only the shared library is installed.** Distributions ship `libfoo.so` and no
+    `libfoo.a`, and an upstream that was only ever built against a vendor tree can
+    depend on the static one in a way that is invisible until the link step.
+    mysql-connector-python's `cpydist` is the sharp version: `mysql_c_api_info()`
+    records the library path under the key **`link_dirs`**, `BuildExt.run()` only ever
+    reads **`library_dirs`**, and the gap is bridged by `_finalize_mysql_capi()`, which
+    copies `libmysqlclient*` into a private `build/temp.*/capi/lib` and then deletes
+    everything not ending in `.a` "to force static linking". With a distro package that
+    directory ends up empty, the only `-L` on the command line points at it, and the
+    build dies with `cannot find -lmysqlclient` after compiling every object
+    successfully.
+    - **Look for an upstream escape hatch before patching.** cpydist already reads
+      `EXTRA_LINK_ARGS` from the environment, so
+      `CIBW_ENVIRONMENT: ... EXTRA_LINK_ARGS=-L/usr/lib64/mysql` fixes it with no diff
+      at all. `LDFLAGS` is the generic fallback — `distutils.sysconfig.customize_compiler`
+      appends it to `ldshared`, so it lands ahead of the objects and the `-l` flags.
+    - **The symptom names the missing `-L`, not the missing `.a`** — read the failing
+      link line for which directories actually reached it rather than assuming the
+      library is absent.
+
+74. **A file capability makes a binary unexecutable inside the build container
+    (`Operation not permitted` on `execve`, as root).** Distro packages routinely carry
+    capabilities — `mysqld` ships `cap_sys_nice=ep` — and when the container's
+    capability bounding set does not include the capability, `execve` fails with
+    **EPERM**, not EACCES, and with no message naming capabilities. It reads like a
+    corrupt binary or a mount problem; `getcap` settles it in one command:
+    ```bash
+    getcap /usr/libexec/mysqld           # -> cap_sys_nice=ep
+    setcap -r /usr/libexec/mysqld        # needs `dnf install libcap`
+    ```
+    Do the `setcap -r` in `CIBW_BEFORE_TEST_LINUX` (or `BEFORE_ALL`) beside the
+    `dnf install` that put the binary there. Dropping a scheduling-priority capability
+    costs nothing in a throwaway container.
+
+75. **Running upstream's suite against a real server the distro also ships is often
+    cheaper than it looks — but scope it, and stop the harness rebuilding the thing
+    under test.** A database/driver port whose test harness bootstraps its own server
+    (`tests/mysqld.py` + `unittests.py --with-mysql=<basedir>`) is usually written for a
+    developer machine, and three things stand between it and a container:
+    - **It runs as root.** Servers that refuse root (`mysqld`: *"Please read Security
+      section of the manual to find out how to run mysqld as root!"*) need an explicit
+      `--user=root`, in *both* the bootstrap argv and the generated option file the
+      started server reads back via `--defaults-file`. That is a two-line
+      `Inappropriate` patch, and cheaper than making cibuildwheel's test phase drop
+      privileges (its venv and temp dirs are mode-700 root).
+    - **`CIBW_ENVIRONMENT` reaches the test phase (gotcha 12), and a harness that
+      reinstalls the project in-tree will use it.** `unittests.py` runs
+      `setup.py install` into `build/testing` and prepends that to `sys.path`; with the
+      build's `MYSQL_CAPI` still set it recompiles the extension there and **shadows the
+      wheel's**. Clear the build-only variables for tests —
+      `CIBW_TEST_ENVIRONMENT: MYSQL_CAPI= SKIP_VENDOR= EXTRA_LINK_ARGS=` (cibuildwheel
+      layers `test_environment` on top of `environment`, `platforms/linux.py`) — and
+      assert what actually got imported:
+      `assert 'site-packages' in m.__file__, m.__file__`.
+    - **Select the modules that test your delta.** The full suite here was 1318 tests
+      with 19 failures — all TLS-cipher and unix-socket cases, artefacts of testing
+      against the distro's older server rather than the version upstream targets, and
+      all reproducing on aarch64. Harnesses of this kind have module-level selection
+      (`--test-regex '^cext_'`) but no pytest-style deselect, so a module regex is the
+      only lever: run the C-extension modules (87 tests, seconds) and report the
+      full-suite numbers in the PR rather than shipping a knowingly red job or a
+      hand-maintained exclusion list.
+
+76. **A `build-system.requires` pin can exclude every riscv64 wheel of a build tool —
+    pip's `--no-build-isolation` is the escape hatch `build --no-isolation` is not
+    (refines gotcha 29).** Gotcha 29 pins a build tool *down* to dodge a breaking release;
+    the mirror case is a project whose pin is too *low* for riscv64 to have a wheel at all.
+    ddtrace's `pyproject.toml` requires `cmake>=3.24.2,<3.28` and `setup.py` invokes CMake
+    through the **`cmake` PyPI package** (`cmake.CMAKE_BIN_DIR`), not through `PATH` — so a
+    system cmake, or the one the manylinux image ships in `/usr/local/bin`, is irrelevant.
+    The oldest riscv64 `cmake` wheel is **4.1.0**, so the isolated build env has nothing to
+    resolve and falls back to compiling CMake itself from the sdist.
+    - **The two `--no-*-isolation` flags differ in more than spelling.** `build
+      --no-isolation` still *verifies* `build-system.requires` and fails on a pin it cannot
+      satisfy (gotcha 29). **pip's `--no-build-isolation` does not check them at all**, so
+      preinstalling a newer tool and passing
+      `CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"` builds the project with the
+      version that exists for riscv64 and needs **no patch to `pyproject.toml`**. Prefer it
+      to patching a pin: the pin stays visible to a reader, and there is nothing to refresh
+      at the next version bump.
+    - **Prove the newer tool actually works before relying on it**, on any host: read every
+      `cmake_minimum_required` in the tree (cmake 4 only rejects `< 3.5`), then run one full
+      `pip wheel . --no-deps --no-build-isolation` in a venv holding the preinstalled
+      versions. ddtrace built clean with cmake 4.4.2 + setuptools 84 on macOS/arm64 in three
+      minutes — arch-independent evidence that the pin, not the code, was the obstacle.
+
+77. **A setup.py that *downloads* a prebuilt native library can often be satisfied by
+    building that library yourself — read whether the downloader skips or fails
+    (the ddtrace/libddwaf case).** Gotcha 35 rejects a port when the vendored payload has no
+    upstream build for our arch *and no source to build*. When the payload is an ordinary
+    open-source C/C++ library, the port is normal work: fetch its source at the version the
+    project pins and drop the result where the download would have landed. Two properties of
+    the downloader decide whether that needs a patch at all — both were true for ddtrace:
+    - the per-arch loop **`continue`s** on an unrecognised platform
+      (`if not get_platform().endswith(arch): continue`) rather than raising, so the build
+      proceeds and only the *runtime* `ctypes.CDLL` fails; and
+    - `download_artifacts()` **returns early when the target directory is already non-empty**,
+      so pre-populating `<pkg>/.../libddwaf/<arch>/lib/libddwaf.so` from `CIBW_BEFORE_ALL`
+      makes it a no-op. `package_data` globs the same path, so the library ships.
+    Check the surrounding clean-up too: ddtrace's `build_py` calls `remove_artifacts()`
+    (an `rmtree` of exactly that directory) unless its incremental flag is on — it defaults
+    to on, but a workflow that turned it off would silently ship a wheel with no library.
+    - **`-static-libstdc++` needs `libstdc++.a`, which the riscv64 manylinux image does not
+      ship** — the link dies with `/usr/bin/ld: cannot find -lstdc++`. `dnf -y install
+      libstdc++-static` (Rocky 10 CRB, already enabled) fixes it; add it beside the
+      `dnf` lines gotcha 15 and 46 collect.
+    - **Validate the library build alone under QEMU** (`docker run --platform linux/riscv64
+      <image>`) before spending a runner cycle: libddwaf took ~50 min emulated and proved the
+      cmake invocation, the ExternalProject downloads, the C++20 compile and the link — and
+      caught the missing `libstdc++.a` in the *first* attempt.
+
+78. **Rust ports: `cargo metadata --filter-platform <triple>` settles which crates a target
+    would actually compile — from any host, with no cross toolchain.** A big Rust dependency
+    tree hides its arch limits in build scripts and `#[cfg(target_arch)]` arms, and the only
+    honest way to enumerate what riscv64 pulls in is to ask cargo:
+    `cargo metadata --format-version 1 --filter-platform riscv64gc-unknown-linux-gnu
+    --features <what setup.py enables> --locked`, then walk `resolve.nodes` from the root.
+    It resolves target-specific `[target.'cfg(...)'.dependencies]` blocks exactly as a real
+    build would, needs only the manifests and the lock, and takes seconds — so it is also how
+    you *verify a patch*: before/after the change, the offending crate must disappear for
+    riscv64 and stay for aarch64.
+    - **Two signatures mean "this crate cannot build here", and both are greppable:** a
+      `panic!` in `build.rs` keyed off `CARGO_CFG_TARGET_ARCH`
+      (libdatadog's `libdd-otel-thread-ctx`: *"Only x86_64 and aarch64 are currently
+      supported"*), and a **two-arm `#[cfg(target_arch)]` binding with no fallback**
+      (`#[cfg(target_arch = "x86_64")] let arch = ...;` / `#[cfg(target_arch = "aarch64")]
+      let arch = ...;`), which leaves the name undefined everywhere else. Grep
+      `target_arch` across the dependency's sources and count the arms before assuming a
+      compile is worth starting.
+    - **Patch the *feature*, not the dependency.** A crate reached through a git dependency
+      cannot be fixed without vendoring it, but the project usually gates it behind a Cargo
+      feature that `setup.py` turns on — narrowing that one condition
+      (`if not SERVERLESS_BUILD and platform.machine() in CRASHTRACKER_ARCHS:`) removes the
+      crate and everything under it. Check the Python side first: a project that already
+      writes `try: from ._native import X ... except ImportError: is_available = False`
+      is telling you the component is optional, and the patch is then one file.
+    - **A dependency whose whole purpose is an ISA feature is a legitimate drop, not a
+      shortcut.** libdatadog's thread-context crate exists to emit a **TLSDESC** thread-local;
+      RISC-V TLSDESC needs GCC 14 *and* binutils 2.42 *and* **glibc 2.40**, while
+      `manylinux_2_39_riscv64` and `ubuntu-24.04-riscv` are both on glibc 2.39 — so even a
+      shim that compiled could not be resolved at load time. Say that in the patch header;
+      it is the difference between `To upstream` and hand-waving.
+
+79. **A `<pkg>-headless`/`-gpu`/`-lite` sibling is usually the same upstream tree behind one
+    env var — mirror the sibling workflow instead of re-deriving it (the
+    opencv-python-headless case).** Gotcha 50 covers the sibling distribution that makes a
+    port pointless (`psycopg2`/`psycopg2-binary`); the commoner shape is a sibling that is a
+    *legitimate second port* of a tree already in the repo. opencv-python's `setup.py` picks
+    `package_name` from `ENABLE_HEADLESS` and appends `-DWITH_QT=OFF -DWITH_GTK=OFF
+    -DWITH_MSMF=OFF -DWITH_OBSENSOR=OFF -DOPENCV_FFMPEG_ENABLE_LIBAVDEVICE=OFF`; nothing else
+    differs, so `build-opencv-python-headless.yml` is `build-opencv-python.yml` plus that
+    variable. Grep `setup.py` for the `package_name = ` assignments first — the branches name
+    every sibling upstream publishes and the flag that selects each. Copying the proven
+    sibling is also goal 2's answer: two near-identical files read as one recipe, and a
+    re-derived second one invites a diff a reviewer has to justify.
+    - **A pre-stamped generated file can override the env var you think selects the build.**
+      Workflows commonly stamp a generated `version.py`/`_version.py` on the host and delete
+      `.git` so the container build runs no git (and cibuildwheel copies ~1 GB less). But
+      `setup.py` may *read that file back* for more than the version: opencv-python's
+      `get_and_set_info()` regenerates it only when `.git` exists and otherwise returns
+      `version["headless"]`, discarding `ENABLE_HEADLESS`. So the variant flag has to be set
+      in **both** places — at the stamp (`find_version.py False True False False`) and in
+      `CIBW_ENVIRONMENT` — and the stamp step should `grep -Fqx "headless = True"` the way it
+      already greps the version, since getting this wrong silently builds the *other* sibling
+      under your artifact name after a two-hour compile.
+
+80. **When a maintainer parks a port, stop pushing to the branch entirely — the
+    `pull_request: paths` trigger makes *every* push restart the riscv64 build (the sglang
+    follow-up).** Gotcha 48 says a stripped `Trigger:` line or a human-cancelled run is a
+    stop signal and not a flake, but it only warns against re-adding the `Trigger:` line.
+    That is not enough: gotcha 54 requires a new workflow to keep `pull_request: paths`, so
+    on a parked PR an *ordinary* commit — even one that only fixes the triggers, rebases
+    onto `main`, or tidies a comment — dispatches the full matrix onto the shared
+    `ubuntu-24.04-riscv` runners again. PR #357 was cancelled by `luhenry` three times, the
+    last one **21 seconds** after a "restore the pull_request trigger" push, following an
+    explicit PR comment ("Waiting for dependencies to be available before trying to enable
+    it further"). Nothing in the workflow was wrong; the pushes themselves were the problem.
+    - **Read the run's `actor`/`triggering_actor` before treating a cancellation as
+      infra flake**: `gh api repos/<repo>/actions/runs/<id> -q
+      '{c:.conclusion,a:.actor.login,t:.triggering_actor.login,d:.updated_at}'`. A human
+      login plus a sub-minute delta between `created_at` and `updated_at` is a deliberate
+      cancel — a runner/infra failure neither names a person nor lands that fast.
+    - **A maintainer comment on the PR is part of the CI signal.** Check `gh pr view <n>
+      --json comments` alongside `statusCheckRollup` before deciding to re-run anything;
+      "waiting for X" there outranks a red rollup as the reason the matrix is not green.
+    - **Verify the stated blocker instead of restating it**, so the report is evidence and
+      not hearsay. Non-extra entries in `info.requires_dist` are the ones that gate
+      installability: sglang hard-requires `cuda-python>=13.0` and `cuda-tile==1.6.0rc5`,
+      neither of which has a riscv64 file on PyPI or on our registry (gotcha 30's `curl`),
+      and CUDA is proprietary — so the wheel is buildable but not installable, permanently,
+      which is exactly what the maintainer was waiting on. Land the workflow, say plainly
+      that CI was never proven green and why, and leave the dispatch to them.
+
+81. **A `py3-none-<platform>` wheel can hold a real compiled library — gotcha 27's stop
+    rule needs a third branch (the xgboost case).** Gotcha 27 reads an all-`py3-none-*`
+    wheel set as proof that the platform tag was forced by hand and nothing is compiled;
+    gotcha 35 adds the downloaded-prebuilt-runtime branch. xgboost is the third and most
+    dangerous shape, because from the tag alone it is indistinguishable from the first:
+    3.4.1 publishes `py3-none-manylinux_2_28_{x86_64,aarch64}.whl` at **57 MB each**, and
+    those bytes are a `libxgboost.so` compiled from the sibling C++ tree during the wheel
+    build. Applying gotcha 27's rule would have returned `not-feasible` on a package that
+    is an ordinary, fully green port.
+    - **The ABI tag is absent because there is no extension module, not because there is
+      no native code.** xgboost defines no `PyInit_*` at all: `xgboost/libpath.py` locates
+      `xgboost/lib/libxgboost.so` and `core.py` opens it with `ctypes`. That is the second
+      gotcha 33's pycryptodome mechanism applied to the *whole* package rather than to a
+      few `_raw_*.so` sitting beside real extensions — and a ctypes-only package holds
+      nothing CPython-version-specific, so `py3-none` is the *correct* tag for a wheel
+      that is nonetheless per-platform.
+    - **Wheel size settles it faster than reasoning about the tag.** Gotcha 27's watchdog
+      wheels and gotcha 24's multiprocess wheels are the same handful of KB on every
+      platform; xgboost's range from 2.4 MB (macOS, linking system libs) to 57 MB (Linux,
+      vendoring them). **Diff the `size` field across the platform wheels in
+      `pypi.org/pypi/<pkg>/<ver>/json` before concluding anything from an all-`py3-none-*`
+      tag set** — near-identical sizes mean one artifact relabelled, divergent sizes mean
+      real per-platform content. One JSON read, nothing downloaded.
+    - **It also collapses the matrix, which is the payoff.** `[tool.scikit-build]
+      wheel.py-api = "py3"` is the scikit-build-core spelling of the gotcha 11/34 idea one
+      step past abi3: a *single* build serves every interpreter, so the workflow is
+      `only: cp312-manylinux_riscv64` with no `python:` matrix at all. Read `py-api`
+      before writing a four-entry matrix that would build the identical wheel four times.
+
+
+82. **A `pytest.skip()` raised from inside the generator that feeds `@parametrize`
+    deletes the whole module, and the run stays green (the fastavro case).** pytest consumes
+    that generator at *collection* time, so the `Skipped` exception propagates out of module
+    collection rather than out of one test — every test in the file disappears, including the
+    ones that never touched the missing dependency, and the summary line says `1 skipped`.
+    Nothing in the output names the module or the count you lost. That makes an "optional"
+    test dependency load-bearing: fastavro's `_test_files()` skips when the snappy codec is
+    absent, and dropping `cramjam` (no riscv64 wheel anywhere, so it builds from its maturin
+    sdist) would have silently taken **152 of 709 tests** — most of the core reader/writer
+    coverage — off a green job.
+    - **Reproduce in 30 seconds on any host**, no QEMU: a `_cases()` generator that calls
+      `pytest.skip()` on one value, plus a second unrelated test in the same module. With the
+      dep present the file reports `4 passed`; without it, `1 skipped`. The 4 -> 1 collapse
+      *is* the whole tell.
+    - **So compare collected counts across the dependency, never just the exit status.** This
+      is the counterpart to gotcha 39's `comm -13` diff of test ids: there the runner changed,
+      here the dependency set did, and both fail by quietly collecting less.
+    - **Weigh that against the cost of the dep before trimming `CIBW_TEST_REQUIRES`.** Gotcha
+      52's dry-run against upstream's released PyPI wheel prices this out directly — it shows
+      the pass/skip counts each candidate dependency list actually produces. A `pytest.importorskip`
+      at module top has the same collapsing effect and is easier to spot; the generator form is not.
+    - pytest warns `Passing a non-Collection iterable to parametrize is deprecated`
+      (`PytestRemovedIn10Warning`), so this shape is on its way out — but it is still what
+      released suites ship today.
+
+83. **A test that asserts on a traceback's *source text* passes only inside a source
+    checkout, so `test-sources` staging is what breaks it (the fastavro case).** Gotchas 25/36
+    stage a minimal test cwd precisely so the checkout cannot shadow the installed wheel. The
+    bill for that arrives here: `traceback.extract_tb()` fills `FrameSummary.line` from
+    **linecache**, and a Cython extension embeds the **relative** path of its `.pyx`
+    (`fastavro/_write.pyx`, not an absolute one) as the code object's filename. linecache
+    resolves that against the **current working directory**, so the source text is recoverable
+    only when cwd happens to be a checkout carrying those sources — which is exactly what
+    upstream's own `build_ext --inplace` CI provides and what a staged `test_cwd` deliberately
+    does not. Against any installed wheel the frame reads back `line=''` and the assertion
+    fails, on every architecture.
+    - **Confirm the mechanism rather than the symptom, in two runs against the *released* PyPI
+      wheel on your own host.** From an empty dir the frame is
+      `filename='fastavro/_write.pyx' lineno=409 line=''`; create a decoy `fastavro/_write.pyx`
+      of 500 numbered lines at cwd and the same frame reports `line='line 409'`. A traceback
+      whose text is dictated by an unrelated file at cwd is proof the assertion is
+      cwd-dependent, not arch-dependent — deselect it and say so.
+    - **Read the *relativeness* of the filename, not just the failure.** An absolute path in
+      the frame would survive any cwd and the test would be portable; a relative one is the
+      signal that upstream assumes an in-place build. `python -c` over the installed wheel
+      prints it in one line.
+    - Generalises past Cython to anything that assertion-checks rendered traceback text
+      (`format_exc()` output, `assert "foo = bar" in tb`) — the source line is never carried
+      *in* the exception, it is looked up afterwards, so it is a property of the filesystem at
+      raise-render time and not of your build.
+
+84. **A build-only dependency that our registry ships for *some* interpreters caps the
+    matrix — trim it, don't drop the port (the statsmodels/scipy case).** Gotcha 40 covers a
+    dependency that is unavailable outright (conda-blocked llvmlite) and correctly says the
+    port is blocked. The commoner and much milder shape is a dependency we already ship, just
+    not for every interpreter: statsmodels' `build-system.requires` has `scipy>=1.13,<2` and
+    scipy is a runtime requirement too, PyPI publishes **no** riscv64 scipy for any version
+    (checked through 1.18.1), and `pypi.riseproject.dev` tops out at 1.15.2 for cp312/cp313.
+    So `cp314`/`cp314t` have nothing to resolve at build time *or* test time, while cp312 and
+    cp313 are fine. Ship the two that work and say why in a one-line matrix comment; the
+    entries drop back in the day the dependency's own port lands.
+    - **Run gotcha 30's registry check per *interpreter tag*, not per package name.** The
+      simple index's filenames carry the tags — `curl -s https://pypi.riseproject.dev/simple/<dep>/
+      | grep -oE '<dep>-[0-9][^-]*-cp3[0-9]+t?-'` — and the highest version is often available
+      for fewer interpreters than the package as a whole. A bare "yes we ship it" answer will
+      send you to a cp314 job that cannot resolve its own build requirements.
+    - **`PIP_ONLY_BINARY=<dep1>,<dep2>` is the right scope here, not `:all:`.** With
+      `PIP_EXTRA_INDEX_URL` set, pip picks the highest version that has a *compatible wheel*,
+      so naming only the heavy scientific deps pins them to our riscv64 wheels while leaving
+      `cython` (which has no riscv64 wheel anywhere and must compile from sdist, gotcha 12)
+      free to build. Listing `:all:` starves the build backend instead.
+
+85. **Dry-run the test phase at the dependency versions the *container* will resolve,
+    not at whatever pip hands your laptop (refines gotcha 52).** Gotcha 52's dry run installs
+    the released PyPI wheel and runs upstream's `test-command` on any host — but on an
+    unconstrained host pip fetches today's newest scientific stack, while inside the container
+    `PIP_ONLY_BINARY` + our registry pin the deps several releases back. Running the two gives
+    opposite answers: statsmodels 0.14.6 against scipy 1.18.1 fails **41** tests on removed
+    private APIs (`ImportError: cannot import name '_lazywhere' from 'scipy._lib._util'`,
+    `No module named 'scipy._lib.array_api_extra'`) plus derived numeric failures; the same
+    command against scipy 1.15.2 — the version the registry actually offers — is
+    `17037 passed, 726 skipped, 126 xfailed, 3 xpassed`, zero failures.
+    - **Read the registry index first, then pin your local venv to match** before you conclude
+      anything from a red local run. Otherwise you spend the cycle diagnosing upstream's
+      incompatibility with a dependency your build will never install, or — worse — patch
+      around it.
+    - Note pip's own resolution does part of this for you: a pinned `scipy==1.15.2` caps
+      `numpy<2.5`, so the container's numpy is 2.4.x even though the registry has 2.5.2.
+      Reproduce the resolution, don't hand-pick each version.
+
+86. **A monorepo's Python package builds from a subdirectory, so the project's *own*
+    LICENSE never reaches the wheel (the thrift case; see `build-thrift.yml`).** Gotchas
+    32/44/57 are all about a *vendored dependency's* licence going missing. The plainer
+    failure is upstream shipping none of its own: when `setup.py` lives in a subdirectory of
+    a multi-language repo (`lib/py`, `python/`, `bindings/python/`), setuptools' default
+    `LICEN[CS]E*`/`COPYING*`/`NOTICE*`/`AUTHORS*` glob runs against **that** directory, not
+    the repo root where the licence actually sits — so every wheel upstream publishes carries
+    only a `License:` metadata string. apache/thrift's `manylinux2014_x86_64` wheel has no
+    `LICENSE` and no `NOTICE` entry at all, while Apache-2.0 sections 4(a) and 4(d) require
+    both to travel with a binary redistribution. RISE distributes these wheels, so the gap is
+    ours to close, and it is worth sending upstream since it affects every architecture.
+    - **The fix needs no patch file, because the files are already in the checkout.** One
+      workflow step — `cp LICENSE NOTICE <subdir>/` before cibuildwheel — puts them where the
+      default glob looks, and `dist-info/licenses/` is populated with no `setup.py` or
+      `pyproject.toml` edit. Cheaper and more upstreamable than a `patches/<pkg>/<ver>/` diff
+      that would have to embed the whole licence text, and it cannot trip gotcha 57 by
+      replacing the default glob with a hand-written list.
+    - **Diagnose on the *published* wheel, not the one you build**:
+      `unzip -l <pypi-wheel> | grep -iE 'licen|notice'` returning nothing is the whole
+      finding, and it is what proves this is upstream's gap rather than something your build
+      dropped. One `curl` of the PyPI file list settles it before any checkout.
+    - **`auditwheel repair` adds a `dist-info/licenses/` *directory* entry that a plain
+      `bdist_wheel` does not**, so gotcha 44's self-verifying set-equality check built from
+      `zipfile.namelist()` picks up an extra `""` after `rsplit("/", 1)` and fails — and only
+      on the riscv64 job, because the wheel from a local `python -m build` has no such entry.
+      Subtract `{""}`, and validate the assertion against a *repaired* wheel rather than the
+      one your host produced.
+
+87. **A test module that force-registers a synthetic package can never test an installed
+    wheel (extends gotchas 25/36).** Gotcha 25's shadowing comes from pytest's rootdir
+    insertion, and staging a minimal `test_cwd` fixes it. A stronger form is immune to that
+    fix: a test that constructs the package object itself so it can run "without a build
+    step" —
+    ```python
+    _thrift_pkg = types.ModuleType('thrift'); _thrift_pkg.__path__ = [_src_dir]
+    sys.modules.setdefault('thrift', _thrift_pkg)
+    ```
+    Under `test-sources` the relative `_src_dir` is absent and the module dies with
+    `ModuleNotFoundError: No module named '<pkg>.<sub>'`; stage the source next to it and it
+    silently exercises the pure-Python tree instead of your compiled wheel. Either way it is
+    not a wheel test — exclude it rather than staging more paths to satisfy it.
+    - **Upstream's own test list is the arbiter, not the sdist's file list.** thrift ships
+      `test_sasl_transport.py` in its sdist but `lib/py/Makefile.am`'s `check-local` never
+      runs it — the confirmation that it is a source-tree-only unit test rather than coverage
+      you dropped. A `Makefile.am`/`tox.ini`/`noxfile.py` target is worth reading in full
+      before deciding which shipped test files belong in `CIBW_TEST_COMMAND`.
+
+88. **An upstream `CIBW_TEST_COMMAND` that shells out to `tox` has to be translated, not
+    copied — and `tox-direct` caps tox below 4 (the lazy-object-proxy case).** Projects
+    generated from ionelmc's `cookiecutter-pylibrary` (lazy-object-proxy, hunter, and
+    friends) run their cibuildwheel tests as
+    `cd {project} && tox --skip-pkg-install --direct-yolo -e py3XX-nocov`. Copying that
+    line drags in `tox-direct`, whose metadata is `tox (<4,>=3.12)`, so `pip install tox
+    tox-direct` silently downgrades to the 2023-era tox 3 inside the container — on the
+    newest interpreters in our matrix that is its own failure mode, and it buys nothing.
+    Read the testenv instead and run its `commands` line directly: `nocov: {posargs:pytest
+    -vv --ignore=src}` becomes `CIBW_TEST_COMMAND: cd {project} && pytest -vv --ignore=src`.
+    Same reasoning as gotcha 36's `setup.py test`, one layer up.
+    - **`deps` in `[testenv]` is not the list of test requirements.** tox envs habitually
+      install the author's whole dev shelf; only what the suite actually imports belongs in
+      `CIBW_TEST_REQUIRES`. lazy-object-proxy's env lists `pytest pytest-benchmark Django
+      objproxies==0.9.4 hunter setuptools setuptools_scm`, but `Django`/`objproxies` are
+      reached only through `pytest.importorskip` from fixture params upstream has commented
+      out, and `hunter` — which has no riscv64 wheel and would compile Cython in-container —
+      is imported nowhere under `tests/`. `grep -n 'import\|benchmark' tests/*.py` settles
+      the whole list in one command; `pytest-benchmark` stayed because a `benchmark` fixture
+      and a `pytest.mark.benchmark` are used and `--strict-markers` is on.
+    - **A src-layout project needs no `test-sources` for this** (contrast gotcha 25): the
+      importable package lives in `src/`, which pytest's rootdir insertion does not put on
+      `sys.path`, so `cd {project}` cannot shadow the installed wheel. Confirm with
+      `python -c "import <pkg>; print(<pkg>.__file__)"` before pytest rather than assuming.
+
+89. **No workflow runs at all after pushing a PR may be GitHub, not your triggers — check
+    the status API before re-reading gotchas 45/54.** Those two explain the *registry*
+    failure mode, where a `workflow_dispatch` of a never-run workflow 404s while
+    `pull_request` still works. A total absence — `gh api
+    "repos/<repo>/actions/runs?branch=<branch>"` empty, `gh pr checks` reporting none, and
+    even the repo-wide `pull_request` checks (`pr-checks.yml`) missing — is a different
+    thing, and other branches showing fresh `startup_failure` runs is the tell that it is
+    not yours. One call settles it:
+    ```bash
+    curl -s https://www.githubstatus.com/api/v2/summary.json \
+      | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["status"]["description"]);[print("!",c["name"],c["status"]) for c in d["components"] if c["status"]!="operational"]'
+    ```
+    `Actions major_outage` means wait, not debug — a workflow edited during the outage
+    would be a change made for no reason.
+
+90. **The committed `pyproject.toml` may be only one of several *variants* upstream
+    publishes — and upstream usually ships the generator (the xgboost case; see
+    `build-xgboost.yml`).** A project that publishes the same code under more than one
+    distribution name or dependency flavour (CPU vs CUDA, `<pkg>` vs `<pkg>-cpu`) commonly
+    commits the *GPU* flavour and rewrites it in CI per target. xgboost's checked-in
+    `python-package/pyproject.toml` is the CUDA variant and declares
+    `nvidia-nccl-cu13 ; platform_system == "Linux"`, which has no riscv64 wheel — so the
+    wheel installs nowhere on riscv64 even though the build is clean. That is **not** a
+    patch: `ops/script/pypi_variants.py --use-suffix=na --require-nccl-dep=na` is
+    upstream's own generator, producing exactly the NCCL-free metadata they already ship
+    for macOS and `win_arm64`. Run the generator in the workflow; hand-editing the
+    dependency (or patching it out) diverges from a variant upstream supports.
+    - **The tell is a marker that is `platform_system == "Linux"`-wide on a dependency
+      that is really vendor-specific.** Read `info.requires_dist` from the PyPI JSON
+      before writing YAML (the gotcha-40 dependency sweep), then grep the source tree for
+      that requirement string: finding it in a *generated-looking* pyproject beside a
+      `ops/script/*variant*.py`, a `PACKAGE_NAME`-style env switch (gotcha 50), or a CI
+      `sed` means the flavour is a build-time choice, not a fact about the package.
+    - **`wheel.py-api = "py3"` collapses the matrix further than abi3 does.** A
+      scikit-build-core project whose extension is a plain `dlopen`ed shared library
+      (gotcha 33's shape) needs no CPython ABI at all, so one build yields
+      `py3-none-manylinux_riscv64` serving *every* interpreter — a single job, no
+      `cp3XX` matrix, and the job/artifact names should say `py3-none-…` rather than
+      naming the interpreter that happened to build it (same reasoning as gotcha 34).
 
 ## Environment / auth notes
 
@@ -1761,405 +2478,6 @@ gpl-sources-description: gcc
 `publish-wheels` attaches the tar to a GitHub Release (creating it if needed) and hands the
 download URL to `update_doc.py`, which renders it as that version's `comment:` — no manual
 docs edit. `build-numpy.yml` is the complete example.
-
-60. **Resuming another agent's in-flight port: re-check the branch against *today's*
-    main, and treat a maintainer hold as binding even when a fix must be pushed (the
-    sglang follow-up).** Two things bite when picking up an existing PR rather than
-    starting one.
-    - **A commit that followed a repo-wide convention can have been invalidated while
-      the PR sat open.** sglang's branch head was "drop pull_request trigger, build via
-      Trigger: directive", written to follow #364 — which #391 reverted. Diff the
-      workflow's `on:`/header against a *recently merged* sibling (not against the
-      workflow you copied from originally) before touching anything else; the branch,
-      not main, is the thing that drifted.
-    - **Under a hold (gotcha 48), a push that touches `build-<pkg>.yml` re-fires the
-      `pull_request` trigger whether you want it or not** — `paths` matches the PR's
-      diff against base, so *every* push to the branch starts the build again. That is
-      not a licence to let it run: land the fix, then `gh run cancel` the run you
-      caused, so the correction reaches the branch without taking the shared riscv64
-      runners back. Say in the report that you cancelled it and why; a cancelled run
-      you explain is cheaper than six runner-hours the maintainer already refused twice.
-
-61. **A wheel that vendors the image's `libgomp` is the standard GPL-sources trigger —
-    and there is no live example left in the tree to copy (the scikit-learn case).**
-    The Licensing section says to add a `gpl_sources` job when the build links GPL
-    components that come from *our* build environment, and names `build-numpy.yml` as
-    the complete example. It no longer is: #178 removed that job (numpy's GPL concern
-    was openblas, which upstream ships prebuilt), leaving only a dangling comment on
-    `MANYLINUX_RISCV64_IMAGE`, and **zero** of the 43 build workflows on `main` use
-    `actions/collect-gpl-sources` today. So the shape has to be reconstructed from
-    `git show 1c45d16 -- .github/workflows/build-numpy.yml`. Reconstruct it rather than
-    skipping — an OpenMP-using project is the commonest case and the check is two
-    commands on an artifact you already have:
-    ```bash
-    gh run download <run-id> -n <pkg>-<ver>-<tag>-manylinux_riscv64 -D whl
-    unzip -l whl/*.whl | grep -E '\.libs/|\.dylibs/'   # auditwheel's vendored-lib dir
-    ```
-    `<pkg>.libs/libgomp-<hash>.so.1.0.0` means the image's GCC OpenMP runtime is being
-    redistributed by us. GPLv3 **with** the GCC Runtime Library Exception still carries
-    the source-distribution obligation for the runtime library itself — the exception
-    only permits the *combination* with non-GPL modules — so the sources must be
-    published, not just the notice shipped.
-    - **The job runs natively, on `ubuntu-24.04-riscv`, not `ubuntu-latest`.**
-      `collect-gpl-sources` does `docker run` on the riscv64 manylinux image, which on
-      an x86 runner needs binfmt that isn't registered there.
-    - **Its artifact must not match the publish job's `artifact-pattern`.** Name it
-      `<pkg>-<ver>-gpl-sources` and keep the pattern anchored on `*-manylinux_riscv64`,
-      then pass it separately via `gpl-sources-artifact`/`-release-tag`/`-description`;
-      `publish-wheels` attaches it to a GitHub Release and renders the URL as the
-      version's docs `comment:`.
-    - **Upstream usually tells you first.** A project shipping a
-      `build_tools/wheels/LICENSE_*.txt` (or any "this binary distribution also bundles"
-      notice) that names `libgomp*`/`libgfortran*` has already done the audit for you —
-      and a `check_license.py`-style test asserting the notice made it into
-      `dist-info/licenses/` is worth inheriting unchanged, since it fails loudly if the
-      before-build step that appends it ever stops running.
-
-62. **A *build*-time dependency that we ship only for some interpreters caps the matrix
-    — and `PIP_ONLY_BINARY` is what makes the older registry version win (the
-    scikit-learn/scipy case).** Gotcha 30 says to check our registry before declaring a
-    dep unavailable, and gotcha 40 covers a dep that is unavailable outright. The middle
-    case is commoner and quieter: `pypi.riseproject.dev` carries the dep for `cp312`
-    and `cp313` but not `cp314`/`cp314t`, so the default four-entry matrix cannot be
-    used. Read the interpreter tags out of the index listing before writing `python:`:
-    ```
-    curl -s https://pypi.riseproject.dev/simple/<dep>/ | grep -oE '<dep>-[0-9.]+-cp[0-9t]+-[^"]*\.whl' | sort -u | tail
-    ```
-    Trim the matrix to those tags and say in a one-line comment *why*, naming the dep —
-    otherwise the next agent re-adds cp314 and burns a multi-hour cycle discovering it.
-    - **It is a build requirement, not just a runtime one, when the extension cimports
-      it** (`scipy.linalg.cython_blas`) — so `PIP_EXTRA_INDEX_URL` has to be in
-      `CIBW_ENVIRONMENT` (both phases, gotcha 12), not `CIBW_TEST_ENVIRONMENT`.
-    - **`PIP_ONLY_BINARY` scoped to the dep names is what makes gotcha 30's
-      "the version has to line up" bullet stop mattering.** PyPI's latest scipy is far
-      newer than the 1.15.2 we host, and pip picks the highest version across both
-      indexes — but with `PIP_ONLY_BINARY=numpy,scipy,pandas` the newer PyPI releases
-      have no riscv64 *binary*, so they are not candidates at all and resolution lands
-      on our wheel. Scope it to the dep names, never `:all:`: `cython` and
-      `meson-python` have no riscv64 wheel anywhere and must build from sdist in the
-      same build env.
-
-63. **A pinned action SHA that does not exist kills the job in "Set up job", after the
-    queue wait — verify every `uses:` pin before pushing.** `actionlint` checks the
-    *syntax* of `owner/repo@ref` and never asks GitHub whether the ref resolves, so a
-    mistyped or hallucinated 40-hex SHA passes every local check and then fails the job
-    with ``Unable to resolve action `actions/download-artifact@<sha>`, unable to find
-    version `<sha>` `` — before checkout, before any `run:` step. On a workflow whose
-    first jobs are cheap and whose expensive job is `needs:`-gated behind them, that is a
-    full cycle burnt on nothing (here: a queue wait plus a 100-minute bazel bootstrap
-    before the wheel job even started). One API call per pin settles it:
-    ```bash
-    grep -ohE 'uses: [^@]+@[a-f0-9]{40}' .github/workflows/build-<pkg>.yml | sort -u |
-      while read -r _ a; do gh api "repos/${a%@*}/commits/${a#*@}" --jq .sha >/dev/null \
-        || echo "BAD PIN: $a"; done
-    ```
-    Cheaper still, and the reason this is worth a rule rather than a habit: **copy the pin
-    from a workflow already on `main`** rather than from memory or from another action's
-    SHA — `grep -rhoE '<owner>/<action>@[a-f0-9]+ *# *v[0-9.]+' .github/workflows/ | sort |
-    uniq -c` shows what the repo already uses and how many workflows agree on it. A pin
-    that disagrees with every other workflow in the repo is a bug even when it resolves.
-
-64. **Looping interpreters inside one bazel output base: a repository rule re-runs
-    only when a var it declares in `environ` changes (the ray/`local_config_python`
-    case).** Building the heavy C++ core once and then looping `cpXY` for the bindings
-    (gotcha 15's shape, and what makes a bazel port affordable at all) means every
-    interpreter shares one output base. Bazel's *actions* re-run when their inputs or
-    `--action_env` change, but a **repository rule** is cached against the values of the
-    vars its `environ =` list names, and nothing else — not `PATH`, not what a symlink on
-    `PATH` points at. grpc's `python_configure` (which ray, and anything using
-    `pyx_library`, pulls in for `@local_config_python//:python_headers`) declares exactly
-    `["BAZEL_SH", "PYTHON3_BIN_PATH", "PYTHON3_LIB_PATH"]` and otherwise falls back to
-    `repository_ctx.which("python3")`. So upstream's `ln -sf /opt/python/$PY/bin/python3
-    /usr/local/bin/python3` re-points the *toolchain* but leaves `Python.h` resolved to
-    the first interpreter of the loop — every wheel gets a `.so` compiled against cp312
-    headers, and cp313/cp314 fail at import after the whole multi-hour build.
-    - **Export the declared var, don't rely on the symlink**: `export
-      PYTHON3_BIN_PATH="/opt/python/${python}/bin/python3"` inside the loop. ray's own
-      `.bazelrc` header asks for that variable by name — it is upstream's documented knob,
-      not a divergence.
-    - **Upstream varying a stamp var is not the invalidation mechanism**, so don't copy it
-      and assume you are covered. ray sets `RAY_BUILD_ENV=manylinux_py$PY` under
-      `build --action_env=RAY_BUILD_ENV`; that re-runs every action but never re-runs a
-      repository rule. Keeping it constant (so the C++ core is built once) is the right
-      call for a riscv64 port — it just is not what was making upstream's per-interpreter
-      `.so` correct.
-    - **Settle "is this artifact really per-interpreter?" from upstream's published wheels
-      without downloading them** — gotcha 41's HTTP-range trick applied to a correctness
-      question rather than a triage one. Read each wheel's zip central directory (last
-      ~1 MB, `Range:` request) and compare the **CRC32 and uncompressed size** of the
-      files you care about across the `cpXY` wheels. For ray 2.58.0 that showed
-      `ray/_raylet.so` differing in both CRC *and* size across cp312/cp313/cp314 (so it
-      must be rebuilt per interpreter) while `core/src/ray/raylet/raylet` was byte
-      identical on all five (so the C++ core genuinely is shared) — the two facts that
-      together justify the build-once-loop-bindings shape and expose the trap above.
-
-65. **`CIBW_TEST_EXTRAS` is a blunt instrument: an extra can drag in a *compiled*
-    transitive dependency whose newest release outruns our registry (the
-    confluent-kafka case).** Gotcha 30 says check `pypi.riseproject.dev` before writing a
-    dep off, and that the version has to line up as well as the name. The trap here is
-    that you never named the dep at all -- you named an *extra*, and pip resolved it three
-    levels down. confluent-kafka's `avro` extra pulls `authlib`, which requires
-    `cryptography`; PyPI's newest cryptography has no riscv64 wheel and our registry is
-    one release behind, so with `PIP_EXTRA_INDEX_URL` set pip picks PyPI's newer version
-    and tries a Rust build inside a container with no cargo. The extra looked like the
-    *closer-to-upstream* choice, which is what makes it easy to reach for.
-    - **Derive the minimum dep set from collection errors, not from the extras table.**
-      Run gotcha 52's dry-run against upstream's released wheel with only `pytest`
-      installed and read what collection actually complains about:
-      `pytest <paths> -q 2>&1 | grep -E "ModuleNotFoundError|ImportError" | sort -u`.
-      confluent-kafka wanted exactly `avro`, `requests`, `urllib3` and `pyflakes` -- all
-      pure Python, none of them `cryptography`. Naming those (plus upstream's own
-      `requirements-tests.txt`, which supplies urllib3 and pyflakes) ran the same 670
-      tests with no compiled test dep at all.
-    - **Then sweep every *resolved* dep, not just the ones you typed.** `pip freeze` the
-      dry-run venv and ask PyPI, per package, whether the latest release has a `-any.whl`
-      *or* a riscv64 wheel; anything with neither is a source build waiting to happen.
-      That surfaced `ast-serialize` and `librt` -- new `mypy` dependencies that are
-      compiled but do publish riscv64 wheels, so they were fine, and you only know that
-      because you looked.
-
-66. **A vendored 3rd-party library can gate its riscv64 SIMD path on the *parent*
-    project's dispatch probe and then re-probe with baseline flags — a guaranteed
-    `FATAL_ERROR` (the opencv-python case; see `build-opencv-python.yml`).** OpenCV probes
-    RVV twice: once with the baseline flags (`HAVE_CPU_RVV_SUPPORT` — **fails**, the
-    baseline is `-march=rv64gc`) and once with `-march=rv64gc_v`
-    (`HAVE_CXX_MARCH_RV64GC_V` — **succeeds**, which is all a *dispatch* target needs).
-    `CPU_RVV_SUPPORTED` therefore ends up ON, and `3rdparty/libpng/CMakeLists.txt` takes
-    it as the default for `PNG_RISCV_RVV` — then compiles `#include <riscv_vector.h>`
-    with the *baseline* flags, gets `COMPILER_SUPPORTS_RVV - Failed`, and calls
-    `message(FATAL_ERROR "Compiler does not support RISC-V Vector extension")`. Configure
-    dies before one object is built. Nothing is wrong with the toolchain — the image's
-    GCC 14.3.1 does support RVV; the two probes just disagree because only one passes
-    `-march`. Distinct from gotcha 26 (a genuinely too-old compiler).
-    - **Turn the vendored dep's SIMD off; do not add `-march` globally.** Raising the
-      baseline to `rv64gcv` would make every wheel require RVV hardware. And off is the
-      only correct answer anyway: the same block appends
-      `riscv/filter_rvv_intrinsics.c` with **no** per-source `-march`, so the path could
-      not compile even if the probe had passed. `off` is libpng's own documented default.
-    - **A `scikit-build` (classic) project takes extra `-D` flags from the `CMAKE_ARGS`
-      environment variable**, so this is a one-line `CIBW_ENVIRONMENT` entry
-      (`CMAKE_ARGS=-DPNG_RISCV_RVV=off`), not a patch: `setuptools_wrap.py` prepends them
-      to the `cmake_args` passed to `setup()` and `cmaker.py` appends them to the
-      configure command line — unless `SKBUILD_CONFIGURE_OPTIONS` is set, which wins and
-      makes `CMAKE_ARGS` a silent no-op. `scikit-build-core` reads `SKBUILD_CMAKE_ARGS`
-      instead. Check which backend `[build-system] build-backend` names before reaching
-      for either.
-    - **Grep the vendored tree for the other gates in the same pass** — each one you miss
-      is a full CI cycle: `grep -rn --include=CMakeLists.txt --include='*.cmake' -iE
-      'riscv|rvv' 3rdparty cmake`, then look for `FATAL_ERROR` in the hits. In OpenCV
-      5.0.0 only libpng is fatal; `zlib-ng` (`set(WITH_RVV OFF)`) and `mlas` degrade
-      quietly, which is why the failure looks isolated rather than systemic.
-    - **A `cmake` *configure* under `--platform linux/riscv64` settles it in ~4 minutes**
-      (gotcha 15): copy the exact `-D` list the failing CI log printed — skbuild echoes
-      the whole command — add the candidate flag, and read the "Configuring done" line.
-      Cheaper than the queue wait on the shared riscv64 runners, and it prints the
-      config summary so you can also check what got disabled (`GUI: NONE`, `FFMPEG: NO`).
-
-67. **A native dependency upstream gets from a vendor tarball may already be in the
-    manylinux image's own repos — and the aarch64 image is a native-speed rehearsal
-    host for the whole recipe (the mysql-connector-python case).** Gotcha 51 queries
-    Rocky's repos for a *build tool*; the same query settles the harder question of
-    where a **library** comes from. mysql-connector-python's C extension links the
-    MySQL C API, which Oracle publishes for x86_64/aarch64 only
-    (`dev.mysql.com/get/.../mysql-<ver>-linux-glibc2.28-riscv64.tar.xz` → 404,
-    `repo.mysql.com/yum/.../el/10/` lists only `aarch64/` and `x86_64/`) — that reads
-    like `not-feasible` or a multi-hour from-source port of MySQL itself. It is
-    neither: Rocky 10 CRB ships `mysql8.4-devel` for riscv64, and manylinux's
-    `install-runtime-packages.sh` already runs `dnf config-manager --set-enabled crb`,
-    so `CIBW_BEFORE_ALL_LINUX: dnf -y install <pkg>-devel` is the whole provisioning
-    step and auditwheel vendors the `.so` into the wheel.
-    - **Answer it from repo metadata, before pulling any image** — one gunzip per
-      repo, and it covers every arch at once:
-      ```bash
-      md=$(curl -s https://dl.rockylinux.org/pub/rocky/10/CRB/riscv64/os/repodata/repomd.xml \
-           | grep -oE 'repodata/[a-f0-9]+-primary\.xml\.gz' | head -1)
-      curl -s "https://dl.rockylinux.org/pub/rocky/10/CRB/riscv64/os/$md" | gunzip \
-           | grep -oE '<name>[^<]*<pkg>[^<]*</name>' | sort -u
-      ```
-      Check `CRB` as well as `AppStream`/`BaseOS`: `-devel` subpackages very often live
-      only in CRB (`mysql8.4` is in AppStream, `mysql8.4-devel` only in CRB). The same
-      trick against `.../AppStream/source/tree/` confirms the SRPM exists before you
-      wire up a `gpl_sources` job.
-    - **`manylinux_2_39_aarch64` is AlmaLinux 10, `manylinux_2_39_riscv64` is Rocky 10**
-      (pypa/manylinux's README says "AlmaLinux/RockyLinux 10 based"). Same package set,
-      same paths, same `dnf`. So on an arm64 host the *entire* recipe — before-all,
-      compile, `auditwheel repair`, venv install, before-test, and the real test
-      command run from an empty cwd — replays natively in minutes, no QEMU. That caught
-      three distinct failures here (link error, missing `setuptools`, `EPERM` on
-      `execve`) that would each have cost a riscv64 CI cycle. Confirm the one thing
-      aarch64 cannot tell you — that the package exists for riscv64 — with a single
-      `dnf install` in the riscv64 image.
-    - **The version you get is the distro's, not upstream's.** Check the C source is
-      version-gated before accepting it (`grep -n 'MYSQL_VERSION_ID' src/*.c` showed
-      every newer-API use behind `#if`, and `MYSQL_TYPE_VECTOR` `#define`d when the
-      header predates it), and say in the commit message which features compile out.
-
-68. **A project that links its dependency *statically* silently produces no `-L` when
-    only the shared library is installed.** Distributions ship `libfoo.so` and no
-    `libfoo.a`, and an upstream that was only ever built against a vendor tree can
-    depend on the static one in a way that is invisible until the link step.
-    mysql-connector-python's `cpydist` is the sharp version: `mysql_c_api_info()`
-    records the library path under the key **`link_dirs`**, `BuildExt.run()` only ever
-    reads **`library_dirs`**, and the gap is bridged by `_finalize_mysql_capi()`, which
-    copies `libmysqlclient*` into a private `build/temp.*/capi/lib` and then deletes
-    everything not ending in `.a` "to force static linking". With a distro package that
-    directory ends up empty, the only `-L` on the command line points at it, and the
-    build dies with `cannot find -lmysqlclient` after compiling every object
-    successfully.
-    - **Look for an upstream escape hatch before patching.** cpydist already reads
-      `EXTRA_LINK_ARGS` from the environment, so
-      `CIBW_ENVIRONMENT: ... EXTRA_LINK_ARGS=-L/usr/lib64/mysql` fixes it with no diff
-      at all. `LDFLAGS` is the generic fallback — `distutils.sysconfig.customize_compiler`
-      appends it to `ldshared`, so it lands ahead of the objects and the `-l` flags.
-    - **The symptom names the missing `-L`, not the missing `.a`** — read the failing
-      link line for which directories actually reached it rather than assuming the
-      library is absent.
-
-69. **A file capability makes a binary unexecutable inside the build container
-    (`Operation not permitted` on `execve`, as root).** Distro packages routinely carry
-    capabilities — `mysqld` ships `cap_sys_nice=ep` — and when the container's
-    capability bounding set does not include the capability, `execve` fails with
-    **EPERM**, not EACCES, and with no message naming capabilities. It reads like a
-    corrupt binary or a mount problem; `getcap` settles it in one command:
-    ```bash
-    getcap /usr/libexec/mysqld           # -> cap_sys_nice=ep
-    setcap -r /usr/libexec/mysqld        # needs `dnf install libcap`
-    ```
-    Do the `setcap -r` in `CIBW_BEFORE_TEST_LINUX` (or `BEFORE_ALL`) beside the
-    `dnf install` that put the binary there. Dropping a scheduling-priority capability
-    costs nothing in a throwaway container.
-
-70. **Running upstream's suite against a real server the distro also ships is often
-    cheaper than it looks — but scope it, and stop the harness rebuilding the thing
-    under test.** A database/driver port whose test harness bootstraps its own server
-    (`tests/mysqld.py` + `unittests.py --with-mysql=<basedir>`) is usually written for a
-    developer machine, and three things stand between it and a container:
-    - **It runs as root.** Servers that refuse root (`mysqld`: *"Please read Security
-      section of the manual to find out how to run mysqld as root!"*) need an explicit
-      `--user=root`, in *both* the bootstrap argv and the generated option file the
-      started server reads back via `--defaults-file`. That is a two-line
-      `Inappropriate` patch, and cheaper than making cibuildwheel's test phase drop
-      privileges (its venv and temp dirs are mode-700 root).
-    - **`CIBW_ENVIRONMENT` reaches the test phase (gotcha 12), and a harness that
-      reinstalls the project in-tree will use it.** `unittests.py` runs
-      `setup.py install` into `build/testing` and prepends that to `sys.path`; with the
-      build's `MYSQL_CAPI` still set it recompiles the extension there and **shadows the
-      wheel's**. Clear the build-only variables for tests —
-      `CIBW_TEST_ENVIRONMENT: MYSQL_CAPI= SKIP_VENDOR= EXTRA_LINK_ARGS=` (cibuildwheel
-      layers `test_environment` on top of `environment`, `platforms/linux.py`) — and
-      assert what actually got imported:
-      `assert 'site-packages' in m.__file__, m.__file__`.
-    - **Select the modules that test your delta.** The full suite here was 1318 tests
-      with 19 failures — all TLS-cipher and unix-socket cases, artefacts of testing
-      against the distro's older server rather than the version upstream targets, and
-      all reproducing on aarch64. Harnesses of this kind have module-level selection
-      (`--test-regex '^cext_'`) but no pytest-style deselect, so a module regex is the
-      only lever: run the C-extension modules (87 tests, seconds) and report the
-      full-suite numbers in the PR rather than shipping a knowingly red job or a
-      hand-maintained exclusion list.
-
-73. **A `build-system.requires` pin can exclude every riscv64 wheel of a build tool —
-    pip's `--no-build-isolation` is the escape hatch `build --no-isolation` is not
-    (refines gotcha 29).** Gotcha 29 pins a build tool *down* to dodge a breaking release;
-    the mirror case is a project whose pin is too *low* for riscv64 to have a wheel at all.
-    ddtrace's `pyproject.toml` requires `cmake>=3.24.2,<3.28` and `setup.py` invokes CMake
-    through the **`cmake` PyPI package** (`cmake.CMAKE_BIN_DIR`), not through `PATH` — so a
-    system cmake, or the one the manylinux image ships in `/usr/local/bin`, is irrelevant.
-    The oldest riscv64 `cmake` wheel is **4.1.0**, so the isolated build env has nothing to
-    resolve and falls back to compiling CMake itself from the sdist.
-    - **The two `--no-*-isolation` flags differ in more than spelling.** `build
-      --no-isolation` still *verifies* `build-system.requires` and fails on a pin it cannot
-      satisfy (gotcha 29). **pip's `--no-build-isolation` does not check them at all**, so
-      preinstalling a newer tool and passing
-      `CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"` builds the project with the
-      version that exists for riscv64 and needs **no patch to `pyproject.toml`**. Prefer it
-      to patching a pin: the pin stays visible to a reader, and there is nothing to refresh
-      at the next version bump.
-    - **Prove the newer tool actually works before relying on it**, on any host: read every
-      `cmake_minimum_required` in the tree (cmake 4 only rejects `< 3.5`), then run one full
-      `pip wheel . --no-deps --no-build-isolation` in a venv holding the preinstalled
-      versions. ddtrace built clean with cmake 4.4.2 + setuptools 84 on macOS/arm64 in three
-      minutes — arch-independent evidence that the pin, not the code, was the obstacle.
-
-74. **A setup.py that *downloads* a prebuilt native library can often be satisfied by
-    building that library yourself — read whether the downloader skips or fails
-    (the ddtrace/libddwaf case).** Gotcha 35 rejects a port when the vendored payload has no
-    upstream build for our arch *and no source to build*. When the payload is an ordinary
-    open-source C/C++ library, the port is normal work: fetch its source at the version the
-    project pins and drop the result where the download would have landed. Two properties of
-    the downloader decide whether that needs a patch at all — both were true for ddtrace:
-    - the per-arch loop **`continue`s** on an unrecognised platform
-      (`if not get_platform().endswith(arch): continue`) rather than raising, so the build
-      proceeds and only the *runtime* `ctypes.CDLL` fails; and
-    - `download_artifacts()` **returns early when the target directory is already non-empty**,
-      so pre-populating `<pkg>/.../libddwaf/<arch>/lib/libddwaf.so` from `CIBW_BEFORE_ALL`
-      makes it a no-op. `package_data` globs the same path, so the library ships.
-    Check the surrounding clean-up too: ddtrace's `build_py` calls `remove_artifacts()`
-    (an `rmtree` of exactly that directory) unless its incremental flag is on — it defaults
-    to on, but a workflow that turned it off would silently ship a wheel with no library.
-    - **`-static-libstdc++` needs `libstdc++.a`, which the riscv64 manylinux image does not
-      ship** — the link dies with `/usr/bin/ld: cannot find -lstdc++`. `dnf -y install
-      libstdc++-static` (Rocky 10 CRB, already enabled) fixes it; add it beside the
-      `dnf` lines gotcha 15 and 46 collect.
-    - **Validate the library build alone under QEMU** (`docker run --platform linux/riscv64
-      <image>`) before spending a runner cycle: libddwaf took ~50 min emulated and proved the
-      cmake invocation, the ExternalProject downloads, the C++20 compile and the link — and
-      caught the missing `libstdc++.a` in the *first* attempt.
-
-75. **Rust ports: `cargo metadata --filter-platform <triple>` settles which crates a target
-    would actually compile — from any host, with no cross toolchain.** A big Rust dependency
-    tree hides its arch limits in build scripts and `#[cfg(target_arch)]` arms, and the only
-    honest way to enumerate what riscv64 pulls in is to ask cargo:
-    `cargo metadata --format-version 1 --filter-platform riscv64gc-unknown-linux-gnu
-    --features <what setup.py enables> --locked`, then walk `resolve.nodes` from the root.
-    It resolves target-specific `[target.'cfg(...)'.dependencies]` blocks exactly as a real
-    build would, needs only the manifests and the lock, and takes seconds — so it is also how
-    you *verify a patch*: before/after the change, the offending crate must disappear for
-    riscv64 and stay for aarch64.
-    - **Two signatures mean "this crate cannot build here", and both are greppable:** a
-      `panic!` in `build.rs` keyed off `CARGO_CFG_TARGET_ARCH`
-      (libdatadog's `libdd-otel-thread-ctx`: *"Only x86_64 and aarch64 are currently
-      supported"*), and a **two-arm `#[cfg(target_arch)]` binding with no fallback**
-      (`#[cfg(target_arch = "x86_64")] let arch = ...;` / `#[cfg(target_arch = "aarch64")]
-      let arch = ...;`), which leaves the name undefined everywhere else. Grep
-      `target_arch` across the dependency's sources and count the arms before assuming a
-      compile is worth starting.
-    - **Patch the *feature*, not the dependency.** A crate reached through a git dependency
-      cannot be fixed without vendoring it, but the project usually gates it behind a Cargo
-      feature that `setup.py` turns on — narrowing that one condition
-      (`if not SERVERLESS_BUILD and platform.machine() in CRASHTRACKER_ARCHS:`) removes the
-      crate and everything under it. Check the Python side first: a project that already
-      writes `try: from ._native import X ... except ImportError: is_available = False`
-      is telling you the component is optional, and the patch is then one file.
-    - **A dependency whose whole purpose is an ISA feature is a legitimate drop, not a
-      shortcut.** libdatadog's thread-context crate exists to emit a **TLSDESC** thread-local;
-      RISC-V TLSDESC needs GCC 14 *and* binutils 2.42 *and* **glibc 2.40**, while
-      `manylinux_2_39_riscv64` and `ubuntu-24.04-riscv` are both on glibc 2.39 — so even a
-      shim that compiled could not be resolved at load time. Say that in the patch header;
-      it is the difference between `To upstream` and hand-waving.
-
-77. **A `<pkg>-headless`/`-gpu`/`-lite` sibling is usually the same upstream tree behind one
-    env var — mirror the sibling workflow instead of re-deriving it (the
-    opencv-python-headless case).** Gotcha 50 covers the sibling distribution that makes a
-    port pointless (`psycopg2`/`psycopg2-binary`); the commoner shape is a sibling that is a
-    *legitimate second port* of a tree already in the repo. opencv-python's `setup.py` picks
-    `package_name` from `ENABLE_HEADLESS` and appends `-DWITH_QT=OFF -DWITH_GTK=OFF
-    -DWITH_MSMF=OFF -DWITH_OBSENSOR=OFF -DOPENCV_FFMPEG_ENABLE_LIBAVDEVICE=OFF`; nothing else
-    differs, so `build-opencv-python-headless.yml` is `build-opencv-python.yml` plus that
-    variable. Grep `setup.py` for the `package_name = ` assignments first — the branches name
-    every sibling upstream publishes and the flag that selects each. Copying the proven
-    sibling is also goal 2's answer: two near-identical files read as one recipe, and a
-    re-derived second one invites a diff a reviewer has to justify.
-    - **A pre-stamped generated file can override the env var you think selects the build.**
-      Workflows commonly stamp a generated `version.py`/`_version.py` on the host and delete
-      `.git` so the container build runs no git (and cibuildwheel copies ~1 GB less). But
-      `setup.py` may *read that file back* for more than the version: opencv-python's
-      `get_and_set_info()` regenerates it only when `.git` exists and otherwise returns
-      `version["headless"]`, discarding `ENABLE_HEADLESS`. So the variant flag has to be set
-      in **both** places — at the stamp (`find_version.py False True False False`) and in
-      `CIBW_ENVIRONMENT` — and the stamp step should `grep -Fqx "headless = True"` the way it
-      already greps the version, since getting this wrong silently builds the *other* sibling
-      under your artifact name after a two-hour compile.
 
 ## After a PR is merged (the maintainer merges, not you)
 
