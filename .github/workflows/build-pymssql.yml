@@ -1,0 +1,107 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/pymssql/pymssql/blob/v2.3.13/.github/workflows/build_wheels.yml
+name: Build pymssql wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pymssql version to build (git tag without the leading v, e.g. 2.3.13)'
+        required: true
+        default: '2.3.13'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pymssql.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.3.13' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYMSSQL_VERSION: ${{ inputs.version || '2.3.13' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build pymssql ${{ inputs.version || '2.3.13' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # No cp314t: upstream skips free-threaded builds (pyproject `skip = "cp31?t-*"`),
+        # the extensions don't declare Py_mod_gil, and PyPI ships no cp314t wheel.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+
+    steps:
+      - name: Checkout pymssql v${{ env.PYMSSQL_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: pymssql/pymssql
+          ref: v${{ env.PYMSSQL_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # The wheel statically links FreeTDS but ships only pymssql's own LICENSE.
+      - name: Patch pymssql source
+        run: |
+          git apply python-wheels/patches/pymssql/${{ env.PYMSSQL_VERSION }}/00*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Restates upstream's [tool.cibuildwheel.linux] environment, which CIBW_ENVIRONMENT
+          # replaces wholesale; the patch above leaves the tree dirty, so pin the version.
+          CIBW_ENVIRONMENT: >-
+            PYMSSQL_FREETDS=./deps
+            LD_LIBRARY_PATH=./deps/lib
+            CFLAGS=-Wno-incompatible-pointer-types
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PYMSSQL=${{ env.PYMSSQL_VERSION }}
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Upstream's before-test installs dev/requirements-test.txt, whose gevent has no
+          # riscv64 wheel anywhere; test_green.py importorskips it, so drop just that one.
+          CIBW_BEFORE_TEST: pip install pytest-subtests pytest-timeout "psutil<7.2.3" sqlalchemy
+          # No SQL Server image exists for riscv64, so the mssql_server_required tests
+          # self-skip (tests/conftest.py); assert the patched licence shipped first.
+          CIBW_TEST_COMMAND: python -c "import importlib.metadata as m; f = sorted(p.name for p in m.files('pymssql') if '.dist-info/licenses/' in str(p)); assert f == ['LICENSE', 'LICENSE.freetds'], f" && pytest {project}/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pymssql-${{ env.PYMSSQL_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pymssql ${{ inputs.version || '2.3.13' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: pymssql-${{ env.PYMSSQL_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

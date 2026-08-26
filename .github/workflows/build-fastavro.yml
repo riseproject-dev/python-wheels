@@ -1,0 +1,129 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-wheels` job of
+# https://github.com/fastavro/fastavro/blob/1.12.2/.github/workflows/build_linux.yml
+name: Build fastavro wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'fastavro version to build (git tag, e.g. 1.12.2)'
+        required: true
+        default: '1.12.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-fastavro.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.12.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.12.2 there.
+  FASTAVRO_VERSION: ${{ inputs.version || '1.12.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build fastavro ${{ inputs.version || '1.12.2' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        # Per-interpreter (not abi3), matching upstream's own wheel matrix.
+        # `test_requires` varies because 3.14 has zstd in the stdlib and the
+        # registry ships no free-threaded pandas wheel.
+        include:
+          - python: "cp312"
+            test_requires: "backports.zstd pandas<3.0.4"
+            pytest_k: ""
+          - python: "cp313"
+            test_requires: "backports.zstd pandas<3.0.4"
+            pytest_k: ""
+          - python: "cp314"
+            test_requires: "pandas<3.0.4"
+            pytest_k: ""
+          - python: "cp314t"
+            test_requires: ""
+            pytest_k: "and not test_pandas_datetime"
+
+    steps:
+      - name: Checkout fastavro ${{ env.FASTAVRO_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: fastavro/fastavro
+          ref: ${{ env.FASTAVRO_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # cramjam (the snappy codec the suite needs) has no riscv64 wheel and
+          # builds from its maturin sdist, so Rust has to be in the container.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Upstream tests the checkout, not the wheel; stage only the suite so the
+          # repo-root `fastavro/` can't shadow the installed extension modules.
+          CIBW_TEST_SOURCES: tests pytest.ini
+          CIBW_TEST_REQUIRES: pytest numpy lz4 zlib_ng cramjam ${{ matrix.test_requires }}
+          # is_testing_cython_modules() is upstream's own check that the compiled
+          # modules, not the pure-Python fallback, are in use.
+          # test_regular_vs_ordered_dict_record_typeerror asserts on a traceback
+          # source line, so it only passes next to the .pyx sources of an in-place
+          # build; it fails against any installed wheel, on every architecture.
+          CIBW_TEST_COMMAND: >-
+            python -c "from tests.conftest import is_testing_cython_modules as c; assert c()"
+            && python -m pytest tests
+            -k "not test_regular_vs_ordered_dict_record_typeerror ${{ matrix.pytest_k }}"
+
+      - name: Check the Cython extensions made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          expected = {
+              "_logical_readers", "_logical_writers", "_read",
+              "_schema", "_validation", "_write",
+          }
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              found = {n.split("/")[-1].split(".")[0] for n in names if n.endswith(".so")}
+              assert found == expected, (whl, found)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fastavro-${{ env.FASTAVRO_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish fastavro ${{ inputs.version || '1.12.2' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: fastavro-${{ env.FASTAVRO_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
