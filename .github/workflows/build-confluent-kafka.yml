@@ -1,10 +1,8 @@
 # SPDX-FileCopyrightText: 2026 The RISE Project
 # SPDX-License-Identifier: MIT
 ---
-# Upstream's released wheels take librdkafka from the prebuilt librdkafka.redist
-# NuGet package (tools/wheels/install-librdkafka.sh), which ships no riscv64
-# build, so this uses their other supported path — tools/cibuildwheel-build.sh's
-# Linux CIBW_BEFORE_BUILD, which builds librdkafka from source.
+# The prebuilt librdkafka.redist NuGet upstream normally uses has no riscv64 build, so this
+# follows their other supported path: tools/cibuildwheel-build.sh, which builds it from source.
 name: Build confluent-kafka wheels (riscv64)
 
 on:
@@ -38,8 +36,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # No cp314t: upstream's build-wheels.sh skips `*t-*` and PyPI carries no
-        # free-threaded wheel.
+        # No cp314t: upstream's build-wheels.sh skips `*t-*`.
         python:
           - "cp312"
           - "cp313"
@@ -78,24 +75,18 @@ jobs:
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # Rocky 10 ships only the minimal perl-interpreter; OpenSSL's Configure
-          # needs the full distribution (lib, FindBin, IPC::Cmd, Pod::Html,
-          # Time::Piece).
+          # OpenSSL's Configure needs full perl; the image ships only perl-interpreter.
           CIBW_BEFORE_BUILD_LINUX: >-
             dnf -y install perl &&
             tools/prepare-cibuildwheel-linux.sh ${{ steps.librdkafka.outputs.version }}
-          # A source-built librdkafka keeps its debug symbols (58MB against the
-          # 11MB prebuilt one upstream bundles).
+          # A source-built librdkafka keeps its debug symbols (58MB vs upstream's prebuilt 11MB).
           CIBW_REPAIR_WHEEL_COMMAND: auditwheel repair --strip -w {dest_dir} {wheel}
-          # Upstream only runs tests/test_error.py here. The rest of tests/ needs
-          # no cluster, so run it: everything but tests/integration (needs a live
-          # Kafka cluster) and tests/schema_registry (needs the `rules` extra,
-          # whose tink and google-re2 have no riscv64 build).
+          # Wider than upstream's single file: all of tests/ bar integration (needs a Kafka cluster)
+          # and schema_registry (needs tink/google-re2, no riscv64 build).
           CIBW_TEST_EXTRAS: oauthbearer-aws
           CIBW_TEST_REQUIRES: avro requests
           CIBW_BEFORE_TEST: pip install -r {project}/requirements/requirements-tests.txt
-          # The first command asserts the LICENSE patch reached the wheel; without
-          # it a patch that stops applying still leaves the job green.
+          # Asserts the LICENSE patch reached the wheel; a patch that stops applying is otherwise silent.
           CIBW_TEST_COMMAND: >-
             python -c "import importlib.metadata as m, pathlib; p = [f for f in m.files('confluent-kafka') if '.dist-info/licenses/' in str(f)]; t = pathlib.Path(m.distribution('confluent-kafka').locate_file(p[0])).read_text(); assert 'For Zstandard software' in t and 'daniel@haxx.se' in t, p" &&
             pytest --timeout 1200 {project}/tests
