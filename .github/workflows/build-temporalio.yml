@@ -1,0 +1,122 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on: https://github.com/temporalio/sdk-python/blob/1.32.0/.github/workflows/release-publish.yml
+# Build-from-checkout, inheriting upstream's [tool.cibuildwheel] (before-all, environment).
+name: Build temporalio wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'temporalio version to build (git tag, e.g. 1.32.0)'
+        required: true
+        default: '1.32.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-temporalio.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.32.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  TEMPORALIO_VERSION: ${{ inputs.version || '1.32.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build temporalio ${{ inputs.version || '1.32.0' }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 480
+
+    steps:
+      - name: Checkout temporalio ${{ env.TEMPORALIO_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: temporalio/sdk-python
+          ref: ${{ env.TEMPORALIO_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # The bridge is pyo3 `abi3-py310`, so upstream's single cp310 build covers
+          # every non-free-threaded CPython >= 3.10.
+          only: cp310-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream's before-build installs protoc-wheel-0, which publishes no riscv64
+          # wheel and no sdist; Rocky 10's CRB repo (enabled in the image) has protoc.
+          CIBW_BEFORE_BUILD: yum install -y protobuf-compiler protobuf-devel
+          # Repeats upstream's [tool.cibuildwheel.linux] environment (an env var replaces
+          # that table wholesale). PROTOC_INCLUDE is needed because protoc 3.19 resolves
+          # google/protobuf/*.proto from disk rather than from the binary.
+          CIBW_ENVIRONMENT: >-
+            PATH=$PATH:$HOME/.cargo/bin
+            CARGO_NET_GIT_FETCH_WITH_CLI=true
+            PROTOC_INCLUDE=/usr/include
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # TEMPORAL_INTEGRATION_TEST makes upstream's conftest assert the wheel is what
+          # gets imported. only-binary keeps cryptography/pydantic-core resolving to our
+          # registry's riscv64 wheels instead of source builds (CLAUDE.md gotcha 12).
+          CIBW_TEST_ENVIRONMENT: 'PIP_ONLY_BINARY=:all: TEMPORAL_INTEGRATION_TEST=1'
+          # Staged into the (empty) test cwd so the checkout's temporalio/ package cannot
+          # shadow the installed wheel; pyproject.toml carries asyncio_mode = "auto".
+          CIBW_TEST_SOURCES: tests pyproject.toml
+          # protobuf is pinned to upstream's uv.lock major: tests/nexus's proto round-trip
+          # helper reads FieldDescriptor.label, removed in protobuf 7.
+          CIBW_TEST_REQUIRES: >-
+            pytest pytest-asyncio>=0.21,<0.22 pytest-timeout~=2.2
+            pydantic cryptography opentelemetry-api opentelemetry-sdk protobuf<7
+          # Upstream tests its release wheels against a local Temporal dev server, which
+          # ships no riscv64 binary (temporal.download answers 400 for arch=riscv64), so
+          # this is the subset of the suite that needs no server. --timeout raises
+          # pyproject's 60s per-test cap for the slower runner.
+          CIBW_TEST_COMMAND: >-
+            python -c "import temporalio.bridge.temporal_sdk_bridge as b; assert b.__file__.endswith('.so'), b.__file__" &&
+            python -m pytest -q --timeout 300
+            tests/bridge tests/nexus tests/testing/test_activity.py
+            tests/test_client_exports.py tests/test_common.py tests/test_converter.py
+            tests/test_extstore.py tests/test_tls.py tests/test_workflow.py
+            tests/test_workflow_exports.py tests/worker/test_command_aware_visitor.py
+            tests/worker/test_replayer.py tests/worker/test_visitor.py
+            tests/worker/workflow_sandbox
+            --ignore tests/nexus/test_dynamic_creation_of_user_handler_classes.py
+            --ignore tests/nexus/test_nexus_client_updates.py
+            --ignore tests/worker/workflow_sandbox/test_runner.py
+            --deselect tests/worker/test_replayer.py::test_replayer_workflow_complete
+            --deselect tests/worker/test_replayer.py::test_replayer_workflow_incomplete
+            --deselect tests/worker/test_replayer.py::test_replayer_workflow_failed
+            --deselect tests/worker/test_replayer.py::test_replayer_workflow_nondeterministic
+            --deselect tests/worker/test_replayer.py::test_replayer_workflow_not_registered
+            --deselect tests/worker/test_replayer.py::test_replayer_multiple_from_client
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: temporalio-${{ env.TEMPORALIO_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish temporalio ${{ inputs.version || '1.32.0' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: temporalio-${{ env.TEMPORALIO_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
