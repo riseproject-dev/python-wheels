@@ -1,0 +1,132 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-linux-wheels` job of
+# https://github.com/wandb/wandb/blob/v0.28.2/.github/workflows/release-sdk.yml
+name: Build wandb wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'wandb version to build (git tag without leading v, e.g. 0.28.2)'
+        required: true
+        default: '0.28.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-wandb.yml'
+      - 'patches/wandb/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.28.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  WANDB_VERSION: ${{ inputs.version || '0.28.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Pinned by upstream for reproducible release artifacts; keep in sync with
+  # RUST_TOOLCHAIN in release-sdk.yml.
+  RUST_TOOLCHAIN: '1.88.0'
+
+jobs:
+  build_wheels:
+    name: Build wandb ${{ inputs.version || '0.28.2' }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    # musllinux is dropped: rustup ships no riscv64 musl host toolchain, and the
+    # musl wheels additionally need CGO, i.e. a riscv64 musl C toolchain.
+
+    env:
+      # wandb pulls protobuf and PyYAML at test time; neither publishes riscv64
+      # wheels on PyPI.
+      PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+
+    steps:
+      - name: Checkout wandb v${{ env.WANDB_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: wandb/wandb
+          ref: v${{ env.WANDB_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch wandb source
+        run: git apply python-wheels/patches/wandb/${{ env.WANDB_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # The build hook emits an ABI-independent py3-none-* wheel, so one
+          # CPython selector covers every interpreter.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >
+            export DOWNLOAD_GOVERSION=$( grep '^go' core/go.mod | cut -d' ' -f2 ) &&
+            curl -L https://golang.org/dl/go$DOWNLOAD_GOVERSION.linux-riscv64.tar.gz > go.tar.gz &&
+            tar -C /usr/local/ -xzf go.tar.gz &&
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+              sh -s -- -y --profile minimal --default-toolchain ${{ env.RUST_TOOLCHAIN }}
+          # NOTE: the Linux build environment lives in [tool.cibuildwheel.linux]
+          # in pyproject.toml. Do not set CIBW_ENVIRONMENT_LINUX here: it would
+          # replace that table, including the PATH entries for Go and cargo.
+          CIBW_ENVIRONMENT_PASS_LINUX: PIP_EXTRA_INDEX_URL
+          CIBW_TEST_COMMAND: >-
+            WANDB_MODE=offline python -c "import wandb; run = wandb.init(); run.finish()"
+
+      - name: Check the wheel carries riscv64 Go and Rust binaries
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          EM_RISCV = 243
+          expected = {
+              "wandb/bin/wandb-core",
+              "wandb/bin/wandb-xpu",
+              "wandb/bin/librust_parquet_ffi.so",
+          }
+
+          for whl in sys.argv[1:]:
+              with zipfile.ZipFile(whl) as zf:
+                  names = set(zf.namelist())
+                  assert expected <= names, sorted(expected - names)
+                  for name in sorted(expected):
+                      header = zf.read(name)[:20]
+                      assert header[:4] == b"\x7fELF", (name, header[:4])
+                      machine = int.from_bytes(header[18:20], "little")
+                      assert machine == EM_RISCV, (name, machine)
+                      print(name, "is a riscv64 ELF")
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: wandb-${{ env.WANDB_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish wandb ${{ inputs.version || '0.28.2' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: wandb-${{ env.WANDB_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
