@@ -111,21 +111,6 @@ jobs:
           xargs -r -a bundled-libs.txt -I{} cp -L {} "$libs/"
           patchelf --set-rpath '$ORIGIN/libs' cli/src/semgrep/bin/semgrep-core
 
-          # Several bundled libraries are (L)GPL (elfutils, gmp, libstdc++,
-          # ...), so their sources have to travel with the wheel. Derive the
-          # source packages from the libraries actually bundled above.
-          sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
-          apt-get update -qq
-          apt-get install -y --no-install-recommends dpkg-dev
-          xargs -r -a bundled-libs.txt dpkg -S |
-            cut -d: -f1 | tr -d ' ' | sort -u |
-            xargs -r dpkg-query -W -f='${source:Package}\n' |
-            sort -u > gpl-source-packages.txt
-          mkdir -p gpl-sources
-          (cd gpl-sources && xargs -r -a ../gpl-source-packages.txt \
-            apt-get source --download-only gcc-13)
-          tar -cf gpl-sources.tar -C gpl-sources .
-
           python3 -m venv /tmp/buildenv
           /tmp/buildenv/bin/pip install --quiet --upgrade pip build
           # upstream's scripts/build-wheels.sh drives the same setup.py through `uv build`
@@ -151,6 +136,15 @@ jobs:
         with:
           name: semgrep-${{ env.SEMGREP_VERSION }}-build-log
           path: build.log
+
+      - name: Store wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: semgrep-${{ env.SEMGREP_VERSION }}-py3-manylinux_riscv64
+          path: cli/dist/*.whl
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
 
       - name: Test the wheel
         shell: bash
@@ -203,14 +197,46 @@ jobs:
             "${BUILD_IMAGE}" \
             bash riscv64-test.sh
 
-      - name: Store wheel
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: semgrep-${{ env.SEMGREP_VERSION }}-py3-manylinux_riscv64
-          path: cli/dist/*.whl
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
+      - name: Collect the bundled libraries' sources
+        shell: bash
+        run: |
+          cat > riscv64-gpl-sources.sh <<'EOF'
+          set -eux
+
+          export DEBIAN_FRONTEND=noninteractive
+          sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
+          apt-get update -qq
+          apt-get install -y --no-install-recommends ca-certificates dpkg-dev
+
+          # gcc for the toolchain itself, plus whatever source packages the
+          # libraries copied into the wheel came from.
+          # libtree-sitter is built from the checkout, so only the system
+          # paths have a Debian source package behind them.
+          { echo gcc-13
+            grep -E '^/(usr|lib)' bundled-libs.txt |
+              xargs -r dpkg -S | cut -d: -f1 | tr -d ' ' | sort -u |
+              xargs -r dpkg-query -W -f='${source:Package}\n'
+          } | sort -u > gpl-source-packages.txt
+          cat gpl-source-packages.txt
+
+          mkdir -p gpl-sources
+          cd gpl-sources
+          rc=0
+          while read -r pkg; do
+            apt-get source --download-only "$pkg" || rc=1
+          done < ../gpl-source-packages.txt
+          cd ..
+          tar -cf gpl-sources.tar -C gpl-sources .
+          exit $rc
+          EOF
+
+          podman run \
+            --log-driver=none \
+            --network=host \
+            -v "$(pwd)":/workspace \
+            --workdir /workspace \
+            "${BUILD_IMAGE}" \
+            bash riscv64-gpl-sources.sh
 
       - name: Store GPL sources
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
