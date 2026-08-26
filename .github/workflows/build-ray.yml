@@ -177,12 +177,13 @@ jobs:
       - name: Build wheels
         run: |
           mkdir -p wheelhouse
+          set -o pipefail
           docker run --rm -i --network=host \
             -v "${GITHUB_WORKSPACE}:/work" \
             -w /work \
             -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
             "${MANYLINUX_RISCV64_IMAGE}" \
-            bash <<'SCRIPT'
+            bash <<'SCRIPT' 2>&1 | tee build.log
           set -eux
 
           dnf install -y --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip
@@ -192,6 +193,9 @@ jobs:
           git config --global --add safe.directory '*'
 
           export BAZEL_PATH=/usr/local/bin/bazel
+          # A multi-hour build's default curses progress output is large enough that
+          # GitHub drops the job log, taking the failure with it.
+          export BAZEL_ARGS="--curses=no --show_progress_rate_limit=60"
           export RAY_INSTALL_JAVA=0
           export RAY_DISABLE_EXTRA_CPP=1
           # //:gen_redis_pkg needs a perl toolchain rules_perl has no riscv64 entry for; its two
@@ -225,6 +229,13 @@ jobs:
             done
           done
           SCRIPT
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ray-${{ env.RAY_VERSION }}-build-log
+          path: build.log
 
       - name: Test wheels
         run: |
