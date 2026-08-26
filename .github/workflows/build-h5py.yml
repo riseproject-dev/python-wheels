@@ -1,0 +1,161 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/h5py/h5py/blob/3.16.0/.github/workflows/build_wheels.yml
+name: Build h5py wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'h5py version to build (git tag, e.g. 3.16.0)'
+        required: true
+        default: '3.16.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-h5py.yml'
+      - 'patches/h5py/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '3.16.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 3.16.0 there.
+  H5PY_VERSION: ${{ inputs.version || '3.16.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Upstream's Linux wheels are built in ghcr.io/h5py/manylinux_2_28_<arch>-hdf5,
+  # which has no riscv64 variant, so the same libraries are built into the
+  # container instead. Versions are the ones h5py/hdf5-manylinux@f6bfd96 baked in
+  # when 3.16.0 was released.
+  HDF5_VERSION: '2.0.0'
+  LIBAEC_VERSION: '1.1.4'
+
+jobs:
+  build_wheels:
+    name: Build h5py ${{ inputs.version || '3.16.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 420
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout h5py ${{ env.H5PY_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: h5py/h5py
+          ref: ${{ env.H5PY_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch h5py source
+        run: git apply python-wheels/patches/h5py/${{ env.H5PY_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # libaec (szip) then HDF5, mirroring h5py/hdf5-manylinux's
+          # install_libaec.sh and install_hdf5.sh. CMAKE_INSTALL_LIBDIR is pinned
+          # because HDF5_DIR resolves libraries as $HDF5_DIR/lib only, and cmake
+          # defaults to lib64 on Rocky (upstream pinned it the same way in
+          # h5py/hdf5-manylinux@5b15b5d).
+          CIBW_BEFORE_ALL_LINUX: |
+            set -ex
+            dnf -y install zlib-devel
+            mkdir -p /tmp/libaec /tmp/hdf5
+            curl -fsSL "https://github.com/Deutsches-Klimarechenzentrum/libaec/releases/download/v$LIBAEC_VERSION/libaec-$LIBAEC_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/libaec
+            cmake -S /tmp/libaec -B /tmp/libaec/build \
+              -D CMAKE_BUILD_TYPE=Release \
+              -D CMAKE_INSTALL_PREFIX="$HDF5_DIR" \
+              -D CMAKE_INSTALL_LIBDIR=lib \
+              -D BUILD_STATIC_LIBS=OFF \
+              -D BUILD_TESTING=OFF
+            cmake --build /tmp/libaec/build -j "$(nproc)"
+            cmake --install /tmp/libaec/build
+            ldconfig
+            curl -fsSL "https://github.com/HDFGroup/hdf5/archive/refs/tags/$HDF5_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/hdf5
+            cmake -S /tmp/hdf5 -B /tmp/hdf5/build \
+              -D CMAKE_BUILD_TYPE=Release \
+              -D CMAKE_INSTALL_PREFIX="$HDF5_DIR" \
+              -D CMAKE_INSTALL_LIBDIR=lib \
+              -D BUILD_TESTING=OFF \
+              -D BUILD_STATIC_LIBS=OFF \
+              -D HDF5_BUILD_EXAMPLES=OFF \
+              -D HDF5_BUILD_TOOLS=OFF \
+              -D HDF5_BUILD_UTILS=OFF \
+              -D HDF5_ENABLE_ZLIB_SUPPORT=ON \
+              -D HDF5_ENABLE_SZIP_SUPPORT=ON
+            cmake --build /tmp/hdf5/build -j "$(nproc)"
+            cmake --install /tmp/hdf5/build
+            ldconfig
+          # HDF5_DIR/HDF5_VERSION are `ENV` in upstream's wheel image; CFLAGS=-g1
+          # comes from h5py's own [tool.cibuildwheel.linux.environment], which
+          # this variable replaces wholesale.
+          CIBW_ENVIRONMENT: >-
+            HDF5_DIR=/usr/local
+            HDF5_VERSION=${{ env.HDF5_VERSION }}
+            LIBAEC_VERSION=${{ env.LIBAEC_VERSION }}
+            CFLAGS=-g1
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Upstream tests wheels through tox envs that resolve NumPy from the
+          # scientific-python nightly index and need tox-uv; neither works on
+          # riscv64, so run the suite the tox `test` env runs, directly.
+          CIBW_TEST_GROUPS: ''
+          CIBW_TEST_REQUIRES: pytest pytest-mpi
+          CIBW_TEST_SOURCES: pytest.ini
+          CIBW_TEST_ENVIRONMENT: H5PY_TEST_CHECK_FILTERS=1
+          CIBW_TEST_COMMAND: >-
+            python -c "from h5py.version import info; print(info)" &&
+            python -c "from h5py import filters; print('Included filters:', filters.encode, filters.decode)" &&
+            python -m pytest --pyargs h5py -rxXs
+
+      - name: Check the wheel ships the extensions and the bundled licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert any(n.endswith(".so") for n in names), names
+          for licence in ("licenses/hdf5.txt", "licenses/libaec.txt"):
+              assert any(
+                  n.endswith(f".dist-info/licenses/{licence}") for n in names
+              ), (licence, names)
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: h5py-${{ env.H5PY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish h5py ${{ inputs.version || '3.16.0' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: h5py-${{ env.H5PY_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
