@@ -45,8 +45,7 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      # The dashboard is a React app: its build output is arch-independent, and
-      # node.js publishes no riscv64 release to run the build with natively.
+      # The dashboard is a React app: arch-independent output, and node.js has no riscv64 release.
       - name: Checkout ray ${{ inputs.version || '2.58.0' }}
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -102,23 +101,17 @@ jobs:
           JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
           export JAVA_HOME
 
-          # rules_python 0.33.2's PLATFORMS table has no riscv64 entry, so
-          # fetching @pythons_hub aborts the bootstrap (bazelbuild/bazel#23018).
-          # The host toolchain it names is never selected here — its
-          # constraint_values don't match a riscv64 host, so the autodetecting
-          # toolchain wins — which makes any linux entry a safe stand-in.
-          # Bootstrapping riscv64 was fixed upstream in bazel 8.2.0
-          # (bazelbuild/bazel#25745); the 7.x backport (#26986) is still open.
+          # rules_python 0.33.2's PLATFORMS has no riscv64 entry, aborting the bootstrap
+          # (bazelbuild/bazel#23018). Any linux entry is a safe stand-in: the toolchain it names
+          # is never selected on a riscv64 host. Fixed in bazel 8.2.0; the 7.x backport is open.
           mkdir -p /tmp/rules_python
           curl -fsSLo /tmp/rules_python.tar.gz "https://github.com/bazel-contrib/rules_python/releases/download/${RULES_PYTHON_VERSION}/rules_python-${RULES_PYTHON_VERSION}.tar.gz"
           tar -xzf /tmp/rules_python.tar.gz -C /tmp/rules_python --strip-components=1
           sed -i 's|fail("No platform declared for host OS {} on arch {}".format(os_name, arch))|return "x86_64-unknown-linux-gnu"|' \
             /tmp/rules_python/python/private/toolchains_repo.bzl
 
-          # rules_java 7.x maps riscv64 (and mips64) to a stray-colon include
-          # path, so //src/main/java/net/starlark/java/eval:libcpu_profiler.so
-          # compiles with -isystem .../toolchains/:include/linux and can't find
-          # jni_md.h. Fixed in rules_java 8.x, never backported to 7.x.
+          # rules_java 7.x maps riscv64 to a stray-colon include path, so libcpu_profiler.so
+          # can't find jni_md.h. Fixed in rules_java 8.x, never backported.
           mkdir -p /tmp/rules_java
           curl -fsSLo /tmp/rules_java.tar.gz "https://github.com/bazelbuild/rules_java/releases/download/${RULES_JAVA_VERSION}/rules_java-${RULES_JAVA_VERSION}.tar.gz"
           tar -xzf /tmp/rules_java.tar.gz -C /tmp/rules_java
@@ -201,10 +194,8 @@ jobs:
           export BAZEL_PATH=/usr/local/bin/bazel
           export RAY_INSTALL_JAVA=0
           export RAY_DISABLE_EXTRA_CPP=1
-          # //:gen_redis_pkg builds OpenSSL 1.1.1f from source, which needs a perl
-          # toolchain rules_perl has no riscv64 entry for and has no riscv64 target
-          # of its own. The two binaries it produces are referenced only by
-          # ray/_private/test_utils.py, never by a runtime path.
+          # //:gen_redis_pkg needs a perl toolchain rules_perl has no riscv64 entry for; its two
+          # binaries are referenced only by ray/_private/test_utils.py, never at runtime.
           export RAY_BUILD_REDIS=0
           # Upstream sets RAY_BUILD_ENV per interpreter; it is an --action_env,
           # so varying it rebuilds the whole C++ core once per wheel.
@@ -219,10 +210,8 @@ jobs:
             # bazel actions run with a fixed PATH (--incompatible_strict_action_env),
             # so the interpreter they compile against is picked up from here.
             ln -sf "/opt/python/${python}/bin/python3" /usr/local/bin/python3
-            # grpc's @local_config_python only re-resolves Python.h when one of the
-            # vars it declares in `environ` changes; the symlink above is invisible
-            # to it, so a shared output base would compile every _raylet.so against
-            # the first interpreter's headers. .bazelrc asks for this var by name.
+            # grpc's @local_config_python re-resolves Python.h only when a var in its `environ`
+            # changes, so without this every _raylet.so uses the first interpreter's headers.
             export PYTHON3_BIN_PATH="/opt/python/${python}/bin/python3"
             (
               cd python
