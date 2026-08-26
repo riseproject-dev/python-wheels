@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+name: Build scipy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'scipy version to build (git tag without leading v, e.g. 1.18.1)'
+        required: true
+        default: '1.18.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-scipy.yml'
+      - 'patches/scipy/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.18.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  SCIPY_VERSION: ${{ inputs.version || '1.18.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build scipy ${{ inputs.version || '1.18.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      # scipy is checked out at the workspace root so cibuildwheel's `{project}`
+      # resolves to it, matching upstream's own wheel job.
+      - name: Checkout scipy v${{ env.SCIPY_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: scipy/scipy
+          ref: v${{ env.SCIPY_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch scipy source
+        run: |
+          git apply python-wheels/patches/scipy/${{ env.SCIPY_VERSION }}/00*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BUILD_FRONTEND: build
+          # CIBW_ENVIRONMENT replaces scipy's [tool.cibuildwheel.linux.environment]
+          # table wholesale, so RUNNER_OS and PKG_CONFIG_PATH have to be restated
+          # here or cibw_before_build.sh writes scipy-openblas.pc where meson
+          # cannot find it.
+          CIBW_ENVIRONMENT: >-
+            RUNNER_OS=Linux
+            PKG_CONFIG_PATH=/project/.openblas
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy-openblas32
+          # hypothesis went Rust-binary at 6.156 and ships no cp314t riscv64 wheel; the last
+          # pure-Python line installs on every interpreter. Rest of the list is upstream's.
+          CIBW_TEST_REQUIRES: 'pytest pytest-xdist threadpoolctl pooch hypothesis<6.156'
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: scipy-${{ env.SCIPY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish scipy ${{ inputs.version || '1.18.1' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: scipy-${{ env.SCIPY_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
