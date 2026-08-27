@@ -1,0 +1,75 @@
+From 9ebc0aeb111e693cf93dfd7bf1c750da935f9135 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 27 Aug 2026 06:31:39 +0200
+Subject: [PATCH 2/2] Detect RVV at runtime instead of assuming it on riscv64
+
+Upstream-Status: To upstream [not yet submitted; needs a maintainer decision on the intended riscv64 baseline, so it is not a drive-by PR]
+
+Only the files in FAISS_SIMD_RVV_SRC are compiled with -march=rv64gcv; the
+rest of the library targets the toolchain default, which for a distro
+compiler is the rv64gc baseline.  SIMDConfig::detect() nevertheless sets
+SIMDLevel::RISCV_RVV unconditionally, so a build that runs on a CPU
+without the V extension dispatches into vector kernels and dies with
+SIGILL.  Most riscv64 hardware in circulation (JH7110, HiFive P550) has no
+vector unit, and a manylinux_riscv64 wheel is expected to run on the
+rv64gc baseline.
+
+Mirror the existing has_sve() aarch64 path: read AT_HWCAP and only offer
+RISCV_RVV when the V bit is set.  dispatch_with_fallback() already falls
+back from RISCV_RVV to SIMDLevel::NONE, so the scalar kernels take over on
+hardware that lacks it.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ faiss/utils/simd_levels.cpp | 28 +++++++++++++++++++++++++---
+ 1 file changed, 25 insertions(+), 3 deletions(-)
+
+diff --git a/faiss/utils/simd_levels.cpp b/faiss/utils/simd_levels.cpp
+index e17796b..dd6a996 100644
+--- a/faiss/utils/simd_levels.cpp
++++ b/faiss/utils/simd_levels.cpp
+@@ -57,6 +57,24 @@ static bool has_sve() {
+ }
+ #endif
+ 
++// RISC-V vector runtime detection
++#if defined(__riscv) && defined(__linux__)
++
++#include <sys/auxv.h>
++#ifndef COMPAT_HWCAP_ISA_V
++#define COMPAT_HWCAP_ISA_V (1 << ('V' - 'A'))
++#endif
++
++static bool has_rvv() {
++    return (getauxval(AT_HWCAP) & COMPAT_HWCAP_ISA_V) != 0;
++}
++
++#else
++[[maybe_unused]] static bool has_rvv() {
++    return false;
++}
++#endif
++
+ // Detect x86 microarchitecture flags used for kernel routing. Uses raw
+ // cpuid so it is safe to run on any CPU regardless of compiled SIMD level.
+ #if defined(__x86_64__)
+@@ -244,9 +262,13 @@ SIMDLevel SIMDConfig::auto_detect_simd_level() {
+ #endif
+ 
+ #if defined(__riscv) && defined(COMPILE_SIMD_RISCV_RVV)
+-    // RVV is always available on RISC-V builds compiled with rv64gcv.
+-    supported_simd_levels |= (1 << static_cast<int>(SIMDLevel::RISCV_RVV));
+-    detected_level = SIMDLevel::RISCV_RVV;
++    // Only the RVV kernels are compiled with -march=rv64gcv; the rest of the
++    // library targets the rv64gc baseline, so they must not be dispatched to
++    // on a CPU without the V extension.
++    if (has_rvv()) {
++        supported_simd_levels |= (1 << static_cast<int>(SIMDLevel::RISCV_RVV));
++        detected_level = SIMDLevel::RISCV_RVV;
++    }
+ #endif
+ 
+     return detected_level;
+-- 
+2.50.1 (Apple Git-155)
+
