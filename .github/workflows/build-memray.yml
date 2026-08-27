@@ -1,0 +1,135 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/bloomberg/memray/blob/v1.20.0/.github/workflows/build_wheels.yml
+name: Build memray wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'memray version to build (git tag without the leading v, e.g. 1.20.0)'
+        required: true
+        default: '1.20.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-memray.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.20.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.20.0 there.
+  MEMRAY_VERSION: ${{ inputs.version || '1.20.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  LIBUNWIND_VERSION: '1.8.3'
+
+jobs:
+  build_wheels:
+    name: Build memray ${{ inputs.version || '1.20.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      # Upstream builds an sdist and unpacks it over a separately-uploaded copy of
+      # `tests/` (the sdist excludes it). A plain checkout is the same tree.
+      - name: Checkout memray v${{ env.MEMRAY_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: bloomberg/memray
+          ref: v${{ env.MEMRAY_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Replaces upstream's before-all: Rocky 10 already ships curl 8, zstd 1.5
+          # and elfutils 0.194, which upstream has to build from source on
+          # AlmaLinux 8. libunwind is the one dependency RHEL 10 dropped, and
+          # manylinux enables no EPEL on riscv64, so build it from source.
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf -y install lz4-devel elfutils-debuginfod-client-devel &&
+            cd /tmp &&
+            curl -fsSLO https://github.com/libunwind/libunwind/releases/download/v${{ env.LIBUNWIND_VERSION }}/libunwind-${{ env.LIBUNWIND_VERSION }}.tar.gz &&
+            tar xf libunwind-${{ env.LIBUNWIND_VERSION }}.tar.gz &&
+            cd libunwind-${{ env.LIBUNWIND_VERSION }} &&
+            ./configure --prefix=/usr --libdir=/usr/lib64 --disable-documentation
+            --disable-tests --disable-minidebuginfo --disable-zlibdebuginfo &&
+            make -j"$(nproc)" install
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_EXTRAS: test
+          CIBW_TEST_COMMAND: python -um pytest --log-cli-level=DEBUG -s --showlocals -vvv {package}/tests
+
+      - name: Verify the wheel ships the compiled extensions
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = sorted(n for n in names if n.endswith(".so"))
+          print("\n".join(sos))
+          assert any("memray/_memray." in n for n in sos), sos
+          assert any("memray/_inject." in n for n in sos), sos
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: memray-${{ env.MEMRAY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    name: Collect GPL sources for memray ${{ inputs.version || '1.20.0' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      # auditwheel vendors the container's elfutils libraries (libdebuginfod,
+      # libelf) into the wheel alongside the gcc runtime, so both need sources.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc elfutils
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: memray-${{ env.MEMRAY_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish memray ${{ inputs.version || '1.20.0' }} to GitLab
+    needs: [build_wheels, gpl_sources]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: memray-${{ env.MEMRAY_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          gpl-sources-artifact: memray-${{ env.MEMRAY_VERSION }}-gpl-sources
+          gpl-sources-release-tag: memray-v${{ env.MEMRAY_VERSION }}
+          gpl-sources-description: gcc, elfutils
