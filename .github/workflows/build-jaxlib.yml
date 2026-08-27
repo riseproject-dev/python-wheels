@@ -35,6 +35,8 @@ env:
   # versions bazel 7.7.1's MODULE.bazel pins; both need a riscv64 fix below
   RULES_PYTHON_VERSION: '0.33.2'
   RULES_JAVA_VERSION: '7.6.5'
+  # the version bazel 7.7.1's MODULE.bazel.lock resolves; see the bootstrap script
+  BAZEL_FEATURES_VERSION: '1.27.0'
   # jax resolves pip for the host platform only (see the patch), so the build-time
   # deps that publish no riscv64 wheel come from our registry as `local_wheels`.
   NUMPY_VERSION: '2.5.2'
@@ -65,6 +67,7 @@ jobs:
             -e BAZEL_VERSION="${BAZEL_VERSION}" \
             -e RULES_PYTHON_VERSION="${RULES_PYTHON_VERSION}" \
             -e RULES_JAVA_VERSION="${RULES_JAVA_VERSION}" \
+            -e BAZEL_FEATURES_VERSION="${BAZEL_FEATURES_VERSION}" \
             "${MANYLINUX_RISCV64_IMAGE}" \
             bash <<'SCRIPT'
           set -eux
@@ -89,6 +92,15 @@ jobs:
           tar -xzf /tmp/rules_java.tar.gz -C /tmp/rules_java
           sed -i 's|\[":include/linux"\]|["include/linux"]|g' /tmp/rules_java/toolchains/BUILD
 
+          # The scratch-built bazel that hosts the real build reports an empty
+          # native.bazel_version, which bazel_features reads as a dev version newer than
+          # everything, so it emits bazel 8's `macro` global and analysis dies with
+          # "name 'macro' is not defined". Tell it which bazel is actually running.
+          mkdir -p /tmp/bazel_features
+          curl -fsSLo /tmp/bazel_features.tar.gz "https://github.com/bazel-contrib/bazel_features/releases/download/v${BAZEL_FEATURES_VERSION}/bazel_features-v${BAZEL_FEATURES_VERSION}.tar.gz"
+          tar -xzf /tmp/bazel_features.tar.gz -C /tmp/bazel_features --strip-components=1
+          sed -i "s|v = \"999999.999999.999999\"|v = \"${BAZEL_VERSION}\"|" /tmp/bazel_features/private/parse.bzl
+
           mkdir -p /tmp/bazel-src
           cd /tmp/bazel-src
           curl -fsSLo dist.zip "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-dist.zip"
@@ -96,7 +108,8 @@ jobs:
 
           EXTRA_BAZEL_ARGS="--tool_java_runtime_version=local_jdk \
             --override_module=rules_python=/tmp/rules_python \
-            --override_module=rules_java=/tmp/rules_java" \
+            --override_module=rules_java=/tmp/rules_java \
+            --override_module=bazel_features=/tmp/bazel_features" \
             bash ./compile.sh
           install -m 0755 output/bazel /work/bazel-bin/bazel
           SCRIPT
@@ -304,7 +317,9 @@ jobs:
           # Upstream runs the whole `tests examples` tree; on the riscv64 runner that
           # does not fit a CI slot, so this is the subset that covers the compiled
           # backend end to end (tracing, lowering, XLA CPU execution, PRNG, autodiff).
-          "${python_exe}" -m pytest -n auto --tb=short --maxfail=20 \
+          # --maxprocesses mirrors the cap run_pytest_cpu.sh applies on aarch64, where
+          # the suite OOMs at full -n auto.
+          "${python_exe}" -m pytest -n auto --maxprocesses=16 --tb=short --maxfail=20 \
             tests/api_test.py \
             tests/lax_test.py \
             tests/nn_test.py \
