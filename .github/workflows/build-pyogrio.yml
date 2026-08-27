@@ -1,0 +1,208 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-wheels-linux` job of
+# https://github.com/geopandas/pyogrio/blob/v0.13.0/.github/workflows/release.yml
+name: Build pyogrio wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pyogrio version to build (git tag without the v, e.g. 0.13.0)'
+        required: true
+        default: '0.13.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pyogrio.yml'
+      - 'ci/pyogrio/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.13.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYOGRIO_VERSION: ${{ inputs.version || '0.13.0' }}
+  GDAL_VERSION: '3.12.4'
+  GEOS_VERSION: '3.13.1'
+  PROJ_VERSION: '9.6.2'
+  SPATIALITE_VERSION: '5.1.0'
+  BASEIMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  GDAL_IMAGE: manylinux_2_39_riscv64_gdal
+
+jobs:
+  build_image:
+    name: Build the GDAL build image
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 600
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+        with:
+          install: true
+          buildkitd-flags: --debug
+
+      # upstream's images install GDAL with vcpkg, which has no riscv64 binary
+      # cache; ours compiles GEOS/PROJ/SpatiaLite/GDAL from source instead. Populating
+      # cache from a job of its own keeps the wheel jobs from each paying for it.
+      - name: Build Docker image with GDAL
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: ci/pyogrio
+          file: ci/pyogrio/manylinux_riscv64-gdal.Dockerfile
+          platforms: linux/riscv64
+          build-args: |
+            BASEIMAGE=${{ env.BASEIMAGE }}
+            GEOS_VERSION=${{ env.GEOS_VERSION }}
+            PROJ_VERSION=${{ env.PROJ_VERSION }}
+            SPATIALITE_VERSION=${{ env.SPATIALITE_VERSION }}
+            GDAL_VERSION=${{ env.GDAL_VERSION }}
+          push: false
+          cache-from: type=gha,scope=${{ env.GDAL_IMAGE }}-${{ env.GDAL_VERSION }}
+          cache-to: type=gha,mode=max,scope=${{ env.GDAL_IMAGE }}-${{ env.GDAL_VERSION }}
+        env:
+          BUILDKIT_PROGRESS: plain
+
+  build_wheels:
+    name: Build pyogrio ${{ inputs.version || '0.13.0' }} ${{ matrix.wheel_tag }}-manylinux_riscv64
+    needs: [build_image]
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 600
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # setup.py builds against the limited API for CPython >= 3.11, so the
+          # single abi3 wheel covers every non-free-threaded interpreter and the
+          # free-threaded one falls back to a version-specific build.
+          - python: cp312
+            wheel_tag: cp311-abi3
+            test_requires: pandas pyproj shapely>=2
+            before_test: pip install --no-deps geopandas
+          - python: cp314t
+            wheel_tag: cp314-cp314t
+            test_requires: pyproj shapely>=2
+            # geopandas needs pandas, which publishes no free-threaded riscv64
+            # wheel; upstream skips it on 3.14t for the same reason.
+            before_test: 'true'
+
+    steps:
+      - name: Checkout pyogrio ${{ env.PYOGRIO_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: geopandas/pyogrio
+          ref: v${{ env.PYOGRIO_VERSION }}
+          fetch-depth: 0  # versioneer derives the version from the tag history
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+        with:
+          install: true
+          buildkitd-flags: --debug
+
+      - name: Load the GDAL build image from the cache
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: python-wheels/ci/pyogrio
+          file: python-wheels/ci/pyogrio/manylinux_riscv64-gdal.Dockerfile
+          platforms: linux/riscv64
+          tags: ${{ env.GDAL_IMAGE }}:${{ env.GDAL_VERSION }}
+          build-args: |
+            BASEIMAGE=${{ env.BASEIMAGE }}
+            GEOS_VERSION=${{ env.GEOS_VERSION }}
+            PROJ_VERSION=${{ env.PROJ_VERSION }}
+            SPATIALITE_VERSION=${{ env.SPATIALITE_VERSION }}
+            GDAL_VERSION=${{ env.GDAL_VERSION }}
+          push: false
+          load: true
+          cache-from: type=gha,scope=${{ env.GDAL_IMAGE }}-${{ env.GDAL_VERSION }}
+        env:
+          BUILDKIT_PROGRESS: plain
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.GDAL_IMAGE }}:${{ env.GDAL_VERSION }}
+          # the image's licences for everything auditwheel vendors, staged where
+          # setuptools' license_files glob picks them up
+          CIBW_BEFORE_BUILD: cp /opt/licenses/LICENSE_* .
+          CIBW_ENVIRONMENT: >-
+            GDAL_INCLUDE_PATH=/usr/local/include
+            GDAL_LIBRARY_PATH=/usr/local/lib
+            GDAL_VERSION=${{ env.GDAL_VERSION }}
+            GDAL_DATA=/usr/local/share/gdal
+            PROJ_LIB=/usr/local/share/proj
+            PYOGRIO_PACKAGE_DATA=1
+            PYOGRIO_LIMITED_API=1
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest ${{ matrix.test_requires }}
+          CIBW_BEFORE_TEST: ${{ matrix.before_test }}
+          # PyPI has no riscv64 wheel for these and ours lag its latest release, so
+          # keep pip off the sdists; test-only, as Cython has to compile from source.
+          CIBW_TEST_ENVIRONMENT: 'PIP_ONLY_BINARY=numpy,pandas,pyproj,shapely'
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m;
+            n = sorted(p.name for p in m.files('pyogrio') if '.dist-info/licenses/' in str(p));
+            missing = [w for w in ['LICENSE', 'LICENSE_GDAL', 'LICENSE_GEOS', 'LICENSE_PROJ', 'LICENSE_SPATIALITE'] if w not in n];
+            assert not missing, (missing, n);
+            print(n)" &&
+            python -c "import pyogrio; print(pyogrio.__gdal_version_string__, pyogrio.__gdal_geos_version__)" &&
+            python -m pytest --pyargs pyogrio.tests -v
+
+      - name: Check the extensions, GDAL and its data files made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("pyogrio/_io.") and n.endswith(".so") for n in names), whl
+              assert any(n.startswith("pyogrio.libs/libgdal") for n in names), whl
+              assert "pyogrio/proj_data/proj.db" in names, whl
+              assert any(n.startswith("pyogrio/gdal_data/") for n in names), whl
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyogrio-${{ env.PYOGRIO_VERSION }}-${{ matrix.wheel_tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyogrio ${{ inputs.version || '0.13.0' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: pyogrio-${{ env.PYOGRIO_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
