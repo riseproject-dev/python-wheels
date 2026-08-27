@@ -88,22 +88,39 @@ jobs:
           import sys, zipfile
 
           EM_RISCV = 243
+          PT_INTERP = 3
+          INTERP = "/lib/ld-linux-riscv64-lp64d.so.1"
           expected = {
               "wandb/bin/wandb-core",
               "wandb/bin/wandb-xpu",
               "wandb/bin/librust_parquet_ffi.so",
           }
 
+          def interpreter(blob):
+              phoff = int.from_bytes(blob[0x20:0x28], "little")
+              phentsize = int.from_bytes(blob[0x36:0x38], "little")
+              phnum = int.from_bytes(blob[0x38:0x3A], "little")
+              for i in range(phnum):
+                  ph = blob[phoff + i * phentsize:][:phentsize]
+                  if int.from_bytes(ph[0:4], "little") != PT_INTERP:
+                      continue
+                  off = int.from_bytes(ph[8:16], "little")
+                  size = int.from_bytes(ph[32:40], "little")
+                  return blob[off:off + size].rstrip(b"\0").decode()
+              return None
+
           for whl in sys.argv[1:]:
               with zipfile.ZipFile(whl) as zf:
                   names = set(zf.namelist())
                   assert expected <= names, sorted(expected - names)
                   for name in sorted(expected):
-                      header = zf.read(name)[:20]
-                      assert header[:4] == b"\x7fELF", (name, header[:4])
-                      machine = int.from_bytes(header[18:20], "little")
+                      blob = zf.read(name)
+                      assert blob[:4] == b"\x7fELF", (name, blob[:4])
+                      machine = int.from_bytes(blob[18:20], "little")
                       assert machine == EM_RISCV, (name, machine)
-                      print(name, "is a riscv64 ELF")
+                      interp = interpreter(blob)
+                      assert interp in (None, INTERP), (name, interp)
+                      print(name, "riscv64 ELF, interpreter:", interp)
               print(whl, "ok")
           EOF
 
