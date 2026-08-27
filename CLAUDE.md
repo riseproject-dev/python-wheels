@@ -3848,6 +3848,50 @@ upload without the docs-PR side effect.
       `git describe`, so `git apply`-ing a patch leaves the wheel filename alone and no
       `SETUPTOOLS_SCM_PRETEND_VERSION`-style pin is needed.
 
+153. **A `dist-info/sboms/*.cyclonedx.json` is not a licence notice — and the notice
+    inventory an upstream generates is often shipped only in the sdist (the burner-redis
+    case; see `build-burner-redis.yml`).** maturin (>= 1.9) writes a CycloneDX SBOM into
+    every wheel, listing each Rust crate with an SPDX *expression* (`"licenses":
+    [{"expression": "MIT OR Apache-2.0"}]`) and no licence text or copyright line. That
+    reads like the third-party obligations are handled; they are not — MIT requires the
+    copyright notice to travel with binary redistribution and Apache-2.0 4(a) requires a
+    copy of the License. Meanwhile the project usually *does* have the full inventory: a
+    `cargo-about`-style `THIRDPARTY.yml`/`about.hbs`/`LICENSE-THIRD-PARTY` at the repo
+    root, complete with texts. burner-redis' release workflow even asserts the file is in
+    the sdist (`tar -tzf … | grep -Fx "…/THIRDPARTY.yml"`) — and never puts it in the
+    wheel, on any architecture.
+    - **Two commands find both halves**: `unzip -l <upstream wheel> | grep -iE 'licen|sbom'`
+      (what actually ships) and `ls <checkout> | grep -iE 'thirdparty|third-party|notice'`
+      (what upstream already generated). A wheel with an SBOM and a single `LICENSE`, next
+      to a repo carrying a half-megabyte notice file, is the signature.
+    - **The fix is gotcha 44/146's one-file move, with no patch**: maturin's auto-discovery
+      globs (`LICEN[CS]E*`, `COPYING*`, `NOTICE*`, `AUTHORS*` at the pyproject directory,
+      used only when `[project] license-files` is absent — checked in maturin 1.15.0
+      `src/metadata.rs`) will pick the inventory up under a `NOTICE*` name, so a
+      `cp THIRDPARTY.yml NOTICE.THIRDPARTY.yml` workflow step before cibuildwheel is the
+      whole change. It logs `📦 Including license file …`, which is the cheapest
+      confirmation it fired.
+    - **Assert the resulting *set*, and subtract the empty basename** — `auditwheel repair`
+      adds a bare `dist-info/licenses/` directory entry that a plain maturin wheel has not
+      got, so a `zipfile.namelist()` check built on `rsplit("/", 1)[1]` picks up a `''`
+      and fails only on the repaired (i.e. CI) wheel (gotcha 86, reached from the maturin
+      side).
+
+154. **A PyPI `project_urls` repository link can 404 — search for the live repo before
+    concluding upstream is not on git (a lighter cousin of gotcha 43).** Gotcha 43 covers a
+    project genuinely off GitHub; the commoner cause of a dead link is an org rename that
+    the released metadata still points at. burner-redis 0.1.7 records
+    `Homepage`/`Repository`/`Issues` all under `github.com/PrefectHQ/burner-redis`, which
+    answers 404 to `curl` *and* to `gh api repos/...` — while `gh api
+    "search/repositories?q=<name>"` returns `prefectlabs/burner-redis`, carrying every
+    release tag (`v0.1.0`…`v0.1.7`), the release workflow, and the MIT licence. A `gh api
+    repos/<o>/<r>` 404 says nothing about whether the code is public, only that *that*
+    path is not.
+    - Check the tag you need actually exists there (`gh api repos/<o>/<r>/git/refs/tags`)
+      and diff the tarball against the PyPI sdist before trusting it, exactly as gotcha 43
+      does for a mirror — then say in the PR body why the checkout `repository:` differs
+      from the URL on the PyPI page, because a reviewer will otherwise read it as a typo.
+
 ## Environment / auth notes
 
 - **Never write outside the repository.** Worktrees go in `.claude/worktrees/<pkg>`, scratch
@@ -3962,12 +4006,10 @@ Use this verbatim. Median merged-PR description is 358 words; this should land a
 Short sentences. No process narration, no "what I tried", no hyperbole.
 
 ```markdown
-| | |
-|---|---|
-| **Package** | `<pkg>` |
-| **Version** | `<version>` |
-| **Source** | <repo url> |
-| **Docs** | <home url> |
+* **Package**: `<pkg>`
+* **Version**: `<version>`
+* **Source**: <repo url>
+* **Docs**: <home url>
 
 <What it compiles, one sentence.> Upstream publishes no riscv64 wheel.
 
@@ -3990,14 +4032,25 @@ Built on cp312; <N> passed, <M> skipped.
 ```
 
 Rules:
-- **Lead**: one sentence on what is compiled, one on the gap. The table carries name/version.
+- **Lead**: one sentence on what is compiled, one on the gap. The bullets carry name/version.
 - **Differs from upstream**: the highest-value section. Overridden `[tool.cibuildwheel]` keys, dropped
   musllinux, added `dnf` packages, image override. Nothing else differs -> "Nothing beyond the riscv64 image."
 - **Matrix**: omit the line entirely when it is the default four. Otherwise name the blocking dependency.
 - **Testing**: "same as upstream", or bullets of the divergences only - deps added/removed/pinned,
   deselected tests, `test-sources` staging. One reason each. Never describe the method.
-- **License**: a check mark when nothing third-party is vendored. Otherwise one sentence: what ships and
-  under what licence. Mention GPL **only when it is GPL** - silence means it is not.
+- **License**: a check mark when nothing third-party is vendored. Otherwise EXACTLY ONE sentence: what
+  ships and under what licence. Mention GPL **only when it is GPL** - silence means it is not. Never
+  describe how the licence reaches the wheel - not the `before-all` step, not the glob, not the
+  assertion. "Wheel bundles libfoo (GPL-2.0) and libbar (MIT); upstream ships no licence text for them,
+  so the build adds it." is the whole section.
+
+Hard length limits: whole description 100-200 words; each **Differs from upstream** bullet one line
+under 20 words; lead paragraph two sentences; **License** one sentence; **Patches** one line each.
+Over 200 words means you are narrating.
+
+Explain WHAT, never HOW - the diff shows how. Delete any sentence that names a cibuildwheel variable
+to explain a mechanism, describes a post-build assertion, or opens with "Note that" / "Importantly" /
+"Crucially".
 - **Patches**: omit when there are none. One line each: filename, `Upstream-Status` + link/reason, what
   breaks without it, whether it reproduces off riscv64.
 - **Last line**: counts only.
@@ -4438,3 +4491,142 @@ shape (it is in the diff), or any debugging history. Do not hard-wrap (see PR / 
       partially initialized module`, which reads like a broken wheel and is not. Write the
       test command as one chain, `cd Tests && python -c "<probe>" && python run_tests.py`,
       and verify by printing `<pkg>.__file__` from that directory.
+
+152. **An sdist's `tests/` directory can be a partial copy — count the files before you
+    pick the sdist as your test source (the geventhttpclient case).** Gotcha 6 asks whether
+    the tests ship in the sdist at all; the quieter answer is "some of them". A `MANIFEST.in`
+    that never mentions tests still yields a `tests/` entry in the tarball, because setuptools
+    auto-includes files matching `test*.py` — and *only* those. geventhttpclient 2.3.9's sdist
+    carries all twelve `tests/test_*.py` and none of `__init__.py`, `common.py`, `conftest.py`
+    or the TLS fixtures, so every module doing `from tests.common import ...` dies at
+    collection with `ModuleNotFoundError: No module named 'tests.common'`. That reads like a
+    missing test dependency or a staging mistake (gotcha 25) and is neither.
+    - **`diff <(tar tzf sdist.tar.gz | grep tests/) <(tar tzf tag.tar.gz | grep tests/)`
+      settles it in one command**, before any venv. The signature is a residue that is exactly
+      the `test*.py` glob: no `__init__.py`, no `conftest.py`, no data files.
+    - **It also decides the port's shape**: only a checkout can run the real suite, so the
+      build-from-checkout form is mandatory even where an sdist->bdist job would otherwise be
+      natural — and gotcha 104's "stage the checkout's tests beside an sdist `package-dir`"
+      trick is the alternative when you need both.
+    - Reach for it as the first explanation whenever gotcha 52's dry run against the released
+      PyPI wheel returns collection errors on *helper* imports while the same files run fine
+      from a git checkout.
+
+155. **maturin abi3 can be an opt-in Cargo *feature*, so a plain PEP 517 build silently
+    ships per-interpreter wheels where upstream ships one abi3 wheel (the arro3-core case;
+    see `build-arro3-core.yml`).** Gotcha 11 splits abi3 into "maturin: a pyproject/Cargo
+    feature, set once and inherited" versus "setuptools-rust: a flag you must inject". The
+    maturin half has a third form that behaves like the setuptools-rust one: the crate
+    declares `[features] abi3-py311 = ["pyo3/abi3-py311"]` and **nothing turns it on** —
+    `[tool.maturin] features` lists only `pyo3/extension-module`, and upstream's release
+    job passes `--features abi3-py311` on the `maturin build` command line. cibuildwheel
+    inherits none of that, so the wheels come out `cpXY-cpXY` while PyPI's are
+    `cp311-abi3`: four builds of the same code under tags upstream never publishes.
+    - **Two greps settle it before you write the matrix**: `[features]` in the crate's
+      `Cargo.toml` (an `abi3-py*` entry that no default enables) and the `--features` list
+      in upstream's wheel job. `[tool.maturin] features` is *not* the whole story — read
+      the CLI args too.
+    - **Hand it over with gotcha 59's `MATURIN_PEP517_ARGS`**, per matrix entry, since the
+      free-threaded build must *not* get it (pyo3 disables abi3 under `Py_GIL_DISABLED`):
+      ```yaml
+      matrix:
+        include:
+          - tag: cp311-abi3
+            build: cp311-manylinux_riscv64 cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+            features: --features abi3-py311 --features extension-module
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+            features: --features extension-module
+      ...
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            MATURIN_PEP517_ARGS="${{ matrix.features }}"
+      ```
+      Restate the project's own `[tool.maturin] features` on the CLI (here the crate's
+      `extension-module`, which is `["pyo3/extension-module"]`) exactly as upstream does —
+      a CLI `--features` may replace rather than extend the pyproject list, and losing
+      `extension-module` links libpython into the wheel.
+    - **The build interpreter is gotcha 96's question, and the answer is upstream's, not
+      ours.** The tag comes from the abi3 floor the feature names (`cp311-abi3`), so the
+      wheel must be built on cp311 even though this repo's floor is cp312 — `CIBW_BUILD`
+      with the whole `cp311..cp314` list lets cibuildwheel build once and re-test the same
+      wheel on each newer interpreter (`Found previously built wheel ... Skipping build
+      step`). `only:` cannot express that; it takes a single identifier.
+    - **The negative case is free evidence**: the free-threaded entry, built with no abi3
+      feature from the identical tree, comes out `cp314-cp314t` — which is what every
+      entry would have looked like had the feature not been passed.
+
+156. **An upstream that exists only as a PyPI sdist is still an ordinary port — but
+    handing that tarball to cibuildwheel as `package-dir` silently breaks
+    `test-sources` (the lmnr-claude-code-proxy case; see
+    `build-lmnr-claude-code-proxy.yml`).** Gotcha 43 covers an upstream on Mercurial with
+    a git mirror to find; the plainer case is an upstream with *no* public repository at
+    all — PyPI records no `project_urls`, the vendor's GitHub org carries none of the
+    crate (`gh api "search/code?q=org:<org>+<crate>"`), and the sdist plus a sibling npm
+    package are the only published forms. The playbook's "always build the sdist yourself
+    from an upstream checkout" then has nothing to check out, so fetching the released
+    sdist *is* the closest available thing to upstream, and it should be said in the
+    workflow header so a reviewer does not go looking for the repo.
+    - **Extract it yourself; do not pass the `.tar.gz` to `package-dir`.** cibuildwheel
+      supports the tarball (gotcha 6), but `__main__.py` extracts it to a temp dir and
+      runs the whole build under `contextlib.chdir(project_dir)` — and
+      `CIBW_TEST_SOURCES` is copied with `copy_test_sources(..., Path.cwd(), test_cwd)`
+      (gotcha 104), so a `tests/` you staged in the workspace is not under that cwd and
+      the run dies with `cibuildwheel: error: Test source tests does not exist` — **after**
+      the entire compile, the auditwheel repair and the test-venv install. A plain
+      `tar xzf` plus `package-dir: <pkg>-<ver>` keeps cwd at the workspace root, where
+      both the extracted tree and the staged tests live (`linux.py` computes
+      `container_package_dir = container_project_path / abs_package_dir.relative_to(cwd)`,
+      so the package dir only has to sit *under* cwd).
+    - **Upstream shipping no tests is not a reason to ship an import-only check.** For a
+      package whose extension *is* a server, a smoke suite staged from a `run:` heredoc
+      (gotcha 144) can drive it end to end — start it, hit its own endpoints, forward a
+      request through it to a local `http.server` and assert the body comes back — which
+      exercises the async runtime, TLS stack and HTTP client that make up the whole wheel.
+      Validate the suite against upstream's **released** wheel on your own host first
+      (gotcha 52): passing there is what makes it a test of our build rather than of your
+      guesses about the API.
+    - **A pure-Rust PyO3 crate cross-compiles as a pre-flight in under a minute** (gotcha
+      124, applied to a wheel rather than a Go binary): in a `rust:trixie` container,
+      `apt-get install gcc-riscv64-linux-gnu`, `rustup target add
+      riscv64gc-unknown-linux-gnu`, then `cargo build --release --features <feat> --target
+      riscv64gc-unknown-linux-gnu` with `CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER`,
+      `PYO3_CROSS=1` and `PYO3_CROSS_PYTHON_VERSION` set. 183 crates including `ring`
+      0.17.14 linked in 38s on an arm64 laptop, which settles the one arch-specific risk
+      in such a tree (does every dependency have a riscv64 path?) before any runner time
+      is spent.
+
+157. **A closed-source vendored runtime has no source to fall back on — and its platform
+    table is published in three independent places (the claude-agent-sdk case).** Gotcha 35
+    triages a `py3-none-<platform>` wheel whose payload is a downloaded prebuilt runtime by
+    finding the fetch and then the vendor's artifact index. When the vendored tool is a
+    *closed-source* product rather than an open-source runtime like Node, gotcha 77's escape
+    hatch — build the dependency from source yourself — does not exist, so the index answer
+    is final. claude-agent-sdk's wheels are 343 MB uncompressed of which **342.56 MB is one
+    file**, `claude_agent_sdk/_bundled/claude`, fetched at build time by
+    `scripts/download_cli.py` running `bash install.sh` from `https://claude.ai/install.sh`;
+    the remaining 0.5 MB is pure Python built by hatchling (`only-include =
+    ["src/claude_agent_sdk"]`), so the build compiles nothing on any platform.
+    - **Three cheap, independent reads of the same platform table**, any one of which
+      settles it: the installer's own `case "$(uname -m)"` (`x86_64|amd64`, `arm64|aarch64`,
+      `*) Unsupported architecture; exit 1`); the vendor's release manifest
+      (`https://downloads.claude.ai/claude-code-releases/<ver>/manifest.json` → exactly
+      `{darwin,linux,win32}-{x64,arm64}` plus the two musl variants, at the pinned version
+      *and* at `latest`); and — for anything also distributed through npm — the launcher
+      package's **`optionalDependencies`**, which fan out to one native-binary package per
+      platform (`@anthropic-ai/claude-code-linux-arm64`, …). Add that last one to the
+      collection beside `nodejs.org/dist`, NVIDIA's redist index and conda repodata: it is
+      one `curl` of `registry.npmjs.org/<pkg>/latest` and needs no download.
+    - **"pip install works on riscv64" is not the same as "riscv64 is served" — read the
+      runtime resolver before choosing between `not-feasible` and `vendored-binary`.**
+      Gotcha 116 reports `not-feasible` when the Linux wheel is the universal `-any` one,
+      because riscv64 already installs exactly what x86_64 installs. Here upstream publishes
+      **no `-any` wheel at all**, so riscv64 falls back to the sdist — which builds fine in
+      seconds and yields a working *import* whose every call fails: `_find_cli()` looks for
+      `_bundled/claude`, then for `claude` on PATH and in six install locations, and raises
+      `CLINotFoundError` when none exists, which on riscv64 is always. Installable but
+      non-functional is `vendored-binary`, not `not-feasible`.
+    - **Read the wheel's central directory over an HTTP range request** (gotcha 41) rather
+      than downloading 100 MB: sorting the entries by uncompressed size showed the single
+      payload file and the 0.5 MB of Python beside it in one call, which is the whole
+      finding.
