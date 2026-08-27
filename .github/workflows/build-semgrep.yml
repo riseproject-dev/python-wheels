@@ -104,19 +104,16 @@ jobs:
           # Upstream's release job ships semgrep-core's shared libraries next to
           # the binary (semgrep/bin/libs/ in their manylinux wheels); reproduce
           # that here so the wheel is self-contained.
+          core=cli/src/semgrep/bin/semgrep-core
           libs=cli/src/semgrep/bin/libs
           mkdir -p "$libs"
-          # every executable in bin/, not just semgrep-core: osemgrep is a separate binary
-          # and needs libelf, which upstream's own runner happens to have installed.
-          for b in cli/src/semgrep/bin/*; do
-            [ -f "$b" ] && [ -x "$b" ] || continue
-            ldd "$b" 2>/dev/null | awk '/=> \//{print $3}'
-          done | grep -Ev '/(libc|ld-linux[^/]*)\.so' | sort -u > bundled-libs.txt
+          ldd "$core" | awk '/=> \//{print $3}' \
+            | grep -Ev '/(libc|ld-linux[^/]*)\.so' | sort -u > bundled-libs.txt
           xargs -r -a bundled-libs.txt -I{} cp -L {} "$libs/"
-          for b in cli/src/semgrep/bin/*; do
-            [ -f "$b" ] && [ -x "$b" ] || continue
-            patchelf --set-rpath '$ORIGIN/libs' "$b"
-          done
+          patchelf --set-rpath '$ORIGIN/libs' "$core"
+          # RUNPATH is not searched for a dependency's own dependencies, so each
+          # library needs one too (libdw -> libelf); upstream sets it the same way.
+          patchelf --set-rpath '$ORIGIN' "$libs"/*
 
           python3 -m venv /tmp/buildenv
           /tmp/buildenv/bin/pip install --quiet --upgrade pip build
