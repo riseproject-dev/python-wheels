@@ -1,0 +1,80 @@
+From b602a1e93e37c7de95a3f7ce478b4bd95bfa59cd Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 27 Aug 2026 04:11:04 +0200
+Subject: [PATCH] tests: fuzz: suppress the too_slow health check for ZoneInfo
+ draws
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The strategies that draw a zoneinfo — `zoneinfos`, and `aware_datetimes`,
+which mixes it with UTC — construct a `ZoneInfo` per example, and the first
+construction of each key parses the matching TZif file off disk. On the
+riscv64 runners that costs ~0.37s per draw, so Hypothesis reports
+
+    FailedHealthCheck: Input generation is slow: Hypothesis only generated
+    7 valid inputs after 1.16 seconds
+
+and fails `test_extract_timestamp_tzname_zoneinfo_datetime`, the only one of
+the four affected tests that carries no `@settings` at all. The health check
+is a fixed wall-clock budget on *input generation*; nothing about the
+generated inputs, the assertions, or the extension under test is different
+here, and the run that tripped it went on to pass every other property.
+
+Suppressing `HealthCheck.too_slow` on exactly the tests that can build a
+`ZoneInfo` leaves the deadline and example budget alone, and is a no-op on
+hardware fast enough never to trip the check.
+
+Upstream-Status: Inappropriate [native runner specific]
+---
+ tests/test_fuzz.py | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/tests/test_fuzz.py b/tests/test_fuzz.py
+index 5673edf..95e4c50 100644
+--- a/tests/test_fuzz.py
++++ b/tests/test_fuzz.py
+@@ -12,7 +12,7 @@ if sys.version_info[:2] == (3, 13) and not sys._is_gil_enabled():
+     # Python < 3.14.
+     pytest.skip("Hypothesis unavailable", allow_module_level=True)
+ 
+-from hypothesis import given, settings
++from hypothesis import HealthCheck, given, settings
+ from hypothesis import strategies as st
+ 
+ import time_machine
+@@ -59,7 +59,7 @@ def test_travel_to_timestamp(timestamp):
+         assert time.time() == expected_ns / NANOSECONDS_PER_SECOND
+ 
+ 
+-@settings(deadline=None)
++@settings(deadline=None, suppress_health_check=[HealthCheck.too_slow])
+ @given(destination=aware_datetimes)
+ def test_travel_to_aware_datetime(destination):
+     with time_machine.travel(destination, tick=False):
+@@ -94,7 +94,7 @@ def test_travel_to_date(destination):
+         assert now.date() == destination
+ 
+ 
+-@settings(deadline=None)
++@settings(deadline=None, suppress_health_check=[HealthCheck.too_slow])
+ @given(destination=aware_datetimes)
+ def test_travel_to_isoformat_string(destination):
+     with time_machine.travel(destination.isoformat(), tick=False):
+@@ -159,7 +159,7 @@ def test_move_to(first, second):
+ @pytest.mark.skipif(
+     not hasattr(time, "tzset"), reason="Doesn't have tzset, so travel() can't set TZ"
+ )
+-@settings(deadline=None)
++@settings(deadline=None, suppress_health_check=[HealthCheck.too_slow])
+ @given(
+     # Past 2038, some platforms' time functions stop applying zones' POSIX DST
+     # rules, diverging from zoneinfo.
+@@ -224,6 +224,7 @@ def test_extract_timestamp_tzname_number(timestamp):
+     )
+ 
+ 
++@settings(suppress_health_check=[HealthCheck.too_slow])
+ @given(destination=naive_datetimes, tz=zoneinfos)
+ def test_extract_timestamp_tzname_zoneinfo_datetime(destination, tz):
+     aware = destination.replace(tzinfo=tz)
