@@ -1,0 +1,143 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/benfred/py-spy/blob/v0.4.2/.github/workflows/build.yml
+name: Build py-spy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'py-spy version to build (git tag without leading v, e.g. 0.4.2)'
+        required: true
+        default: '0.4.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-py-spy.yml'
+      - 'patches/py-spy/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.4.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.4.2 there.
+  PY_SPY_VERSION: ${{ inputs.version || '0.4.2' }}
+
+jobs:
+  build_wheel:
+    name: Build py-spy ${{ inputs.version || '0.4.2' }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout py-spy v${{ inputs.version || '0.4.2' }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: benfred/py-spy
+          ref: v${{ env.PY_SPY_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply -v python-wheels/patches/py-spy/${{ env.PY_SPY_VERSION }}/*.patch
+
+      # Upstream passes `--features unwind` on every Linux target but i686;
+      # remoteprocess has no riscv64 libunwind bindings (benfred/py-spy#594), so
+      # riscv64 takes the i686 shape and loses `--native` stack traces.
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --out dist
+          manylinux: '2_39'
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - name: Rename wheel  # upstream tags its wheels py2.py3
+        run: |
+          python3 -c "import shutil; import glob; wheels = glob.glob('dist/*.whl'); [shutil.move(wheel, wheel.replace('py3', 'py2.py3')) for wheel in wheels if 'py2' not in wheel]"
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: py-spy-${{ env.PY_SPY_VERSION }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test py-spy ${{ inputs.version || '0.4.2' }} on Python ${{ matrix.python-version }}
+    needs: [build_wheel]
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Upstream's test matrix trimmed to the interpreters this registry
+        # targets; it carries no free-threaded entry.
+        python-version: ['3.12', '3.13', '3.14']
+
+    steps:
+      - name: Checkout py-spy v${{ inputs.version || '0.4.2' }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: benfred/py-spy
+          ref: v${{ env.PY_SPY_VERSION }}
+          persist-credentials: false
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: py-spy-${{ env.PY_SPY_VERSION }}-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . py-spy
+
+      - name: Test wheel
+        id: test
+        run: python tests/integration_test.py
+        continue-on-error: true
+
+      # The suite asserts on sampling percentages and is retried upstream too.
+      - name: Test wheel (retry#1)
+        id: test1
+        run: python tests/integration_test.py
+        if: steps.test.outcome == 'failure'
+        continue-on-error: true
+
+      - name: Test wheel (retry#2)
+        run: python tests/integration_test.py
+        if: steps.test1.outcome == 'failure'
+
+  publish:
+    name: Publish py-spy ${{ inputs.version || '0.4.2' }} to GitLab
+    needs: [build_wheel, test_wheel]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: py-spy-${{ env.PY_SPY_VERSION }}-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
