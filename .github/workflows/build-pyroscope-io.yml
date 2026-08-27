@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/grafana/pyroscope-python/blob/python-1.2.1/.github/workflows/ci.yml
+name: Build pyroscope-io wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pyroscope-io version to build (git tag without leading python-, e.g. 1.2.1)'
+        required: true
+        default: '1.2.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pyroscope-io.yml'
+      - 'ci/pyroscope-io/**'
+      - 'patches/pyroscope-io/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.2.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.2.1 there.
+  PYROSCOPE_IO_VERSION: ${{ inputs.version || '1.2.1' }}
+  # The py-spy revision rust/Cargo.toml pins.
+  PY_SPY_REV: 32080cc0c22bc23938541dfa7dabb6090e40be14
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build pyroscope-io ${{ inputs.version || '1.2.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 480
+    strategy:
+      fail-fast: false
+      matrix:
+        # PyO3 extension built per-interpreter (upstream ships cp3x-cp3x wheels,
+        # no abi3). cp314t is excluded: upstream publishes no free-threaded wheel.
+        python: ["cp312", "cp313", "cp314"]
+
+    steps:
+      - name: Checkout pyroscope-python ${{ env.PYROSCOPE_IO_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: grafana/pyroscope-python
+          ref: python-${{ env.PYROSCOPE_IO_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Check out py-spy and add riscv64 support
+        run: |
+          git clone --filter=blob:none --no-checkout https://github.com/benfred/py-spy py-spy
+          git -C py-spy checkout --detach "${PY_SPY_REV}"
+          git -C py-spy apply "${GITHUB_WORKSPACE}/python-wheels/patches/pyroscope-io/${PYROSCOPE_IO_VERSION}/0002-python_bindings-return-no-tstate_current-offset-on-riscv64.patch"
+          git apply "python-wheels/patches/pyroscope-io/${PYROSCOPE_IO_VERSION}/0001-cargo-build-py-spy-from-a-locally-patched-checkout.patch"
+
+      - name: Stage the smoke test
+        run: |
+          mkdir -p smoke
+          cp python-wheels/ci/pyroscope-io/riscv64_smoke.py smoke/
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: bash {project}/python-wheels/ci/pyroscope-io/before-all.sh
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            OPENSSL_DIR=/usr/local/openssl
+            OPENSSL_STATIC=1
+          CIBW_TEST_SOURCES: smoke
+          CIBW_TEST_COMMAND: python smoke/riscv64_smoke.py
+
+      - name: Check the wheel carries the compiled extension
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = [n for n in names if n.endswith(".so")]
+          assert sos, f"no .so in {sys.argv[1]}: {names}"
+          print("\n".join(sos))
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyroscope_io-${{ env.PYROSCOPE_IO_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyroscope-io ${{ inputs.version || '1.2.1' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: pyroscope_io-${{ env.PYROSCOPE_IO_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
