@@ -83,9 +83,33 @@ jobs:
           path: wheelhouse/*.whl
           if-no-files-found: error
 
+  gpl_sources:
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      # faiss links OpenMP and OpenBLAS, so auditwheel vendors the image's
+      # libgomp and libgfortran into faiss_cpu.libs/.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: faiss-cpu-${{ env.FAISS_CPU_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
   publish:
     name: Publish faiss-cpu ${{ inputs.version || '1.15.0' }} to GitLab
-    needs: [build_wheels]
+    needs: [build_wheels, gpl_sources]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -100,3 +124,6 @@ jobs:
           gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
           gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
           gh-token: ${{ secrets.GITHUB_TOKEN }}
+          gpl-sources-artifact: faiss-cpu-${{ env.FAISS_CPU_VERSION }}-gpl-sources
+          gpl-sources-release-tag: faiss-cpu-v${{ env.FAISS_CPU_VERSION }}
+          gpl-sources-description: gcc
