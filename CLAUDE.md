@@ -4893,11 +4893,10 @@ shape (it is in the diff), or any debugging history. Do not hard-wrap (see PR / 
       the packages that run a very large number of small parallel regions. lightgbm reaches
       it once per boosting iteration through the ranking objective and once per sparse
       dataset through `FeatureGroup::FinishLoad`.
-    - **Three env vars distinguish it from a bug in the package, in minutes on the runner**:
+    - **Two env vars separate it from a bug in the package, in minutes on the runner**:
       `OMP_NUM_THREADS=1` and `OMP_WAIT_POLICY=passive GOMP_SPINCOUNT=0` each take it from
-      9/10 failures to 0/10, while rebuilding the package at `-O1` changes nothing. A
-      codegen bug would not care about the wait policy; a package data race would not be
-      reproduced by a C program containing none of the package.
+      9/10 failures to 0/10. A codegen bug would not care about the wait policy, and a race
+      in the package would not be reproduced by a C program containing none of it.
     - **`grep -rho 'schedule([a-z]*' src include | sort | uniq -c` prices the workaround
       before you write it.** LightGBM asks for dynamic or guided in 13 of ~230 parallel
       regions, so a patch moving those to static is small and costs only load balancing on
@@ -5013,3 +5012,38 @@ shape (it is in the diff), or any debugging history. Do not hard-wrap (see PR / 
       against 2.4e-8 on aarch64 — gotcha 38's artificial-test-limitation shape. Loosening
       that tolerance only uncovers the next assertion in the same test (`res.mae < 1e-6`),
       so drop the one parametrisation and keep the sibling that is exact.
+
+171. **A green wheel we publish can break a *different* package's build the moment it lands
+    — Cython 3.3.0 reroutes C-integer subscripts through the sequence protocol (the
+    preshed/spacy case).** spaCy's PR run was green on every interpreter and its `main`
+    publish run 16 minutes later failed with **100** `OverflowError: Python int too large to
+    convert to C ssize_t`, all inside `PreshMap`. Nothing about spaCy changed: our own
+    `preshed` wheel was published in between, so pip stopped source-building preshed in the
+    container and installed ours — and ours is broken. Cython **3.3.0** (2026-08-22) makes an
+    extension type whose subscript special methods take a C integer implement the *sequence*
+    protocol rather than the mapping one, so `def __setitem__(self, key_t key, size_t value)`
+    with `key_t = uint64_t` is reached through `sq_ass_item`, whose index is a `Py_ssize_t`.
+    Every key at or above `2**63` — half of them, since they are 64-bit hashes — raises.
+    This is gotcha 23's build-tool drift with the blast radius pointing *outward*: the
+    damaged package is not the one whose CI went red.
+    - **Diff the artefact *filenames* between the green run and the failing one, not the
+      versions.** Both logs said `preshed-3.0.13`; only the tags differed —
+      `preshed-3.0.13-cp312-cp312-linux_riscv64.whl` (built in-container from the sdist) in
+      the green run against `…-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl` (ours) in
+      the failing one. `grep -oE '(Downloading|Using cached) [^ ]+\.(whl|tar\.gz)'` over both
+      job logs is the whole diagnosis.
+    - **Reproduce it on aarch64 with two `pip install`s** (gotcha 101's rehearsal, at its
+      cheapest): upstream's PyPI wheel passes a five-line `PreshMap` probe and a
+      `--no-binary` build of the *same version* fails it. That instantly rules out riscv64
+      and names the build as the variable; bisecting `cython==3.2.9` vs `3.3.0` under
+      `--no-isolation` then takes seconds per version. The codegen confirms it —
+      `sq_ass_item` occurrences go 1 → 3.
+    - **A package's own test suite is not evidence the wheel is good.** `pytest --pyargs
+      preshed -Werror` passed on the broken wheel because no test uses a key above `2**63`.
+      When a pin exists to stop a specific regression, add the assertion that regression
+      would trip, ahead of the suite.
+    - **The exposure is narrow and greppable**, so scan rather than pinning everywhere:
+      `grep -rhE 'def __(get|set|del)item__\(self, +[a-z_]+ +[a-z_]' --include='*.pyx'
+      --include='*.pxd'` over every Cython package we publish (261 files across 21 sdists)
+      found preshed and nothing else. Only a subscript type wider than or unsigned relative
+      to `Py_ssize_t` can fail; an `int`/`Py_ssize_t` subscript is unaffected.
