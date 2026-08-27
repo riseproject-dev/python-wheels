@@ -3891,12 +3891,75 @@ upload without the docs-PR side effect.
       does for a mirror — then say in the PR body why the checkout `repository:` differs
       from the URL on the PyPI page, because a reviewer will otherwise read it as a typo.
 
+181. **A pyo3 crate can carry `abi3` unconditionally in its own dependency declaration —
+    read `[dependencies] pyo3` before reaching for `MATURIN_PEP517_ARGS` (the primp case;
+    see `build-primp.yml`).** Gotcha 155 covers the maturin project whose `abi3-pyNN` is an
+    opt-in Cargo *feature* that nothing enables, so the flag has to be passed per matrix
+    entry. The commoner form is the inverse and needs no cibuildwheel config at all:
+    `pyo3 = { version = "0.28", features = ["abi3-py310", ...] }` in the extension crate's
+    `Cargo.toml`, with `[tool.maturin] features = []` and no `--features` in upstream's
+    release job. Every build is then abi3 automatically, and the free-threaded build needs
+    no second shape either — pyo3 disables abi3 under `Py_GIL_DISABLED`, so the same
+    invocation yields `cpXY-abi3` on the GIL-ful interpreters and `cp314-cp314t` on the
+    free-threaded one. Adding `MATURIN_PEP517_ARGS="--features abi3-pyNN"` would be the
+    redundant divergence gotchas 28/49 warn about elsewhere.
+    - **The matrix is still two entries, and the abi3 one still has to build on the floor
+      the crate names** (gotcha 96): `abi3-py310` tags the wheel `cp310-abi3`, so
+      `CIBW_BUILD` lists `cp310..cp314` and cibuildwheel builds once on cp310 and re-tests
+      the same wheel on each newer interpreter. Name the job and artifact after the tag the
+      wheel carries, not after this repo's cp312 floor (gotcha 34).
+    - **Three greps settle which of the three maturin forms you are in**: `abi3` in the
+      extension crate's `[dependencies] pyo3` line (unconditional — nothing to pass),
+      `[features]` for an `abi3-py*` entry no default enables (gotcha 155 — pass it), and
+      `[tool.maturin] features` / upstream's `maturin build --features` for what upstream
+      actually does.
+
+182. **Cross-compiling a pyo3 crate as a riscv64 pre-flight needs
+    `--features pyo3/extension-module`, or it dies at the link on `-lpython3.NN`.** Gotchas
+    124/156 use a cross `cargo build` on a fast host to prove every crate in a Rust tree has
+    a riscv64 path before spending runner time. For a pyo3 extension the obvious invocation
+    fails at the very last step — `cannot find -lpython3.10` — because *maturin* is what
+    normally adds `pyo3/extension-module` (which suppresses the libpython link), and a bare
+    `cargo build` does not. It reads like a missing cross sysroot and is nothing of the
+    kind. Add the feature and the same command links a real riscv64 `.so`:
+    ```bash
+    apt-get install -y gcc-riscv64-linux-gnu cmake
+    rustup target add riscv64gc-unknown-linux-gnu
+    export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER=riscv64-linux-gnu-gcc
+    export CC_riscv64gc_unknown_linux_gnu=riscv64-linux-gnu-gcc \
+           CXX_riscv64gc_unknown_linux_gnu=riscv64-linux-gnu-g++ \
+           AR_riscv64gc_unknown_linux_gnu=riscv64-linux-gnu-ar
+    export PYO3_CROSS=1 PYO3_CROSS_PYTHON_VERSION=3.10
+    cargo build --release --locked --target riscv64gc-unknown-linux-gnu \
+      --manifest-path <crate>/Cargo.toml --features pyo3/extension-module
+    ```
+    `cmake` in the image is load-bearing for any tree pulling `aws-lc-sys` (rustls' default
+    provider), which cross-builds its C for riscv64 from the prebuilt
+    `src/riscv64gc_unknown_linux_gnu_crypto.rs` bindings with no bindgen. primp's ~310-crate
+    workspace linked in 75 s this way on an arm64 laptop — cheap enough to run before the
+    gotcha-101 aarch64 rehearsal, and it is the only local check that exercises riscv64
+    codegen at all.
+
 ## Environment / auth notes
 
 - **Never write outside the repository.** Worktrees go in `.claude/worktrees/<pkg>`, scratch
   files in `.git/pw-scratch/<pkg>`, local lock state in `.git/pw-locks/`. No files in `$HOME`,
   `~/.local/bin`, `/tmp`, or sibling directories, and **no installing software** on the host
   (brew/apt/dnf/npm/pip). If you think you need either, ask first.
+- **A port adds files only under `.github/workflows/` and `patches/<pkg>/<version>/`.**
+  Never create a `ci/` directory, and never add a helper script, Dockerfile, or test file
+  anywhere else in the repo — not for a build step, not for a smoke test, not "just this
+  once" because the content is long. Anything a job needs that is not a patch is **written
+  by the workflow at run time** from a `run:` heredoc (gotcha 7): into `$RUNNER_TEMP` for a
+  docker build context, or into the upstream checkout for something cibuildwheel must carry
+  into the container (`{project}/<name>` then names it). This has been asked for three times
+  — `ci/memray`, `ci/pyogrio`, `ci/pyroscope-io` were each removed after the fact — so treat
+  a new top-level path as a hard stop, not a judgement call. If a file genuinely cannot be
+  inlined, ask before writing it.
+  - Reproduce the file byte for byte when inlining: quote the heredoc marker (`<<'EOF'`) so
+    nothing expands, and diff the extracted block against the original before pushing.
+  - `cat >` drops the executable bit, so a script invoked by path needs `chmod +x`; one
+    invoked as `bash <script>` does not. Getting this wrong costs a full image build.
 - **Commit identity is `Ludovic Henry <git@ludovic.dev>`** and is already configured. Never
   pass `-c user.email`/`-c user.name` or set `GIT_AUTHOR_*`/`GIT_COMMITTER_*` — in particular
   do not use the user's address from your own session context, which is a *different*
@@ -5047,3 +5110,247 @@ shape (it is in the diff), or any debugging history. Do not hard-wrap (see PR / 
       --include='*.pxd'` over every Cython package we publish (261 files across 21 sdists)
       found preshed and nothing else. Only a subscript type wider than or unsigned relative
       to `Py_ssize_t` can fail; an `int`/`Py_ssize_t` subscript is unaffected.
+
+172. **An abi3 build compiles the wheel once but rebuilds the *test venv* per
+    interpreter, so a source-built test dependency costs 3x (the chromadb case; see
+    `build-chromadb.yml`).** Gotchas 11/34/155 all sell the abi3 collapse as "one build,
+    re-tested on each interpreter" — true of the wheel and false of everything around it.
+    cibuildwheel creates a fresh venv and re-runs `pip install <test-requires> <wheel>`
+    for every identifier in `CIBW_BUILD`, and pip's wheel cache is keyed by interpreter
+    tag, so any dependency without a riscv64 wheel is compiled once per entry. chromadb's
+    test phase resolved **grpcio** and **pandas** from PyPI — whose newest releases are
+    ahead of what our registry hosts and have no riscv64 build — turning a 3-line
+    `CIBW_TEST_REQUIRES` into six heavy source builds bolted onto an already multi-hour
+    Rust compile, against a 720-minute timeout.
+    - **Gotcha 67's `PIP_ONLY_BINARY=<names>` is the fix, but it belongs in
+      `CIBW_TEST_ENVIRONMENT` here** (gotcha 12's split): it is a test-phase concern only,
+      and `test_environment.as_dictionary(prev_environment=...)` layers it *on top of*
+      `CIBW_ENVIRONMENT`, so the registry `PIP_EXTRA_INDEX_URL` set there still applies.
+      Scope it to the names the registry actually hosts for your interpreters — a
+      dependency with no riscv64 wheel *anywhere* (chroma-hnswlib, mmh3) must stay
+      source-built, and naming it would make resolution impossible.
+    - **Before accepting a source build, read the dependency's own release workflow for
+      the flags its published wheels carry.** chroma-hnswlib's `setup.py` appends
+      `-march=native` unless `HNSWLIB_NO_NATIVE` is set, while its `release.yml` sets
+      `CIBW_ENVIRONMENT: HNSWLIB_NO_NATIVE=true` — so reproducing that is *less*
+      divergence than letting the sdist take its default, and it removes an arch-specific
+      unknown (whether the image's GCC accepts `-march=native` on riscv64) for free. One
+      `gh api repos/<o>/<r>/contents/.github/workflows/<f>` settles it.
+    - **`[profile.release] debug = 2` next to maturin's `strip = true` is pure waste on a
+      slow runner** (extends gotcha 141, which covers picking the *profile*): the DWARF is
+      generated for the whole crate graph and then thrown away by the strip, so
+      `CARGO_PROFILE_RELEASE_DEBUG=0` in `CIBW_ENVIRONMENT` changes no shipped byte and
+      cuts both compile time and target-dir size. Read `[profile.release]` in the
+      workspace root before budgeting the build.
+    - **Activate the venv in your local dry run, or it invents failures.** cibuildwheel
+      runs `test-command` with the test venv's `bin` first on `PATH`, so a suite that
+      shells out (`subprocess.run(["python", "-m", ...])` — a common way to test import
+      behaviour in a clean process) works in CI. Running gotcha 52's rehearsal as
+      `../venv/bin/python -m pytest` instead leaves `python` unresolvable and that test
+      fails with a bare `FileNotFoundError` deep inside `subprocess`. The trap is that the
+      obvious response is to deselect it: this port arrived carrying a PR-description note
+      claiming exactly that test "needs network", when re-running it with the venv on
+      `PATH` passes in 0.4s.
+
+173. **`gh pr list --state open --head <pkg>` does not see a *merged* PR, so a finished
+    port reads as unstarted work — check `--state all` and the registry first (the
+    pillow-heif case).** The standard resume check looks for an open PR on the package's
+    branch. A port that has already landed answers `[]`, while everything else on the
+    machine still looks mid-flight: the local branch exists, the worktree is still there at
+    its pre-merge commit, and `git log` in it shows a normal-looking WIP commit. Starting
+    over from that state duplicates a merged workflow and, if it gets as far as a second
+    `main` dispatch, re-uploads files GitLab already has (`HTTPError: 400 Bad Request`,
+    after a full multi-hour build). Three cheap calls settle it before any research:
+    ```bash
+    gh pr list --state all --search <pkg> --json number,state,headRefName,url
+    curl -s -o /dev/null -w '%{http_code}\n' --max-redirs 0 https://pypi.riseproject.dev/simple/<pkg>/
+    git log --oneline origin/main -- .github/workflows/build-<pkg>.yml
+    ```
+    A `200` from the registry plus a merged PR means the work is done including the publish
+    dispatch; verify the post-merge bookkeeping (issue, `closingIssuesReferences`, project
+    Status) rather than the port.
+    - **An `origin/github-actions/add-doc-for-<pkg>` branch is the strongest single tell**,
+      and it shows up in a plain `git branch -a | grep <pkg>` before you have asked GitHub
+      anything: only `publish-wheels` creates it, and only on a run whose ref was `main`.
+      Its existence proves the wheels reached the registry. The matching `docs: add <pkg>`
+      PR is the maintainer's to merge, not yours.
+    - **`docs/packages/<pkg>.yaml` missing from `main` is not evidence the port is
+      incomplete** — it arrives through that separate docs PR, so it lags the wheels by
+      however long the maintainer takes.
+
+174. **A `<pkg>/` directory at the checkout root is only a shadowing hazard when it holds
+    an `__init__.py` (bounds gotchas 25/36/148).** Those three all treat a same-named
+    directory beside the tests as something to stage away from, and reach for
+    `CIBW_TEST_SOURCES` or a rename to do it. The rule is narrower than that: `PathFinder`
+    treats a directory *without* `__init__.py` as a namespace **portion**, which it records
+    and then keeps scanning `sys.path` for a concrete loader — a real module or extension
+    found at any later entry wins, and the namespace package is only materialised when
+    nothing else matches. So a checkout root carrying `<pkg>/` purely as a typing stub
+    holder (`__init__.pyi` + `py.typed`, packaged alongside a top-level
+    `Extension("<pkg>", ...)` — ciso8601's layout, and a common one for C extensions that
+    want inline types) cannot shadow the installed wheel, however the tests are run.
+    - **`ls <pkg>/__init__.py` is the whole check**, and it is worth doing before adding
+      staging or a rename you do not need — both are divergence, and a rename in
+      particular breaks relative imports inside the suite.
+    - **The inverse still holds and is the common case**: gotcha 25's `test/__init__.py`
+      and gotcha 148's `<pkg>/test/` are regular packages, so the directory *is* a concrete
+      loader and does win.
+    - Confirm rather than reason about it: `python -c "import <pkg>; print(<pkg>.__file__)"`
+      from the directory in question, on any host, in one second — and keep that as the
+      test command's first link (gotcha 20) so a regression is loud.
+175. **One `PIP_BUILD_CONSTRAINT` file covers the project's build tool *and* every
+    dependency pip source-builds in the test phase — cheaper than gotcha 23's preinstall
+    (the habluetooth case; see `build-habluetooth.yml`).** Gotchas 23/29/118 all fix a
+    floating build tool by preinstalling a pin and disabling isolation, which reaches only
+    the *top-level* build. A Cython/setuptools release that a new tool version breaks
+    usually breaks its **siblings from the same author** too, and those arrive as ordinary
+    runtime requirements that pip compiles from sdist during `pip install <wheel>` — a
+    second, identical failure your preinstall cannot touch. habluetooth 6.26.7 and its
+    `bluetooth-data-tools` dependency both fail on Cython 3.3.0 with `Signature not
+    compatible with previous declaration` over their augmenting `.pxd` files. Write the
+    file once in `before-all` and name it in both variables:
+    ```yaml
+    CIBW_BEFORE_ALL: echo 'Cython<3.3.0' > /cython-constraint.txt
+    CIBW_ENVIRONMENT: >-
+      PIP_CONSTRAINT=/cython-constraint.txt
+      PIP_BUILD_CONSTRAINT=/cython-constraint.txt
+    ```
+    `before_all` runs in the container before any build, so the path exists by the time
+    either phase reads it. The payoff over gotcha 23's shape is that **build isolation
+    stays on**, so the build runs exactly as upstream's does — no `--no-isolation`, no
+    restating `build-system.requires`, and nothing to refresh when upstream adds a
+    requirement. Reach for the preinstall only when the tool must be *importable* by
+    `setup.py` before the backend runs (gotcha 23's easy_install path).
+    - **A poetry-core project is where this bites hardest**, because `[tool.poetry.build]
+      script = "build_ext.py"` puts the cythonize call inside the backend: there is no
+      `setup.py` to preinstall for, and the generated `setup.py` is executed by the
+      *isolated* env's interpreter.
+
+176. **`log_level` is the third pytest ini key that decides whether a staged suite passes,
+    after `addopts` and `markers` — and the failure it produces looks like a compiled-vs-pure
+    bug (extends gotchas 25/28/108).** `caplog` captures at **WARNING** unless the ini sets
+    `log_level`, so a suite whose assertions read `caplog.text` for DEBUG/INFO messages
+    (`assert "Waiting for adapter to initialize" in caplog.text`) fails the moment
+    `CIBW_TEST_SOURCES` staging drops the project's `pyproject.toml`. The traceback shows the
+    *other* records the test did emit, which reads like the extension logging differently from
+    the pure-Python fallback — exactly the gotcha-20 failure you are primed to look for. It is
+    not: nothing about it is arch- or build-dependent.
+    - **Separate "our port" from "our staging" by running the identical staged command against
+      upstream's *released* wheel** (gotcha 52's dry run, aimed at a different question). Six
+      failures reproducing byte-for-byte against habluetooth's own PyPI wheel settled it in one
+      container run, before any riscv64 cycle.
+    - **Then supply the one key rather than staging the file**, when `addopts` is coverage-only
+      (gotcha 28): `python -m pytest tests -o log_level=NOTSET` avoids pulling in `pytest-cov`,
+      `pytest-timeout` and — the real hazard — an ini `timeout = 5` sized for upstream's x86 CI
+      that would flake on the riscv64 runner (gotcha 38). `-o <key>=<value>` overrides or
+      supplies any ini key without a rootdir.
+
+
+177. **Narrowing an upstream test suite because its heavy requirements file has no
+    riscv64 wheels is almost always unnecessary — the modules that need those libraries
+    skip themselves (the pyinstaller case; see `build-pyinstaller.yml`).** A project with
+    a two-tier test-requirements split (`requirements-base.txt` for the framework,
+    `requirements-libraries.txt` pinning Qt/numpy/scipy/pandas/matplotlib/Django) invites
+    the conclusion that only a hand-picked module can run on riscv64, and the port then
+    ships one file out of forty. It reads as prudent and is a large, silent coverage loss:
+    every module reaching those libraries is already guarded by `pytest.importorskip` or
+    an equivalent, so installing only the base requirements makes them **skip**, not
+    error, and the whole suite runs. pyinstaller's port tested `tests/unit` plus
+    `tests/functional/test_basic.py` (417 tests) where upstream's `ci.yml` runs
+    `tests/unit tests/functional`; widening it to upstream's own selector took the job to
+    773 tests — multiprocessing, signals, symlinks, ctypes, the import hooks, splash,
+    reproducibility and security, i.e. most of what a bootloader port exists to prove.
+    - **Price it before deciding, on aarch64 in minutes** (gotcha 101's rehearsal, aimed
+      at the *test* phase): build the wheel in an `ubuntu:24.04` arm64 container with the
+      same uv-provisioned interpreter, install only the base requirements, and run the
+      full suite. The pass/skip/fail split falls straight out — here 452 passed, 396
+      skipped, 12 failed — and the 12 failures are the exact deselect list, each one
+      reproducing off riscv64 and therefore not a port defect.
+    - **The guard's strength is where the residue clusters.** A module gated on
+      *importability* rather than *usability* is the one that fails instead of skipping:
+      pyinstaller's `test_splash.py` checks `tcltk_info.tkinter_fully_usable` and skips,
+      while `test_libraries.py` checks only `can_import_module("tkinter")` — true under
+      an interpreter that ships the Python package without the Tcl/Tk shared libraries —
+      so its two tkinter tests fail. Grep the suite for the weaker predicate rather than
+      inferring the list from a failing run.
+    - **Deselect per matrix entry, never globally** (gotcha 33). These failures track the
+      *interpreter build*, and one entry usually has a different one — the riscv64
+      runner's own 3.12 has shared `_ctypes`, a shared libssl and no tkinter at all, so it
+      passes the reclassification and multipackage tests and skips the tkinter ones, while
+      the PBS 3.13/3.14 entries need all seven deselects.
+    - **Extends gotcha 169's list of what python-build-standalone folds into the
+      interpreter: OpenSSL too.** `_ssl` is builtin with no `libssl.so` to collect, so a
+      test asserting that a frozen application bundles a shared OpenSSL —
+      `'.*<app>:.*ssl.*'` in an expected-contents manifest — fails on every PBS
+      interpreter and on no distro one. Settle it with
+      `python -c "import sys; print('_ssl' in sys.builtin_module_names)"` rather than from
+      the failure text, which only says an expected entry was missing.
+178. **Run gotcha 101's riscv64 `pip download` check inside a *Linux* container, and run
+    it over the resolved closure rather than the direct dependencies (the habluetooth case).**
+    Gotcha 113 warns that the aarch64 rehearsal installs wheels where riscv64 would compile
+    from sdist, and offers `PIP_NO_BINARY` as the corrective. That cannot catch the commoner
+    inverse: a dependency two levels down whose newest release has **no riscv64 wheel at
+    all**, so the aarch64 run resolves it silently and the riscv64 job dies in the
+    *test-phase* `pip install <wheel>`, after a clean build and auditwheel repair.
+    habluetooth -> `bluetooth-data-tools` -> `cryptography`: PyPI's newest cryptography ships
+    no riscv64 file, so pip fell back to its sdist and died on `Target triple not supported by
+    rustup: riscv64-unknown-linux-gnu` (gotcha 10's missing `gc`). Fix is gotcha 67's, applied
+    to a name you never typed: `PIP_EXTRA_INDEX_URL` plus `PIP_ONLY_BINARY=<that one dep>`, so
+    the newer PyPI release stops being a candidate and resolution lands on our wheel.
+    - **`pip download --platform` does not override *marker* evaluation**, which is taken
+      from the host, so running the check on macOS makes every `platform_system == "Darwin"`
+      requirement real — bleak's `pyobjc-core` turned a fine dependency set into a
+      `ResolutionImpossible` naming 60 versions of bleak. Run the same command in any Linux
+      container (the aarch64 manylinux image will do) and the markers evaluate as the target
+      does.
+    - **Feed it the whole `requires_dist` closure, not the package's own list.** The gotcha-40
+      sweep reads one level; the blocker here was three levels down and had no riscv64 file on
+      either index, which is exactly what the download check reports in one line.
+
+179. **A pinned *git* dependency that does not build on riscv64: redirect it with a cargo
+    `[patch]` and keep `--locked` (the pyroscope-io/py-spy case; see
+    `build-pyroscope-io.yml`).** Gotcha 78 says a crate reached through a git dependency
+    cannot be fixed without vendoring it, and points at narrowing the Cargo feature that
+    pulls it in. When the crate is a core dependency with no feature gate — py-spy, whose
+    `pyruntime::get_tstate_current_offset` has one definition per architecture and none
+    matching riscv64, so the build dies with `error[E0425]: cannot find function
+    'get_tstate_current_offset' in module 'pyruntime'` — there is a third way that is
+    neither vendoring the whole tree nor forking: clone the pinned revision beside the
+    project, patch it, and add to the root manifest
+    ```toml
+    [patch."https://github.com/<owner>/<crate>"]
+    <crate> = { path = "../<crate>" }
+    ```
+    **The entire `Cargo.lock` delta is the one `source = "git+..."` line**, so every other
+    dependency stays pinned exactly as upstream released it and a `--locked` build
+    (setuptools-rust's `cargo_manifest_args=["--locked"]`, maturin's `--locked`) keeps
+    working once that line is in the patch too. Generate the delta rather than writing it:
+    apply the `[patch]`, run `cargo metadata`, `git diff Cargo.lock`.
+    - **Clone on the host, not from `before-all`** — cibuildwheel copies the whole cwd into
+      the container (gotcha 142), so a sibling directory created by a `run:` step is present
+      when cargo resolves, and `git apply` can reach the patch file from this repo's second
+      checkout.
+    - **Settle the arch question for the whole dependency tree before writing any YAML**,
+      with `cargo check --target riscv64gc-unknown-linux-gnu` in a `rust:trixie` container —
+      no cross linker needed, `check` does not link. Two environment facts get a real tree
+      past its first build script: `dpkg --add-architecture riscv64 && apt-get install
+      libssl-dev:riscv64 gcc-riscv64-linux-gnu` satisfies **openssl-sys**, whose build script
+      shells out to `<triple>-gcc` to expand headers (`failed to find tool
+      "riscv64-linux-gnu-gcc"` otherwise), and `PYO3_CROSS_PYTHON_VERSION=3.12` satisfies
+      **pyo3**, which otherwise stops with `PYO3_CROSS_PYTHON_VERSION or either an
+      abi3-py3* or abi3t-py3* feature must be specified when cross-compiling`. 230 crates
+      type-checked in 12 seconds that way, which is what turned "py-spy may need porting"
+      into a one-line change.
+
+180. **The aarch64 rehearsal defaults to the *wrong* base image — pass
+    `CIBW_MANYLINUX_AARCH64_IMAGE` explicitly (sharpens gotcha 101).** `cibuildwheel --only
+    cpXY-manylinux_aarch64` uses cibuildwheel's default aarch64 image,
+    `manylinux_2_28_aarch64`, which is **AlmaLinux 8** — a different distro generation from
+    the Rocky 10 that `manylinux_2_39_riscv64` is built on, with a different package set and
+    a much older toolchain. So the rehearsal whose whole purpose is to catch `dnf`/`yum` and
+    toolchain differences quietly validates the wrong base and goes green on a recipe that
+    fails in CI. Set `CIBW_MANYLINUX_AARCH64_IMAGE=quay.io/pypa/manylinux_2_39_aarch64` on
+    the run. Concretely: the 2_28 run built, repaired and tested the wheel in two minutes,
+    while the 2_39 run on the identical tree died at `/usr/bin/ld: cannot find -lstdc++`
+    because RHEL 10 moved `libstdc++.a` into `libstdc++-static` (gotcha 77) — exactly the
+    class of failure the rehearsal exists to find.
