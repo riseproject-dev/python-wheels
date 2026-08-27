@@ -106,10 +106,17 @@ jobs:
           # that here so the wheel is self-contained.
           libs=cli/src/semgrep/bin/libs
           mkdir -p "$libs"
-          ldd cli/src/semgrep/bin/semgrep-core | awk '/=> \//{print $3}' |
-            grep -Ev '/(libc|ld-linux[^/]*)\.so' > bundled-libs.txt
+          # every executable in bin/, not just semgrep-core: osemgrep is a separate binary
+          # and needs libelf, which upstream's own runner happens to have installed.
+          for b in cli/src/semgrep/bin/*; do
+            [ -f "$b" ] && [ -x "$b" ] || continue
+            ldd "$b" 2>/dev/null | awk '/=> \//{print $3}'
+          done | grep -Ev '/(libc|ld-linux[^/]*)\.so' | sort -u > bundled-libs.txt
           xargs -r -a bundled-libs.txt -I{} cp -L {} "$libs/"
-          patchelf --set-rpath '$ORIGIN/libs' cli/src/semgrep/bin/semgrep-core
+          for b in cli/src/semgrep/bin/*; do
+            [ -f "$b" ] && [ -x "$b" ] || continue
+            patchelf --set-rpath '$ORIGIN/libs' "$b"
+          done
 
           python3 -m venv /tmp/buildenv
           /tmp/buildenv/bin/pip install --quiet --upgrade pip build
