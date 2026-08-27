@@ -14,8 +14,11 @@ SIGILL.  Most riscv64 hardware in circulation (JH7110, HiFive P550) has no
 vector unit, and a manylinux_riscv64 wheel is expected to run on the
 rv64gc baseline.
 
-Mirror the existing has_sve() aarch64 path: read AT_HWCAP and only offer
-RISCV_RVV when the V bit is set.  dispatch_with_fallback() already falls
+Probe with riscv_hwprobe(RISCV_HWPROBE_KEY_IMA_EXT_0) and offer RISCV_RVV
+only when RISCV_HWPROBE_IMA_V is set.  glibc exposes __riscv_hwprobe() only
+from 2.40 and the manylinux image is 2.39, so the syscall is issued directly.
+Kernels before 6.4 do not implement it and fail with ENOSYS; those fall back
+to the AT_HWCAP bit, mirroring the existing has_sve() aarch64 path.  dispatch_with_fallback() already falls
 back from RISCV_RVV to SIMDLevel::NONE, so the scalar kernels take over on
 hardware that lacks it.
 
@@ -23,12 +26,13 @@ Signed-off-by: Ludovic Henry <git@ludovic.dev>
 ---
  faiss/utils/simd_levels.cpp | 28 +++++++++++++++++++++++++---
  1 file changed, 25 insertions(+), 3 deletions(-)
+---
 
 diff --git a/faiss/utils/simd_levels.cpp b/faiss/utils/simd_levels.cpp
 index e17796b..dd6a996 100644
 --- a/faiss/utils/simd_levels.cpp
 +++ b/faiss/utils/simd_levels.cpp
-@@ -57,6 +57,24 @@ static bool has_sve() {
+@@ -57,6 +57,45 @@
  }
  #endif
  
@@ -36,11 +40,32 @@ index e17796b..dd6a996 100644
 +#if defined(__riscv) && defined(__linux__)
 +
 +#include <sys/auxv.h>
++#include <sys/syscall.h>
++#include <unistd.h>
++#include <cstdint>
++
 +#ifndef COMPAT_HWCAP_ISA_V
 +#define COMPAT_HWCAP_ISA_V (1 << ('V' - 'A'))
 +#endif
 +
++// glibc only declares __riscv_hwprobe() from 2.40 and manylinux_2_39 is older,
++// so issue the syscall directly.  Kernels before 6.4 do not implement it and
++// fail with ENOSYS; AT_HWCAP is the fallback for those.
++#ifndef __NR_riscv_hwprobe
++#define __NR_riscv_hwprobe 258
++#endif
++#define RISCV_HWPROBE_KEY_IMA_EXT_0 4
++#define RISCV_HWPROBE_IMA_V (1ULL << 2)
++
 +static bool has_rvv() {
++    struct {
++        int64_t key;
++        uint64_t value;
++    } pair = {RISCV_HWPROBE_KEY_IMA_EXT_0, 0};
++
++    if (syscall(__NR_riscv_hwprobe, &pair, 1UL, 0UL, nullptr, 0U) == 0) {
++        return (pair.value & RISCV_HWPROBE_IMA_V) != 0;
++    }
 +    return (getauxval(AT_HWCAP) & COMPAT_HWCAP_ISA_V) != 0;
 +}
 +
@@ -53,7 +78,7 @@ index e17796b..dd6a996 100644
  // Detect x86 microarchitecture flags used for kernel routing. Uses raw
  // cpuid so it is safe to run on any CPU regardless of compiled SIMD level.
  #if defined(__x86_64__)
-@@ -244,9 +262,13 @@ SIMDLevel SIMDConfig::auto_detect_simd_level() {
+@@ -244,9 +283,13 @@ SIMDLevel SIMDConfig::auto_detect_simd_level() {
  #endif
  
  #if defined(__riscv) && defined(COMPILE_SIMD_RISCV_RVV)
