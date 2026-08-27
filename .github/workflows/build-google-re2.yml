@@ -1,0 +1,130 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `wheel-linux` job of
+# https://github.com/google/re2/blob/2025-11-05/.github/workflows/python.yml
+name: Build google-re2 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'google-re2 version to build (e.g. 1.1.20251105)'
+        required: true
+        default: '1.1.20251105'
+  pull_request:
+    paths:
+      - '.github/workflows/build-google-re2.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.1.20251105' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  GOOGLE_RE2_VERSION: ${{ inputs.version || '1.1.20251105' }}
+  # abseil-cpp version that re2's MODULE.bazel pins at this tag.
+  ABSEIL_VERSION: '20250512.1'
+  # Upstream's Bazel build uses pybind11 2.13.6, which predates CPython 3.14 support.
+  PYBIND11_VERSION: '3.1.0'
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build google-re2 ${{ inputs.version || '1.1.20251105' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      - name: Derive the upstream tag from the version
+        run: |
+          tag="$(echo "${GOOGLE_RE2_VERSION}" | sed -E 's/^1\.1\.([0-9]{4})([0-9]{2})([0-9]{2})$/\1-\2-\3/')"
+          echo "RE2_TAG=${tag}" >> "$GITHUB_ENV"
+
+      - name: Checkout re2 ${{ env.RE2_TAG }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: google/re2
+          ref: ${{ env.RE2_TAG }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT_PASS_LINUX: ABSEIL_VERSION PYBIND11_VERSION
+          # Upstream builds the extension with Bazel, which publishes no riscv64
+          # binary; setup.py's other path links a system RE2, so build RE2 here.
+          # abseil-cpp is static-with-PIC so it ends up inside libre2.so, which
+          # keeps the wheel the size Bazel's static link produces upstream.
+          CIBW_BEFORE_ALL_LINUX: >-
+            mkdir -p /tmp/abseil-cpp &&
+            curl -sSLf "https://github.com/abseil/abseil-cpp/archive/refs/tags/${ABSEIL_VERSION}.tar.gz"
+            | tar -xz -C /tmp/abseil-cpp --strip-components=1 &&
+            cmake -S /tmp/abseil-cpp -B /tmp/abseil-cpp/build -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CXX_STANDARD=17
+            -DABSL_PROPAGATE_CXX_STD=ON -DABSL_ENABLE_INSTALL=ON -DCMAKE_INSTALL_LIBDIR=lib &&
+            cmake --build /tmp/abseil-cpp/build --parallel --target install &&
+            cmake -S {project} -B /tmp/re2-build -DCMAKE_BUILD_TYPE=Release
+            -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_LIBDIR=lib &&
+            cmake --build /tmp/re2-build --parallel --target install &&
+            ldconfig &&
+            cp /tmp/abseil-cpp/LICENSE {package}/LICENSE.abseil-cpp
+          CIBW_ENVIRONMENT: LIBRARY_PATH=/usr/local/lib LD_LIBRARY_PATH=/usr/local/lib
+          # setup.py reads pybind11's include path at import time and declares no
+          # build-system table, so the pin has to be visible to the build itself.
+          CIBW_BEFORE_BUILD: pip install "pybind11==${PYBIND11_VERSION}" setuptools wheel
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          CIBW_REPAIR_WHEEL_COMMAND: auditwheel repair --strip -w {dest_dir} {wheel}
+          CIBW_TEST_REQUIRES: absl-py
+          CIBW_TEST_SOURCES: python/re2_test.py
+          CIBW_TEST_COMMAND: python python/re2_test.py
+
+      - name: Check the extension and the licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("re2/_re2.") and n.endswith(".so") for n in names), whl
+              assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), whl
+              assert any(n.endswith("licenses/LICENSE.abseil-cpp") for n in names), whl
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: google-re2-${{ env.GOOGLE_RE2_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish google-re2 ${{ inputs.version || '1.1.20251105' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: google-re2-${{ env.GOOGLE_RE2_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
