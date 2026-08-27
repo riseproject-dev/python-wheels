@@ -1454,7 +1454,6 @@ upload without the docs-PR side effect.
     version* of a workflow that already exists on `main`.
 
 
-
 55. **A pure-Python test dependency can go binary mid-stream, and free-threaded x riscv64
     is where that first bites (the hypothesis case).** Gotchas 23/25 pin floating build
     tools and test plugins for *behaviour* drift; this is the packaging variant — a dep that
@@ -4630,3 +4629,387 @@ shape (it is in the diff), or any debugging history. Do not hard-wrap (see PR / 
       than downloading 100 MB: sorting the entries by uncompressed size showed the single
       payload file and the 0.5 MB of Python beside it in one call, which is the whole
       finding.
+
+158. **Editing a PR's *description* is free on a parked port; pushing a commit is not
+    (the complement to gotcha 80).** Gotcha 80 says an ordinary push to a held PR restarts
+    the whole riscv64 matrix, because `pull_request: paths` matches the PR's diff against
+    base on every push. That makes it easy to assume the PR is untouchable and to leave a
+    finished port carrying a description written against an older convention. It is not:
+    GitHub's default `pull_request` activity types are `opened`, `synchronize` and
+    `reopened`, and **`edited` is not among them**, so `gh pr edit --body-file` fires no
+    build at all. Confirmed empirically here — three body edits on a parked PR produced
+    only skipped `pr-trigger.yml` runs and left the green `Build ... (riscv64)` run from
+    the previous day as the newest one on the branch.
+    - **So when resuming an older port (gotcha 65), bring the description up to the
+      current template even when you must not push.** Convention drifts in *both* files:
+      check the branch's `on:`/header against a recently merged sibling **and** the PR body
+      against `CLAUDE.md`'s PR-description template, which may have been added or rewritten
+      after the PR was opened.
+    - **Verify the branch is genuinely undrifted before concluding there is nothing to
+      push.** Being tens of commits behind `main` is not by itself drift — a port that adds
+      only new files (`build-<pkg>.yml`, `patches/<pkg>/**`) cannot conflict, so a rebase
+      buys nothing and costs a full matrix re-run. Diff the conventions, not the commit
+      count.
+    - **A merged dependency PR is not a landed dependency.** The registry check
+      (`curl --max-redirs 0 .../simple/<dep>/` → 302) stays authoritative long after the
+      merge: publishing needs a separate `main` dispatch, and for a heavy package that run
+      itself takes hours (pyarrow's is a 24h-timeout Arrow C++ build). Read the *publish
+      run's* status, not the PR's `mergedAt`, before deciding a blocked port can be
+      unblocked.
+
+159. **Bundling shared libraries next to a binary: `patchelf --set-rpath` writes
+    **DT_RUNPATH**, and the loader does not search an object's RUNPATH for that object's
+    *own* dependencies — every bundled library needs its own `$ORIGIN` (the semgrep case;
+    see `build-semgrep.yml`).** The `ldd`-the-binary / copy-into `bin/libs/` /
+    `patchelf --set-rpath '$ORIGIN/libs'` recipe is the standard way to make a wheel that
+    ships a compiled executable self-contained, and it half works: the binary's *direct*
+    `DT_NEEDED` entries resolve, so most libraries load. The first transitive one does not.
+    semgrep-core links `libdw` but not `libelf`; `libdw`'s `NEEDED libelf.so.1` is looked
+    up using **libdw's** search path (empty), never the executable's, and the wheel dies at
+    startup with `error while loading shared libraries: libelf.so.1`. DT_RPATH *is*
+    inherited, which is why the pre-2000s spelling appeared to work — but the fix is one
+    more line, not `--force-rpath`:
+    ```bash
+    patchelf --set-rpath '$ORIGIN/libs' "$binary"
+    patchelf --set-rpath '$ORIGIN'      "$libs"/*
+    ```
+    - **`ldd` is transitive, so the copy step is already complete** — the missing piece is
+      only the second `patchelf`. That is what makes the failure so late and so confusing:
+      the library is right there in the wheel.
+    - **Check what upstream's own wheel does before inventing a scheme.** Read one bundled
+      library's dynamic section out of upstream's published wheel for another arch — over
+      HTTP range requests, no download (gotcha 41) — and the answer is explicit: semgrep's
+      `libdw.so.1` carries `RUNPATH $ORIGIN`. auditwheel does the same thing for the `.so`s
+      it vendors.
+    - **Parsing `DT_NEEDED`/`DT_RUNPATH` is ~40 lines of `struct` over the ELF program
+      headers**, which is worth having on a host with no `readelf`: it turns "which library
+      is missing and why" into a fact before you spend another multi-hour cycle.
+    - **A wheel that ships a prebuilt binary can be re-tested without rebuilding it.**
+      Download the failed run's wheel artifact, unpack it in the build image under QEMU,
+      apply the candidate `patchelf` there, and run the workflow's own test script against
+      it — that validated this fix end to end (`semgrep --version`, `semgrep-core -version`
+      and the e2e scan) in minutes against a 2.5-hour CI job.
+
+160. **An architecture `select()` that supplies *source* files and ends in
+    `//conditions:default: []` links a library with undefined symbols — the build stays
+    green and the first `dlopen` is where it fails (the ray/boost.context case).** Gotcha
+    71's vendored-SIMD gate at least dies loudly at configure; this one says nothing at
+    all. rules_boost picks Boost.Context's stack-switching assembly — `jump_fcontext`,
+    `make_fcontext`, `ontop_fcontext`, one hand-written file per (arch, ABI, object
+    format) — with `BOOST_CTX_ASM_SOURCES`, which enumerates aarch64/arm/ppc64/x86_64/
+    Apple/Windows and ends in `"//conditions:default": []`. On riscv64 `@boost//:context`
+    is therefore compiled with **no** assembly, and because an ELF shared object may carry
+    undefined symbols, `_raylet.so` linked, all three wheels built, and an 11-hour job
+    failed at the very end on
+    `OSError: .../ray/_raylet.so: undefined symbol: jump_fcontext`.
+    - **The symbol name is the whole diagnosis.** Find which upstream file defines it and
+      whether that project ships an arch variant: Boost has shipped
+      `libs/context/src/asm/{jump,make,ontop}_riscv64_sysv_elf_gas.S` since 1.71.0 and ray
+      pins 1.81.0, so the sources were already in the fetched archive and the fix was a
+      `linux_riscv64` `config_setting` plus one select branch — no new code, and it lands
+      through the project's existing patch list (ray already patches this same file).
+    - **Audit every arch select in one pass — `dlopen` reports only the *first* unresolved
+      symbol**, so fixing them one per cycle is the worst case on a build measured in
+      hours. `grep -n 'linux_x86_64\|linux_aarch64' <build file>` and check each hit that
+      supplies **`srcs`**; ones that only set `linkopts`/`defines` are harmless. rules_boost
+      has exactly two, and only `BOOST_CTX_ASM_SOURCES` mattered — nothing in the graph
+      depends on `:stacktrace` (`grep -n '":stacktrace"' BUILD.boost` returns nothing), so
+      its identically-shaped empty default is dead. Confirm which targets are really linked
+      with `grep -rhoE '@<dep>//:[a-z_0-9]+' --include=BUILD --include='*.bzl' .` over the
+      project.
+    - **Upload the wheel *before* the smoke test.** With `upload-artifact` after the test,
+      a failing import leaves no artifact and the next debugging round costs another full
+      build. Moving it ahead costs nothing — `publish` still gates on the whole job — and
+      hands you the `.so` to run `ldd -r` against, which lists *all* unresolved symbols at
+      once instead of the first. (Filter `Py`-prefixed ones: manylinux extensions resolve
+      those from the interpreter at runtime.)
+    - Settle that the arch's assembly actually builds before spending the cycle: `gcc -c`
+      the three `.S` files in `rockylinux/rockylinux:10` under `--platform linux/riscv64`
+      and `nm --defined-only` the objects.
+    - **A patch that *adds* a file is erased by a `git clean -x` between interpreters.** A
+      workflow that loops interpreters in one checkout wipes build outputs between them
+      (ray: `git clean -f -f -x -d -e python/ray/dashboard/client`), and `git apply` leaves
+      an added file **untracked** — so the new patch is deleted before bazel resolves its
+      label, while the *modified* tracked files survive untouched. Nothing in the patch
+      looks wrong; the build just fails on a missing target. Add it to the `-e` list beside
+      whatever else is staged before the loop, and check with
+      `git clean -n -f -f -x -d -e <existing> | grep <your file>` — a dry run costs nothing
+      and the real thing costs the whole build.
+
+161. **A vendored prebuilt stack can be GPL while every library in it reports LGPL — read
+    `DT_NEEDED`, not the licence string (the av case; see `build-av.yml`).** Gotcha 98 says a
+    dependency bundle fetched from upstream's own sibling build repo is an ordinary port. The
+    licensing half needs its own look, because the sibling repo may carry a patch that changes
+    what the bundle *is*. pyav-ffmpeg patches FFmpeg's `configure` to move `libx264`/`libx265`
+    out of `EXTERNAL_LIBRARY_GPL_LIST` into `EXTERNAL_LIBRARY_VERSION3_LIST`, so FFmpeg builds
+    without `--enable-gpl` and every `libav*.so` answers `license: LGPL version 3 or later` —
+    while `libavcodec` still has `DT_NEEDED` on `libx264.so.165` and `libx265.so.216`, both
+    GPL-2.0-or-later, both shipped in `av.libs/`. Reading the version string, or the
+    `configure` line embedded in the binary (which shows no `--enable-gpl`), gives the wrong
+    answer twice over.
+    - **Settle it from the ELF, on any host, off the wheel you already built**: pyelftools
+      ships with abi3audit, so
+      `ELFFile(open(so,'rb')).get_section_by_name('.dynamic').iter_tags('DT_NEEDED')` over the
+      biggest bundled library names every GPL dependency in one call. Do this before writing
+      the PR's **License** section for any wheel whose `.libs/` holds more than a couple of
+      files — `ls` of the vendored directory tells you the names, not the terms.
+    - **`dist-info/sboms/auditwheel.cdx.json` splits the vendored set for free.** auditwheel
+      (>= 6.8) writes a CycloneDX SBOM naming each bundled library's origin: `pkg:rpm/rocky/...`
+      for the ones it pulled out of the build *image*, and the project's own purl for the rest.
+      One `json.load` separates "our build environment's obligation" (the `gpl_sources` job of
+      gotcha 66) from "upstream's vendored tree" (this one) instead of guessing — here exactly
+      `libxcb`, `libXau`, `libdrm`, all MIT, and no gcc runtime at all.
+
+162. **A sibling build repo pins every source by URL and SHA-256, which makes the GPL/LGPL
+    source release mechanical (extends gotchas 53/66/98).** Gotcha 66's `gpl_sources` job only
+    knows how to fetch source RPMs from the manylinux image; a bundle built by upstream's own
+    `<pkg>-ffmpeg`-style repo has no RPMs, but it does have a pin table —
+    pyav-ffmpeg's `scripts/pkg.py` is importable on its own (`dataclasses` + `platform` only),
+    so `exec`ing it yields `name`, `source_url` and `sha256` for all 17 dependencies. A job on
+    `ubuntu-latest` (gotcha 4 — sources are arch-independent) downloads each tarball, verifies
+    the pin, and hands the result to `publish-wheels`' `gpl-sources-artifact` as
+    `gpl-sources.tar`, which is the same mechanism `collect-gpl-sources` feeds.
+    - **The build repo itself is part of the corresponding source.** It carries the configure
+      arguments and, usually, patches against the dependencies (pyav-ffmpeg patches FFmpeg,
+      GMP, LAME and libvpx) — pristine upstream tarballs alone are *not* the source the binary
+      was built from. Add its release tarball to the same archive.
+    - **The same tarballs are also where the licence texts come from**, so collect both in one
+      pass: glob `COPYING*`/`LICEN[CS]E*`/`NOTICE*` at the top two levels of each archive
+      (x265 keeps its sources under `source/`, gnutls its texts under `doc/`), concatenate per
+      dependency into `LICENSE.<name>`, and stage those at the checkout root where the PEP 639
+      default glob ships them (gotchas 44/123 — PyAV declares `license = "BSD-3-Clause"` and no
+      `license-files`, so the default applies). Verify the glob in 60 seconds with a throwaway
+      `pyproject.toml` + `LICENSE.x264` rather than by inspecting a three-hour wheel.
+    - **Derive the dependency set from the build script's platform conditions, not from the
+      whole pin table** — `use_libvpl`/`use_cuda`/`is_arm32` gate which packages a given arch
+      builds, and shipping a licence for something the wheel does not contain is its own kind
+      of wrong.
+
+163. **A maintainer hold that *names* a condition is an instruction to come back and
+    re-test it, not a permanent park (the positive case gotchas 48/80/158 leave out).**
+    Those three all push one way — a cancelled run is a stop signal, an ordinary push
+    restarts the matrix, edit the description but do not commit — which makes it easy to
+    resume a held port, confirm it is still held, and hand it back untouched forever. Read
+    what the hold actually says first. "Let's wait for `<dep>` to be available and we can
+    enable that dependency" is a *conditional* hold with a checkable trigger and a named
+    follow-up, and one `curl --max-redirs 0 https://pypi.riseproject.dev/simple/<dep>/`
+    (gotcha 30) settles whether it still binds. When it has cleared, doing the thing the
+    maintainer named is the work — including the push that re-fires `pull_request: paths`,
+    because that build is the point rather than collateral damage. An *unconditional* hold
+    ("waiting for dependencies to be available before trying to enable it further", with no
+    dependency that can land) is gotcha 80 and stays binding.
+    - **Check the condition per interpreter, not just per name.** The dep has to cover the
+      tags your matrix builds; gotcha 84's per-tag registry read is the same command.
+    - **`PIP_NO_DEPS=1` is the standing marker of such a hold.** Gotcha 122 introduces it
+      for a runtime dependency with no riscv64 wheel *and* no sdist, and says in as many
+      words that nothing about the port changes when the dependency lands — so when it does,
+      the whole shape comes back out: the env var, the `before-test` that hand-staged what
+      the wheel install could not resolve, and the `--ignore`/`--noconftest` that skipped
+      the tests reaching it. Grep a resumed port for `PIP_NO_DEPS` before anything else.
+    - **The payoff is usually much larger than the diff.** Deleting ten lines here took the
+      suite from 2 tests to 12 and, more to the point, from "the extensions import" to
+      actually running the model-loading path the package exists for. Quote the before/after
+      counts in the PR: a reviewer cannot otherwise tell a re-enabled dependency from a
+      cosmetic change.
+    - **Settle it off-target first, exactly as if it were a new port.** Upstream's released
+      wheel for *any* platform plus the checkout's tests reproduces the full suite on your
+      own host in seconds (gotcha 52), so you learn which tests the dependency unlocks, and
+      that they pass, before spending a queued riscv64 cycle.
+
+164. **A test helper with a per-architecture syscall table falls back to a fixed sleep on
+    riscv64 — and riscv64's numbers are aarch64's (the memray case).** Test suites that need
+    "wait until the child is actually blocked" commonly poll `/proc/<pid>/syscall` against a
+    hardcoded table, with an `else: time.sleep(1.0)  # hope for the best` arm for unknown
+    architectures. That arm is gotcha 38's fixed-timeout shape in disguise, and it is the only
+    one riscv64 ever reaches: memray's `_wait_until_process_blocks` gave the `memray live`
+    client one second to reach its `connect()`, the runner needed longer, and the SIGINT the
+    test then sent hit the default handler — `assert -2 == 0`, on every interpreter, with
+    nothing about the wheel at fault.
+    - **riscv64 uses the unified `scripts/syscall.tbl` (abi `64`/`common`), the same table
+      aarch64 uses, so adding `riscv64` to the existing aarch64 branch is the whole patch** —
+      nanosleep 101, clock_nanosleep 115, accept 202, connect 203. Confirm rather than assert
+      it: `curl -s https://raw.githubusercontent.com/torvalds/linux/v6.12/scripts/syscall.tbl`,
+      then `dnf install linux-libc-dev`/`apt-get install linux-libc-dev` in a riscv64 container
+      and grep `/usr/include` for `__NR_*`. Both take seconds and the second one is the real
+      header the kernel ships.
+    - **Widening the branch is safer than widening the sleep.** These loops have no timeout, so
+      a wrong number hangs the job until the workflow's `timeout-minutes` — check the arch
+      selects `HAVE_ARCH_TRACEHOOK` (riscv does, so `/proc/<pid>/syscall` is populated) before
+      trusting the poll at all.
+    - Grep for it while reading the suite: `platform.machine()` or `uname -m` next to a literal
+      number table is the tell, and the same shape shows up wherever a project maps arch →
+      syscall/ABI constants (seccomp filters, ptrace helpers, `libc` fallbacks).
+
+165. **Three ways gotcha 137's licence sweep silently under-collects, and one image fact that
+    makes it matter far more on riscv64 (the memray case).** Gotcha 137's `ldd` + `rpm -qf`
+    recipe is right, and pyproj proved it — but each of these fails *quietly*, producing a
+    green build and a wheel that is short a notice.
+    - **`ldd` does not list the libraries you pass it.** Running it over the project's direct
+      link dependencies gets the transitive closure and misses the roots themselves, so exactly
+      the libraries you were thinking about are the ones absent. Add `readlink -f` of each root
+      to the list. In memray's case that silently dropped `lz4-libs` and
+      `elfutils-debuginfod-client` — and the `-devel` symlink you ldd is owned by a different
+      package than the runtime `.so.N` the wheel ships, so resolve before querying rpm.
+    - **`%license` survives `tsflags=nodocs`; `%doc` does not.** Gotcha 137 says to
+      `dnf reinstall --setopt=tsflags=`, but after doing so the file is still invisible to
+      `rpm -q --licensefiles` — it was never marked `%license`. `lz4-libs` ships
+      `/usr/share/doc/lz4-libs/LICENSE` this way. The third fallback tier is
+      `rpm -qd "$pkg" | grep -iE '/(LICEN[CS]E|COPYING|NOTICE)'` after the reinstall.
+    - **Exclude only what auditwheel's allowlist actually covers.** glibc, the gcc runtime,
+      libstdc++ and **zlib** (`zlib-ng-compat` on Rocky 10) are on the manylinux policy
+      allowlist and never vendored, so collecting licences for them is noise; everything else
+      in the closure does land in the wheel. Cross-check the finished list against
+      `unzip -l <whl> | grep '\.libs/'` — that is the only proof the sweep was complete.
+    - **The riscv64 manylinux image ships full `libcurl`, not `libcurl-minimal`.** Anything
+      linking libcurl — `libdebuginfod` is the common route, via elfutils — therefore drags in
+      krb5, openldap, libssh, libfido2, libcbor, libsasl2, libidn2, libunistring, systemd's
+      libudev, pcre2 and brotli. memray's riscv64 wheel vendors **33** shared libraries where
+      upstream's `manylinux_2_28` wheels vendor 9, so a licence gap that is minor upstream is
+      substantial for us, and the `gpl_sources` package list has to grow to match (keyutils,
+      libcap, libidn2, libssh, libunistring, libxcrypt, libzstd, lz4, pcre2, systemd on top of
+      gcc and elfutils). `dnf download --source` resolves all of them by binary package name
+      and dedupes to one SRPM each; validate the names on the aarch64 image first, since source
+      RPMs are arch-independent.
+    - **scikit-build-core applies the same default glob setuptools does, even behind a legacy
+      `license = {text = "..."}` table** — `wheel.py` runs `Path().glob("LICEN[CS]E*")` (plus
+      `COPYING*`/`NOTICE*`/`AUTHORS*`) from the build cwd when neither `project.license-files`
+      nor `tool.scikit-build.wheel.license-files` is set. So gotcha 44's drop-a-file-at-the-root
+      trick works here with no patch: stage `LICENSE.<pkg>.<file>` into `{project}` from
+      `before-all` and it lands in `dist-info/licenses/`. `{project}` is substituted in
+      `before-all` (`platforms/linux.py` calls `prepare_command(..., project=..., package=...)`),
+      so the collector can be a script checked out beside the workflow.
+
+166. **The riscv64 runners' libgomp faults on the `dynamic` and `guided` OpenMP
+    schedules — `static` is unaffected (the lightgbm case; see `patches/lightgbm/4.7.0/0002-*`).**
+    A 40-line C program that allocates nothing in the loop body segfaults 3 times out of 3
+    under `schedule(guided)` and `schedule(dynamic)`, on the bare `ubuntu-24.04-riscv` runner
+    with GCC 13.3.0 *and* inside `manylinux_2_39_riscv64` with GCC 14.3.1, while
+    `schedule(static)` on the same program and 30M concurrent `malloc`/`free` per thread are
+    clean. The identical binaries pass under QEMU riscv64 and on `manylinux_2_39_aarch64` at
+    4, 16 and 64 threads. Tracked as riseproject-dev/python-wheels#617.
+    - **So an OpenMP-heavy port can fail with a SIGSEGV that has nothing to do with the
+      package.** The signature is a fault *inside* libgomp — `gomp_iter_guided_next()` or
+      `gomp_iter_dynamic_next()` at frame #0 with the project's `._omp_fn.N` at #1 — hitting
+      the packages that run a very large number of small parallel regions. lightgbm reaches
+      it once per boosting iteration through the ranking objective and once per sparse
+      dataset through `FeatureGroup::FinishLoad`.
+    - **Three env vars distinguish it from a bug in the package, in minutes on the runner**:
+      `OMP_NUM_THREADS=1` and `OMP_WAIT_POLICY=passive GOMP_SPINCOUNT=0` each take it from
+      9/10 failures to 0/10, while rebuilding the package at `-O1` changes nothing. A
+      codegen bug would not care about the wait policy; a package data race would not be
+      reproduced by a C program containing none of the package.
+    - **`grep -rho 'schedule([a-z]*' src include | sort | uniq -c` prices the workaround
+      before you write it.** LightGBM asks for dynamic or guided in 13 of ~230 parallel
+      regions, so a patch moving those to static is small and costs only load balancing on
+      loops whose iterations differ in cost. Tag it `Inappropriate` with the issue link and
+      say to revert it when the toolchain is fixed — it is our infrastructure's defect, not
+      upstream's.
+
+167. **A riscv64-only intermittent SIGSEGV: climb the control ladder before you debug
+    anything.** Gotcha 60 says to reproduce a fault on your own host before blaming the
+    architecture, and gotcha 115 gets a native backtrace from CI when that fails. Between
+    them sit three controls that say *architecture, toolchain, or code* — none needs the
+    runner, and each costs minutes:
+    - **QEMU riscv64 executes the same instructions but serialises atomics**, so a
+      *miscompile* reproduces there and a *race* does not. lightgbm's whole suite ran green
+      under QEMU while the same tree faulted on the runner — that alone ruled out codegen.
+    - **`manylinux_2_39_aarch64` on an arm64 host is real parallelism on a weakly-ordered
+      machine** (gotcha 101's rehearsal used as a race control). Oversubscribe it —
+      `OMP_NUM_THREADS` at 4, 16 and 64 — and loop the failing tests. 36 clean runs there
+      put the fault on riscv64 rather than on the code's threading.
+    - **Then a standalone C reproducer of whatever the backtrace names**, run on the bare
+      runner *and* in the manylinux image. Whether a 40-line `#pragma omp parallel for`
+      faults on its own is the whole difference between "our wheel is broken" and "the
+      toolchain is", and it is a two-minute job that needs no wheel build.
+    **ThreadSanitizer is not one of the controls.** GCC's libgomp carries no TSan
+    annotations, so its barriers are invisible and every cross-region access is reported:
+    lightgbm produced 80 warnings, all of them allocator reuse. The tell is that *every*
+    `SUMMARY:` line names `operator new`/`delete`/`memcpy`/`memmove`/`memset`/`free` rather
+    than a project line — check with `grep '^SUMMARY: ThreadSanitizer' tsan.out | sed
+    's|.*data race ||' | sort | uniq -c` before reading a single report. It is usable only
+    with an annotated runtime (LLVM libomp + Archer), and the aarch64 manylinux image ships
+    no clang.
+
+168. **Running a diagnostic on the riscv64 runner: drive it from `CIBW_TEST_COMMAND`, and
+    never leave the branch in that state.** Gotcha 115 commits a throwaway gdb loop; the
+    same shape carries any experiment that needs the real hardware — a rebuild at another
+    optimisation level, `MALLOC_CHECK_=3`, an instrumented library swapped over the
+    installed one. Five mechanics, each of which cost a cycle to learn:
+    - **A maintainer can merge while you are mid-experiment.** #481 was merged with the
+      probe job still in the workflow and an `if:` guard switching the build off, so `main`
+      briefly carried a workflow that built nothing. Gotcha 115's "reset and force-push
+      afterwards" is not enough — between pushes the branch head *is* the deliverable. Keep
+      diagnostics to the shortest possible window, and check the PR is still open before
+      pushing the next one.
+    - **A bare `podman run` on `ubuntu-24.04-riscv` dies with `could not find slirp4netns,
+      the network namespace can't be configured` (exit 127)** unless you pass
+      `--network=host`, as `build-cryptography.yml` and `build-orjson.yml` do. It also
+      re-pulls the manylinux image under podman even though cibuildwheel already has it —
+      nine minutes, for nothing.
+    - **Stage helper scripts into the workspace root with a `run:` heredoc before the
+      cibuildwheel step** (gotcha 7) and reach them as `{project}/diag.sh`. `{project}` is
+      the whole checkout inside the container even when `test-sources` has emptied the test
+      cwd (gotcha 5), so an extracted sdist at `{project}/dist/<pkg>-<ver>` is right there
+      to re-run `cmake` against. End the script `exit 0` so a red experiment still lets the
+      job finish.
+    - **Verify the path you are swapping the rebuilt library into.** A wrong path makes
+      `cp` create a file nothing loads, and the experiment silently re-measures the
+      original — a whole "rebuild at -O1" round was wasted that way. Ask the package where
+      it loads from (`python -c 'from <pkg>.libpath import _find_lib_path; print(...)'`)
+      rather than guessing, and print `ls -l` before and after.
+    - **Rebuilding at another optimisation level needs `CMAKE_CXX_FLAGS_RELEASE`, not
+      `CMAKE_CXX_FLAGS`**, when the project appends `-O3` to the latter itself: per-config
+      flags land after `CMAKE_CXX_FLAGS` and the last `-O` wins. And **put anything that
+      needs no wheel in its own job** — a libgomp probe answers in ten minutes instead of
+      queueing behind a multi-hour build.
+
+169. **`astral-sh/setup-uv` hands you a python-build-standalone interpreter, and PBS links
+    statically what a distro ships as shared — which fails tests that assert on module
+    *kind* or bundle system libraries (the pyinstaller case).** The Anatomy section mandates
+    setup-uv because setup-python has no riscv64 support, and gotcha 117 notes it silently
+    reuses the runner's system CPython when the versions match. The other half of the same
+    fact is what PBS *builds*: from **3.13** on, `_ctypes` is compiled into the interpreter
+    (`'_ctypes' in sys.builtin_module_names`) rather than shipped as `lib-dynload/_ctypes*.so`,
+    and PBS's **Linux** builds carry no `libtcl*.so`/`libtk*.so` at all — Tcl/Tk is linked
+    into `_tkinter.so`, while the macOS builds ship them as dylibs. Suites that introspect
+    the interpreter fail on those facts with nothing wrong in the wheel: PyInstaller's
+    `test_extension` asserts `_ctypes` is a `modulegraph.Extension`, and its splash-screen
+    tests die with `Could not determine the path to Tcl and/or Tk shared library`.
+    - **The tell is a matrix where the older interpreters pass and the newer ones fail
+      identically** — the inverse of gotcha 33's shape, and it points at the interpreter
+      *build*, not at a CPython feature gate. PBS 3.12 passes both here because it has
+      `_ctypes` as a shared module and no `_tkinter` at all (so the splash tests skip).
+    - **Settle it on any host in under a minute, no QEMU and no riscv64.**
+      `uv run --no-project --python 3.13 python -c "import sys; print('_ctypes' in sys.builtin_module_names)"`
+      answers the first, and for the second, untar the PBS **linux-x86_64** asset and look
+      for `lib/libtcl*`: absent there too, so the failure is arch-independent. Both
+      reproduced on macOS/arm64 before a single CI cycle was spent.
+    - **Deselect per matrix entry** (gotcha 33), so the interpreter whose PBS build does not
+      trip the assertion keeps running it — an unset `include:` key interpolates to the
+      empty string, so the unaffected entries need no second command shape.
+
+170. **`np.linalg.eig` on a symmetric matrix returns *real* eigenvalues on x86_64 and
+    aarch64 and *complex* ones on riscv64 — a numeric-port trap with no numeric symptom
+    (the statsmodels case).** LAPACK's general `dgeev` computes an imaginary part for every
+    eigenvalue and numpy returns a `float64` array only when all of them are exactly zero.
+    For a matrix that is symmetric by construction (`exog.T @ exog`) the x86_64 and aarch64
+    OpenBLAS kernels land on exact zeros; the `riscv64_generic` ones do not, so the same
+    call returns `complex128` and the failure surfaces far away as
+    `_UFuncOutputCastingError: Cannot cast ufunc 'multiply' output from dtype('complex128')
+    to dtype('float64')` on an in-place multiply several functions later. Nothing about the
+    numbers is wrong — the imaginary parts are ~1e-17 — so it reads like a broken wheel.
+    - **Grep the traceback's call chain for `linalg.eig(` before reading any values.** A
+      complex dtype arriving where the code assumes real is the whole finding; `eigh`
+      (`dsyevd`) is real by construction on every platform and agreed with `eig` to 3e-15 on
+      the same inputs here. That makes it a genuine upstream bug rather than a riscv64
+      workaround — statsmodels still calls `eig` on `main`.
+    - **Reproduce the *mechanism*, not the failure**, since the failure needs the riscv64
+      BLAS: instrument the function on any host and print `ev.dtype` alongside `evmin`. It
+      printed `float64` on aarch64, which is the evidence that the divergence is the dtype
+      and not the arithmetic.
+    - **The neighbouring failure in the same job may be unrelated and needs the opposite
+      treatment.** A maximum-likelihood fit that upstream itself logs as non-convergent
+      (`ConvergenceWarning`) but that is asserted to `atol=1e-4` lands at 1.9e-3 here
+      against 2.4e-8 on aarch64 — gotcha 38's artificial-test-limitation shape. Loosening
+      that tolerance only uncovers the next assertion in the same test (`res.mae < 1e-6`),
+      so drop the one parametrisation and keep the sibling that is exact.
