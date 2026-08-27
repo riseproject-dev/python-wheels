@@ -1,0 +1,219 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/willmcgugan/textual-speedups/blob/v0.2.1/.github/workflows/CI.yml
+name: Build textual-speedups wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'textual-speedups version to build (git tag without the leading v, e.g. 0.2.1)'
+        required: true
+        default: '0.2.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-textual-speedups.yml'
+      - 'patches/textual-speedups/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.2.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.2.1 there.
+  TEXTUAL_SPEEDUPS_VERSION: ${{ inputs.version || '0.2.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build textual-speedups ${{ inputs.version || '0.2.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # The pyo3 extension is not abi3, so upstream ships a wheel per
+        # interpreter.
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout textual-speedups v${{ env.TEXTUAL_SPEEDUPS_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: willmcgugan/textual-speedups
+          ref: v${{ env.TEXTUAL_SPEEDUPS_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch textual-speedups source
+        run: git apply python-wheels/patches/textual-speedups/${{ env.TEXTUAL_SPEEDUPS_VERSION }}/*.patch
+
+      - name: Stage the smoke tests
+        # Upstream ships no test suite and its CI only builds, so exercise the
+        # four classes the module exports against known values instead.
+        run: |
+          mkdir -p tests
+          cat > tests/test_geometry.py <<'EOF'
+          import importlib.metadata
+
+          from textual_speedups import Offset, Region, Size, Spacing
+
+
+          def test_offset():
+              assert repr(Offset(3, 4)) == "Offset(x=3, y=4)"
+              assert tuple(Offset(3, 4)) == (3, 4)
+              assert Offset(3, 4) == Offset(3, 4) != Offset(4, 3)
+              assert Offset(0, 0).is_origin and not Offset(1, 0).is_origin
+              assert Offset(3, 4) + (1, 2) == Offset(4, 6)
+              assert Offset(3, 4) - (1, 2) == Offset(2, 2)
+              assert Offset(3, 4) * 2 == Offset(6, 8)
+              assert -Offset(3, 4) == Offset(-3, -4)
+              assert Offset(-3, -4).clamped == Offset(0, 0)
+              assert Offset(3, 4).transpose == (4, 3)
+              assert Offset(0, 0).get_distance_to(Offset(3, 4)) == 5.0
+              assert Offset(0, 0).blend(Offset(10, 20), 0.5) == Offset(5, 10)
+              assert Offset(-2, 99).clamp(4, 6) == Offset(0, 5)
+
+
+          def test_size():
+              size = Size(5, 3)
+              assert repr(size) == "Size(width=5, height=3)"
+              assert tuple(size) == (5, 3) and size.area == 15
+              assert size.region == Region(0, 0, 5, 3)
+              assert list(size.line_range) == [0, 1, 2]
+              assert (size.with_width(7), size.with_height(7)) == (Size(7, 3), Size(5, 7))
+              assert size + (1, 2) == Size(6, 5)
+              assert size - (1, 2) == Size(4, 1)
+              assert size.contains(4, 2) and not size.contains(5, 2)
+              assert size.contains_point((1, 1))
+              assert size.clamp_offset(Offset(99, -9)) == Offset(4, 0)
+
+
+          def test_region_geometry():
+              region = Region(2, 3, 5, 7)
+              assert repr(region) == "Region(x=2, y=3, width=5, height=7)"
+              assert (region.right, region.bottom, region.area) == (7, 10, 35)
+              assert (region.offset, region.size) == (Offset(2, 3), Size(5, 7))
+              assert region.corners == (2, 3, 7, 10)
+              assert region.center == (4.5, 6.5)
+              assert region.bottom_right == Offset(7, 10)
+              assert region.bottom_right_inclusive == Offset(6, 9)
+              assert (region.top_right, region.bottom_left) == (Offset(7, 3), Offset(2, 10))
+              assert (region.column_span, region.line_span) == ((2, 7), (3, 10))
+              assert list(region.column_range) == [2, 3, 4, 5, 6]
+              assert region.reset_offset == Region(0, 0, 5, 7)
+
+
+          def test_region_operations():
+              region = Region(2, 3, 5, 7)
+              assert region.union(Region(0, 0, 1, 1)) == Region(0, 0, 7, 10)
+              assert region.intersection(Region(0, 0, 4, 5)) == Region(2, 3, 2, 2)
+              assert region.overlaps(Region(0, 0, 4, 5))
+              assert region.contains_region(Region(3, 4, 1, 1)) and region.contains(3, 4)
+              assert region.expand((1, 1)) == Region(1, 2, 7, 9)
+              assert region.grow((1, 2, 3, 4)) == Region(-2, 2, 11, 11)
+              assert region.shrink((1, 1, 1, 1)) == Region(3, 4, 3, 5)
+              assert region.crop_size((3, 3)) == Region(2, 3, 3, 3)
+              assert region.at_offset((0, 0)) == Region(0, 0, 5, 7)
+              assert region.translate((1, 1)) == Region(3, 4, 5, 7)
+              assert region.split_horizontal(2) == (Region(2, 3, 5, 2), Region(2, 5, 5, 5))
+              assert region.split_vertical(2) == (Region(2, 3, 2, 7), Region(4, 3, 3, 7))
+              assert region.split(2, 2) == (
+                  Region(2, 3, 2, 2),
+                  Region(4, 3, 3, 2),
+                  Region(2, 5, 2, 5),
+                  Region(4, 5, 3, 5),
+              )
+              assert Region(10, 10, 2, 2).translate_inside(Region(0, 0, 8, 8)) == Region(6, 6, 2, 2)
+              assert Region(0, 0, 10, 10).get_spacing_between(Region(2, 2, 5, 5)) == Spacing(2, 3, 3, 2)
+
+
+          def test_region_constructors():
+              assert Region.from_corners(1, 2, 5, 6) == Region(1, 2, 4, 4)
+              assert Region.from_offset((1, 2), (3, 4)) == Region(1, 2, 3, 4)
+              assert Region.from_union([Region(0, 0, 2, 2), Region(4, 4, 1, 1)]) == Region(0, 0, 5, 5)
+
+
+          def test_spacing():
+              spacing = Spacing(1, 2, 3, 4)
+              assert repr(spacing) == "Spacing(top=1, right=2, bottom=3, left=4)"
+              assert (spacing.width, spacing.height) == (6, 4)
+              assert (spacing.top_left, spacing.bottom_right) == ((4, 1), (2, 3))
+              assert spacing.totals == (6, 4)
+              assert spacing.css == "1 2 3 4"
+              assert Spacing.all(3) == Spacing(3, 3, 3, 3)
+              assert Spacing.unpack((1, 2)) == Spacing(1, 2, 1, 2)
+              assert spacing.grow_maximum(Spacing(2, 2, 2, 2)) == Spacing(2, 2, 3, 4)
+              assert spacing + (1, 1, 1, 1) == Spacing(2, 3, 4, 5)
+
+
+          def test_license_is_packaged():
+              files = importlib.metadata.files("textual-speedups")
+              licenses = [str(path) for path in files if ".dist-info/licenses/" in str(path)]
+              assert [path.rsplit("/", 1)[-1] for path in licenses] == ["LICENSE"], licenses
+          EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # textual-speedups ships no [tool.cibuildwheel], so the Rust toolchain
+          # its maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$PATH:$HOME/.cargo/bin"'
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: python -m pytest -v tests
+
+      - name: Check the extension made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(
+                  n.startswith("textual_speedups/textual_speedups.") and n.endswith(".so")
+                  for n in names
+              ), names
+              assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: textual-speedups-${{ env.TEXTUAL_SPEEDUPS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish textual-speedups ${{ inputs.version || '0.2.1' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: textual-speedups-${{ env.TEXTUAL_SPEEDUPS_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
