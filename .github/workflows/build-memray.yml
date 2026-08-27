@@ -77,7 +77,9 @@ jobs:
             cd libunwind-${{ env.LIBUNWIND_VERSION }} &&
             ./configure --prefix=/usr --libdir=/usr/lib64 --disable-documentation
             --disable-tests --disable-minidebuginfo --disable-zlibdebuginfo &&
-            make -j"$(nproc)" install
+            make -j"$(nproc)" install &&
+            bash {project}/python-wheels/ci/memray/collect-licenses.sh
+            {project} /tmp/libunwind-${{ env.LIBUNWIND_VERSION }}
           CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
           CIBW_TEST_EXTRAS: test
           CIBW_TEST_COMMAND: python -um pytest --log-cli-level=DEBUG -s --showlocals -vvv {package}/tests
@@ -91,6 +93,9 @@ jobs:
           print("\n".join(sos))
           assert any("memray/_memray." in n for n in sos), sos
           assert any("memray/_inject." in n for n in sos), sos
+          lic = sorted(n.split("/")[-1] for n in names if ".dist-info/licenses/" in n and not n.endswith("/"))
+          print("\n".join(lic))
+          assert {"LICENSE", "LICENSE.libunwind", "LICENSE.libbacktrace"} <= set(lic), lic
           EOF
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -109,12 +114,14 @@ jobs:
         with:
           persist-credentials: false
 
-      # auditwheel vendors the container's elfutils libraries (libdebuginfod,
-      # libelf) into the wheel alongside the gcc runtime, so both need sources.
+      # Every copyleft library auditwheel vendors out of the build image,
+      # alongside the gcc runtime.
       - uses: ./actions/collect-gpl-sources
         with:
           image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          packages: gcc elfutils
+          packages: >-
+            gcc elfutils keyutils-libs libcap libidn2 libssh libunistring
+            libxcrypt libzstd lz4-libs pcre2 systemd-libs
           output: gpl-sources.tar
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -142,4 +149,4 @@ jobs:
           gh-token: ${{ secrets.GITHUB_TOKEN }}
           gpl-sources-artifact: memray-${{ env.MEMRAY_VERSION }}-gpl-sources
           gpl-sources-release-tag: memray-v${{ env.MEMRAY_VERSION }}
-          gpl-sources-description: gcc, elfutils
+          gpl-sources-description: gcc and the copyleft libraries bundled in the wheel
