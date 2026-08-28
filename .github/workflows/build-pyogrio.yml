@@ -15,7 +15,6 @@ on:
   pull_request:
     paths:
       - '.github/workflows/build-pyogrio.yml'
-      - 'ci/pyogrio/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.version || '0.13.0' }}-${{ github.head_ref || github.run_id }}
@@ -55,11 +54,172 @@ jobs:
       # upstream's images install GDAL with vcpkg, which has no riscv64 binary
       # cache; ours compiles GEOS/PROJ/SpatiaLite/GDAL from source instead. Populating
       # cache from a job of its own keeps the wheel jobs from each paying for it.
+      - name: Write the GDAL image build context
+        run: |
+          mkdir -p "$RUNNER_TEMP/gdal-ctx"
+          cat > "$RUNNER_TEMP/gdal-ctx/collect-licenses.sh" <<'COLLECT_EOF'
+          #!/bin/bash
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # auditwheel vendors libgdal's whole shared-library closure into the wheel, so
+          # collect the licence of every rpm that closure comes from; the wheel build
+          # stages the result at the project root, where setuptools' license_files glob
+          # picks it up.
+          set -euo pipefail
+          
+          out=/opt/licenses
+          mkdir -p "${out}"
+          
+          mapfile -t libs < <(ldd /usr/local/lib/libgdal.so | tr ' ' '\n' | grep '^/' | sort -u)
+          mapfile -t pkgs < <(rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null \
+              | grep -E '^[A-Za-z0-9._+-]+$' | sort -u \
+              | grep -vE '^(glibc|libgcc|libstdc\+\+|gcc)$')
+          
+          for pkg in "${pkgs[@]}"; do
+              mapfile -t files < <(rpm -q --licensefiles "${pkg}")
+          
+              # A subpackage may carry no licence of its own (pcre2 leaves it to
+              # pcre2-syntax), so fall back to its siblings from the same source rpm.
+              if [ "${#files[@]}" -eq 0 ]; then
+                  srpm=$(rpm -q --qf '%{SOURCERPM}' "${pkg}")
+                  mapfile -t siblings < <(rpm -qa --qf '%{SOURCERPM} %{NAME}\n' \
+                      | awk -v srpm="${srpm}" '$1 == srpm { print $2 }')
+                  mapfile -t files < <(rpm -q --licensefiles "${siblings[@]}")
+              fi
+          
+              # And the image installs rpms with tsflags=nodocs, which drops the licence
+              # of a package that marks it %doc rather than %license.
+              if [ "${#files[@]}" -eq 0 ]; then
+                  dnf -y reinstall --setopt=tsflags= "${pkg}"
+                  mapfile -t files < <(rpm -qd "${pkg}" \
+                      | grep -iE '/(LICEN[CS]E|COPYING|COPYRIGHT)[^/]*$' || true)
+              fi
+          
+              for file in "${files[@]}"; do
+                  [ -f "${file}" ] || { echo "missing ${file} from rpm ${pkg}" >&2; exit 1; }
+                  cat "${file}" >> "${out}/LICENSE_${pkg}"
+              done
+          
+              # Packages under a licence that needs no notice ship no file at all
+              # (sqlite-libs is public domain); record what the rpm declares instead.
+              if [ ! -s "${out}/LICENSE_${pkg}" ]; then
+                  rpm -q --qf '%{NAME} %{VERSION} is distributed under: %{LICENSE}\nIts package ships no licence file.\n' \
+                      "${pkg}" > "${out}/LICENSE_${pkg}"
+              fi
+          done
+          
+          ls -l "${out}"
+          COLLECT_EOF
+          chmod +x "$RUNNER_TEMP/gdal-ctx/collect-licenses.sh"
+          cat > "$RUNNER_TEMP/gdal-ctx/Dockerfile" <<'DOCKER_EOF'
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # manylinux_riscv64 build image for pyogrio, standing in for the vcpkg-based
+          # images upstream builds its Linux wheels with
+          # (pyogrio ci/manylinux_2_28_*-vcpkg-gdal.Dockerfile): vcpkg has no riscv64
+          # binary cache, so GEOS/PROJ/SpatiaLite/GDAL are compiled from source here instead.
+          ARG BASEIMAGE=quay.io/pypa/manylinux_2_39_riscv64:latest
+          FROM ${BASEIMAGE}
+          
+          ARG GEOS_VERSION
+          ARG PROJ_VERSION
+          ARG SPATIALITE_VERSION
+          ARG GDAL_VERSION
+          
+          SHELL ["/bin/bash", "-euxo", "pipefail", "-c"]
+          
+          ENV PREFIX=/usr/local
+          
+          # sqlite (the CLI) builds PROJ's proj.db and glibc-gconv-extra carries the
+          # charset converters GDAL recodes shapefile attributes with; the rest are
+          # GDAL/PROJ/SpatiaLite dependencies.
+          RUN dnf -y install sqlite sqlite-devel libtiff-devel libcurl-devel expat-devel \
+                  libxml2-devel openssl-devel glibc-gconv-extra \
+              && dnf clean all \
+              && echo "${PREFIX}/lib" > /etc/ld.so.conf.d/pyogrio-local.conf \
+              && mkdir -p /opt/licenses /src
+          
+          RUN cd /src \
+              && curl -sSLo geos.tar.bz2 "https://download.osgeo.org/geos/geos-${GEOS_VERSION}.tar.bz2" \
+              && tar xf geos.tar.bz2 \
+              && cd "geos-${GEOS_VERSION}" \
+              && cp COPYING /opt/licenses/LICENSE_GEOS \
+              && cmake -S . -B build \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+                  -DCMAKE_INSTALL_LIBDIR=lib \
+                  -DBUILD_TESTING=OFF \
+                  -DBUILD_DOCUMENTATION=OFF \
+                  -DBUILD_BENCHMARKS=OFF \
+              && cmake --build build -j"$(nproc)" \
+              && cmake --install build \
+              && ldconfig \
+              && rm -rf /src/*
+          
+          RUN cd /src \
+              && curl -sSLo proj.tar.gz "https://download.osgeo.org/proj/proj-${PROJ_VERSION}.tar.gz" \
+              && tar xf proj.tar.gz \
+              && cd "proj-${PROJ_VERSION}" \
+              && cp COPYING /opt/licenses/LICENSE_PROJ \
+              && cmake -S . -B build \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+                  -DCMAKE_INSTALL_LIBDIR=lib \
+                  -DBUILD_TESTING=OFF \
+                  -DBUILD_APPS=OFF \
+                  -DENABLE_CURL=ON \
+                  -DENABLE_TIFF=ON \
+              && cmake --build build -j"$(nproc)" \
+              && cmake --install build \
+              && ldconfig \
+              && rm -rf /src/*
+          
+          # pyogrio's vcpkg manifest asks for libspatialite with its default features
+          # off, so freexl and rttopo are left out here too. Its config.guess/config.sub
+          # date from 2009 and know neither aarch64 nor riscv64, hence automake's.
+          RUN cd /src \
+              && curl -sSLo spatialite.tar.gz "https://www.gaia-gis.it/gaia-sins/libspatialite-sources/libspatialite-${SPATIALITE_VERSION}.tar.gz" \
+              && tar xf spatialite.tar.gz \
+              && cd "libspatialite-${SPATIALITE_VERSION}" \
+              && cp COPYING /opt/licenses/LICENSE_SPATIALITE \
+              && cp /usr/share/automake-*/config.guess /usr/share/automake-*/config.sub . \
+              && ./configure --prefix="${PREFIX}" --libdir="${PREFIX}/lib" \
+                  --disable-static --disable-freexl --disable-rttopo --disable-examples \
+                  --disable-minizip \
+              && make -j"$(nproc)" \
+              && make install \
+              && ldconfig \
+              && rm -rf /src/*
+          
+          RUN cd /src \
+              && curl -sSLo gdal.tar.gz "https://github.com/OSGeo/gdal/releases/download/v${GDAL_VERSION}/gdal-${GDAL_VERSION}.tar.gz" \
+              && tar xf gdal.tar.gz \
+              && cd "gdal-${GDAL_VERSION}" \
+              && cp LICENSE.TXT /opt/licenses/LICENSE_GDAL \
+              && cmake -S . -B build \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+                  -DCMAKE_INSTALL_LIBDIR=lib \
+                  -DBUILD_TESTING=OFF \
+                  -DBUILD_APPS=OFF \
+                  -DBUILD_PYTHON_BINDINGS=OFF \
+                  -DBUILD_JAVA_BINDINGS=OFF \
+                  -DBUILD_CSHARP_BINDINGS=OFF \
+              && cmake --build build -j"$(nproc)" \
+              && cmake --install build \
+              && ldconfig \
+              && rm -rf /src/*
+          
+          COPY collect-licenses.sh /usr/local/bin/collect-licenses.sh
+          RUN collect-licenses.sh && dnf clean all
+          DOCKER_EOF
       - name: Build Docker image with GDAL
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
         with:
-          context: ci/pyogrio
-          file: ci/pyogrio/manylinux_riscv64-gdal.Dockerfile
+          context: ${{ runner.temp }}/gdal-ctx
+          file: ${{ runner.temp }}/gdal-ctx/Dockerfile
           platforms: linux/riscv64
           build-args: |
             BASEIMAGE=${{ env.BASEIMAGE }}
@@ -118,11 +278,172 @@ jobs:
           install: true
           buildkitd-flags: --debug
 
+      - name: Write the GDAL image build context
+        run: |
+          mkdir -p "$RUNNER_TEMP/gdal-ctx"
+          cat > "$RUNNER_TEMP/gdal-ctx/collect-licenses.sh" <<'COLLECT_EOF'
+          #!/bin/bash
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # auditwheel vendors libgdal's whole shared-library closure into the wheel, so
+          # collect the licence of every rpm that closure comes from; the wheel build
+          # stages the result at the project root, where setuptools' license_files glob
+          # picks it up.
+          set -euo pipefail
+          
+          out=/opt/licenses
+          mkdir -p "${out}"
+          
+          mapfile -t libs < <(ldd /usr/local/lib/libgdal.so | tr ' ' '\n' | grep '^/' | sort -u)
+          mapfile -t pkgs < <(rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null \
+              | grep -E '^[A-Za-z0-9._+-]+$' | sort -u \
+              | grep -vE '^(glibc|libgcc|libstdc\+\+|gcc)$')
+          
+          for pkg in "${pkgs[@]}"; do
+              mapfile -t files < <(rpm -q --licensefiles "${pkg}")
+          
+              # A subpackage may carry no licence of its own (pcre2 leaves it to
+              # pcre2-syntax), so fall back to its siblings from the same source rpm.
+              if [ "${#files[@]}" -eq 0 ]; then
+                  srpm=$(rpm -q --qf '%{SOURCERPM}' "${pkg}")
+                  mapfile -t siblings < <(rpm -qa --qf '%{SOURCERPM} %{NAME}\n' \
+                      | awk -v srpm="${srpm}" '$1 == srpm { print $2 }')
+                  mapfile -t files < <(rpm -q --licensefiles "${siblings[@]}")
+              fi
+          
+              # And the image installs rpms with tsflags=nodocs, which drops the licence
+              # of a package that marks it %doc rather than %license.
+              if [ "${#files[@]}" -eq 0 ]; then
+                  dnf -y reinstall --setopt=tsflags= "${pkg}"
+                  mapfile -t files < <(rpm -qd "${pkg}" \
+                      | grep -iE '/(LICEN[CS]E|COPYING|COPYRIGHT)[^/]*$' || true)
+              fi
+          
+              for file in "${files[@]}"; do
+                  [ -f "${file}" ] || { echo "missing ${file} from rpm ${pkg}" >&2; exit 1; }
+                  cat "${file}" >> "${out}/LICENSE_${pkg}"
+              done
+          
+              # Packages under a licence that needs no notice ship no file at all
+              # (sqlite-libs is public domain); record what the rpm declares instead.
+              if [ ! -s "${out}/LICENSE_${pkg}" ]; then
+                  rpm -q --qf '%{NAME} %{VERSION} is distributed under: %{LICENSE}\nIts package ships no licence file.\n' \
+                      "${pkg}" > "${out}/LICENSE_${pkg}"
+              fi
+          done
+          
+          ls -l "${out}"
+          COLLECT_EOF
+          chmod +x "$RUNNER_TEMP/gdal-ctx/collect-licenses.sh"
+          cat > "$RUNNER_TEMP/gdal-ctx/Dockerfile" <<'DOCKER_EOF'
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # manylinux_riscv64 build image for pyogrio, standing in for the vcpkg-based
+          # images upstream builds its Linux wheels with
+          # (pyogrio ci/manylinux_2_28_*-vcpkg-gdal.Dockerfile): vcpkg has no riscv64
+          # binary cache, so GEOS/PROJ/SpatiaLite/GDAL are compiled from source here instead.
+          ARG BASEIMAGE=quay.io/pypa/manylinux_2_39_riscv64:latest
+          FROM ${BASEIMAGE}
+          
+          ARG GEOS_VERSION
+          ARG PROJ_VERSION
+          ARG SPATIALITE_VERSION
+          ARG GDAL_VERSION
+          
+          SHELL ["/bin/bash", "-euxo", "pipefail", "-c"]
+          
+          ENV PREFIX=/usr/local
+          
+          # sqlite (the CLI) builds PROJ's proj.db and glibc-gconv-extra carries the
+          # charset converters GDAL recodes shapefile attributes with; the rest are
+          # GDAL/PROJ/SpatiaLite dependencies.
+          RUN dnf -y install sqlite sqlite-devel libtiff-devel libcurl-devel expat-devel \
+                  libxml2-devel openssl-devel glibc-gconv-extra \
+              && dnf clean all \
+              && echo "${PREFIX}/lib" > /etc/ld.so.conf.d/pyogrio-local.conf \
+              && mkdir -p /opt/licenses /src
+          
+          RUN cd /src \
+              && curl -sSLo geos.tar.bz2 "https://download.osgeo.org/geos/geos-${GEOS_VERSION}.tar.bz2" \
+              && tar xf geos.tar.bz2 \
+              && cd "geos-${GEOS_VERSION}" \
+              && cp COPYING /opt/licenses/LICENSE_GEOS \
+              && cmake -S . -B build \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+                  -DCMAKE_INSTALL_LIBDIR=lib \
+                  -DBUILD_TESTING=OFF \
+                  -DBUILD_DOCUMENTATION=OFF \
+                  -DBUILD_BENCHMARKS=OFF \
+              && cmake --build build -j"$(nproc)" \
+              && cmake --install build \
+              && ldconfig \
+              && rm -rf /src/*
+          
+          RUN cd /src \
+              && curl -sSLo proj.tar.gz "https://download.osgeo.org/proj/proj-${PROJ_VERSION}.tar.gz" \
+              && tar xf proj.tar.gz \
+              && cd "proj-${PROJ_VERSION}" \
+              && cp COPYING /opt/licenses/LICENSE_PROJ \
+              && cmake -S . -B build \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+                  -DCMAKE_INSTALL_LIBDIR=lib \
+                  -DBUILD_TESTING=OFF \
+                  -DBUILD_APPS=OFF \
+                  -DENABLE_CURL=ON \
+                  -DENABLE_TIFF=ON \
+              && cmake --build build -j"$(nproc)" \
+              && cmake --install build \
+              && ldconfig \
+              && rm -rf /src/*
+          
+          # pyogrio's vcpkg manifest asks for libspatialite with its default features
+          # off, so freexl and rttopo are left out here too. Its config.guess/config.sub
+          # date from 2009 and know neither aarch64 nor riscv64, hence automake's.
+          RUN cd /src \
+              && curl -sSLo spatialite.tar.gz "https://www.gaia-gis.it/gaia-sins/libspatialite-sources/libspatialite-${SPATIALITE_VERSION}.tar.gz" \
+              && tar xf spatialite.tar.gz \
+              && cd "libspatialite-${SPATIALITE_VERSION}" \
+              && cp COPYING /opt/licenses/LICENSE_SPATIALITE \
+              && cp /usr/share/automake-*/config.guess /usr/share/automake-*/config.sub . \
+              && ./configure --prefix="${PREFIX}" --libdir="${PREFIX}/lib" \
+                  --disable-static --disable-freexl --disable-rttopo --disable-examples \
+                  --disable-minizip \
+              && make -j"$(nproc)" \
+              && make install \
+              && ldconfig \
+              && rm -rf /src/*
+          
+          RUN cd /src \
+              && curl -sSLo gdal.tar.gz "https://github.com/OSGeo/gdal/releases/download/v${GDAL_VERSION}/gdal-${GDAL_VERSION}.tar.gz" \
+              && tar xf gdal.tar.gz \
+              && cd "gdal-${GDAL_VERSION}" \
+              && cp LICENSE.TXT /opt/licenses/LICENSE_GDAL \
+              && cmake -S . -B build \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+                  -DCMAKE_INSTALL_LIBDIR=lib \
+                  -DBUILD_TESTING=OFF \
+                  -DBUILD_APPS=OFF \
+                  -DBUILD_PYTHON_BINDINGS=OFF \
+                  -DBUILD_JAVA_BINDINGS=OFF \
+                  -DBUILD_CSHARP_BINDINGS=OFF \
+              && cmake --build build -j"$(nproc)" \
+              && cmake --install build \
+              && ldconfig \
+              && rm -rf /src/*
+          
+          COPY collect-licenses.sh /usr/local/bin/collect-licenses.sh
+          RUN collect-licenses.sh && dnf clean all
+          DOCKER_EOF
       - name: Load the GDAL build image from the cache
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
         with:
-          context: python-wheels/ci/pyogrio
-          file: python-wheels/ci/pyogrio/manylinux_riscv64-gdal.Dockerfile
+          context: ${{ runner.temp }}/gdal-ctx
+          file: ${{ runner.temp }}/gdal-ctx/Dockerfile
           platforms: linux/riscv64
           tags: ${{ env.GDAL_IMAGE }}:${{ env.GDAL_VERSION }}
           build-args: |

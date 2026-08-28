@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build-wheels` job of
+# https://github.com/geventhttpclient/geventhttpclient/blob/2.3.9/.github/workflows/publish.yml
+# and the tox `testenv` upstream runs in .github/workflows/test.yml.
+name: Build geventhttpclient wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'geventhttpclient version to build (git tag, e.g. 2.3.9)'
+        required: true
+        default: '2.3.9'
+  pull_request:
+    paths:
+      - '.github/workflows/build-geventhttpclient.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.3.9' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  GEVENTHTTPCLIENT_VERSION: ${{ inputs.version || '2.3.9' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build geventhttpclient ${{ inputs.version || '2.3.9' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        include:
+          # gevent, a hard runtime dependency, publishes no free-threaded wheel on
+          # any platform, so the cp314t wheel cannot be installed to be tested.
+          - python: "cp314t"
+            test_skip: "*"
+
+    steps:
+      # The llhttp parser is a submodule; setup.py compiles its sources directly.
+      - name: Checkout geventhttpclient ${{ env.GEVENTHTTPCLIENT_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: geventhttpclient/geventhttpclient
+          ref: ${{ env.GEVENTHTTPCLIENT_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # llhttp is compiled into the extension under its own MIT notice, which
+      # upstream's wheels do not ship.
+      - name: Patch geventhttpclient source
+        run: |
+          git apply python-wheels/patches/geventhttpclient/${{ env.GEVENTHTTPCLIENT_VERSION }}/00*.patch
+
+      # musllinux is skipped: our registry carries gevent and brotli for
+      # manylinux riscv64 only, so a musl wheel could be neither installed nor tested.
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # gevent and brotli have no riscv64 wheel on public PyPI.
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
+          # pyproject.toml registers the `network` marker.
+          CIBW_TEST_SOURCES: tests pyproject.toml
+          CIBW_TEST_EXTRAS: dev
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m;
+            l = {str(p).split('.dist-info/licenses/')[1] for p in m.files('geventhttpclient') if '.dist-info/licenses/' in str(p)};
+            assert l == {'LICENSE-MIT', 'llhttp/LICENSE-MIT'}, l" &&
+            python -m pytest tests
+
+      # The only proof the untested cp314t wheel really carries the extension.
+      - name: Check the wheel ships the parser extension
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = [n for n in names if n.endswith(".so")]
+          assert len(sos) == 1 and sos[0].startswith("geventhttpclient/_parser."), sos
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: geventhttpclient-${{ env.GEVENTHTTPCLIENT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish geventhttpclient ${{ inputs.version || '2.3.9' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: geventhttpclient-${{ env.GEVENTHTTPCLIENT_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
