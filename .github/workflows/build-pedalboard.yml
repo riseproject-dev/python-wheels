@@ -1,0 +1,220 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/spotify/pedalboard/blob/v0.9.24/.github/workflows/all.yml
+name: Build pedalboard wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pedalboard version to build (git tag without the leading v, e.g. 0.9.24)'
+        required: true
+        default: '0.9.24'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pedalboard.yml'
+      - 'patches/pedalboard/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.9.24' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.9.24 there.
+  PEDALBOARD_VERSION: ${{ inputs.version || '0.9.24' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build pedalboard ${{ inputs.version || '0.9.24' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 420
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout pedalboard v${{ env.PEDALBOARD_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: spotify/pedalboard
+          ref: v${{ env.PEDALBOARD_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pedalboard source
+        run: git apply python-wheels/patches/pedalboard/${{ env.PEDALBOARD_VERSION }}/*.patch
+
+      - name: Stage the licence-collection script
+        run: |
+          cat > collect-licenses.sh <<'COLLECT_EOF'
+          #!/bin/bash
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # Stage, at the project root, the licence of everything that ends up inside
+          # the wheel: the libraries pedalboard compiles into pedalboard_native, and
+          # every shared library auditwheel vendors out of the build image.
+          # scikit-build-core's default LICEN[CS]E* glob copies them into the wheel.
+          set -euo pipefail
+
+          project="${1:?usage: collect-licenses.sh <project-dir>}"
+          cd "$project"
+
+          cp JUCE/LICENSE.md LICENSE.JUCE
+          cp vendors/fftw3/COPYING LICENSE.fftw3
+          cp vendors/lame/COPYING LICENSE.lame
+          cp vendors/libgsm/COPYRIGHT LICENSE.libgsm
+          cp vendors/pybind11/LICENSE LICENSE.pybind11
+          cp vendors/rubberband/COPYING LICENSE.rubberband
+
+          roots=(/usr/lib64/libasound.so /usr/lib64/libfreetype.so)
+
+          # ldd is transitive, so the two libraries pedalboard links cover the whole
+          # closure; ldd does not list the roots themselves, so resolve those too.
+          mapfile -t libs < <(
+              {
+                  ldd "${roots[@]}" | tr ' ' '\n' | grep '^/'
+                  readlink -f "${roots[@]}"
+              } | sort -u
+          )
+
+          # `rpm -qf` reports unowned files on stdout, so keep only bare package names.
+          # glibc, the gcc runtime and zlib are on auditwheel's manylinux allowlist and
+          # are never vendored into the wheel.
+          mapfile -t pkgs < <(
+              rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null |
+                  grep -E '^[A-Za-z0-9._+-]+$' | sort -u |
+                  grep -vE '^(glibc|libgcc|libstdc\+\+|gcc|zlib-ng-compat)$'
+          )
+
+          for pkg in "${pkgs[@]}"; do
+              mapfile -t files < <(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
+
+              # Some subpackages leave the licence to a sibling of the same source RPM.
+              if [ -z "${files[0]:-}" ]; then
+                  srpm=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg")
+                  mapfile -t files < <(
+                      rpm -qa --qf '%{SOURCERPM} %{NAME}\n' |
+                          awk -v s="$srpm" '$1 == s { print $2 }' |
+                          xargs -r rpm -q --licensefiles 2>/dev/null | sort -u
+                  )
+              fi
+
+              # Others mark it %doc rather than %license, and the image installs no docs.
+              if [ -z "${files[0]:-}" ]; then
+                  dnf -y reinstall --setopt=tsflags= "$pkg" >/dev/null
+                  mapfile -t files < <(rpm -qd "$pkg" | grep -iE '/(LICEN[CS]E|COPYING|NOTICE)')
+              fi
+
+              for f in "${files[@]}"; do
+                  [ -f "$f" ] || continue
+                  cp "$f" "LICENSE.${pkg}.$(basename "$f")"
+              done
+              compgen -G "LICENSE.$pkg.*" >/dev/null ||
+                  { echo "no licence file found for $pkg" >&2; exit 1; }
+          done
+
+          ls -1 LICENSE.*
+          COLLECT_EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_BUILD_LINUX: bash {project}/collect-licenses.sh {project}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Upstream's repair command pip-installs auditwheel-symbols, a Rust tool
+          # with no riscv64 wheel, before every repair.
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: auditwheel repair -w {dest_dir} {wheel}
+          # Upstream skips its own manylinux tests (`test-skip` in pyproject.toml)
+          # because its build image predates the suite's glibc requirement.
+          CIBW_TEST_SKIP: ''
+          CIBW_TEST_REQUIRES: pytest pytest-mock numpy tqdm psutil mido mutagen
+          CIBW_TEST_SOURCES: tests
+          # test_type_hints needs mypy and pyright, neither of which runs on riscv64;
+          # the deselected test asserts threaded reads beat serial ones, which is a
+          # timing race that also fails on macOS against upstream's own wheel.
+          CIBW_TEST_COMMAND: >-
+            python -m pytest tests --ignore=tests/test_type_hints.py
+            -k "not test_read_from_bytes_io_memoryview_without_gil"
+
+      - name: Verify the wheel ships the extension and the bundled licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = sorted(n for n in names if n.endswith(".so"))
+          print("\n".join(sos))
+          assert any(n.startswith("pedalboard_native.") for n in sos), sos
+          lic = sorted(n.split("/")[-1] for n in names if ".dist-info/licenses/" in n)
+          print("\n".join(lic))
+          expected = {"LICENSE", "NOTICE", "LICENSE.JUCE", "LICENSE.fftw3", "LICENSE.lame",
+                      "LICENSE.libgsm", "LICENSE.pybind11", "LICENSE.rubberband"}
+          assert expected <= set(lic) - {""}, sorted(expected - set(lic))
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pedalboard-${{ env.PEDALBOARD_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    name: Collect GPL sources for pedalboard ${{ inputs.version || '0.9.24' }}
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      # Every copyleft library auditwheel vendors out of the build image,
+      # alongside the gcc runtime.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc alsa-lib freetype
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pedalboard-${{ env.PEDALBOARD_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish pedalboard ${{ inputs.version || '0.9.24' }} to GitLab
+    needs: [build_wheels, gpl_sources]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: pedalboard-${{ env.PEDALBOARD_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          gpl-sources-artifact: pedalboard-${{ env.PEDALBOARD_VERSION }}-gpl-sources
+          gpl-sources-release-tag: pedalboard-v${{ env.PEDALBOARD_VERSION }}
+          gpl-sources-description: gcc and the copyleft libraries bundled in the wheel
