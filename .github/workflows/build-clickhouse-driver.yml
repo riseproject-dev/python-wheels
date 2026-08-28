@@ -1,0 +1,109 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `wheels-linux` / `wheels-linux-non-x86` jobs of
+# https://github.com/mymarilyn/clickhouse-driver/blob/0.2.11/.github/workflows/actions.yml
+name: Build clickhouse-driver wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'clickhouse-driver version to build (git tag, e.g. 0.2.11)'
+        required: true
+        default: '0.2.11'
+  pull_request:
+    paths:
+      - '.github/workflows/build-clickhouse-driver.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.2.11' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  CLICKHOUSE_DRIVER_VERSION: ${{ inputs.version || '0.2.11' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build clickhouse-driver ${{ inputs.version || '0.2.11' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout clickhouse-driver ${{ env.CLICKHOUSE_DRIVER_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: mymarilyn/clickhouse-driver
+          ref: ${{ env.CLICKHOUSE_DRIVER_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_BUILD: pip install cython
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_REQUIRES: pytest
+          # Upstream's wheel jobs run no tests; the suite needs a live ClickHouse
+          # server, which publishes no riscv64 image. These modules are the ones that
+          # run without one, and they cover all four compiled extensions.
+          CIBW_TEST_COMMAND: >-
+            python -m pytest -v
+            tests/test_errors.py
+            tests/test_buffered_reader.py
+            tests/test_varint.py
+            tests/test_util.py
+            tests/columns/test_dynamic_shared_value.py
+            tests/columns/test_unknown.py
+
+      - name: Check the compiled extensions made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          expected = {
+              'bufferedreader', 'bufferedwriter', 'varint', 'columns/largeint',
+          }
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              found = {
+                  n[len('clickhouse_driver/'):].split('.')[0]
+                  for n in names
+                  if n.startswith('clickhouse_driver/') and n.endswith('.so')
+              }
+              assert found == expected, (whl, found)
+              print(whl, 'ok')
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: clickhouse-driver-${{ env.CLICKHOUSE_DRIVER_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish clickhouse-driver ${{ inputs.version || '0.2.11' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: clickhouse-driver-${{ env.CLICKHOUSE_DRIVER_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
