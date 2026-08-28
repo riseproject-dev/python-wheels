@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's wheel builder:
+#   https://github.com/docling-project/docling-parse/blob/main/.github/workflows/wheels.yml
+name: Build docling-parse wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'docling-parse version to build'
+        required: true
+        default: '7.16.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-docling-parse.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '7.16.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  DOCLING_PARSE_VERSION: ${{ inputs.version || '7.16.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  # Upstream publishes cp310-cp314 and no free-threaded wheel, so there is no cp314t job.
+  build_wheels:
+    name: Build docling-parse ${{ inputs.version || '7.16.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314"]
+
+    steps:
+      - name: Checkout docling-parse v${{ env.DOCLING_PARSE_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: docling-project/docling-parse
+          ref: v${{ env.DOCLING_PARSE_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # pyproject pins cmake<4.0.0, which has no riscv64 wheel; the image's own
+          # cmake is used instead, so the build requirements are preinstalled here.
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          # The C++ dependencies are fetched and statically linked by the build, and
+          # upstream ships none of their licences.
+          CIBW_BEFORE_BUILD: |
+            pip install "setuptools>=77.0.3" "pybind11>=2.13.6" "wheel>=0.43.0"
+            curl -fsSL -o {project}/LICENSE.qpdf https://raw.githubusercontent.com/qpdf/qpdf/v12.2.0/LICENSE.txt
+            curl -fsSL -o {project}/LICENSE.libjpeg-turbo https://raw.githubusercontent.com/libjpeg-turbo/libjpeg-turbo/3.1.1/LICENSE.md
+            curl -fsSL -o {project}/LICENSE.openjpeg https://raw.githubusercontent.com/uclouvain/openjpeg/v2.5.3/LICENSE
+            curl -fsSL -o {project}/LICENSE.lcms2 https://raw.githubusercontent.com/mm2/Little-CMS/lcms2.17/LICENSE
+            curl -fsSL -o {project}/LICENSE.freetype https://raw.githubusercontent.com/freetype/freetype/VER-2-13-3/docs/FTL.TXT
+            curl -fsSL -o {project}/LICENSE.blend2d https://raw.githubusercontent.com/blend2d/blend2d/6dbc2cefbc996379e07104e34519a440b49b15d7/LICENSE.md
+            curl -fsSL -o {project}/LICENSE.utfcpp https://raw.githubusercontent.com/nemtrif/utfcpp/v4.0.6/LICENSE
+            curl -fsSL -o {project}/LICENSE.json https://raw.githubusercontent.com/nlohmann/json/v3.12.0/LICENSE.MIT
+            curl -fsSL -o {project}/LICENSE.loguru https://raw.githubusercontent.com/emilk/loguru/4adaa185883e3c04da25913579c451d3c32cfac1/LICENSE
+            curl -fsSL -o {project}/LICENSE.cxxopts https://raw.githubusercontent.com/jarro2783/cxxopts/v3.3.1/LICENSE
+            curl -fsSL -o {project}/LICENSE.pdfium https://raw.githubusercontent.com/chromium/pdfium/main/LICENSE
+          CIBW_ENVIRONMENT: >-
+            BUILD_THREADS=4
+            CMAKE_BUILD_TYPE=Release
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_REQUIRES: pytest numpy huggingface_hub fonttools
+          CIBW_TEST_COMMAND: python -m pytest -v tests/test_unit_*.py
+
+      - name: Check wheel contents
+        run: |
+          python3 - ./wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert any(
+              n.startswith("docling_parse/pdf_parsers") and n.endswith(".so") for n in names
+          ), names
+
+          licences = {
+              n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n
+          } - {""}
+          expected = {
+              "LICENSE",
+              "LICENSE.blend2d",
+              "LICENSE.cxxopts",
+              "LICENSE.freetype",
+              "LICENSE.json",
+              "LICENSE.lcms2",
+              "LICENSE.libjpeg-turbo",
+              "LICENSE.loguru",
+              "LICENSE.openjpeg",
+              "LICENSE.pdfium",
+              "LICENSE.qpdf",
+              "LICENSE.utfcpp",
+          }
+          assert licences == expected, sorted(licences)
+          EOF
+
+      - name: Check Blend2D debug assertions are absent
+        run: python3 scripts/check_no_blend2d_assertions.py ./wheelhouse/*.whl
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: docling-parse-${{ env.DOCLING_PARSE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish docling-parse ${{ inputs.version || '7.16.0' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: docling-parse-${{ env.DOCLING_PARSE_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
