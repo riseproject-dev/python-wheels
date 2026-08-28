@@ -1,0 +1,53 @@
+From 8ab48ed4ec272b88471ec3e1545ce2aa30a03dd0 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 27 Aug 2026 09:36:19 +0200
+Subject: [PATCH] compat: numpy 2.5.0
+
+numpy 2.5.0 deprecated the "generic" unit for datetime64/timedelta64, so
+`np.datetime64('NaT').view('int64')` -- evaluated at import time in both
+converted_types.py and writer.py -- emits a DeprecationWarning. That turns
+`import fastparquet` under -Werror into an error, which is exactly what
+fastparquet/test/test_api.py::test_import_without_warning checks, so the
+released 2026.5.0 wheel fails its own test suite against the numpy we ship
+for riscv64 (2.5.2).
+
+Substitute the literal NaT sentinel, keeping the original expression as a
+comment. Cherry-picked verbatim from upstream commit fb5634c ("compat: numpy
+2.5.0", PR #981), merged after the 2026.5.0 tag and not yet in a release.
+Reported upstream as issue #983.
+
+Upstream-Status: Backport [https://github.com/dask/fastparquet/commit/fb5634c2aac83a22011a8d06c05899bc68774fa8]
+---
+ fastparquet/converted_types.py | 2 +-
+ fastparquet/writer.py          | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/fastparquet/converted_types.py b/fastparquet/converted_types.py
+index d48098d..8d20232 100644
+--- a/fastparquet/converted_types.py
++++ b/fastparquet/converted_types.py
+@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover
+ # Explicitly use numpy type in order to avoid promotion errors due to NEP 50 in numpy >= 2
+ DAYS_TO_NANOS = np.int64(86400000000000)
+ """Number of nanoseconds in a day. Used to convert a Date to a date"""
+-nat = np.datetime64('NaT').view('int64')
++nat = np.int64(-9223372036854775808)  # np.datetime64('NaT').view('int64')
+ 
+ simple = {
+     parquet_thrift.Type.INT32: np.dtype('int32'),
+diff --git a/fastparquet/writer.py b/fastparquet/writer.py
+index 6cc3025..d0bb665 100644
+--- a/fastparquet/writer.py
++++ b/fastparquet/writer.py
+@@ -27,7 +27,7 @@ from decimal import Decimal
+ MARKER = b'PAR1'
+ ROW_GROUP_SIZE = 50_000_000
+ NaT = np.timedelta64(None).tobytes()  # require numpy version >= 1.7
+-nat = np.datetime64('NaT').view('int64')
++nat = np.int64(-9223372036854775808)  # np.datetime64('NaT').view('int64')
+ 
+ typemap = {  # primitive type, converted type, bit width
+     'boolean': (parquet_thrift.Type.BOOLEAN, None, 1),
+-- 
+2.50.1 (Apple Git-155)
+
