@@ -137,6 +137,7 @@ jobs:
       - name: Build wheel
         env:
           PYTHON_VERSION: ${{ matrix.python }}
+          PROTOBUF_VERSION: '28.3'
         run: |
           mkdir -p wheelhouse
           set -o pipefail
@@ -144,6 +145,7 @@ jobs:
             -v "${GITHUB_WORKSPACE}:/work" \
             -w /work \
             -e PYTHON_VERSION \
+            -e PROTOBUF_VERSION \
             "${MANYLINUX_RISCV64_IMAGE}" \
             bash <<'SCRIPT' 2>&1 | tee build.log
           set -eux
@@ -157,6 +159,13 @@ jobs:
           export PYTHON_BIN="/opt/python/${PYTAG}-${PYTAG}/bin/python"
           export PATH="/opt/python/${PYTAG}-${PYTAG}/bin:${PATH}"
           "${PYTHON_BIN}" -m pip install -q -U setuptools wheel auditwheel
+
+          # protobuf 28.3 asks for a CPython 3.8 toolchain, which
+          # python-build-standalone does not publish for riscv64.
+          curl -fsSLo /tmp/protobuf.zip \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOBUF_VERSION}/protobuf-${PROTOBUF_VERSION}.zip"
+          unzip -q /tmp/protobuf.zip -d /tmp
+          sed -i '/^    "3.8",$/d' "/tmp/protobuf-${PROTOBUF_VERSION}/MODULE.bazel"
 
           cd /work/array_record
 
@@ -178,6 +187,7 @@ jobs:
             echo "test --@rules_python//python/config_settings:python_version=${PYTHON_VERSION}"
             echo "test --action_env PYTHON_VERSION=${PYTHON_VERSION}"
             echo "test --test_timeout=900"
+            echo "build --override_module=protobuf=/tmp/protobuf-${PROTOBUF_VERSION}"
             # A long build's default curses progress output is large enough that
             # GitHub drops the job log, taking the failure with it.
             echo "common --curses=no --show_progress_rate_limit=60"
