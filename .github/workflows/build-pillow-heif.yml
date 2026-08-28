@@ -1,0 +1,109 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-linux` job of
+# https://github.com/bigcat88/pillow_heif/blob/v1.5.0/.github/workflows/wheels.yml
+name: Build pillow-heif wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pillow-heif version to build (git tag without leading v, e.g. 1.5.0)'
+        required: true
+        default: '1.5.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pillow-heif.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.5.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PILLOW_HEIF_VERSION: ${{ inputs.version || '1.5.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build pillow-heif ${{ inputs.version || '1.5.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout pillow_heif v${{ env.PILLOW_HEIF_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: bigcat88/pillow_heif
+          ref: v${{ env.PILLOW_HEIF_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream installs `cmake==3.31.6` from PyPI, which ships no riscv64 wheel; the
+          # image already provides cmake 4.4.2. The `cp` lines add the licences of the three
+          # libraries the wheel bundles, which upstream only references by URL.
+          CIBW_BEFORE_ALL_LINUX: |
+            set -e
+            yum makecache && yum install -y libjpeg-turbo-devel lcms2-devel zlib-devel
+            export BUILD_DIR=/tmp/ph_build_stuff
+            python3 {package}/libheif/build_libs.py
+            for lib in x265 libde265 libheif; do
+              cp "$BUILD_DIR/$lib/COPYING" "{package}/LICENSE.$lib"
+            done
+          # Pillow ships no riscv64 wheel on public PyPI; ours is what the test env installs.
+          CIBW_ENVIRONMENT: >-
+            PH_RELEASE_TESTS=1
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+
+      - name: Check the wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("_pillow_heif.") and n.endswith(".so") for n in names), whl
+              libs = sorted(n.split("/")[1].split("-")[0] for n in names if n.startswith("pillow_heif.libs/") and n != "pillow_heif.libs/")
+              assert libs == ["libde265", "libheif", "libx265"], (whl, libs)
+              licenses = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+              assert licenses == {
+                  "LICENSE.txt", "LICENSES_bundled.txt",
+                  "LICENSE.x265", "LICENSE.libde265", "LICENSE.libheif",
+              }, (whl, licenses)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pillow_heif-${{ env.PILLOW_HEIF_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pillow-heif ${{ inputs.version || '1.5.0' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: pillow_heif-${{ env.PILLOW_HEIF_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
