@@ -31,7 +31,6 @@ env:
   # which has no riscv64 variant, so the same libraries are built into the
   # container instead. Versions are the ones Unidata/netcdf4-python-manylinux
   # bakes into that image.
-  OPENSSL_VERSION: '3.5.1'
   CURL_VERSION: '8.14.1'
   LIBAEC_VERSION: '1.1.4'
   BLOSC_VERSION: '1.21.6'
@@ -72,28 +71,22 @@ jobs:
           only: ${{ matrix.python }}-manylinux_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Mirrors Unidata/netcdf4-python-manylinux's install_libs.sh. OpenSSL
-          # and curl are built from source there and here so the wheel bundles
-          # curl's small closure rather than Rocky's krb5/openldap/libssh one.
-          # zstd, bzip2 and zlib come from the distro: they are only built from
-          # source upstream because AlmaLinux 8 ships them too old.
+          # Mirrors Unidata/netcdf4-python-manylinux's install_libs.sh. curl is
+          # built from source there and here so the wheel bundles curl's small
+          # closure rather than Rocky's krb5/openldap/libssh one. OpenSSL, zstd,
+          # bzip2 and zlib come from the distro: they are only built from source
+          # upstream because AlmaLinux 8 ships them too old, and Rocky 10 already
+          # carries a newer OpenSSL than the version upstream pins.
           # NETCDF_PLUGIN_INSTALL is the current spelling of the option upstream
           # still passes as ENABLE_PLUGIN_INSTALL, which netcdf-c 4.10 ignores.
           CIBW_BEFORE_ALL_LINUX: |
             set -ex
-            dnf -y install perl zlib-devel bzip2-devel libzstd-devel
-            mkdir -p /tmp/openssl /tmp/curl /tmp/libaec /tmp/blosc /tmp/hdf5 /tmp/netcdf
-
-            curl -fsSL "https://github.com/openssl/openssl/releases/download/openssl-$OPENSSL_VERSION/openssl-$OPENSSL_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/openssl
-            cd /tmp/openssl
-            ./config shared -fPIC --prefix=/usr/local --libdir=lib
-            make -j "$(nproc)"
-            make install_sw install_ssldirs
-            ldconfig
+            dnf -y install zlib-devel bzip2-devel libzstd-devel openssl-devel
+            mkdir -p /tmp/curl /tmp/libaec /tmp/blosc /tmp/hdf5 /tmp/netcdf
 
             curl -fsSL "https://curl.se/download/curl-$CURL_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/curl
             cd /tmp/curl
-            ./configure --prefix=/usr/local --disable-ldap --with-openssl=/usr/local --without-zstd --without-libpsl
+            ./configure --prefix=/usr/local --disable-ldap --with-openssl --without-zstd --without-libpsl
             make -j "$(nproc)"
             make install
             ldconfig
@@ -154,7 +147,7 @@ jobs:
             cmake --build /tmp/netcdf/build -j "$(nproc)" --target install
             ldconfig
 
-            cp /tmp/openssl/LICENSE.txt "{project}/LICENSE.openssl"
+            cp /usr/share/licenses/openssl-libs/LICENSE.txt "{project}/LICENSE.openssl"
             cp /tmp/curl/COPYING "{project}/LICENSE.curl"
             cp /tmp/libaec/LICENSE.txt "{project}/LICENSE.libaec"
             cp /tmp/blosc/LICENSE.txt "{project}/LICENSE.c-blosc"
@@ -168,7 +161,6 @@ jobs:
           CIBW_ENVIRONMENT: >-
             NETCDF_PLUGIN_DIR=/usr/local/hdf5/lib/plugin/
             SETUPTOOLS_SCM_PRETEND_VERSION_FOR_NETCDF4=${{ env.NETCDF4_VERSION }}
-            OPENSSL_VERSION=${{ env.OPENSSL_VERSION }}
             CURL_VERSION=${{ env.CURL_VERSION }}
             LIBAEC_VERSION=${{ env.LIBAEC_VERSION }}
             BLOSC_VERSION=${{ env.BLOSC_VERSION }}
