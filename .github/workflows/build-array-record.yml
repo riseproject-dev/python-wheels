@@ -73,7 +73,7 @@ jobs:
           # (bazelbuild/bazel#23018). Any linux entry is a safe stand-in: the toolchain it names
           # is never selected on a riscv64 host. Fixed in bazel 8.2.0; the 7.x backport is open.
           mkdir -p /tmp/rules_python
-          curl -fsSLo /tmp/rules_python.tar.gz "https://github.com/bazel-contrib/rules_python/releases/download/${RULES_PYTHON_VERSION}/rules_python-${RULES_PYTHON_VERSION}.tar.gz"
+          curl -fsSLo /tmp/rules_python.tar.gz "https://github.com/bazel-contrib/rules_python/releases/download/${PROJECT_RULES_PYTHON_VERSION}/rules_python-${PROJECT_RULES_PYTHON_VERSION}.tar.gz"
           tar -xzf /tmp/rules_python.tar.gz -C /tmp/rules_python --strip-components=1
           sed -i 's|fail("No platform declared for host OS {} on arch {}".format(os_name, arch))|return "x86_64-unknown-linux-gnu"|' \
             /tmp/rules_python/python/private/toolchains_repo.bzl
@@ -137,7 +137,7 @@ jobs:
       - name: Build wheel
         env:
           PYTHON_VERSION: ${{ matrix.python }}
-          PROTOBUF_VERSION: '28.3'
+          PROJECT_RULES_PYTHON_VERSION: '1.6.0'
         run: |
           mkdir -p wheelhouse
           set -o pipefail
@@ -145,7 +145,7 @@ jobs:
             -v "${GITHUB_WORKSPACE}:/work" \
             -w /work \
             -e PYTHON_VERSION \
-            -e PROTOBUF_VERSION \
+            -e PROJECT_RULES_PYTHON_VERSION \
             "${MANYLINUX_RISCV64_IMAGE}" \
             bash <<'SCRIPT' 2>&1 | tee build.log
           set -eux
@@ -160,12 +160,26 @@ jobs:
           export PATH="/opt/python/${PYTAG}-${PYTAG}/bin:${PATH}"
           "${PYTHON_BIN}" -m pip install -q -U setuptools wheel auditwheel
 
-          # protobuf 28.3 asks for a CPython 3.8 toolchain, which
-          # python-build-standalone does not publish for riscv64.
-          curl -fsSLo /tmp/protobuf.zip \
-            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOBUF_VERSION}/protobuf-${PROTOBUF_VERSION}.zip"
-          unzip -q /tmp/protobuf.zip -d /tmp
-          sed -i '/^    "3.8",$/d' "/tmp/protobuf-${PROTOBUF_VERSION}/MODULE.bazel"
+          # protobuf and rules_fuzzing declare pip hubs for CPython 3.8, which
+          # python-build-standalone does not publish for riscv64, and rules_python
+          # aborts on the missing interpreter even though nothing uses those hubs.
+          mkdir -p /tmp/rules_python
+          curl -fsSLo /tmp/rules_python.tar.gz \
+            "https://github.com/bazel-contrib/rules_python/releases/download/${PROJECT_RULES_PYTHON_VERSION}/rules_python-${PROJECT_RULES_PYTHON_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_python.tar.gz -C /tmp/rules_python --strip-components=1
+          python3 - <<'PATCH'
+          path = "/tmp/rules_python/python/private/pypi/extension.bzl"
+          source = open(path).read()
+          old = "        if python_name not in available_interpreters:\n            fail(("
+          new = (
+              "        if python_name not in available_interpreters:\n"
+              "            python_name = sorted(available_interpreters)[0]\n"
+              "        if False:\n"
+              "            fail(("
+          )
+          assert old in source
+          open(path, "w").write(source.replace(old, new, 1))
+          PATCH
 
           cd /work/array_record
 
@@ -187,7 +201,7 @@ jobs:
             echo "test --@rules_python//python/config_settings:python_version=${PYTHON_VERSION}"
             echo "test --action_env PYTHON_VERSION=${PYTHON_VERSION}"
             echo "test --test_timeout=900"
-            echo "build --override_module=protobuf=/tmp/protobuf-${PROTOBUF_VERSION}"
+            echo "build --override_module=rules_python=/tmp/rules_python"
             # A long build's default curses progress output is large enough that
             # GitHub drops the job log, taking the failure with it.
             echo "common --curses=no --show_progress_rate_limit=60"
