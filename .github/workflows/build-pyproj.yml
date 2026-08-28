@@ -1,0 +1,122 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/pyproj4/pyproj/blob/3.7.2/.github/workflows/release.yaml
+name: Build pyproj wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pyproj version to build (git tag, e.g. 3.7.2)'
+        required: true
+        default: '3.7.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pyproj.yml'
+      - 'patches/pyproj/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '3.7.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYPROJ_VERSION: ${{ inputs.version || '3.7.2' }}
+  PROJ_VERSION: '9.5.1'
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build pyproj ${{ inputs.version || '3.7.2' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 600
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout pyproj ${{ env.PYPROJ_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: pyproj4/pyproj
+          ref: ${{ env.PYPROJ_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # auditwheel vendors the curl/libtiff/nghttp2 (and statically, OpenSSL) that
+      # ci/proj-compile-wheels.sh builds, but the wheel ships only pyproj's own licences.
+      - name: Patch pyproj source
+        run: |
+          git apply python-wheels/patches/pyproj/${{ env.PYPROJ_VERSION }}/00*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL: bash ./ci/proj-compile-wheels.sh
+          CIBW_ENVIRONMENT: >-
+            PROJ_WHEEL=true
+            PROJ_NETWORK=ON
+            PROJ_VERSION=${{ env.PROJ_VERSION }}
+            PROJ_DIR=/project/pyproj/proj_dir
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: cython pytest numpy
+          CIBW_BEFORE_TEST: python -m pip install shapely pandas xarray || echo "Optional requirements install failed"
+          # PyPI has no riscv64 wheel for these and ours lag its latest release, so keep pip
+          # off the sdists; test-only (gotcha 12) since Cython has to compile from source.
+          CIBW_TEST_ENVIRONMENT: 'PIP_ONLY_BINARY=numpy,pandas,shapely'
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m; n=sorted(p.name for p in m.files('pyproj') if 'licenses/' in str(p)); assert n == ['LICENSE', 'LICENSE_curl', 'LICENSE_libtiff', 'LICENSE_nghttp2', 'LICENSE_openssl', 'LICENSE_proj'], n" &&
+            pyproj -v &&
+            python -c "import pyproj; pyproj.Proj(init='epsg:4269')" &&
+            cp -r {package}/test . &&
+            python -m pytest test -v -s
+
+      - name: Check the compiled extensions and PROJ made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("pyproj/_crs.") and n.endswith(".so") for n in names), whl
+              assert any(n.startswith("pyproj.libs/libproj") for n in names), whl
+              assert "pyproj/proj_dir/share/proj/proj.db" in names, whl
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyproj-${{ env.PYPROJ_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyproj ${{ inputs.version || '3.7.2' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: pyproj-${{ env.PYPROJ_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

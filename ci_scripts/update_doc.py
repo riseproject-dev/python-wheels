@@ -56,11 +56,50 @@ def normalize_label(label):
     return label.translate(removal_map).lower()
 
 
+# "License :: OSI Approved :: BSD License" -> "BSD"
+TROVE_LICENSE_PREFIX = "License :: "
+
+
+def license_from_classifiers(message):
+    for classifier in message.get_all("Classifier", []):
+        if not classifier.startswith(TROVE_LICENSE_PREFIX):
+            continue
+        name = classifier.rsplit(" :: ", 1)[-1].strip()
+        if name and name != "OSI Approved":
+            return name
+    return None
+
+
 def extract_license(message):
+    """
+    Core metadata < 2.4 allows the whole licence text in `License`, and projects
+    such as scipy ship exactly that. Only take that field when it is a short
+    identifier; otherwise fall back to the trove classifier, which stays short.
+    """
     license = message.get("License-Expression")
-    if not license:
-        license = message.get("License", "Unknown")
-    return license
+    if license:
+        return license
+
+    license = message.get("License")
+    if license and "\n" not in license.strip() and len(license.strip()) <= 64:
+        return license.strip()
+
+    return license_from_classifiers(message) or "Unknown"
+
+
+# Trove names that say a family rather than a licence. They are good enough for a
+# brand-new package's top-level entry but cannot establish that a version's licence
+# changed, so a per-version key is not worth emitting for them.
+VAGUE_LICENSES = frozenset(
+    {
+        "BSD License",
+        "Apache Software License",
+        "MIT License",
+        "GNU General Public License (GPL)",
+        "GNU Lesser General Public License v2 or later (LGPLv2+)",
+        "Python Software Foundation License",
+    }
+)
 
 
 def extract_source_code_url(message):
@@ -169,7 +208,7 @@ def append_version(content, package_data, version, license, patch_dir, comment=N
     lines = [f"  - {yaml_line('version', version)}"]
     if patch_dir is not None:
         lines.append("    patched:")
-    if license and license != top_level_license:
+    if license and license != top_level_license and license not in VAGUE_LICENSES:
         lines.append(f"    {yaml_line('license', license)}")
     if comment:
         lines.append(f"    {yaml_line('comment', comment)}")

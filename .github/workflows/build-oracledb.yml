@@ -1,0 +1,115 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_linux_wheels` job of
+# https://github.com/oracle/python-oracledb/blob/v4.0.2/.github/workflows/build.yaml
+# Dropped: macos, windows, musllinux (the registry has no musl riscv64 cryptography,
+# which oracledb requires at runtime).
+name: Build oracledb wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'oracledb version to build (git tag without leading v, e.g. 4.0.2)'
+        required: true
+        default: '4.0.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-oracledb.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '4.0.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  ORACLEDB_VERSION: ${{ inputs.version || '4.0.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build oracledb ${{ inputs.version || '4.0.2' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        # cp314t is left out: upstream publishes no free-threaded wheel and its tox
+        # envlist stops at py314.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+
+    steps:
+      - name: Checkout python-oracledb v${{ env.ORACLEDB_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: oracle/python-oracledb
+          ref: v${{ env.ORACLEDB_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PYO_COMPILE_ARGS=-g0
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Test phase only, so it can't starve the build backend (cython builds from sdist).
+          CIBW_TEST_ENVIRONMENT: 'PIP_ONLY_BINARY=:all: PYO_TEST_MAIN_PASSWORD=unused'
+          CIBW_TEST_REQUIRES: pytest numpy pandas
+          CIBW_TEST_SOURCES: tests
+          # Upstream's suite needs a live Oracle Database, which has no riscv64 build.
+          # These five modules pass without one; test_1009 is the only test in them
+          # that opens a connection.
+          CIBW_TEST_COMMAND: >-
+            python -m pytest -k "not test_1009"
+            tests/test_1000_module.py tests/test_1500_types.py
+            tests/test_4500_connect_params.py tests/test_4700_pool_params.py
+            tests/test_7200_tnsnames.py
+
+      - name: Check the extension modules made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          expected = {"arrow_impl", "base_impl", "thick_impl", "thin_impl"}
+          for whl in sys.argv[1:]:
+              found = {
+                  n.split("/")[-1].split(".")[0]
+                  for n in zipfile.ZipFile(whl).namelist()
+                  if n.endswith(".so")
+              }
+              assert found == expected, (whl, found)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: oracledb-${{ env.ORACLEDB_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish oracledb ${{ inputs.version || '4.0.2' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: oracledb-${{ env.ORACLEDB_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
