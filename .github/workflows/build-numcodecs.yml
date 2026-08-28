@@ -1,0 +1,105 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's wheel builder:
+#   https://github.com/zarr-developers/numcodecs/blob/main/.github/workflows/wheel.yaml
+name: Build numcodecs wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'numcodecs version to build (git tag without leading v, e.g. 0.16.5)'
+        required: true
+        default: '0.16.5'
+  pull_request:
+    paths:
+      - '.github/workflows/build-numcodecs.yml'
+      - 'patches/numcodecs/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.16.5' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  NUMCODECS_VERSION: ${{ inputs.version || '0.16.5' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build numcodecs ${{ inputs.version || '0.16.5' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        # Per-interpreter (not abi3): PyPI ships a cpXY-cpXY wheel for each.
+        # Upstream builds cp311-cp314 and publishes no free-threaded wheel.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+
+    steps:
+      - name: Checkout numcodecs v${{ env.NUMCODECS_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: zarr-developers/numcodecs
+          ref: v${{ env.NUMCODECS_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch numcodecs source
+        run: git apply python-wheels/patches/numcodecs/${{ env.NUMCODECS_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Repeats upstream's [tool.cibuildwheel] environment, which this replaces.
+          # numpy resolves from our registry; the patch dirties the tree, so pin the
+          # version setuptools_scm would otherwise derive from git.
+          CIBW_ENVIRONMENT: >-
+            DISABLE_NUMCODECS_AVX2=1
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_NUMCODECS=${{ env.NUMCODECS_VERSION }}
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+          CIBW_TEST_EXTRAS: test,test_extras,msgpack
+          # Upstream's wheel job only imports numcodecs; run the bundled suite instead.
+          CIBW_TEST_COMMAND: python -c "import importlib.metadata as md, numcodecs.blosc, numcodecs.zstd, numcodecs.lz4, numcodecs.vlen, numcodecs.compat_ext, numcodecs._shuffle, numcodecs.fletcher32, numcodecs.jenkins as j; assert j.__file__.endswith('.so'), j.__file__; assert any(str(p).endswith('.dist-info/licenses/LICENSE.zstd') for p in md.files('numcodecs'))" && python -m pytest --pyargs numcodecs -q
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: numcodecs-${{ env.NUMCODECS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish numcodecs ${{ inputs.version || '0.16.5' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: numcodecs-${{ env.NUMCODECS_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
