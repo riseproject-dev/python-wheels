@@ -41,6 +41,76 @@ jobs:
           ref: v${{ env.TSLP_VERSION }}
           persist-credentials: false
 
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # The parser-sources release bundle keeps only src/ and queries/, so each
+      # grammar's licence has to come from its own pinned revision.
+      - name: Stage the grammar licences
+        run: |
+          python3 - <<'PY'
+          import concurrent.futures as cf
+          import json
+          import pathlib
+          import re
+          import urllib.error
+          import urllib.request
+
+          NAMES = ["LICENSE", "LICENSE.md", "LICENSE.txt", "LICENCE", "LICENCE.md",
+                   "LICENCE.txt", "COPYING", "COPYING.md", "COPYING.txt", "LICENSE-MIT",
+                   "LICENSE-APACHE", "UNLICENSE", "license", "license.md"]
+          EXPECTED = 357
+          LICENCE_RE = re.compile(r"(?i)^(licen[cs]e|copying|notice)")
+          out = pathlib.Path("packages/python/grammar-licenses")
+
+
+          def write(language, filename, data):
+              target = out / language / filename
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(data)
+              return language
+
+
+          def stage(item):
+              language, spec = item
+              local = spec.get("local")
+              if local:
+                  for path in sorted(pathlib.Path(local).iterdir()):
+                      if LICENCE_RE.match(path.name):
+                          return write(language, path.name, path.read_bytes())
+                  return None
+              repo, rev = spec.get("repo"), spec.get("rev")
+              if not repo or not rev:
+                  return None
+              if repo.startswith("https://github.com/"):
+                  base = "https://raw.githubusercontent.com/%s/%s" % (repo[19:].strip("/"), rev)
+              elif repo.startswith("https://gitlab.com/"):
+                  base = "%s/-/raw/%s" % (repo.rstrip("/"), rev)
+              else:
+                  return None
+              for candidate in NAMES:
+                  try:
+                      with urllib.request.urlopen("%s/%s" % (base, candidate), timeout=60) as response:
+                          return write(language, candidate, response.read())
+                  except (urllib.error.URLError, TimeoutError):
+                      continue
+              return None
+
+
+          definitions = json.load(open("sources/language_definitions.json"))
+          with cf.ThreadPoolExecutor(max_workers=16) as pool:
+              staged = [name for name in pool.map(stage, sorted(definitions.items())) if name]
+          missing = sorted(set(definitions) - set(staged))
+          print("staged %d; no licence file at the pinned revision: %s" % (len(staged), ", ".join(missing)))
+          assert len(staged) == EXPECTED, len(staged)
+          PY
+
+      - name: Patch tree-sitter-language-pack source
+        run: git apply python-wheels/patches/tree-sitter-language-pack/${{ env.TSLP_VERSION }}/*.patch
+
       - name: Build wheels
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
@@ -78,7 +148,10 @@ jobs:
           # test_download.py needs upstream's prebuilt parser bundle for this
           # platform, which is exactly what riscv64 has none of.
           CIBW_TEST_COMMAND: >-
-            cd e2e/python
+            python -c "import importlib.metadata as md;
+            n = len([p for p in md.files('tree-sitter-language-pack') if '.dist-info/licenses/grammar-licenses/' in str(p)]);
+            assert n == 357, n"
+            && cd e2e/python
             && python -m pytest tests --ignore=tests/test_download.py
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
