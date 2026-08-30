@@ -1,0 +1,144 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build:
+#   https://github.com/Quansight-Labs/ndindex/blob/1.10.1/.github/workflows/publish-package.yml
+name: Build ndindex wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'ndindex version/tag to build (e.g. 1.10.1)'
+        required: true
+        default: '1.10.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-ndindex.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.10.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NDINDEX_VERSION: ${{ inputs.version || '1.10.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_sdist:
+    name: Build ndindex ${{ inputs.version || '1.10.1' }} sdist
+    runs-on: ubuntu-latest
+    outputs:
+      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
+      package_version: ${{ steps.sdist.outputs.package_version }}
+    steps:
+      - name: Checkout ndindex ${{ env.NDINDEX_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: Quansight-Labs/ndindex
+          ref: ${{ env.NDINDEX_VERSION }}
+          # versioneer derives the version from the tag history
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build sdist
+        id: sdist
+        run: |
+          uv pip install build twine
+          python -m build --sdist .
+          twine check --strict dist/*
+          sdists=(dist/*.tar.gz)
+          sdist_name="$(basename "${sdists[0]}")"
+          echo "sdist_name=$sdist_name" >> "$GITHUB_OUTPUT"
+          echo "package_version=$(echo "$sdist_name" | sed -En 's/ndindex-(.+)\.tar\.gz/\1/p')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ndindex-${{ env.NDINDEX_VERSION }}-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: build_sdist
+    name: Build ndindex ${{ inputs.version || '1.10.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        # Upstream also builds musllinux; dropped here because we publish no
+        # musllinux_riscv64 numpy or hypothesis wheel to test against.
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ndindex-${{ env.NDINDEX_VERSION }}-sdist
+          path: dist/
+
+      # Extracted at the workspace root so cibuildwheel's cwd is the sdist tree
+      # and CIBW_TEST_SOURCES can stage upstream's conftest.py.
+      - name: Extract sdist
+        run: tar zxf dist/${{ needs.build_sdist.outputs.sdist_name }} --strip-components=1
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@63fd63b352a9a8bdcc24791c9dbee952ee9a8abc  # v3.3.0
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_REQUIRES: numpy hypothesis pytest sympy packaging
+          CIBW_TEST_SOURCES: conftest.py
+          # Upstream's wheel job only imports the module; run the suite that
+          # ships inside the wheel instead. --hypothesis-disable-deadline is
+          # upstream's own flag: the per-example deadline is sized for their x86
+          # runners.
+          CIBW_TEST_COMMAND: >-
+            python -c "import ndindex._slice as s, ndindex._tuple as t; assert s.__file__.endswith('.so') and t.__file__.endswith('.so'), (s.__file__, t.__file__)" &&
+            python -m pytest --pyargs ndindex -v --hypothesis-disable-deadline
+          CIBW_TEST_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,hypothesis
+        with:
+          only: ${{ matrix.python }}-manylinux_riscv64
+
+      - name: Check the wheel ships the extension modules
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = {n.rsplit("/", 1)[-1].split(".")[0]
+                   for n in zipfile.ZipFile(sys.argv[1]).namelist() if n.endswith(".so")}
+          assert names == {"_slice", "_tuple"}, names
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ndindex-${{ needs.build_sdist.outputs.package_version }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish ndindex ${{ inputs.version || '1.10.1' }} to GitLab
+    needs: [build_sdist, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: ndindex-${{ needs.build_sdist.outputs.package_version }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
