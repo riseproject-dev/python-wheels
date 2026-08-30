@@ -1,0 +1,147 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 28 Aug 2026 08:00:00 +0200
+Subject: [PATCH] tests: wait for background specs syncs instead of assuming a 1ms interval
+
+`StatsigOptions.specs_sync_interval_ms` is now rejected below 1000 ("Invalid
+'specs_sync_interval_ms', value must be greater than 1000"), so the five tests
+that set it to 1 no longer get the near-instant background sync they were
+written against. They fail at the 0.22.0 tag on every platform, against the
+wheels published on PyPI -- x86_64, aarch64 and macOS alike.
+
+Use the smallest accepted interval and wait for the condition each test is
+really about rather than for a fixed duration. The waits return as soon as the
+sync lands, so fast hardware pays nothing and the whole file gets quicker.
+
+Upstream-Status: To upstream [not yet submitted; the release tag is not covered by upstream's test workflow, which runs on branches only, so this needs a maintainer discussion rather than a drive-by PR]
+---
+diff --git a/statsig-pyo3/tests/test_data_store.py b/statsig-pyo3/tests/test_data_store.py
+index 7959adf..d9d615d 100644
+--- a/statsig-pyo3/tests/test_data_store.py
++++ b/statsig-pyo3/tests/test_data_store.py
+@@ -1,4 +1,5 @@
+ import json
++import time
+ from time import sleep
+ from typing import Optional
+ import pytest
+@@ -16,6 +17,13 @@ from utils import get_test_data_resource, get_test_data_resource_bytes
+ 
+ known_lcut = 1767981029384
+ 
++
++def wait_for(predicate, timeout=30.0, interval=0.05):
++    deadline = time.monotonic() + timeout
++    while not predicate() and time.monotonic() < deadline:
++        sleep(interval)
++
++
+ dcs_content = get_test_data_resource("eval_proj_dcs.json")
+ json_data = json.loads(dcs_content)
+ eval_proj_protobuf = get_test_data_resource_bytes("eval_proj_dcs.pb.br")
+@@ -142,7 +150,7 @@ def statsig_setup(httpserver: HTTPServer):
+         specs_url=httpserver.url_for("/v2/download_config_specs"),
+         log_event_url=httpserver.url_for("/v1/log_event"),
+         data_store=data_store,
+-        specs_sync_interval_ms=1,
++        specs_sync_interval_ms=1001,
+     )
+ 
+     statsig = Statsig("secret-key", options)
+@@ -166,7 +174,7 @@ def statsig_bytes_setup(httpserver: HTTPServer):
+         specs_url=httpserver.url_for("/v2/download_config_specs"),
+         log_event_url=httpserver.url_for("/v1/log_event"),
+         data_store=data_store,
+-        specs_sync_interval_ms=1,
++        specs_sync_interval_ms=1001,
+     )
+ 
+     statsig = Statsig("secret-key", options)
+@@ -191,6 +199,8 @@ def test_data_store_usage_get(statsig_setup):
+ 
+     statsig.flush_events().wait()
+ 
++    wait_for(lambda: data_store.get_called_count > 1)
++
+     assert data_store.init_called
+     assert gate.details.reason == "Adapter(DataStore):Recognized"
+     assert gate.value == True
+@@ -207,7 +217,7 @@ def test_data_store_usage_set(statsig_setup):
+ 
+     assert data_store.init_called
+     assert gate.details.reason == "Adapter(DataStore):Recognized"
+-    sleep(1)
++    wait_for(lambda: data_store.content_set is not None)
+ 
+     gate_after = statsig.get_feature_gate(user, "test_public")
+     statsig.flush_events().wait()
+@@ -232,10 +242,7 @@ def test_data_store_usage_get_bytes(statsig_bytes_setup):
+     assert gate.value == True
+     assert gate.details.lcut == known_lcut
+ 
+-    for _ in range(5):
+-        if data_store.set_bytes_called_count > 0:
+-            break
+-        sleep(0.05)
++    wait_for(lambda: data_store.set_bytes_called_count > 0)
+ 
+     assert data_store.get_bytes_called_count >= 1
+     assert data_store.get_called_count == 0
+@@ -251,7 +258,10 @@ def test_data_store_usage_set_bytes(statsig_bytes_setup):
+ 
+     assert data_store.init_called
+     assert gate.details.reason == "Adapter(DataStore):Recognized"
+-    sleep(1)
++    wait_for(
++        lambda: statsig.get_feature_gate(user, "test_public").details.lcut
++        == known_lcut + 10
++    )
+ 
+     gate_after = statsig.get_feature_gate(user, "test_public")
+     statsig.flush_events().wait()
+diff --git a/statsig-pyo3/tests/test_observability_client.py b/statsig-pyo3/tests/test_observability_client.py
+index 1459a60..b4d9243 100644
+--- a/statsig-pyo3/tests/test_observability_client.py
++++ b/statsig-pyo3/tests/test_observability_client.py
+@@ -85,7 +85,7 @@ def statsig_setup(httpserver: HTTPServer):
+     options.specs_url = httpserver.url_for("/v2/download_config_specs")
+     options.log_event_url = httpserver.url_for("/v1/log_event")
+     options.observability_client = observability_client
+-    options.specs_sync_interval_ms = 1
++    options.specs_sync_interval_ms = 1001
+     options.output_log_level = "error"
+     statsig = Statsig("secret-key", options)
+ 
+@@ -165,16 +165,23 @@ def test_metric_with_high_card(statsig_setup):
+     statsig.flush_events().wait()
+ 
+     assert observability_client.init_called, "init() should have been called"
+-    time.sleep(3)
+ 
+-    dist_event = next(
+-        (
+-            m
+-            for m in observability_client.metrics
+-            if m[0] == "distribution" and m[1] == "statsig.sdk.config_propagation_diff"
+-        ),
+-        None,
+-    )
++    def find_dist_event():
++        return next(
++            (
++                m
++                for m in observability_client.metrics
++                if m[0] == "distribution"
++                and m[1] == "statsig.sdk.config_propagation_diff"
++            ),
++            None,
++        )
++
++    deadline = time.monotonic() + 30.0
++    while find_dist_event() is None and time.monotonic() < deadline:
++        time.sleep(0.05)
++
++    dist_event = find_dist_event()
+     assert dist_event is not None, "distribution() should have been called"
+     assert isinstance(dist_event[2], float)
+     assert isinstance(int(dist_event[3].get("lcut")), (int, float))
