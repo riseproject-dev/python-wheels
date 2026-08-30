@@ -1,0 +1,96 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/djlint/djLint/blob/v1.44.2/.github/workflows/publish.yml
+name: Build djlint wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'djlint version to build (git tag without the v, e.g. 1.44.2)'
+        required: true
+        default: '1.44.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-djlint.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.44.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.44.2 there.
+  DJLINT_VERSION: ${{ inputs.version || '1.44.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build djlint ${{ inputs.version || '1.44.2' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        # mypyc emits per-interpreter (non-abi3) wheels, one build each.
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout djlint ${{ env.DJLINT_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: djlint/djLint
+          ref: v${{ env.DJLINT_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream's build[uv] frontend asserts a host uv in the audit step.
+          CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
+          # click 8.5 makes get_text_stream untyped, so mypyc rejects djlint's source.
+          CIBW_BEFORE_BUILD: >-
+            pip install hatchling hatch-mypyc "click<8.5" cssbeautifier jsbeautifier
+            json5 types-pyyaml types-regex typing-extensions
+          # Restates upstream's [tool.cibuildwheel] environment, which this replaces.
+          CIBW_ENVIRONMENT: >-
+            HATCH_BUILD_HOOK_ENABLE_MYPYC=1
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest pytest-xdist
+          # pyproject.toml is what djlint resolves reported paths against.
+          CIBW_TEST_SOURCES: tests pytest.toml pyproject.toml
+          # Upstream never tests its wheels; run the suite its CI runs.
+          # The import assert catches a silently-uncompiled (pure-Python) wheel.
+          CIBW_TEST_COMMAND: >-
+            python -c "import djlint; assert djlint.__file__.endswith('.so'), djlint.__file__"
+            && python -m pytest tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: djlint-${{ env.DJLINT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish djlint ${{ inputs.version || '1.44.2' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: djlint-${{ env.DJLINT_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
