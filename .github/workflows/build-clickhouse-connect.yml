@@ -1,0 +1,126 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_*_manylinux_wheels` jobs of
+# https://github.com/ClickHouse/clickhouse-connect/blob/v1.7.2/.github/workflows/publish.yml
+# and the unit-test half of on_push.yml (the integration tests need a
+# ClickHouse server, which publishes no riscv64 image).
+name: Build clickhouse-connect wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'clickhouse-connect version to build (git tag without leading v, e.g. 1.7.2)'
+        required: true
+        default: '1.7.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-clickhouse-connect.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.7.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  CLICKHOUSE_CONNECT_VERSION: ${{ inputs.version || '1.7.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build clickhouse-connect ${{ inputs.version || '1.7.2' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        # Per-interpreter (not abi3), matching upstream's own wheel matrix.
+        # `test_requires` varies because 3.14 has zstd in the stdlib, and the
+        # registry ships no free-threaded pandas wheel — so on cp314t the two
+        # modules that import pandas at module scope are skipped instead.
+        include:
+          - python: "cp312"
+            test_requires: "backports.zstd pandas<3.0.4"
+            pytest_ignore: ""
+          - python: "cp313"
+            test_requires: "backports.zstd pandas<3.0.4"
+            pytest_ignore: ""
+          - python: "cp314"
+            test_requires: "pandas<3.0.4"
+            pytest_ignore: ""
+          - python: "cp314t"
+            test_requires: ""
+            pytest_ignore: >-
+              --ignore tests/unit_tests/test_driver/test_params.py
+              --ignore tests/unit_tests/test_driver/test_temporal.py
+
+    steps:
+      - name: Checkout clickhouse-connect v${{ env.CLICKHOUSE_CONNECT_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: ClickHouse/clickhouse-connect
+          ref: v${{ env.CLICKHOUSE_CONNECT_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Upstream builds the wheels without testing them and tests an in-place
+          # build instead; stage only the suite so the repo-root `clickhouse_connect/`
+          # can't shadow the installed extension modules.
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_REQUIRES: pytest pytest-asyncio numpy pyarrow sqlalchemy alembic aiohttp ${{ matrix.test_requires }}
+          # Keeps a dep whose riscv64 wheel we don't have from silently source-building.
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,pyarrow,pandas,sqlalchemy,aiohttp,lz4,backports.zstd
+          # tests/unit_tests/test_driver/test_c_parity.py imports driverc directly, so a
+          # wheel that fell back to pure Python fails here. TestQuery's fixture opens a
+          # real connection to a ClickHouse server, which has no riscv64 image.
+          CIBW_TEST_COMMAND: >-
+            python -m pytest tests/unit_tests -k "not TestQuery" ${{ matrix.pytest_ignore }}
+
+      - name: Check the Cython extensions made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          expected = {"buffer", "dataconv", "npconv"}
+          for whl in sys.argv[1:]:
+              found = {
+                  n.rsplit("/", 1)[-1].split(".")[0]
+                  for n in zipfile.ZipFile(whl).namelist()
+                  if n.startswith("clickhouse_connect/driverc/") and n.endswith(".so")
+              }
+              assert found == expected, (whl, found)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: clickhouse-connect-${{ env.CLICKHOUSE_CONNECT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish clickhouse-connect ${{ inputs.version || '1.7.2' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: clickhouse-connect-${{ env.CLICKHOUSE_CONNECT_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
