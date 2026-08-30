@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `wheels-linux-*` jobs of
+# https://github.com/mosquito/caio/blob/0.12.2/.github/workflows/publish.yml
+name: Build caio wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'caio version to build (git tag, e.g. 0.12.2)'
+        required: true
+        default: '0.12.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-caio.yml'
+      - 'patches/caio/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.12.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  CAIO_VERSION: ${{ inputs.version || '0.12.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build caio ${{ inputs.version || '0.12.2' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout caio ${{ env.CAIO_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: mosquito/caio
+          ref: ${{ env.CAIO_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # The free-threading stress cases size their waits for upstream's CI: the
+      # heaviest ones queue thousands of completions against a 20-30s budget
+      # that four riscv64 cores cannot meet, and one waits on a different event
+      # from the one it asserts.
+      - name: Patch caio source
+        run: git apply python-wheels/patches/caio/${{ env.CAIO_VERSION }}/*.patch
+
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          enable-cache: false
+
+      # pyproject.toml carries a stale placeholder version; upstream's release
+      # job stamps the real one from the tag before building.
+      - name: Set version from tag
+        run: |
+          uv version --frozen "${CAIO_VERSION}"
+          grep -qx "version = \"${CAIO_VERSION}\"" pyproject.toml
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # The default seccomp profile blocks io_uring, which would make the
+          # linux_uring backend unimportable and skip a third of the suite.
+          CIBW_CONTAINER_ENGINE: "docker; create_args: --security-opt=seccomp=unconfined"
+          CIBW_TEST_SOURCES: tests pyproject.toml
+          CIBW_TEST_REQUIRES: pytest aiomisc-pytest pytest-rerunfailures
+          CIBW_TEST_COMMAND: >-
+            python -c "import caio.thread_aio as t, caio.linux_aio as l, caio.linux_uring as u;
+            assert t.__file__.endswith('.so'), t.__file__;
+            assert l.__file__.endswith('.so'), l.__file__;
+            assert u.__file__.endswith('.so'), u.__file__" &&
+            python -m pytest -v tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: caio-${{ env.CAIO_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish caio ${{ inputs.version || '0.12.2' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: caio-${{ env.CAIO_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
