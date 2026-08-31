@@ -1,0 +1,179 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/xberg-io/tree-sitter-language-pack/blob/v1.15.8/.github/workflows/ci-e2e.yaml
+name: Build tree-sitter-language-pack wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'tree-sitter-language-pack version to build (git tag without the leading v, e.g. 1.15.8)'
+        required: true
+        default: '1.15.8'
+  pull_request:
+    paths:
+      - '.github/workflows/build-tree-sitter-language-pack.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.15.8' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.15.8 there.
+  TSLP_VERSION: ${{ inputs.version || '1.15.8' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build tree-sitter-language-pack ${{ inputs.version || '1.15.8' }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+
+    steps:
+      - name: Checkout tree-sitter-language-pack v${{ env.TSLP_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: xberg-io/tree-sitter-language-pack
+          ref: v${{ env.TSLP_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # The parser-sources release bundle keeps only src/ and queries/, so each
+      # grammar's licence has to come from its own pinned revision.
+      - name: Stage the grammar licences
+        run: |
+          python3 - <<'PY'
+          import concurrent.futures as cf
+          import json
+          import pathlib
+          import re
+          import urllib.error
+          import urllib.request
+
+          NAMES = ["LICENSE", "LICENSE.md", "LICENSE.txt", "LICENCE", "LICENCE.md",
+                   "LICENCE.txt", "COPYING", "COPYING.md", "COPYING.txt", "LICENSE-MIT",
+                   "LICENSE-APACHE", "UNLICENSE", "license", "license.md"]
+          EXPECTED = 357
+          LICENCE_RE = re.compile(r"(?i)^(licen[cs]e|copying|notice)")
+          out = pathlib.Path("packages/python/grammar-licenses")
+
+
+          def write(language, filename, data):
+              target = out / language / filename
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(data)
+              return language
+
+
+          def stage(item):
+              language, spec = item
+              local = spec.get("local")
+              if local:
+                  for path in sorted(pathlib.Path(local).iterdir()):
+                      if LICENCE_RE.match(path.name):
+                          return write(language, path.name, path.read_bytes())
+                  return None
+              repo, rev = spec.get("repo"), spec.get("rev")
+              if not repo or not rev:
+                  return None
+              if repo.startswith("https://github.com/"):
+                  base = "https://raw.githubusercontent.com/%s/%s" % (repo[19:].strip("/"), rev)
+              elif repo.startswith("https://gitlab.com/"):
+                  base = "%s/-/raw/%s" % (repo.rstrip("/"), rev)
+              else:
+                  return None
+              for candidate in NAMES:
+                  try:
+                      with urllib.request.urlopen("%s/%s" % (base, candidate), timeout=60) as response:
+                          return write(language, candidate, response.read())
+                  except (urllib.error.URLError, TimeoutError):
+                      continue
+              return None
+
+
+          definitions = json.load(open("sources/language_definitions.json"))
+          with cf.ThreadPoolExecutor(max_workers=16) as pool:
+              staged = [name for name in pool.map(stage, sorted(definitions.items())) if name]
+          missing = sorted(set(definitions) - set(staged))
+          print("staged %d; no licence file at the pinned revision: %s" % (len(staged), ", ".join(missing)))
+          assert len(staged) == EXPECTED, len(staged)
+          PY
+
+      - name: Patch tree-sitter-language-pack source
+        run: git apply python-wheels/patches/tree-sitter-language-pack/${{ env.TSLP_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: packages/python
+          output-dir: wheelhouse/
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # pyo3/abi3-py310 tags a single wheel cp310-abi3; build it on cp310 and let
+          # cibuildwheel reuse and re-test it on the newer interpreters.
+          CIBW_BUILD: cp310-manylinux_riscv64 cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          # Upstream's own CI fills parsers/ from a CI artifact of the grammar
+          # checkouts; the released bundle is that same tree and spares 371 clones.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            && dnf -y install zstd
+            && curl -fsSL -o /tmp/sources.tar.zst "${PARSER_SOURCES_URL}"
+            && curl -fsSL -o /tmp/sources.sha256 "${PARSER_SOURCES_URL}.sha256"
+            && echo "$(awk '{print $1}' /tmp/sources.sha256)  /tmp/sources.tar.zst" | sha256sum -c -
+            && mkdir -p /tmp/sources
+            && tar --zstd -xf /tmp/sources.tar.zst -C /tmp/sources
+            && rm -rf {project}/parsers
+            && mv /tmp/sources/parsers {project}/parsers
+          # Upstream publishes no riscv64 parser bundle, so the runtime download path
+          # has nothing to fetch; every grammar is compiled into the wheel instead.
+          # TSLP_GRAMMAR_CFLAGS matches the -O2 upstream builds its parsers with.
+          CIBW_ENVIRONMENT: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PARSER_SOURCES_URL=https://github.com/xberg-io/tree-sitter-language-pack/releases/download/v${{ env.TSLP_VERSION }}/parser-sources-${{ env.TSLP_VERSION }}.tar.zst
+            PROJECT_ROOT=/project
+            TSLP_LANGUAGES=all
+            TSLP_LINK_MODE=static
+            TSLP_GRAMMAR_CFLAGS=-O2
+          CIBW_TEST_REQUIRES: pytest pytest-asyncio pytest-timeout
+          CIBW_TEST_SOURCES: e2e/python
+          # test_download.py needs upstream's prebuilt parser bundle for this
+          # platform, which is exactly what riscv64 has none of.
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as md;
+            n = len([p for p in md.files('tree-sitter-language-pack') if '.dist-info/licenses/grammar-licenses/' in str(p)]);
+            assert n == 357, n"
+            && cd e2e/python
+            && python -m pytest tests --ignore=tests/test_download.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tree-sitter-language-pack-${{ env.TSLP_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish tree-sitter-language-pack ${{ inputs.version || '1.15.8' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: tree-sitter-language-pack-${{ env.TSLP_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

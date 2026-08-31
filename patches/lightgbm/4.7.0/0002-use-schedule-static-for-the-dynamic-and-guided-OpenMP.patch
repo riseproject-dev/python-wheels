@@ -1,0 +1,183 @@
+From 01c2eba5b13c66519ec73d141424470860840975 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 27 Aug 2026 17:21:10 +0200
+Subject: [PATCH] use schedule(static) for the dynamic and guided OpenMP loops
+
+Upstream-Status: Inappropriate [works around a libgomp defect on the riscv64 runners, riseproject-dev/python-wheels#617]
+
+libgomp's dynamic and guided work-share schedules fault on the riscv64
+machines these wheels are built and tested on. A 40-line C program that
+allocates nothing in the loop body segfaults 3 times out of 3 under
+schedule(guided) and schedule(dynamic), on the bare runner with GCC
+13.3.0 and inside manylinux_2_39_riscv64 with GCC 14.3.1, while
+schedule(static) on the same program is clean and 30M concurrent
+malloc/free per thread are clean. The identical binaries pass under QEMU
+riscv64 and on aarch64 at 64 threads, so it is specific to that
+hardware, not to the code.
+
+LightGBM lands on it because it runs a very large number of small
+parallel regions: the ranking objective takes the guided path once per
+boosting iteration, and every sparse dataset construction takes it in
+FeatureGroup::FinishLoad. The wheel segfaults inside
+gomp_iter_guided_next() during training.
+
+Only 13 of LightGBM's ~230 parallel regions ask for a dynamic or guided
+schedule; the rest already use static. Moving those 13 over costs load
+balancing on loops whose iterations differ in cost -- ranking queries and
+feature groups -- and buys a wheel that does not crash. Revert once the
+runners' toolchain is fixed.
+---
+ include/LightGBM/feature_group.h        | 2 +-
+ src/io/dataset.cpp                      | 2 +-
+ src/io/dataset_loader.cpp               | 8 ++++----
+ src/metric/map_metric.hpp               | 4 ++--
+ src/objective/rank_objective.hpp        | 6 +++---
+ src/treelearner/gpu_tree_learner.cpp    | 2 +-
+ src/treelearner/linear_tree_learner.cpp | 2 +-
+ 7 files changed, 13 insertions(+), 13 deletions(-)
+
+diff --git a/include/LightGBM/feature_group.h b/include/LightGBM/feature_group.h
+index 055c620..83f5148 100644
+--- a/include/LightGBM/feature_group.h
++++ b/include/LightGBM/feature_group.h
+@@ -363,7 +363,7 @@ class FeatureGroup {
+   inline void FinishLoad() {
+     if (is_multi_val_) {
+       OMP_INIT_EX();
+-#pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(guided)
++#pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+       for (int i = 0; i < num_feature_; ++i) {
+         OMP_LOOP_EX_BEGIN();
+         multi_bin_data_[i]->FinishLoad();
+diff --git a/src/io/dataset.cpp b/src/io/dataset.cpp
+index c0709a9..51e7787 100644
+--- a/src/io/dataset.cpp
++++ b/src/io/dataset.cpp
+@@ -860,7 +860,7 @@ void Dataset::CopySubrowHostPart(const Dataset* fullset, const data_size_t* used
+   int num_copy_tasks = static_cast<int>(group_ids.size());
+ 
+   OMP_INIT_EX();
+-  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(dynamic)
++  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+   for (int task_id = 0; task_id < num_copy_tasks; ++task_id) {
+     OMP_LOOP_EX_BEGIN();
+     int group = group_ids[task_id];
+diff --git a/src/io/dataset_loader.cpp b/src/io/dataset_loader.cpp
+index ac69794..b8b7851 100644
+--- a/src/io/dataset_loader.cpp
++++ b/src/io/dataset_loader.cpp
+@@ -633,7 +633,7 @@ Dataset* DatasetLoader::ConstructFromSampleData(double** sample_values,
+   if (Network::num_machines() == 1) {
+     // if only one machine, find bin locally
+     OMP_INIT_EX();
+-    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(guided)
++    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+     for (int i = 0; i < num_col; ++i) {
+       OMP_LOOP_EX_BEGIN();
+       if (ignore_features_.count(i) > 0) {
+@@ -684,7 +684,7 @@ Dataset* DatasetLoader::ConstructFromSampleData(double** sample_values,
+     }
+     len[num_machines - 1] = num_total_features - start[num_machines - 1];
+     OMP_INIT_EX();
+-    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(guided)
++    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+     for (int i = 0; i < len[rank]; ++i) {
+       OMP_LOOP_EX_BEGIN();
+       if (ignore_features_.count(start[rank] + i) > 0) {
+@@ -1146,7 +1146,7 @@ void DatasetLoader::ConstructBinMappersFromTextData(int rank, int num_machines,
+   if (num_machines == 1) {
+     // if only one machine, find bin locally
+     OMP_INIT_EX();
+-    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(guided)
++    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+     for (int i = 0; i < static_cast<int>(sample_values.size()); ++i) {
+       OMP_LOOP_EX_BEGIN();
+       if (ignore_features_.count(i) > 0) {
+@@ -1189,7 +1189,7 @@ void DatasetLoader::ConstructBinMappersFromTextData(int rank, int num_machines,
+     }
+     len[num_machines - 1] = dataset->num_total_features_ - start[num_machines - 1];
+     OMP_INIT_EX();
+-    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(guided)
++    #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+     for (int i = 0; i < len[rank]; ++i) {
+       OMP_LOOP_EX_BEGIN();
+       if (ignore_features_.count(start[rank] + i) > 0) {
+diff --git a/src/metric/map_metric.hpp b/src/metric/map_metric.hpp
+index dfa2c08..129a4f4 100644
+--- a/src/metric/map_metric.hpp
++++ b/src/metric/map_metric.hpp
+@@ -114,7 +114,7 @@ class MapMetric:public Metric {
+     }
+     std::vector<double> tmp_map(eval_at_.size(), 0.0f);
+     if (query_weights_ == nullptr) {
+-      #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(guided) firstprivate(tmp_map)
++      #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static) firstprivate(tmp_map)
+       for (data_size_t i = 0; i < num_queries_; ++i) {
+         const int tid = omp_get_thread_num();
+         CalMapAtK(eval_at_, npos_per_query_[i], label_ + query_boundaries_[i],
+@@ -124,7 +124,7 @@ class MapMetric:public Metric {
+         }
+       }
+     } else {
+-      #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(guided) firstprivate(tmp_map)
++      #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static) firstprivate(tmp_map)
+       for (data_size_t i = 0; i < num_queries_; ++i) {
+         const int tid = omp_get_thread_num();
+         CalMapAtK(eval_at_, npos_per_query_[i], label_ + query_boundaries_[i],
+diff --git a/src/objective/rank_objective.hpp b/src/objective/rank_objective.hpp
+index 512f731..bd418f6 100644
+--- a/src/objective/rank_objective.hpp
++++ b/src/objective/rank_objective.hpp
+@@ -60,7 +60,7 @@ class RankingObjective : public ObjectiveFunction {
+   void GetGradientsWithSampledQueries(const double* score, const data_size_t num_sampled_queries, const data_size_t* sampled_query_indices,
+                     score_t* gradients, score_t* hessians) const override {
+     const data_size_t num_queries = (sampled_query_indices == nullptr ? num_queries_ : num_sampled_queries);
+-#pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(guided)
++#pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+     for (data_size_t i = 0; i < num_queries; ++i) {
+       const data_size_t query_index = (sampled_query_indices == nullptr ? i : sampled_query_indices[i]);
+       const data_size_t start = query_boundaries_[query_index];
+@@ -307,7 +307,7 @@ class LambdarankNDCG : public RankingObjective {
+     std::vector<double> bias_first_derivatives(num_position_ids_ * num_threads, 0.0);
+     std::vector<double> bias_second_derivatives(num_position_ids_ * num_threads, 0.0);
+     std::vector<int> instance_counts(num_position_ids_ * num_threads, 0);
+-    #pragma omp parallel for schedule(guided) num_threads(num_threads)
++    #pragma omp parallel for schedule(static) num_threads(num_threads)
+     for (data_size_t i = 0; i < num_data_; i++) {
+       // get thread ID
+       const int tid = omp_get_thread_num();
+@@ -318,7 +318,7 @@ class LambdarankNDCG : public RankingObjective {
+       bias_second_derivatives[offset] -= hessians[i];
+       instance_counts[offset]++;
+     }
+-    #pragma omp parallel for schedule(guided) num_threads(num_threads)
++    #pragma omp parallel for schedule(static) num_threads(num_threads)
+     for (data_size_t i = 0; i < num_position_ids_; i++) {
+       double bias_first_derivative = 0.0;
+       double bias_second_derivative = 0.0;
+diff --git a/src/treelearner/gpu_tree_learner.cpp b/src/treelearner/gpu_tree_learner.cpp
+index 60e73c2..f87a634 100644
+--- a/src/treelearner/gpu_tree_learner.cpp
++++ b/src/treelearner/gpu_tree_learner.cpp
+@@ -578,7 +578,7 @@ void GPUTreeLearner::BuildGPUKernels() {
+   // currently we don't use constant memory
+   int use_constants = 0;
+   OMP_INIT_EX();
+-  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(guided)
++  #pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+   for (int i = 0; i <= kMaxLogWorkgroupsPerFeature; ++i) {
+     OMP_LOOP_EX_BEGIN();
+     boost::compute::program program;
+diff --git a/src/treelearner/linear_tree_learner.cpp b/src/treelearner/linear_tree_learner.cpp
+index a57cdb7..de4bdc5 100644
+--- a/src/treelearner/linear_tree_learner.cpp
++++ b/src/treelearner/linear_tree_learner.cpp
+@@ -168,7 +168,7 @@ void LinearTreeLearner<TREE_LEARNER_TYPE>::GetLeafMap(Tree* tree) const {
+   std::fill(leaf_map_.begin(), leaf_map_.end(), -1);
+   // map data to leaf number
+   const data_size_t* ind = this->data_partition_->indices();
+-#pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(dynamic)
++#pragma omp parallel for num_threads(OMP_NUM_THREADS()) schedule(static)
+   for (int i = 0; i < tree->num_leaves(); ++i) {
+     data_size_t idx = this->data_partition_->leaf_begin(i);
+     for (int j = 0; j < this->data_partition_->leaf_count(i); ++j) {

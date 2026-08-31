@@ -1,0 +1,228 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/kuelumbus/rdkit-pypi/blob/2026.03.5/.github/workflows/wheels.yml
+name: Build rdkit wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'rdkit version to build (e.g. 2026.3.5)'
+        required: true
+        default: '2026.3.5'
+  pull_request:
+    paths:
+      - '.github/workflows/build-rdkit.yml'
+      - 'patches/rdkit/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2026.3.5' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 2026.3.5 there.
+  RDKIT_VERSION: ${{ inputs.version || '2026.3.5' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Versions Conan builds from source, from rdkit-pypi's conanfile.py.
+  BOOST_VERSION: '1.85.0'
+  EXPAT_VERSION: '2.7.5'
+  # Closest riscv64 build of the cmake==3.31.1 pyproject.toml pins.
+  CMAKE_VERSION: '3.31.6'
+
+jobs:
+  build_wheels:
+    name: Build rdkit ${{ inputs.version || '2026.3.5' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        # numpy and Pillow are build and runtime requirements and the registry
+        # carries them for cp312/cp313/cp314 only; upstream ships no
+        # free-threaded wheel either.
+        python: ["cp312", "cp313", "cp314"]
+
+    steps:
+      - name: Resolve the upstream tag
+        id: upstream
+        # rdkit-pypi zero-pads the month in its tags: 2026.3.5 -> 2026.03.5.
+        run: |
+          IFS=. read -r year month patch <<< "$RDKIT_VERSION"
+          printf 'tag=%s.%02d.%s\n' "$year" "$month" "$patch" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout rdkit-pypi ${{ steps.upstream.outputs.tag }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: kuelumbus/rdkit-pypi
+          ref: ${{ steps.upstream.outputs.tag }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch rdkit-pypi source
+        run: git apply python-wheels/patches/rdkit/${{ env.RDKIT_VERSION }}/*.patch
+
+      - name: Stage the licence-collection script
+        run: |
+          cat > collect-licenses.sh <<'COLLECT_EOF'
+          #!/bin/bash
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # auditwheel bundles Boost and the image's cairo/freetype stack into the wheel and
+          # upstream ships no licence text for any of it. Stage those texts at the project
+          # root, where setuptools' default license_files glob picks them up.
+          set -euo pipefail
+
+          project="${1:?usage: collect-licenses.sh <project> <boost-version> <expat-version>}"
+          boost_version="${2:?missing boost version}"
+          expat_version="${3:?missing expat version}"
+
+          # Conan builds these during the build, so their source trees do not exist yet.
+          curl -fsSL "https://raw.githubusercontent.com/boostorg/boost/boost-${boost_version}/LICENSE_1_0.txt" \
+              -o "$project/LICENSE.boost"
+          curl -fsSL "https://raw.githubusercontent.com/libexpat/libexpat/R_${expat_version//./_}/expat/COPYING" \
+              -o "$project/LICENSE.expat"
+
+          # Everything RDKit links out of the image, plus its transitive closure.
+          roots=()
+          for soname in libcairo.so.2 libfreetype.so.6 libpng16.so.16 libpixman-1.so.0; do
+              roots+=("$(ldconfig -p | awk -v n="$soname" '$1 == n { print $NF; exit }')")
+          done
+          mapfile -t libs < <(
+              { for r in "${roots[@]}"; do readlink -f "$r"; ldd "$r"; done; } |
+                  tr ' ' '\n' | grep '^/' | sort -u
+          )
+          # glibc, libgcc, libstdc++ and zlib are on auditwheel's allowlist, never bundled.
+          mapfile -t pkgs < <(
+              rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null |
+                  grep -E '^[A-Za-z0-9._+-]+$' | sort -u |
+                  grep -vE '^(glibc|libgcc|libstdc\+\+|gcc|zlib-ng-compat)$'
+          )
+
+          # Rocky ships no licence file for these; take it from the release they packaged.
+          license_url() {
+              case "$1" in
+              libX11) echo "https://gitlab.freedesktop.org/xorg/lib/libx11/-/raw/libX11-$2/COPYING" ;;
+              libxcb) echo "https://gitlab.freedesktop.org/xorg/lib/libxcb/-/raw/libxcb-$2/COPYING" ;;
+              esac
+          }
+
+          for pkg in "${pkgs[@]}"; do
+              files=$(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
+              if [ -z "$files" ]; then
+                  # tsflags=nodocs drops %doc-marked licences; a reinstall restores them.
+                  dnf -y reinstall --setopt=tsflags= "$pkg" >/dev/null 2>&1 || true
+                  files=$(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
+                  [ -n "$files" ] || files=$(rpm -qd "$pkg" | grep -iE '/(LICEN[CS]E|COPYING|NOTICE)' || true)
+              fi
+              if [ -z "$files" ]; then
+                  # A subpackage can leave its licence to a sibling built from the same source.
+                  srpm=$(rpm -q --qf '%{SOURCERPM}' "$pkg")
+                  for sib in $(rpm -qa --qf '%{SOURCERPM} %{NAME}\n' | awk -v s="$srpm" '$1 == s { print $2 }'); do
+                      files=$(rpm -q --licensefiles "$sib" 2>/dev/null || true)
+                      [ -n "$files" ] && break
+                  done
+              fi
+              if [ -n "$files" ]; then
+                  for f in $files; do
+                      [ -f "$f" ] && cp "$f" "$project/LICENSE.$pkg.$(basename "$f")"
+                  done
+                  continue
+              fi
+              url=$(license_url "$pkg" "$(rpm -q --qf '%{VERSION}' "$pkg")")
+              if [ -n "$url" ] && curl -fsSL "$url" -o "$project/LICENSE.$pkg.COPYING"; then
+                  continue
+              fi
+              echo "no licence text for $pkg ($(rpm -q --qf '%{LICENSE}' "$pkg"))" >&2
+              exit 1
+          done
+
+          ls -1 "$project"/LICENSE.*
+          COLLECT_EOF
+
+      # RDKit's boost-heavy translation units peak well above what the runner has.
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 10
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # setup.py reads CIBW_BUILD, which pyproject.toml forwards into the
+          # container, so it selects the build the way upstream's job does.
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,pillow
+          # pyproject.toml pins cmake==3.31.1, which has no riscv64 wheel, so the
+          # build requirements are preinstalled and isolation is turned off.
+          CIBW_BEFORE_BUILD: |
+            set -ex
+            pip install "setuptools==75.2.0" wheel "cmake==$CMAKE_VERSION" numpy "conan>=2.0.0" ninja pybind11-stubgen Pillow
+            conan profile detect --exist-ok
+            # conancenter has CMake binaries for x86_64 and armv8 only, so point
+            # the recipes that tool-require it at the one just installed.
+            printf '\n[platform_tool_requires]\ncmake/%s\n' "$CMAKE_VERSION" >> "$(conan config home)/profiles/default"
+            bash {project}/collect-licenses.sh {project} "$BOOST_VERSION" "$EXPAT_VERSION"
+          CIBW_BUILD_FRONTEND: 'pip; args: --no-build-isolation --no-clean'
+          CIBW_ENVIRONMENT_PASS_LINUX: CIBW_BUILD BOOST_VERSION EXPAT_VERSION CMAKE_VERSION
+
+      - name: Check the wheel ships the extensions and the bundled licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert any(n.endswith(".so") for n in names), names
+          expected = [
+              "LICENSE.md",
+              "LICENSE.boost",
+              "LICENSE.expat",
+              "LICENSE.cairo.COPYING",
+              "LICENSE.freetype.LICENSE.TXT",
+              "LICENSE.libpng.LICENSE",
+              "LICENSE.pixman.COPYING",
+              "LICENSE.libxcb.COPYING",
+          ]
+          for licence in expected:
+              assert any(
+                  n.endswith(f".dist-info/{licence}") for n in names
+              ), (licence, [n for n in names if ".dist-info/" in n])
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rdkit-${{ env.RDKIT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish rdkit ${{ inputs.version || '2026.3.5' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: rdkit-${{ env.RDKIT_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
