@@ -1,0 +1,128 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build` job of
+# https://github.com/prefectlabs/burner-redis/blob/v0.1.7/.github/workflows/release.yml
+# and the `test` job of .../ci.yml.
+name: Build burner-redis wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'burner-redis version to build (git tag without the leading v, e.g. 0.1.7)'
+        required: true
+        default: '0.1.7'
+  pull_request:
+    paths:
+      - '.github/workflows/build-burner-redis.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.1.7' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.1.7 there.
+  BURNER_REDIS_VERSION: ${{ inputs.version || '0.1.7' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build burner-redis ${{ inputs.version || '0.1.7' }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout burner-redis v${{ env.BURNER_REDIS_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: prefectlabs/burner-redis
+          ref: v${{ env.BURNER_REDIS_VERSION }}
+          persist-credentials: false
+
+      # The wheel statically links vendored Lua 5.4 and 60+ MIT/Apache-2.0 crates
+      # whose notices upstream only ships in the sdist. maturin's default
+      # licence-file globs (LICEN[CS]E*, COPYING*, NOTICE*, AUTHORS*) are rooted at
+      # the pyproject directory, so copying the inventory to a NOTICE* name is
+      # enough to land it in dist-info/licenses/ with no packaging change.
+      - name: Ship the third-party licence inventory in the wheel
+        run: cp THIRDPARTY.yml NOTICE.THIRDPARTY.yml
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ARCHS: riscv64
+          # Cargo.toml pins pyo3 to `abi3-py310`, so maturin tags every build
+          # `cp310-abi3` whatever interpreter runs it. Selecting the five
+          # interpreters therefore compiles the Rust ONCE (on cp310, the oldest the
+          # tag claims) and then find_compatible_wheel reuses that wheel for
+          # cp311-cp314 while still running the test phase on each. cp314t is
+          # excluded: pyo3's abi3 mode cannot target free-threaded CPython, which is
+          # also why upstream publishes no cp3??t wheel.
+          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
+          # Upstream also ships musllinux wheels, but rustup.rs publishes no
+          # riscv64gc-unknown-linux-musl *host* toolchain (only rust-std, a cross
+          # target), so the musl container has no cargo to build with.
+          CIBW_SKIP: "*-musllinux_*"
+          # burner-redis ships no [tool.cibuildwheel], so the Rust toolchain its
+          # maturin backend needs is installed in-container here. The crate is
+          # edition 2024 with no nightly features, so stable satisfies it.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Upstream's `.[dev]` extra, minus maturin (cibuildwheel drives the build).
+          CIBW_TEST_REQUIRES: pytest pytest-asyncio redis
+          # pyproject.toml carries [tool.pytest.ini_options] (asyncio_mode = auto,
+          # the `integration` marker and the `-m 'not integration'` default) that the
+          # suite cannot run without. Staging only these two paths leaves the
+          # importable `python/burner_redis` out of the test cwd, so `import
+          # burner_redis` can only resolve to the installed wheel.
+          CIBW_TEST_SOURCES: tests pyproject.toml
+          CIBW_TEST_COMMAND: python -m pytest tests
+
+      - name: Check the extension module and licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = sorted(n for n in names if n.endswith('.so'))
+          assert sos == ['burner_redis/_burner_redis.abi3.so'], sos
+          # auditwheel repair adds a bare `dist-info/licenses/` directory entry a
+          # plain maturin wheel has not got, so drop the empty basename it yields.
+          lic = sorted({n.rsplit('/', 1)[1] for n in names
+                        if '.dist-info/licenses/' in n} - {''})
+          assert lic == ['LICENSE', 'NOTICE.THIRDPARTY.yml'], lic
+          print('OK:', sys.argv[1], sos, lic)
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: burner-redis-${{ env.BURNER_REDIS_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish burner-redis ${{ inputs.version || '0.1.7' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: burner-redis-${{ env.BURNER_REDIS_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
