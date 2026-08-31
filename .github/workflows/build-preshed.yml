@@ -58,9 +58,18 @@ jobs:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           # cymem/murmurhash ship no riscv64 wheels; both build and test install them.
           CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # Upstream's tests.yml runs the suite bundled in the wheel.
+          # Cython 3.3.0 routes a C-integer __setitem__ through sq_ass_item, whose
+          # Py_ssize_t index cannot hold PreshMap's uint64 keys; build-system.requires
+          # only floors Cython, so the pin has to be preinstalled.
+          CIBW_BEFORE_BUILD: pip install "cython<3.3.0" setuptools "cymem>=2.0.2,<2.1.0" "murmurhash>=0.28.0,<1.1.0"
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          # Upstream's tests.yml runs the suite bundled in the wheel; it never uses a key
+          # above 2**63, so the assertion below is what catches the Cython regression.
           CIBW_TEST_REQUIRES: pytest
-          CIBW_TEST_COMMAND: python -m pytest --pyargs preshed -Werror
+          CIBW_TEST_COMMAND: >-
+            python -c "from preshed.maps import PreshMap; m = PreshMap();
+            k = (1 << 63) + 12345; m[k] = 7; assert list(m) == [k], list(m); del m[k]"
+            && python -m pytest --pyargs preshed -Werror
 
       - name: Verify the wheel ships the compiled extensions
         run: |

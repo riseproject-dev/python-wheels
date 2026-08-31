@@ -1,0 +1,276 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow mirrors semgrep's own core build: the `build-test-core-x86`
+# workflow and the `semgrep-core-container` stage of
+# https://github.com/semgrep/semgrep/blob/v1.174.0/Dockerfile, followed by
+# https://github.com/semgrep/semgrep/blob/v1.174.0/scripts/build-wheels.sh
+name: Build semgrep wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'semgrep version to build (git tag without leading v, e.g. 1.174.0)'
+        required: true
+        default: '1.174.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-semgrep.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.174.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  SEMGREP_VERSION: ${{ inputs.version || '1.174.0' }}
+  # Upstream builds semgrep-core on a bare distro image (alpine, see their
+  # Dockerfile). Ubuntu is the riscv64 equivalent here: Rocky 10, the base of
+  # the manylinux_riscv64 image, ships no libunwind-devel, which semgrep's
+  # `obackward` links.
+  BUILD_IMAGE: docker.io/riscv64/ubuntu:24.04
+  OPAM_VERSION: '2.5.2'
+  OPAM_SHA256: '42ba8cafa2775e574566da6d17edeafc685576bcf04e88e2cb3dbb78fbf24dec'
+
+jobs:
+  build_wheel:
+    name: Build semgrep ${{ inputs.version || '1.174.0' }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    # The OCaml compiler, ~250 opam packages, 36 tree-sitter grammars and
+    # 300k lines of OCaml are all compiled from source on the riscv64 runner.
+    timeout-minutes: 1440
+
+    steps:
+      - name: Checkout semgrep v${{ env.SEMGREP_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: semgrep/semgrep
+          ref: v${{ env.SEMGREP_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply riscv64 patches
+        run: git apply -v python-wheels/patches/semgrep/${{ env.SEMGREP_VERSION }}/*.patch
+
+      - name: Build semgrep-core and the wheel
+        shell: bash
+        run: |
+          cat > riscv64-build.sh <<'EOF'
+          set -eux
+
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y --no-install-recommends \
+            bash build-essential ca-certificates curl git git-lfs m4 make patch \
+            patchelf pkg-config python3 python3-venv rsync unzip \
+            libbz2-dev libcurl4-openssl-dev libdw-dev libev-dev libgmp-dev \
+            liblzma-dev libpcre2-dev libssl-dev libunwind-dev libzstd-dev zlib1g-dev
+
+          # Upstream's CI installs opam via semgrep/setup-ocaml; the equivalent
+          # here is opam's own riscv64 release binary.
+          curl -fsSL -o /usr/local/bin/opam \
+            "https://github.com/ocaml/opam/releases/download/${OPAM_VERSION}/opam-${OPAM_VERSION}-riscv64-linux"
+          echo "${OPAM_SHA256}  /usr/local/bin/opam" | sha256sum -c -
+          chmod +x /usr/local/bin/opam
+
+          git config --global --add safe.directory /workspace
+
+          export OPAMROOT=/workspace/.opamroot
+          export OPAMYES=1
+
+          make opam-init OPAM_INIT_FLAGS=--disable-sandboxing
+          make switch
+
+          # `make install-deps` picks a lockfile via scripts/pick-lockfile.sh, which
+          # knows no riscv64. Upstream's linux lockfiles differ only in the host-arch
+          # package, so derive ours from the amd64 one and call the rest of the target.
+          sed 's/"host-arch-x86_64"/"host-arch-riscv64"/' \
+            opam-lockfiles/semgrep.opam.linux-amd64.locked > semgrep.opam.locked
+          make install-deps-for-semgrep-core
+
+          opam exec -- make core
+          ./scripts/validate-compiler-sha.sh bin/semgrep-core
+          make copy-core-for-cli
+
+          # Upstream's release job ships semgrep-core's shared libraries next to
+          # the binary (semgrep/bin/libs/ in their manylinux wheels); reproduce
+          # that here so the wheel is self-contained.
+          core=cli/src/semgrep/bin/semgrep-core
+          libs=cli/src/semgrep/bin/libs
+          mkdir -p "$libs"
+          ldd "$core" | awk '/=> \//{print $3}' \
+            | grep -Ev '/(libc|ld-linux[^/]*)\.so' | sort -u > bundled-libs.txt
+          xargs -r -a bundled-libs.txt -I{} cp -L {} "$libs/"
+          patchelf --set-rpath '$ORIGIN/libs' "$core"
+          # RUNPATH is not searched for a dependency's own dependencies, so each
+          # library needs one too (libdw -> libelf); upstream sets it the same way.
+          patchelf --set-rpath '$ORIGIN' "$libs"/*
+
+          python3 -m venv /tmp/buildenv
+          /tmp/buildenv/bin/pip install --quiet --upgrade pip build
+          # upstream's scripts/build-wheels.sh drives the same setup.py through `uv build`
+          /tmp/buildenv/bin/python -m build --wheel --outdir cli/dist cli
+          EOF
+
+          # `make switch` builds the compiler under `opam -v`; tee the whole run
+          # to an artifact since a multi-hour job's log is sometimes dropped.
+          podman run \
+            --log-driver=none \
+            --network=host \
+            -v "$(pwd)":/workspace \
+            --workdir /workspace \
+            -e OPAM_VERSION="${OPAM_VERSION}" \
+            -e OPAM_SHA256="${OPAM_SHA256}" \
+            --pull=newer \
+            "${BUILD_IMAGE}" \
+            bash riscv64-build.sh 2>&1 | tee build.log
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: semgrep-${{ env.SEMGREP_VERSION }}-build-log
+          path: build.log
+
+      - name: Store wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: semgrep-${{ env.SEMGREP_VERSION }}-py3-manylinux_riscv64
+          path: cli/dist/*.whl
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Test the wheel
+        shell: bash
+        run: |
+          cat > riscv64-test.sh <<'EOF'
+          set -eux
+
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y --no-install-recommends ca-certificates git python3 python3-venv
+
+          python3 -m venv /tmp/testenv
+          # Ubuntu 24.04's pip 24.0 matches no manylinux_*_riscv64 tag, so it rejects our
+          # own wheel as "not a supported wheel on this platform"; 26.x matches 27 of them.
+          /tmp/testenv/bin/pip install --quiet --upgrade pip
+          # --only-binary=:all: makes pip backtrack to the versions our registry
+          # has riscv64 wheels for instead of source-building a Rust dependency.
+          PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            /tmp/testenv/bin/pip install --quiet --only-binary=:all: cli/dist/*.whl
+
+          /tmp/testenv/bin/semgrep --version
+          # run the bundled binary itself: it resolves its libs through the
+          # $ORIGIN/libs rpath set at build time
+          core=$(/tmp/testenv/bin/python -c \
+            'import os, semgrep; print(os.path.join(os.path.dirname(semgrep.__file__), "bin", "semgrep-core"))')
+          "$core" -version
+
+          # Upstream's own e2e rules and targets, run through the CLI so the
+          # bundled semgrep-core does the parsing and matching.
+          cd cli/tests/default/e2e
+          /tmp/testenv/bin/semgrep scan --metrics=off --disable-version-check \
+            --config rules/eqeq-python.yaml --config rules/eqeq-basic.yaml \
+            --json --output=/tmp/findings.json \
+            targets/basic/stupid.py targets/basic/stupid.js
+          python3 - /tmp/findings.json <<'PY'
+          import json
+          import sys
+
+          report = json.load(open(sys.argv[1]))
+          assert not report["errors"], report["errors"]
+          langs = {r["path"].rsplit(".", 1)[-1] for r in report["results"]}
+          assert {"py", "js"} <= langs, report["results"]
+          print(f"{len(report['results'])} findings over {sorted(langs)}")
+          PY
+          EOF
+
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "$(pwd)":/workspace \
+            --workdir /workspace \
+            --pull=newer \
+            "${BUILD_IMAGE}" \
+            bash riscv64-test.sh
+
+      - name: Collect the bundled libraries' sources
+        shell: bash
+        run: |
+          cat > riscv64-gpl-sources.sh <<'EOF'
+          set -eux
+
+          export DEBIAN_FRONTEND=noninteractive
+          sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
+          apt-get update -qq
+          apt-get install -y --no-install-recommends ca-certificates dpkg-dev
+
+          # gcc for the toolchain itself, plus whatever source packages the
+          # libraries copied into the wheel came from.
+          # libtree-sitter is built from the checkout, so only the system
+          # paths have a Debian source package behind them.
+          { echo gcc-13
+            grep -E '^/(usr|lib)' bundled-libs.txt |
+              xargs -r dpkg -S | cut -d: -f1 | tr -d ' ' | sort -u |
+              xargs -r dpkg-query -W -f='${source:Package}\n'
+          } | sort -u > gpl-source-packages.txt
+          cat gpl-source-packages.txt
+
+          mkdir -p gpl-sources
+          cd gpl-sources
+          rc=0
+          while read -r pkg; do
+            apt-get source --download-only "$pkg" || rc=1
+          done < ../gpl-source-packages.txt
+          cd ..
+          tar -cf gpl-sources.tar -C gpl-sources .
+          exit $rc
+          EOF
+
+          podman run \
+            --log-driver=none \
+            --network=host \
+            -v "$(pwd)":/workspace \
+            --workdir /workspace \
+            "${BUILD_IMAGE}" \
+            bash riscv64-gpl-sources.sh
+
+      - name: Store GPL sources
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: semgrep-${{ env.SEMGREP_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  publish:
+    name: Publish semgrep ${{ inputs.version || '1.174.0' }} to GitLab
+    needs: [build_wheel]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: semgrep-${{ env.SEMGREP_VERSION }}-*-manylinux_riscv64
+          gpl-sources-artifact: semgrep-${{ env.SEMGREP_VERSION }}-gpl-sources
+          gpl-sources-release-tag: semgrep-v${{ env.SEMGREP_VERSION }}
+          gpl-sources-description: the shared libraries bundled next to semgrep-core
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
