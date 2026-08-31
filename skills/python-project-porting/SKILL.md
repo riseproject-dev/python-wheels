@@ -62,6 +62,11 @@ or a repeated ask. Follow them exactly; the reference files explain the why.
   `pull_request` trigger is the only thing that registers a new workflow with GitHub; without
   it dispatch and `Trigger:` lines both 404 (gotchas 45/54). Shipping `workflow_dispatch`
   alone is why #364 was reverted by #391.
+- **Every job reports status to the PR, and permissions live in one workflow-level block.** The
+  first step of every job is `set-commit-status` (so `Trigger:`-dispatched builds show up on the
+  PR), and a single top-level `permissions:` block (`contents`/`pull-requests: write` for publish,
+  `statuses: write` + `actions: read` for the status action) covers every job — no per-job blocks.
+  See [references/workflow-anatomy.md](references/workflow-anatomy.md).
 - **Default to NO comments in workflows** — they are read as reference. One "why" line only for
   a genuine non-obvious deviation; never narrate standard steps.
 - **Never set `CIBW_BUILD_VERBOSITY`** — drop it if you inherit it from a template.

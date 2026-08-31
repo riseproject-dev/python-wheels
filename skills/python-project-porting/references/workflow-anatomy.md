@@ -17,6 +17,41 @@ without it the workflow is never registered, so `workflow_dispatch` and `Trigger
 fail with `HTTP 404` (gotcha 54; this is why #364 was reverted by #391). Never ship a
 `build-<pkg>.yml` with `workflow_dispatch` alone.
 
+**Every job reports its status to the PR.** A `Trigger:`-dispatched build runs via
+`workflow_dispatch`, which — unlike a `pull_request` check — is not auto-linked to the PR whose
+head commit it builds. So the **first step of every job** is the shared status action; it posts
+a `pending` status when the job starts and the final `success`/`failure`/`error` when it ends (a
+`pre`/`post` JS action — one step covers both ends, and it is a no-op on any event other than
+`workflow_dispatch`):
+
+```yaml
+    steps:
+      - name: Report status to the PR
+        uses: riseproject-dev/python-wheels/actions/set-commit-status@main
+        with:
+          context: "${{ github.workflow }} / ${{ github.job }}${{ strategy.job-index && format(' / {0}', strategy.job-index) || '' }}"
+```
+
+`context` must be unique per job and per matrix leg — statuses on the same commit that share a
+context overwrite each other — hence `github.job` + `strategy.job-index`. Copy the line verbatim;
+it works for every matrix shape.
+
+**One workflow-level `permissions:` block, covering every job** (no per-job blocks):
+
+```yaml
+permissions:
+  contents: write  # publish job pushes the docs branch
+  pull-requests: write  # publish job opens the docs PR
+  statuses: write  # set-commit-status posts build status to the PR
+  actions: read  # set-commit-status reads this run's job conclusions
+  # packages: write  # only if a job pushes container images (see build-torch.yml)
+```
+
+`statuses: write` + `actions: read` are what the status action needs; `contents: write` +
+`pull-requests: write` are what the publish job's docs PR needs. Granting them once at the
+workflow level (rather than per job) is deliberate — every job runs the status action, so every
+job needs those scopes anyway.
+
 UV env vars (`UV_EXTRA_INDEX_URL`, `UV_INDEX_STRATEGY`, `UV_ONLY_BINARY`) are **only** needed
 if the workflow has steps that actually invoke `uv` (e.g. an sdist-build job on `ubuntu-latest`
 that uses `setup-uv`). For pure cibuildwheel build-from-checkout workflows with no `uv` steps,
@@ -114,8 +149,11 @@ safe on PR branches:
 publish:
   needs: [<build jobs>]
   runs-on: ubuntu-latest
-  permissions: { contents: write, pull-requests: write }
   steps:
+    - name: Report status to the PR
+      uses: riseproject-dev/python-wheels/actions/set-commit-status@main
+      with:
+        context: "${{ github.workflow }} / ${{ github.job }}${{ strategy.job-index && format(' / {0}', strategy.job-index) || '' }}"
     - uses: riseproject-dev/python-wheels/actions/publish-wheels@main
       with:
         artifact-pattern: <pkg>-${{ needs.<sdist-job>.outputs.package_version }}-*-manylinux_riscv64
@@ -129,8 +167,9 @@ publish:
 first publish (`ci_scripts/update_doc.py`). Nightly checks and docs are driven off
 that YAML, so **a new package needs no manual registration anywhere** — just the
 workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
-`permissions` needs `contents: write` **and** `pull-requests: write` (not `contents: read`)
-because that docs step pushes a branch and opens a PR with the default `GITHUB_TOKEN`.
-Reach for the lower-level `publish-to-gitlab` action directly only when a workflow needs the
-upload without the docs-PR side effect.
+The docs step pushes a branch and opens a PR with the default `GITHUB_TOKEN`, which is
+why the workflow-level `permissions:` block carries `contents: write` **and**
+`pull-requests: write` (not `contents: read`). Reach for the lower-level
+`publish-to-gitlab` action directly only when a workflow needs the upload without the
+docs-PR side effect.
 
