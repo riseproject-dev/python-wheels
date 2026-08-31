@@ -1,6 +1,7 @@
 Port a new package to this repo (riscv64 wheel → pypi.riseproject.dev). Follow
-the porting playbook, working process, and gotchas in CLAUDE.md — that's the
-source of truth; everything below is just this package's coordinates.
+the `python-project-porting` skill (skills/python-project-porting/SKILL.md and its
+references/ — start by skimming references/gotchas-index.md) — that's the source of truth;
+everything below is just this package's coordinates.
 
 Create the branch and the worktree first then proceed with research. Always work out of the worktree!
 
@@ -15,4 +16,5 @@ Do the full loop end to end: branch + worktree, add build-<pkg>.yml, validate
 locally, push, open the PR, then watch CI and iterate until every matrix job is
 green and publish dry-runs cleanly. Wire up real testing the way upstream tests
 its own wheels. When it's working, fold any new project-agnostic learnings back
-into CLAUDE.md.
+into the matching themed file under the skill's references/gotchas/ (and add a row to
+references/gotchas-index.md).
