@@ -23,7 +23,10 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read  # to fetch code (actions/checkout)
+  contents: write  # publish job pushes the docs branch
+  pull-requests: write  # publish job opens the docs PR
+  statuses: write  # set-commit-status posts build status to the PR
+  actions: read  # set-commit-status reads this run's job conclusions
 
 env:
   SQLALCHEMY_VERSION: ${{ inputs.version || '2.0.52' }}
@@ -33,12 +36,14 @@ jobs:
   build_sdist:
     name: Build sqlalchemy ${{ inputs.version || '2.0.52' }} sdist
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     outputs:
       sdist_name: ${{ steps.sdist.outputs.sdist_name }}
       package_version: ${{ steps.sdist.outputs.package_version }}
     steps:
+      - name: Report status to the PR
+        uses: riseproject-dev/python-wheels/actions/set-commit-status@main
+        with:
+          context: "${{ github.workflow }} / ${{ github.job }}${{ strategy.job-index && format(' / {0}', strategy.job-index) || '' }}"
       - name: Compute git tag
         id: tag
         # SQLAlchemy's tags are rel_X_Y_Z, not the PyPI version.
@@ -85,14 +90,16 @@ jobs:
     needs: build_sdist
     name: Build sqlalchemy ${{ inputs.version || '2.0.52' }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
-    permissions:
-      contents: read
     strategy:
       fail-fast: false
       matrix:
         # cyextension is a plain per-interpreter C ext (not abi3), so one wheel each.
         python: [cp312, cp313, cp314, cp314t]
     steps:
+      - name: Report status to the PR
+        uses: riseproject-dev/python-wheels/actions/set-commit-status@main
+        with:
+          context: "${{ github.workflow }} / ${{ github.job }}${{ strategy.job-index && format(' / {0}', strategy.job-index) || '' }}"
       - name: Download sdist
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
@@ -125,11 +132,12 @@ jobs:
     name: Publish sqlalchemy ${{ inputs.version || '2.0.52' }} to GitLab
     needs: [build_sdist, build_wheels]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
 
     steps:
+      - name: Report status to the PR
+        uses: riseproject-dev/python-wheels/actions/set-commit-status@main
+        with:
+          context: "${{ github.workflow }} / ${{ github.job }}${{ strategy.job-index && format(' / {0}', strategy.job-index) || '' }}"
       - name: Publish wheels and open docs PR
         uses: riseproject-dev/python-wheels/actions/publish-wheels@main
         with:

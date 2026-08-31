@@ -23,8 +23,11 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read  # to fetch code (actions/checkout)
-  packages: read
+  contents: write  # publish job pushes the docs branch
+  pull-requests: write  # publish job opens the docs PR
+  statuses: write  # set-commit-status posts build status to the PR
+  actions: read  # set-commit-status reads this run's job conclusions
+  packages: write  # docker-builds job pushes images
 
 defaults:
   run:
@@ -37,14 +40,16 @@ jobs:
   docker-builds:
     runs-on: ubuntu-24.04
     timeout-minutes: 360  # 6h
-    permissions:
-      packages: write
     env:
       DOCKER_IMAGE_NAME: manylinux2_39_riscv64-builder:cpu-riscv64
     outputs:
       docker-image: ${{ steps.tag.outputs.docker-image }}
 
     steps:
+      - name: Report status to the PR
+        uses: riseproject-dev/python-wheels/actions/set-commit-status@main
+        with:
+          context: "${{ github.workflow }} / ${{ github.job }}${{ strategy.job-index && format(' / {0}', strategy.job-index) || '' }}"
       - name: Checkout pytorch v${{ env.TORCH_VERSION }}
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -128,6 +133,10 @@ jobs:
       BUILD_NAME_SUFFIX: "-cpu-riscv64"
 
     steps:
+      - name: Report status to the PR
+        uses: riseproject-dev/python-wheels/actions/set-commit-status@main
+        with:
+          context: "${{ github.workflow }} / ${{ github.job }}${{ strategy.job-index && format(' / {0}', strategy.job-index) || '' }}"
       - name: Checkout pytorch v${{ env.TORCH_VERSION }}
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -192,11 +201,12 @@ jobs:
     name: Publish torch ${{ inputs.version || '2.13.0' }} to GitLab
     needs: [build_wheels]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
 
     steps:
+      - name: Report status to the PR
+        uses: riseproject-dev/python-wheels/actions/set-commit-status@main
+        with:
+          context: "${{ github.workflow }} / ${{ github.job }}${{ strategy.job-index && format(' / {0}', strategy.job-index) || '' }}"
       - name: Publish wheels and open docs PR
         uses: riseproject-dev/python-wheels/actions/publish-wheels@main
         with:
