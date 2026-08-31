@@ -1,0 +1,121 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/ringsaturn/go-cities.json/blob/v0.6.13/.github/workflows/release-python.yml
+name: Build citiespy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'citiespy version to build (git tag without the leading v, e.g. 0.6.13)'
+        required: true
+        default: '0.6.13'
+  pull_request:
+    paths:
+      - '.github/workflows/build-citiespy.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.6.13' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.6.13 there.
+  CITIESPY_VERSION: ${{ inputs.version || '0.6.13' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build citiespy ${{ inputs.version || '0.6.13' }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # pyo3's abi3-py310 feature gives one wheel for every GIL-ful
+          # interpreter; free-threaded builds disable abi3 and get their own.
+          - tag: cp310-abi3
+            # Built on cp310 -- the oldest interpreter the abi3 tag claims --
+            # and re-tested on the newer ones via find_compatible_wheel.
+            build: >-
+              cp310-manylinux_riscv64 cp311-manylinux_riscv64
+              cp312-manylinux_riscv64 cp313-manylinux_riscv64
+              cp314-manylinux_riscv64
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+
+    steps:
+      - name: Checkout citiespy ${{ env.CITIESPY_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: ringsaturn/go-cities.json
+          ref: v${{ env.CITIESPY_VERSION }}
+          persist-credentials: false
+
+      # maturin globs licence files next to pyproject.toml, which here is the
+      # citiespy/ subdirectory -- so upstream's wheels carry none at all.
+      - name: Stage the licence beside citiespy's pyproject.toml
+        run: cp LICENSE citiespy/
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: citiespy
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # citiespy ships no [tool.cibuildwheel], so the Rust toolchain its
+          # maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: citiespy/tests
+          # citiespy/__init__.py is a maturin-generated shim, so the extension
+          # has to be probed by its own name.
+          CIBW_TEST_COMMAND: >-
+            python -c "from citiespy import citiespy as ext;
+            assert ext.__file__.endswith('.so'), ext.__file__" &&
+            python -m pytest -v citiespy/tests
+
+      - name: Check the wheel ships the extension and the licence
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert any(n.endswith(".so") for n in names), names
+          assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
+          print("\n".join(n for n in names if n.endswith(".so") or "licenses/" in n))
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: citiespy-${{ env.CITIESPY_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish citiespy ${{ inputs.version || '0.6.13' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: citiespy-${{ env.CITIESPY_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
