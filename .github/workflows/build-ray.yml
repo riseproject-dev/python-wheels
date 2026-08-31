@@ -1,0 +1,304 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# This workflow is based on: https://github.com/ray-project/ray/blob/master/python/build-wheel-manylinux2014.sh
+---
+name: Build ray wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'ray version to build (git tag without leading ray-, e.g. 2.58.0)'
+        required: true
+        default: '2.58.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-ray.yml'
+      - 'patches/ray/**'
+
+run-name: build-ray - ${{ inputs.version || '2.58.0' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.58.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  RAY_VERSION: ${{ inputs.version || '2.58.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Upstream fetches this version through bazelisk, which publishes no riscv64
+  # binary, so it is bootstrapped from the dist archive instead.
+  BAZEL_VERSION: '7.5.0'
+  # versions bazel 7.5.0's MODULE.bazel pins; both need a riscv64 fix below
+  RULES_PYTHON_VERSION: '0.33.2'
+  RULES_JAVA_VERSION: '7.6.5'
+  # ci/build/build-manylinux-forge.sh pins this node for the dashboard build.
+  NODE_VERSION: '14.21.3'
+
+jobs:
+  dashboard:
+    name: Build ray dashboard
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      # The dashboard is a React app: arch-independent output, and node.js has no riscv64 release.
+      - name: Checkout ray ${{ inputs.version || '2.58.0' }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: ray-project/ray
+          ref: ray-${{ env.RAY_VERSION }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903  # v6.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Build dashboard
+        working-directory: python/ray/dashboard/client
+        run: |
+          npm ci
+          npm run build
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ray-dashboard-${{ env.RAY_VERSION }}
+          path: python/ray/dashboard/client/build
+          if-no-files-found: error
+
+  bazel:
+    name: Bootstrap bazel (riscv64)
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+
+    steps:
+      - name: Restore bazel binary
+        id: cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: bazel-bin
+          key: bazel-${{ env.BAZEL_VERSION }}-manylinux_riscv64
+
+      - name: Bootstrap bazel ${{ env.BAZEL_VERSION }}
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p bazel-bin
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e BAZEL_VERSION="${BAZEL_VERSION}" \
+            -e RULES_PYTHON_VERSION="${RULES_PYTHON_VERSION}" \
+            -e RULES_JAVA_VERSION="${RULES_JAVA_VERSION}" \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+
+          # rules_python 0.33.2's PLATFORMS has no riscv64 entry, aborting the bootstrap
+          # (bazelbuild/bazel#23018). Any linux entry is a safe stand-in: the toolchain it names
+          # is never selected on a riscv64 host. Fixed in bazel 8.2.0; the 7.x backport is open.
+          mkdir -p /tmp/rules_python
+          curl -fsSLo /tmp/rules_python.tar.gz "https://github.com/bazel-contrib/rules_python/releases/download/${RULES_PYTHON_VERSION}/rules_python-${RULES_PYTHON_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_python.tar.gz -C /tmp/rules_python --strip-components=1
+          sed -i 's|fail("No platform declared for host OS {} on arch {}".format(os_name, arch))|return "x86_64-unknown-linux-gnu"|' \
+            /tmp/rules_python/python/private/toolchains_repo.bzl
+
+          # rules_java 7.x maps riscv64 to a stray-colon include path, so libcpu_profiler.so
+          # can't find jni_md.h. Fixed in rules_java 8.x, never backported.
+          mkdir -p /tmp/rules_java
+          curl -fsSLo /tmp/rules_java.tar.gz "https://github.com/bazelbuild/rules_java/releases/download/${RULES_JAVA_VERSION}/rules_java-${RULES_JAVA_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_java.tar.gz -C /tmp/rules_java
+          sed -i 's|\[":include/linux"\]|["include/linux"]|g' /tmp/rules_java/toolchains/BUILD
+
+          mkdir -p /tmp/bazel-src
+          cd /tmp/bazel-src
+          curl -fsSLo dist.zip "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-dist.zip"
+          unzip -q dist.zip
+
+          EXTRA_BAZEL_ARGS="--tool_java_runtime_version=local_jdk \
+            --override_module=rules_python=/tmp/rules_python \
+            --override_module=rules_java=/tmp/rules_java" \
+            bash ./compile.sh
+          install -m 0755 output/bazel /work/bazel-bin/bazel
+          SCRIPT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin/bazel
+          if-no-files-found: error
+
+  build_wheels:
+    name: Build ray ${{ inputs.version || '2.58.0' }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440  # 24h
+    needs: [bazel, dashboard]
+
+    steps:
+      - name: Checkout ray ${{ inputs.version || '2.58.0' }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: ray-project/ray
+          ref: ray-${{ env.RAY_VERSION }}
+          path: ray
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Patch ray source
+        working-directory: ray
+        run: git apply ../python-wheels/patches/ray/${{ env.RAY_VERSION }}/00*.patch
+
+      - name: Download bazel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin
+
+      - name: Download dashboard
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ray-dashboard-${{ env.RAY_VERSION }}
+          path: ray/python/ray/dashboard/client/build
+
+      - name: Build wheels
+        run: |
+          mkdir -p wheelhouse
+          set -o pipefail
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT' 2>&1 | tee build.log
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+          install -m 0755 /work/bazel-bin/bazel /usr/local/bin/bazel
+          git config --global --add safe.directory '*'
+
+          export BAZEL_PATH=/usr/local/bin/bazel
+          # A multi-hour build's default curses progress output is large enough that
+          # GitHub drops the job log, taking the failure with it.
+          # rules_foreign_cc ships no prebuilt cmake for riscv64 and its from-source
+          # bootstrap rejects the CXX=gcc bazel hands it, so use the image's own cmake.
+          export BAZEL_ARGS="--curses=no --show_progress_rate_limit=60 --extra_toolchains=@rules_foreign_cc//toolchains:preinstalled_cmake_toolchain"
+          export RAY_INSTALL_JAVA=0
+          export RAY_DISABLE_EXTRA_CPP=1
+          # //:gen_redis_pkg needs a perl toolchain rules_perl has no riscv64 entry for; its two
+          # binaries are referenced only by ray/_private/test_utils.py, never at runtime.
+          export RAY_BUILD_REDIS=0
+          # Upstream sets RAY_BUILD_ENV per interpreter; it is an --action_env,
+          # so varying it rebuilds the whole C++ core once per wheel.
+          export RAY_BUILD_ENV=manylinux_riscv64
+
+          cd /work/ray
+          sed -i "s/{{RAY_COMMIT_SHA}}/$(git rev-parse HEAD)/g" python/ray/_version.py
+
+          for python in cp312-cp312 cp313-cp313 cp314-cp314; do
+            # both exclusions are staged before the loop and are untracked, so a plain
+            # clean would take them: the dashboard artifact and the added rules_boost patch.
+            git clean -f -f -x -d -e python/ray/dashboard/client -e thirdparty/patches/boost-riscv64-context.patch
+            "/opt/python/${python}/bin/pip" install -q cython==3.0.12 setuptools==80.9.0
+            # bazel actions run with a fixed PATH (--incompatible_strict_action_env),
+            # so the interpreter they compile against is picked up from here.
+            ln -sf "/opt/python/${python}/bin/python3" /usr/local/bin/python3
+            # grpc's @local_config_python re-resolves Python.h only when a var in its `environ`
+            # changes, so without this every _raylet.so uses the first interpreter's headers.
+            export PYTHON3_BIN_PATH="/opt/python/${python}/bin/python3"
+            (
+              cd python
+              PATH="/opt/python/${python}/bin:$PATH" \
+                "/opt/python/${python}/bin/python" -m pip wheel -w dist . --no-deps
+            )
+            # Mirrors upstream's rename: the wheels are built in the
+            # manylinux_2_39 image, but `pip wheel` tags them linux_riscv64.
+            for wheel in python/dist/*.whl; do
+              mv "${wheel}" "/work/wheelhouse/$(basename "${wheel}" | sed 's/-linux_riscv64\.whl$/-manylinux_2_39_riscv64.whl/')"
+            done
+          done
+          SCRIPT
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ray-${{ env.RAY_VERSION }}-build-log
+          path: build.log
+
+      # Uploaded before the smoke test so a failing wheel is still available to inspect.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ray-${{ env.RAY_VERSION }}-wheels-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Test wheels
+        run: |
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            --shm-size=1g \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          # /work holds the ray checkout, whose root is importable as a
+          # namespace package and would shadow the installed wheel.
+          cd /tmp
+
+          for python in cp312-cp312 cp313-cp313 cp314-cp314; do
+            "/opt/python/${python}/bin/pip" install /work/wheelhouse/ray-*-"${python%%-*}"-*.whl
+            "/opt/python/${python}/bin/python" - <<'PY'
+          import ray
+          import ray._raylet
+
+          assert ray._raylet.__file__.endswith(".so"), ray._raylet.__file__
+
+          ray.init(num_cpus=1, include_dashboard=False)
+
+
+          @ray.remote
+          def double(x):
+              return 2 * x
+
+
+          assert ray.get([double.remote(i) for i in range(4)]) == [0, 2, 4, 6]
+          ray.shutdown()
+          PY
+          done
+          SCRIPT
+
+  publish:
+    name: Publish ray ${{ inputs.version || '2.58.0' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: ray-${{ env.RAY_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
