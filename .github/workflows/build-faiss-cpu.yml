@@ -1,0 +1,129 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/facebookresearch/faiss/blob/v1.15.0/.github/workflows/build-pip.yml
+name: Build faiss-cpu wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'faiss-cpu version to build (git tag without the leading v, e.g. 1.15.0)'
+        required: true
+        default: '1.15.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-faiss-cpu.yml'
+      - 'patches/faiss-cpu/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.15.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.15.0 there.
+  FAISS_CPU_VERSION: ${{ inputs.version || '1.15.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  # pyproject.toml sets wheel.py-api = "cp310" on Linux, so a single abi3 wheel
+  # covers every non-free-threaded CPython; upstream skips free-threaded builds
+  # entirely (`skip = "... cp3*t-*"`). Built on cp312 rather than upstream's
+  # cp310 because our registry's newest riscv64 numpy/scipy are cp311+ only.
+  build_wheels:
+    name: Build faiss-cpu ${{ inputs.version || '1.15.0' }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 600
+
+    steps:
+      - name: Checkout faiss v${{ env.FAISS_CPU_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: facebookresearch/faiss
+          ref: v${{ env.FAISS_CPU_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch faiss source
+        run: git apply python-wheels/patches/faiss-cpu/${{ env.FAISS_CPU_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy (build and test), scipy and swig have no riscv64 wheels on PyPI.
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+
+      - name: Check the wheel is a compiled abi3 wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              assert "-cp310-abi3-" in whl, whl
+              names = zipfile.ZipFile(whl).namelist()
+              for want in ("faiss/libfaiss.so", "faiss/_swigfaiss.abi3.so"):
+                  assert want in names, (whl, want)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: faiss-cpu-${{ env.FAISS_CPU_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      # faiss links OpenMP and OpenBLAS, so auditwheel vendors the image's
+      # libgomp and libgfortran into faiss_cpu.libs/.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: faiss-cpu-${{ env.FAISS_CPU_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish faiss-cpu ${{ inputs.version || '1.15.0' }} to GitLab
+    needs: [build_wheels, gpl_sources]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: faiss-cpu-${{ env.FAISS_CPU_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          gpl-sources-artifact: faiss-cpu-${{ env.FAISS_CPU_VERSION }}-gpl-sources
+          gpl-sources-release-tag: faiss-cpu-v${{ env.FAISS_CPU_VERSION }}
+          gpl-sources-description: gcc
