@@ -1,0 +1,158 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+name: Build mysql-connector-python wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'mysql-connector-python version to build (git tag, e.g. 26.7.0)'
+        required: true
+        default: '26.7.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-mysql-connector-python.yml'
+      - 'patches/mysql-connector-python/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '26.7.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 26.7.0 there.
+  MYSQL_CONNECTOR_PYTHON_VERSION: ${{ inputs.version || '26.7.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build mysql-connector-python ${{ inputs.version || '26.7.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      - name: Checkout mysql-connector-python ${{ env.MYSQL_CONNECTOR_PYTHON_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: mysql/mysql-connector-python
+          ref: ${{ env.MYSQL_CONNECTOR_PYTHON_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: |
+          git apply -v python-wheels/patches/mysql-connector-python/${{ env.MYSQL_CONNECTOR_PYTHON_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: mysql-connector-python
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Oracle publishes no riscv64 MySQL C API build, so the extension links
+          # Rocky 10's libmysqlclient (auditwheel then vendors it into the wheel)
+          # instead of the static one Oracle's own wheels bundle.
+          CIBW_BEFORE_ALL_LINUX: dnf -y install mysql8.4-devel
+          # Without MYSQL_CAPI setup.py silently drops the C extension; SKIP_VENDOR
+          # turns off bundling the auth plugins, which mysql8.4-devel does not ship.
+          # EXTRA_LINK_ARGS is needed because upstream only puts the MySQL library
+          # path on the link line when it finds a static libmysqlclient.a to copy.
+          CIBW_ENVIRONMENT: MYSQL_CAPI=/usr SKIP_VENDOR=1 EXTRA_LINK_ARGS=-L/usr/lib64/mysql
+          # Clear them again for the test phase, or unittests.py's in-tree rebuild
+          # would shadow the wheel's extension with one it just compiled.
+          CIBW_TEST_ENVIRONMENT: MYSQL_CAPI= SKIP_VENDOR= EXTRA_LINK_ARGS=
+          # unittests.py bootstraps its own server; the container's capability
+          # bounding set makes mysqld's cap_sys_nice file capability unexecutable.
+          CIBW_BEFORE_TEST_LINUX: >-
+            dnf -y install mysql8.4-server mysql8.4 libcap &&
+            setcap -r /usr/libexec/mysqld
+          CIBW_TEST_REQUIRES: setuptools wheel
+          CIBW_TEST_COMMAND: >-
+            cd {package} &&
+            python -c "import _mysql_connector as m; assert 'site-packages' in m.__file__, m.__file__;
+            print(m.__file__, m.MySQL().get_client_info())" &&
+            python -c "import importlib.metadata as md;
+            n={p.name for p in md.files('mysql-connector-python') if '.dist-info/licenses/' in str(p)};
+            assert n == {'LICENSE.txt', 'LICENSE.zstd'}, n" &&
+            python unittests.py --with-mysql=/usr --with-mysql-share=/usr/share/mysql
+            --verbosity=1 --test-regex '^cext_'
+
+      - name: Check the C extension made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("_mysql_connector") and n.endswith(".so")
+                         for n in names), f"no C extension in {whl}"
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mysql-connector-python-${{ env.MYSQL_CONNECTOR_PYTHON_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      # The wheels vendor libmysqlclient (GPLv2) out of the build container
+      # alongside the gcc runtime, so both need their sources published.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc mysql8.4-libs
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mysql-connector-python-${{ env.MYSQL_CONNECTOR_PYTHON_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish mysql-connector-python ${{ inputs.version || '26.7.0' }} to GitLab
+    needs: [build_wheels, gpl_sources]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: mysql-connector-python-${{ env.MYSQL_CONNECTOR_PYTHON_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          gpl-sources-artifact: mysql-connector-python-${{ env.MYSQL_CONNECTOR_PYTHON_VERSION }}-gpl-sources
+          gpl-sources-release-tag: mysql-connector-python-v${{ env.MYSQL_CONNECTOR_PYTHON_VERSION }}
+          gpl-sources-description: gcc, libmysqlclient

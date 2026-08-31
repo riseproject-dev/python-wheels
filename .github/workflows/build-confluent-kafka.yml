@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# The prebuilt librdkafka.redist NuGet upstream normally uses has no riscv64 build, so this
+# follows their other supported path: tools/cibuildwheel-build.sh, which builds it from source.
+name: Build confluent-kafka wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'confluent-kafka version to build (e.g. 2.15.0)'
+        required: true
+        default: '2.15.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-confluent-kafka.yml'
+      - 'patches/confluent-kafka/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.15.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  CONFLUENT_KAFKA_VERSION: ${{ inputs.version || '2.15.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build confluent-kafka ${{ inputs.version || '2.15.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        # No cp314t: upstream's build-wheels.sh skips `*t-*`.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+
+    steps:
+      - name: Checkout confluent-kafka-python ${{ env.CONFLUENT_KAFKA_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: confluentinc/confluent-kafka-python
+          ref: v${{ env.CONFLUENT_KAFKA_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch confluent-kafka source
+        run: |
+          git apply python-wheels/patches/confluent-kafka/${{ env.CONFLUENT_KAFKA_VERSION }}/00*.patch
+
+      - name: Resolve the librdkafka version this release pins
+        id: librdkafka
+        # Same extraction upstream's tools/pre-release-validation.sh uses.
+        run: |
+          version="$(sed -n '/LIBRDKAFKA_VERSION/{n;s/.*value: *//p;}' .semaphore/semaphore.yml | head -1)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # OpenSSL's Configure needs full perl; the image ships only perl-interpreter.
+          CIBW_BEFORE_BUILD_LINUX: >-
+            dnf -y install perl &&
+            tools/prepare-cibuildwheel-linux.sh ${{ steps.librdkafka.outputs.version }}
+          # A source-built librdkafka keeps its debug symbols (58MB vs upstream's prebuilt 11MB).
+          CIBW_REPAIR_WHEEL_COMMAND: auditwheel repair --strip -w {dest_dir} {wheel}
+          # Wider than upstream's single file: all of tests/ bar integration (needs a Kafka cluster)
+          # and schema_registry (needs tink/google-re2, no riscv64 build).
+          CIBW_TEST_EXTRAS: oauthbearer-aws
+          CIBW_TEST_REQUIRES: avro requests
+          CIBW_BEFORE_TEST: pip install -r {project}/requirements/requirements-tests.txt
+          # Asserts the LICENSE patch reached the wheel; a patch that stops applying is otherwise silent.
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m, pathlib; p = [f for f in m.files('confluent-kafka') if '.dist-info/licenses/' in str(f)]; t = pathlib.Path(m.distribution('confluent-kafka').locate_file(p[0])).read_text(); assert 'For Zstandard software' in t and 'daniel@haxx.se' in t, p" &&
+            pytest --timeout 1200 {project}/tests
+            --ignore={project}/tests/integration
+            --ignore={project}/tests/schema_registry
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: confluent-kafka-${{ env.CONFLUENT_KAFKA_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish confluent-kafka ${{ inputs.version || '2.15.0' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: confluent-kafka-${{ env.CONFLUENT_KAFKA_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
