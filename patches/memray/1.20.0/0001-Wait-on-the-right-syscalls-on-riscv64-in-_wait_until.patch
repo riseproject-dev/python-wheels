@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 27 Aug 2026 15:51:27 +0200
+Subject: [PATCH] Wait on the right syscalls on riscv64 in
+ _wait_until_process_blocks
+
+`_wait_until_process_blocks` polls /proc/<pid>/syscall until the child is
+parked in nanosleep/clock_nanosleep/connect/accept, but only knows the syscall
+numbers for x86_64 and aarch64. Every other architecture falls back to a flat
+one-second sleep, and on a slow machine that is not long enough: the client in
+`test_live_client_exits_properly_on_sigint_before_connecting` has not reached
+its `connect()` yet when SIGINT arrives, so the default handler kills it and
+the test sees returncode -2 instead of 0.
+
+riscv64 uses the asm-generic syscall table, which is the same one aarch64 uses,
+so the numbers already in the aarch64 branch are correct for it: nanosleep 101,
+clock_nanosleep 115, accept 202, connect 203 (scripts/syscall.tbl).
+
+Upstream-Status: To upstream [not submitted from this automated port run; needs a pull request against bloomberg/memray]
+---
+ tests/integration/test_main.py | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/tests/integration/test_main.py b/tests/integration/test_main.py
+index 7f72eec..dc2b248 100644
+--- a/tests/integration/test_main.py
++++ b/tests/integration/test_main.py
+@@ -94,7 +94,8 @@ def _wait_until_process_blocks(pid: int) -> None:
+         connect_syscall = "42"
+         accept_syscall = "43"
+         clock_nanosleep = "230"
+-    elif arch == "aarch64":
++    elif arch in ("aarch64", "riscv64"):
++        # Both use the asm-generic syscall table.
+         sleep_syscall = "101"
+         connect_syscall = "203"
+         accept_syscall = "202"
