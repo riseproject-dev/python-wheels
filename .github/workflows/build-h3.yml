@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/uber/h3-py/blob/v4.5.0/.github/workflows/wheels.yml
+name: Build h3 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'h3 version to build (git tag without the leading v, e.g. 4.5.0)'
+        required: true
+        default: '4.5.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-h3.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '4.5.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 4.5.0 there.
+  H3_VERSION: ${{ inputs.version || '4.5.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build h3 ${{ inputs.version || '4.5.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      - name: Checkout h3-py ${{ env.H3_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: uber/h3-py
+          ref: v${{ env.H3_VERSION }}
+          # The H3 C library is a submodule and is compiled into the extensions.
+          submodules: recursive
+          persist-credentials: false
+
+      # Apache-2.0 4(d): the vendored H3 C library ships a NOTICE that h3-py carries
+      # nowhere, so no published wheel has it. At the project root it is picked up by
+      # scikit-build-core's default licence glob with no packaging change.
+      - name: Stage the H3 C library's NOTICE
+        run: cp src/h3lib/NOTICE NOTICE
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream uses `build[uv]`, which crashes cibuildwheel's audit step on the
+          # self-hosted riscv64 runner (no host `uv`).
+          CIBW_BUILD_FRONTEND: build
+          CIBW_TEST_REQUIRES: pytest pytest-cov numpy
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m; f = {p.name for p in m.files('h3') if '.dist-info/licenses/' in str(p)}; assert f == {'LICENSE', 'NOTICE'}, f"
+            && pytest {project}/tests
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # numpy has no riscv64 wheel on public PyPI; keep pip on our registry's copy.
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: h3-${{ env.H3_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish h3 ${{ inputs.version || '4.5.0' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: h3-${{ env.H3_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
