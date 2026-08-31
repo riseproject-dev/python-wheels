@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `wheels` job of
+# https://github.com/emmett-framework/granian/blob/v2.8.2/.github/workflows/release.yml
+name: Build granian wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'granian version to build (git tag without the leading v, e.g. 2.8.2)'
+        required: true
+        default: '2.8.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-granian.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.8.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 2.8.2 there.
+  GRANIAN_VERSION: ${{ inputs.version || '2.8.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build granian ${{ inputs.version || '2.8.2' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: cp312
+            allocator: jemalloc
+          - python: cp313
+            allocator: jemalloc
+          - python: cp314
+            allocator: jemalloc
+          # upstream builds the free-threaded wheels against mimalloc
+          - python: cp314t
+            allocator: mimalloc
+
+    steps:
+      - name: Checkout granian v${{ env.GRANIAN_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: emmett-framework/granian
+          ref: v${{ env.GRANIAN_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch granian source
+        run: git apply python-wheels/patches/granian/${{ env.GRANIAN_VERSION }}/00*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          only: ${{ matrix.python }}-manylinux_riscv64
+          output-dir: wheelhouse/
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # granian ships no [tool.cibuildwheel], so the Rust toolchain its
+          # maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          # upstream passes the allocator to `maturin build`; maturin's PEP 517
+          # backend takes the same arguments from MATURIN_PEP517_ARGS.
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            MATURIN_PEP517_ARGS="--features ${{ matrix.allocator }}"
+          CIBW_TEST_REQUIRES: >-
+            httpx~=0.28 pytest~=9.0 pytest-asyncio~=1.3 sniffio~=1.3 websockets~=16.0
+          CIBW_TEST_SOURCES: tests pyproject.toml
+          CIBW_TEST_COMMAND: >-
+            python -c "import granian._granian as m;
+            assert m.__file__.endswith('.so'), m.__file__" &&
+            python -m pytest -v tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: granian-${{ env.GRANIAN_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish granian ${{ inputs.version || '2.8.2' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: granian-${{ env.GRANIAN_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,44 @@
+From 948f5ad96a935a4b1e57195f6389951ed71fdd0c Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 27 Aug 2026 21:10:00 +0200
+Subject: [PATCH] build ONNX Runtime's re2 static library explicitly
+
+Upstream-Status: Inappropriate [compensates for turning ONNX Runtime's unit tests off, which the riscv64 runner cannot afford; upstream's own build leaves them on and gets re2 for free]
+
+The ort crate links -lre2 unconditionally against the static ONNX Runtime
+this script builds. ONNX Runtime declares re2 EXCLUDE_FROM_ALL, and the
+only thing in its default target that concretely links re2 is the gtest
+suite -- every consumer inside ONNX Runtime is itself a static library, so
+CMake never has to produce libre2.a for them. Building with
+onnxruntime_BUILD_UNIT_TESTS=OFF therefore leaves _deps/re2-build empty
+and the wheel build dies at the final link with "could not find native
+static library `re2`".
+
+Building the target by name costs a couple of minutes, where leaving the
+unit tests on adds hours to an ONNX Runtime build that already takes over
+three on this hardware. The test keeps a silently renamed target from
+being discovered 20 minutes later, in cargo.
+---
+ rust/onnx/build.sh | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/rust/onnx/build.sh b/rust/onnx/build.sh
+index 69fe4b7..699182e 100755
+--- a/rust/onnx/build.sh
++++ b/rust/onnx/build.sh
+@@ -54,6 +54,12 @@ else
+   info "Build the static libraries."
+   x ./build.sh --config=Release --parallel $ONNX_RUNTIME_BUILD_FLAGS
+ 
++  # The ort crate links re2 unconditionally, but ONNX Runtime declares re2
++  # EXCLUDE_FROM_ALL and only its unit tests pull it into the default target, so a
++  # build that turns those off never produces libre2.a. Build it by name.
++  x cmake --build build/Linux/Release --target re2 --parallel
++  test -f build/Linux/Release/_deps/re2-build/libre2.a
++
+   info "Only keep the static libraries to save cache space."
+   find build/Linux -not -name '*.a' \( -not -type d -or -empty \) -delete
+   cd ..
+-- 
+2.50.1 (Apple Git-155)
+
