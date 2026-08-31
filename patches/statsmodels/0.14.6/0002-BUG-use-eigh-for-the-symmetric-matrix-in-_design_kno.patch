@@ -1,0 +1,41 @@
+From cf1ec9cdf2a761df13be0fb694ab87e48b586672 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 27 Aug 2026 17:46:47 +0200
+Subject: [PATCH] BUG: use eigh for the symmetric matrix in
+ _design_knockoff_equi
+
+`xcov` is `exog.T @ exog`, so it is symmetric positive semi-definite and its
+eigenvalues are real. `np.linalg.eig` calls LAPACK's general `dgeev`, which
+returns a complex array whenever rounding leaves any imaginary part non-zero
+-- what happens depends on the BLAS kernels, and OpenBLAS's riscv64_generic
+ones do it for these matrices where the x86_64 and aarch64 ones do not.
+`evmin` is then complex, `min(2 * evmin, 1)` picks it over the real 1, and
+`_get_knmat` dies on the first in-place multiply:
+
+    ash *= -np.outer(sl, sl)
+    numpy._core._exceptions._UFuncOutputCastingError: Cannot cast ufunc
+    'multiply' output from dtype('complex128') to dtype('float64') with
+    casting rule 'same_kind'
+
+`eigh` uses `dsyevd`, is real by construction on every platform, and agrees
+with `eig` to 3e-15 on the same inputs. This is 13 failures in
+stats/tests/test_knockoff.py on riscv64 -- every `equi` parametrisation.
+
+Upstream-Status: To upstream [not yet submitted; pending review of the riscv64 port that found it]
+---
+ statsmodels/stats/_knockoff.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/statsmodels/stats/_knockoff.py b/statsmodels/stats/_knockoff.py
+index aecb73c..5da40e2 100644
+--- a/statsmodels/stats/_knockoff.py
++++ b/statsmodels/stats/_knockoff.py
+@@ -220,7 +220,7 @@ def _design_knockoff_equi(exog):
+     exog = exog / xnm
+ 
+     xcov = np.dot(exog.T, exog)
+-    ev, _ = np.linalg.eig(xcov)
++    ev, _ = np.linalg.eigh(xcov)
+     evmin = np.min(ev)
+ 
+     sl = min(2*evmin, 1)

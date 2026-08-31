@@ -1,0 +1,117 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux`/`linux-cross` jobs of
+# https://github.com/dbt-labs/dbt-extractor/blob/89d46724fc9c7dcd94a03f58342bc4f0d2b7a82e/.github/workflows/release.yml
+name: Build dbt-extractor wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'dbt-extractor version to build (e.g. 0.6.0)'
+        required: true
+        default: '0.6.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-dbt-extractor.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.6.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.6.0 there.
+  DBT_EXTRACTOR_VERSION: ${{ inputs.version || '0.6.0' }}
+  # Upstream cuts releases without git tags, so pin the release commit: this is
+  # "bump patch version, add changelog (#111)", whose tree is byte-identical to
+  # the 0.6.0 PyPI sdist. Update it alongside DBT_EXTRACTOR_VERSION.
+  DBT_EXTRACTOR_REF: 89d46724fc9c7dcd94a03f58342bc4f0d2b7a82e
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build dbt-extractor ${{ inputs.version || '0.6.0' }} cp39-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout dbt-extractor ${{ env.DBT_EXTRACTOR_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: dbt-labs/dbt-extractor
+          ref: ${{ env.DBT_EXTRACTOR_REF }}
+          persist-credentials: false
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # pyo3 is built with the `abi3-py39` feature, so maturin emits a single
+          # cp39-abi3 wheel whatever interpreter builds it - matching the one
+          # Linux wheel upstream publishes per arch. cibuildwheel compiles once
+          # for cp312 and then reuses that wheel for cp313/cp314 while still
+          # running the test phase on each. musllinux is excluded because
+          # rustup.rs ships no riscv64 musl toolchain (as in build-fastuuid.yml).
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # cibuildwheel's default frontend runs `python -m build /project` with
+          # cwd=/project, and the repo root holds a dev helper named build.py
+          # that shadows the `build` module (it imports tree_sitter at top level,
+          # so the run dies before maturin is reached). pip is unaffected.
+          CIBW_BUILD_FRONTEND: pip
+          # dbt-extractor ships no [tool.cibuildwheel], so install the Rust
+          # toolchain its maturin backend needs in-container and put it on PATH.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$PATH:$HOME/.cargo/bin"'
+          # Upstream only checks `import dbt_extractor` after building a wheel;
+          # extract from a model that exercises all three result kinds instead.
+          CIBW_TEST_COMMAND: >-
+            python -c "import dbt_extractor;
+            src = '''{{ config(materialized='table', tags=['a','b']) }}
+            select * from {{ ref('other_model') }} join {{ source('my_src','my_tbl') }}''';
+            r = dbt_extractor.py_extract_from_source(src);
+            assert r['refs'] == [{'name': 'other_model'}], r;
+            assert r['sources'] == {('my_src','my_tbl')}, r;
+            assert r['configs'] == [('materialized','table'), ('tags',['a','b'])], r;
+            print('dbt_extractor OK:', r)"
+
+      - name: Check the extension made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert "dbt_extractor/dbt_extractor.abi3.so" in names, names
+              assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dbt-extractor-${{ env.DBT_EXTRACTOR_VERSION }}-cp39-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish dbt-extractor ${{ inputs.version || '0.6.0' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: dbt-extractor-${{ env.DBT_EXTRACTOR_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

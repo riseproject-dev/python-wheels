@@ -1,0 +1,316 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/kylebarron/arro3/blob/py-v0.8.1/.github/workflows/wheels.yml
+name: Build arro3-core wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'arro3-core version to build (git tag without the leading py-v, e.g. 0.8.1)'
+        required: true
+        default: '0.8.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-arro3-core.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.8.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.8.1 there.
+  ARRO3_CORE_VERSION: ${{ inputs.version || '0.8.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build arro3-core ${{ inputs.version || '0.8.1' }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Upstream builds one abi3 wheel with `-i 3.11 --features abi3-py311`
+          # plus per-interpreter wheels for the free-threaded builds. cp313t is
+          # dropped: the riscv64 manylinux image ships no cp313t.
+          - tag: cp311-abi3
+            # Built on cp311 -- the oldest interpreter the abi3 tag claims --
+            # and re-tested on the newer ones via find_compatible_wheel.
+            build: >-
+              cp311-manylinux_riscv64 cp312-manylinux_riscv64
+              cp313-manylinux_riscv64 cp314-manylinux_riscv64
+            features: --features abi3-py311 --features extension-module
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+            features: --features extension-module
+
+    steps:
+      - name: Checkout arro3 py-v${{ env.ARRO3_CORE_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: kylebarron/arro3
+          ref: py-v${{ env.ARRO3_CORE_VERSION }}
+          persist-credentials: false
+
+      - name: Stage the licences beside arro3-core's pyproject.toml
+        # maturin globs LICEN[CS]E* relative to the pyproject directory, which
+        # in this monorepo is arro3-core/ -- so upstream's published wheels
+        # carry no licence text at all, only the License-Expression metadata.
+        run: cp LICENSE_MIT LICENSE_APACHE arro3-core/
+
+      - name: Stage the riscv64 smoke tests
+        # Upstream's tests/core suite compares arro3 against pyarrow, which
+        # publishes no riscv64 wheel; only the two reader tests below run
+        # without it. These cover the same surface using arro3's own
+        # constructors, accessors and PyCapsule round trips.
+        run: |
+          cat > tests/test_riscv64_smoke.py <<'EOF'
+          import importlib.metadata
+
+          import numpy as np
+          import pytest
+          from arro3.core import (
+              Array,
+              Buffer,
+              ChunkedArray,
+              DataType,
+              Field,
+              RecordBatch,
+              RecordBatchReader,
+              Scalar,
+              Schema,
+              Table,
+              list_array,
+              list_flatten,
+              list_offsets,
+              struct_array,
+              struct_field,
+          )
+
+
+          def test_extension_is_compiled():
+              from arro3.core import _core
+
+              assert _core.__file__.endswith(".so"), _core.__file__
+
+
+          def test_data_type():
+              assert DataType.int32().bit_width == 32
+              assert DataType.float64().bit_width == 64
+              assert DataType.int32() == DataType.int32()
+              assert DataType.int32() != DataType.int64()
+              assert DataType.is_integer(DataType.uint16())
+              assert DataType.is_floating(DataType.float32())
+              assert not DataType.is_integer(DataType.string())
+              assert DataType.list(DataType.int32(), 2).list_size == 2
+              assert DataType.from_arrow(DataType.int64()) == DataType.int64()
+
+
+          def test_array_from_python():
+              arr = Array([1, 2, 3], DataType.int32())
+              assert len(arr) == 3
+              assert arr.type == DataType.int32()
+              assert arr[0].as_py() == 1
+              assert arr.to_pylist() == [1, 2, 3]
+              assert arr.slice(1, 2).to_pylist() == [2, 3]
+              assert arr.null_count == 0
+
+              with_null = Array([1, None, 3], DataType.int32())
+              assert with_null.null_count == 1
+              assert with_null.to_pylist() == [1, None, 3]
+
+
+          def test_array_numpy_roundtrip():
+              np_arr = np.array([1.5, 2.5, 3.5], dtype=np.float64)
+              arr = Array(np_arr)
+              assert arr.type == DataType.float64()
+              back = np.asarray(arr)
+              assert back.dtype == np.float64
+              np.testing.assert_array_equal(back, np_arr)
+              np.testing.assert_array_equal(np.asarray(arr.to_numpy()), np_arr)
+
+
+          @pytest.mark.parametrize(
+              "dtype",
+              [np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint16,
+               np.uint32, np.uint64, np.float32, np.float64],
+          )
+          def test_numpy_dtypes_roundtrip(dtype):
+              np_arr = np.arange(4, dtype=dtype)
+              back = np.asarray(Array(np_arr))
+              assert back.dtype == np.dtype(dtype)
+              np.testing.assert_array_equal(back, np_arr)
+
+
+          def test_array_pycapsule_roundtrip():
+              arr = Array([1, 2, 3], DataType.int64())
+              assert Array.from_arrow(arr).to_pylist() == [1, 2, 3]
+              assert DataType.from_arrow(arr).equals(DataType.int64())
+
+
+          def test_string_and_bool_arrays():
+              strings = Array(["a", "bb", None], DataType.string())
+              assert strings.to_pylist() == ["a", "bb", None]
+              assert strings.type == DataType.string()
+
+              bools = Array([True, False, True], DataType.bool())
+              assert bools.to_pylist() == [True, False, True]
+
+
+          def test_scalar():
+              scalar = Scalar(7, DataType.int32())
+              assert scalar.as_py() == 7
+              assert scalar.type == DataType.int32()
+
+
+          def test_field_and_schema():
+              field = Field("a", DataType.int32(), nullable=False)
+              assert field.name == "a"
+              assert field.type == DataType.int32()
+              assert not field.nullable
+
+              schema = Schema([field, Field("b", DataType.string())])
+              assert schema.names == ["a", "b"]
+              assert schema.field(0).name == "a"
+              assert schema.field("b").type == DataType.string()
+              assert len(schema) == 2
+              assert Schema.from_arrow(schema).names == ["a", "b"]
+
+
+          def test_chunked_array():
+              chunked = ChunkedArray(
+                  [Array([1, 2], DataType.int32()), Array([3], DataType.int32())]
+              )
+              assert len(chunked) == 3
+              assert chunked.num_chunks == 2
+              assert chunked.type == DataType.int32()
+              assert chunked.to_pylist() == [1, 2, 3]
+              combined = chunked.combine_chunks()
+              assert combined.to_pylist() == [1, 2, 3]
+              assert chunked.chunk(1).to_pylist() == [3]
+              assert chunked.rechunk(max_chunksize=1).num_chunks == 3
+
+
+          def test_record_batch_and_table():
+              batch = RecordBatch(
+                  {
+                      "a": Array([1, 2], DataType.int32()),
+                      "b": Array(["x", "y"], DataType.string()),
+                  }
+              )
+              assert batch.num_rows == 2
+              assert batch.num_columns == 2
+              assert batch.schema.names == ["a", "b"]
+              assert batch.column("a").to_pylist() == [1, 2]
+
+              table = Table.from_batches([batch, batch])
+              assert table.num_rows == 4
+              assert table.column_names == ["a", "b"]
+              assert table.column("b").to_pylist() == ["x", "y", "x", "y"]
+              assert Table.from_arrow(table).num_rows == 4
+
+
+          def test_record_batch_reader():
+              batch = RecordBatch({"a": Array([1, 2, 3], DataType.int32())})
+              reader = RecordBatchReader.from_batches(batch.schema, [batch])
+              assert reader.schema.names == ["a"]
+              table = reader.read_all()
+              assert table.num_rows == 3
+
+
+          def test_list_helpers():
+              values = Array([1, 2, 3, 4], DataType.int32())
+              offsets = Array([0, 2, 4], DataType.int32())
+              lists = list_array(offsets, values)
+              assert len(lists) == 2
+              assert list_flatten(lists).to_pylist() == [1, 2, 3, 4]
+              assert list_offsets(lists).to_pylist() == [0, 2, 4]
+
+
+          def test_struct_helpers():
+              a = Array([1, 2], DataType.int32())
+              b = Array(["x", "y"], DataType.string())
+              fields = [Field("a", DataType.int32()), Field("b", DataType.string())]
+              structs = struct_array([a, b], fields=fields)
+              assert len(structs) == 2
+              assert struct_field(structs, 0).to_pylist() == [1, 2]
+              assert struct_field(structs, 1).to_pylist() == ["x", "y"]
+
+
+          def test_buffer_protocol():
+              buffer = Buffer(b"hello")
+              assert len(buffer) == 5
+              assert buffer.to_bytes() == b"hello"
+              assert bytes(memoryview(buffer)) == b"hello"
+              from_buffer = Array.from_buffer(Buffer(np.array([1, 2, 3], dtype=np.uint8)))
+              assert from_buffer.to_pylist() == [1, 2, 3]
+
+
+          def test_licenses_are_packaged():
+              files = importlib.metadata.files("arro3-core")
+              licenses = sorted(
+                  str(path).rsplit("/", 1)[-1]
+                  for path in files
+                  if ".dist-info/licenses/" in str(path)
+              )
+              assert licenses == ["LICENSE_APACHE", "LICENSE_MIT"], licenses
+          EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: arro3-core
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # arro3 ships no [tool.cibuildwheel], so the Rust toolchain its
+          # maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            MATURIN_PEP517_ARGS="${{ matrix.features }}"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Without it pip prefers PyPI's newer numpy, which has no riscv64
+          # wheel, and source-builds it in the container.
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy
+          CIBW_TEST_REQUIRES: pytest numpy
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: >-
+            python -m pytest -v
+            tests/test_riscv64_smoke.py
+            tests/core/test_array_reader.py
+            tests/core/test_record_batch_reader.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: arro3-core-${{ env.ARRO3_CORE_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish arro3-core ${{ inputs.version || '0.8.1' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: arro3-core-${{ env.ARRO3_CORE_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
