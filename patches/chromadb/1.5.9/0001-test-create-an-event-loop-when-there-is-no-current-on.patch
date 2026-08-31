@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 27 Aug 2026 22:30:00 +0200
+Subject: [PATCH] test: create an event loop when there is no current one
+
+Upstream-Status: To upstream [not submitted from this automated port run; needs a pull request against chroma-core/chroma]
+
+CPython 3.14 finished the deprecation of asyncio.get_event_loop()'s
+implicit loop creation: called from a thread with no running loop and no
+loop set, it now raises RuntimeError instead of making one. The
+http_api_factory fixture calls it from a plain synchronous test, so the
+three async_client cases in test_client.py fail on 3.14 with
+"RuntimeError: There is no current event loop in thread 'MainThread'".
+
+Nothing about this is architecture specific -- it reproduces on macOS
+arm64 with CPython 3.14 against the released chromadb 1.5.9 wheel, and
+3.12 and 3.13 are unaffected.
+
+chromadb's own library code already guards the same call this way; see
+sync_wrapper() in chromadb/utils/async_to_sync.py and _get_client() in
+chromadb/api/async_fastapi.py. Use the same shape in the fixture.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/chromadb/test/test_client.py b/chromadb/test/test_client.py
+index 0f787059..17386eff 100644
+--- a/chromadb/test/test_client.py
++++ b/chromadb/test/test_client.py
+@@ -47,7 +47,12 @@ def http_api_factory(
+             with patch("chromadb.api.async_client.AsyncClient.get_user_identity"):
+ 
+                 def factory(*args: Any, **kwargs: Any) -> Any:
+-                    cls = asyncio.get_event_loop().run_until_complete(
++                    try:
++                        loop = asyncio.get_event_loop()
++                    except RuntimeError:
++                        loop = asyncio.new_event_loop()
++                        asyncio.set_event_loop(loop)
++                    cls = loop.run_until_complete(
+                         chromadb.AsyncHttpClient(*args, **kwargs)
+                     )
+                     return cls
+-- 
+2.51.0
+
