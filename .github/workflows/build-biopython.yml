@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` and `test_macos` jobs of
+# https://github.com/biopython/biopython/blob/biopython-188/.github/workflows/ci.yml
+name: Build biopython wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'biopython version to build (e.g. 1.88)'
+        required: true
+        default: '1.88'
+  pull_request:
+    paths:
+      - '.github/workflows/build-biopython.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.88' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  BIOPYTHON_VERSION: ${{ inputs.version || '1.88' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build biopython ${{ inputs.version || '1.88' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      # Upstream tags releases as `biopython-<version without the dot>`.
+      - name: Resolve upstream tag
+        run: echo "BIOPYTHON_TAG=biopython-${BIOPYTHON_VERSION//./}" >> "$GITHUB_ENV"
+
+      - name: Checkout biopython ${{ env.BIOPYTHON_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: biopython/biopython
+          ref: ${{ env.BIOPYTHON_TAG }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # run_tests.py enumerates doctest modules by walking `Tests/..` and some
+          # tests open data through `../Bio` and `../Doc`, so reproduce upstream's
+          # checkout layout around Tests/. Nothing here shadows the wheel: every
+          # command runs from Tests/, which is what lands on sys.path[0].
+          CIBW_TEST_SOURCES: Tests Bio BioSQL Doc
+          # Upstream's macOS/Windows test jobs install only numpy; setuptools is
+          # imported by run_tests.py itself.
+          CIBW_TEST_REQUIRES: numpy setuptools
+          CIBW_TEST_COMMAND: >-
+            cd Tests &&
+            python -c "import importlib; [importlib.import_module(m) for m in ('Bio.Align._aligncore', 'Bio.Align._alignmentcounts', 'Bio.Align._codonaligner', 'Bio.Align._pairwisealigner', 'Bio.Align.substitution_matrices._arraycore', 'Bio.cpairwise2', 'Bio.Nexus.cnexus', 'Bio.motifs._pwm', 'Bio.Cluster._cluster', 'Bio.PDB.ccealign', 'Bio.PDB.kdtrees', 'Bio.PDB._bcif_helper', 'Bio.SeqIO._twoBitIO')]" &&
+            python run_tests.py --offline
+
+      - name: Check the C extensions made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = [n for n in zipfile.ZipFile(whl).namelist() if n.endswith(".so")]
+              assert len(names) == 13, (whl, names)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: biopython-${{ env.BIOPYTHON_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish biopython ${{ inputs.version || '1.88' }} to GitLab
+    needs: [setup, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: biopython-${{ env.BIOPYTHON_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

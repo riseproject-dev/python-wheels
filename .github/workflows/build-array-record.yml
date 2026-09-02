@@ -1,0 +1,329 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# This workflow is based on:
+# https://github.com/google/array_record/blob/main/.github/workflows/build_and_publish_template.yml
+# and https://github.com/google/array_record/blob/main/oss/build_whl.sh
+---
+name: Build array-record wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'array_record version to build'
+        required: true
+        default: '0.8.3'
+  pull_request:
+    paths:
+      - '.github/workflows/build-array-record.yml'
+
+run-name: build-array-record - ${{ inputs.version || '0.8.3' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.8.3' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  ARRAY_RECORD_VERSION: ${{ inputs.version || '0.8.3' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Upstream pins 7.2.1, fetched from the bazel releases, which publish no
+  # riscv64 binary; 7.5.0 is the version this repo bootstraps from source.
+  BAZEL_VERSION: '7.5.0'
+  # versions bazel 7.5.0's MODULE.bazel pins; both need a riscv64 fix below
+  RULES_PYTHON_VERSION: '0.33.2'
+  RULES_JAVA_VERSION: '7.6.5'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  bazel:
+    needs: [setup]
+    name: Bootstrap bazel (riscv64)
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+
+    steps:
+      - name: Restore bazel binary
+        id: cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: bazel-bin
+          key: bazel-${{ env.BAZEL_VERSION }}-manylinux_riscv64
+
+      - name: Bootstrap bazel ${{ env.BAZEL_VERSION }}
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p bazel-bin
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e BAZEL_VERSION="${BAZEL_VERSION}" \
+            -e RULES_PYTHON_VERSION="${RULES_PYTHON_VERSION}" \
+            -e RULES_JAVA_VERSION="${RULES_JAVA_VERSION}" \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          dnf install -y --disablerepo=extras --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+
+          # rules_python 0.33.2's PLATFORMS has no riscv64 entry, aborting the bootstrap
+          # (bazelbuild/bazel#23018). Any linux entry is a safe stand-in: the toolchain it names
+          # is never selected on a riscv64 host. Fixed in bazel 8.2.0; the 7.x backport is open.
+          mkdir -p /tmp/rules_python
+          curl -fsSLo /tmp/rules_python.tar.gz "https://github.com/bazel-contrib/rules_python/releases/download/${PROJECT_RULES_PYTHON_VERSION}/rules_python-${PROJECT_RULES_PYTHON_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_python.tar.gz -C /tmp/rules_python --strip-components=1
+          sed -i 's|fail("No platform declared for host OS {} on arch {}".format(os_name, arch))|return "x86_64-unknown-linux-gnu"|' \
+            /tmp/rules_python/python/private/toolchains_repo.bzl
+
+          # rules_java 7.x maps riscv64 to a stray-colon include path, so a JNI library
+          # can't find jni_md.h. Fixed in rules_java 8.x, never backported.
+          mkdir -p /tmp/rules_java
+          curl -fsSLo /tmp/rules_java.tar.gz "https://github.com/bazelbuild/rules_java/releases/download/${RULES_JAVA_VERSION}/rules_java-${RULES_JAVA_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_java.tar.gz -C /tmp/rules_java
+          sed -i 's|\[":include/linux"\]|["include/linux"]|g' /tmp/rules_java/toolchains/BUILD
+
+          mkdir -p /tmp/bazel-src
+          cd /tmp/bazel-src
+          curl -fsSLo dist.zip "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-dist.zip"
+          unzip -q dist.zip
+
+          EXTRA_BAZEL_ARGS="--tool_java_runtime_version=local_jdk \
+            --override_module=rules_python=/tmp/rules_python \
+            --override_module=rules_java=/tmp/rules_java" \
+            bash ./compile.sh
+          install -m 0755 output/bazel /work/bazel-bin/bazel
+          SCRIPT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin/bazel
+          if-no-files-found: error
+
+  build_wheels:
+    name: Build array-record ${{ inputs.version || '0.8.3' }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    needs: [setup, bazel]
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Upstream supports 3.11-3.14 and publishes no free-threaded wheel.
+        include:
+          - {tag: cp312, python: '3.12'}
+          - {tag: cp313, python: '3.13'}
+          - {tag: cp314, python: '3.14'}
+
+    steps:
+      - name: Checkout array_record ${{ inputs.version || '0.8.3' }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: google/array_record
+          ref: v${{ env.ARRAY_RECORD_VERSION }}
+          path: array_record
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download bazel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin
+
+      - name: Build wheel
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
+          PROJECT_RULES_PYTHON_VERSION: '1.6.0'
+        run: |
+          mkdir -p wheelhouse
+          set -o pipefail
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e PYTHON_VERSION \
+            -e PROJECT_RULES_PYTHON_VERSION \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT' 2>&1 | tee build.log
+          set -eux
+
+          dnf install -y --disablerepo=extras --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip rsync
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+          install -m 0755 /work/bazel-bin/bazel /usr/local/bin/bazel
+
+          PYTAG="cp${PYTHON_VERSION/./}"
+          export PYTHON_BIN="/opt/python/${PYTAG}-${PYTAG}/bin/python"
+          export PATH="/opt/python/${PYTAG}-${PYTAG}/bin:${PATH}"
+          "${PYTHON_BIN}" -m pip install -q -U setuptools wheel auditwheel
+
+          # protobuf and rules_fuzzing declare pip hubs for CPython 3.8, which
+          # python-build-standalone does not publish for riscv64, and rules_python
+          # aborts on the missing interpreter even though nothing uses those hubs.
+          mkdir -p /tmp/rules_python
+          curl -fsSLo /tmp/rules_python.tar.gz \
+            "https://github.com/bazel-contrib/rules_python/releases/download/${PROJECT_RULES_PYTHON_VERSION}/rules_python-${PROJECT_RULES_PYTHON_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_python.tar.gz -C /tmp/rules_python --strip-components=1
+          python3 - <<'PATCH'
+          path = "/tmp/rules_python/python/private/pypi/extension.bzl"
+          source = open(path).read()
+          old = "        if python_name not in available_interpreters:\n            fail(("
+          new = (
+              "        if python_name not in available_interpreters:\n"
+              "            python_name = sorted(available_interpreters)[0]\n"
+              "        if False:\n"
+              "            fail(("
+          )
+          assert old in source
+          open(path, "w").write(source.replace(old, new, 1))
+          PATCH
+
+          cd /work/array_record
+
+          rm -f .bazelrc
+          cat > .bazelrc <<'RC'
+          build --incompatible_default_to_explicit_init_py
+          build --enable_platform_specific_config
+          build -c opt
+          build --cxxopt=-std=c++17
+          build --host_cxxopt=-std=c++17
+          build --experimental_repo_remote_exec
+          common --check_direct_dependencies=error
+          build --cxxopt=-Wno-deprecated-declarations --host_cxxopt=-Wno-deprecated-declarations
+          build --cxxopt=-Wno-parentheses --host_cxxopt=-Wno-parentheses
+          build --cxxopt=-Wno-sign-compare --host_cxxopt=-Wno-sign-compare
+          RC
+          {
+            echo "build --@rules_python//python/config_settings:python_version=${PYTHON_VERSION}"
+            echo "test --@rules_python//python/config_settings:python_version=${PYTHON_VERSION}"
+            echo "test --action_env PYTHON_VERSION=${PYTHON_VERSION}"
+            echo "test --test_timeout=900"
+            echo "build --override_module=rules_python=/tmp/rules_python"
+            # A long build's default curses progress output is large enough that
+            # GitHub drops the job log, taking the failure with it.
+            echo "common --curses=no --show_progress_rate_limit=60"
+          } >> .bazelrc
+
+          bazel build ... --action_env PYTHON_BIN_PATH="${PYTHON_BIN}"
+          bazel test --verbose_failures --test_output=errors ... --action_env PYTHON_BIN_PATH="${PYTHON_BIN}"
+
+          STAGE="$(mktemp -d)"
+          mkdir "${STAGE}/array_record"
+          cp setup.py LICENSE "${STAGE}"
+          rsync -avm -L --exclude="bazel-*/" . "${STAGE}/array_record"
+          rsync -avm -L --include="*.so" --include="*_pb2.py" \
+            --exclude="*.runfiles" --exclude="*_obj" --include="*/" --exclude="*" \
+            bazel-bin/cpp "${STAGE}/array_record"
+          rsync -avm -L --include="*.so" --include="*_pb2.py" \
+            --exclude="*.runfiles" --exclude="*_obj" --include="*/" --exclude="*" \
+            bazel-bin/python "${STAGE}/array_record"
+
+          # The extension statically links these; upstream ships none of their
+          # licences, so collect them from the sources bazel built.
+          OUTPUT_BASE="$(bazel info output_base)"
+          for repo in abseil-cpp boringssl brotli crc32c curl google_cloud_cpp \
+                      highwayhash protobuf pybind11 riegeli snappy zlib zstd; do
+            dir="$(find "${OUTPUT_BASE}/external" -mindepth 1 -maxdepth 1 -type d \
+              \( -name "${repo}" -o -name "${repo}~" -o -name "*~${repo}" \) | head -1)"
+            file="$(find "${dir}" -maxdepth 1 -type f -iname 'LICENSE*' | head -1)"
+            [ -n "${file}" ] || file="$(find "${dir}" -maxdepth 1 -type f -iname 'COPYING*' | head -1)"
+            cp "${file}" "${STAGE}/LICENSE.${repo}"
+          done
+
+          cd "${STAGE}"
+          "${PYTHON_BIN}" setup.py bdist_wheel --python-tag "py3${PYTHON_VERSION#*.}"
+          auditwheel repair --plat manylinux_2_39_riscv64 -w /work/wheelhouse dist/*.whl
+          SCRIPT
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: array-record-${{ env.ARRAY_RECORD_VERSION }}-${{ matrix.tag }}-build-log
+          path: build.log
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: array-record-${{ env.ARRAY_RECORD_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+      - name: Test wheel
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
+        run: |
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -e PYTHON_VERSION \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          PYTAG="cp${PYTHON_VERSION/./}"
+          PYTHON_BIN="/opt/python/${PYTAG}-${PYTAG}/bin/python"
+          "${PYTHON_BIN}" -m pip install /work/wheelhouse/*.whl
+
+          # /work holds the checkout, whose root would shadow the installed wheel.
+          cd /tmp
+          "${PYTHON_BIN}" - <<'PY'
+          import importlib.metadata
+          import tempfile
+
+          import array_record
+          from array_record.python import array_record_data_source  # noqa: F401
+          from array_record.python import array_record_module
+
+          assert array_record_module.__file__.endswith(".so"), array_record_module.__file__
+
+          path = tempfile.mkdtemp() + "/test.arecord"
+          writer = array_record_module.ArrayRecordWriter(path)
+          records = [b"abc", b"def", b"ghi"]
+          for record in records:
+              writer.write(record)
+          writer.close()
+          reader = array_record_module.ArrayRecordReader(path)
+          assert reader.num_records() == len(records)
+          assert [reader.read() for _ in records] == records
+          reader.close()
+
+          licenses = {
+              str(f).rsplit("/", 1)[1]
+              for f in importlib.metadata.files("array_record")
+              if ".dist-info/licenses/" in str(f)
+          } - {""}
+          expected = {"LICENSE"} | {
+              "LICENSE." + name
+              for name in [
+                  "abseil-cpp", "boringssl", "brotli", "crc32c", "curl",
+                  "google_cloud_cpp", "highwayhash", "protobuf", "pybind11",
+                  "riegeli", "snappy", "zlib", "zstd",
+              ]
+          }
+          assert licenses == expected, licenses
+          PY
+          SCRIPT
+
+  publish:
+    name: Publish array-record ${{ inputs.version || '0.8.3' }} to GitLab
+    needs: [setup, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: array-record-${{ env.ARRAY_RECORD_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

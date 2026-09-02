@@ -1,0 +1,131 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/delta-io/delta-rs/blob/python-v1.6.3/.github/workflows/python_release.yml
+name: Build deltalake wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'deltalake version to build (git tag without leading python-v, e.g. 1.6.3)'
+        required: true
+        default: '1.6.3'
+  pull_request:
+    paths:
+      - '.github/workflows/build-deltalake.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.6.3' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.6.3 there.
+  DELTALAKE_VERSION: ${{ inputs.version || '1.6.3' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build deltalake ${{ inputs.version || '1.6.3' }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+
+    steps:
+      # Checked out at the workspace root: deltalake-python is a member of the
+      # delta-rs Cargo workspace and builds against its sibling crates.
+      - name: Checkout delta-rs python-v${{ env.DELTALAKE_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: delta-io/delta-rs
+          ref: python-v${{ env.DELTALAKE_VERSION }}
+          persist-credentials: false
+
+      # Same OOM guard build-polars-runtime.yml needs on these runners for a
+      # comparably sized Rust build (this one links AWS-LC and jemalloc too).
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 10
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python
+          output-dir: wheelhouse/
+          # pyo3 is pinned to `abi3-py310`, so upstream ships a single
+          # cp310-abi3 wheel and no free-threaded variant: one build, on our
+          # minimum interpreter. musllinux is dropped - rustup.rs ships no
+          # riscv64 musl toolchain.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          # `[tool.maturin] profile = "dev"` would ship an unoptimised wheel, so
+          # the profile is selected here the way upstream's release jobs do.
+          # Their `python-release` adds fat LTO + codegen-units=1 on top of
+          # `release`; both are dropped because the riscv64 runner cannot afford
+          # that link (build-polars-runtime.yml disables LTO for the same
+          # reason), and `--strip` makes up the size difference.
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            MATURIN_PEP517_ARGS="--profile release --strip"
+            CARGO_BUILD_JOBS=2
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # arro3-core (a hard runtime dependency) and arro3-io have no riscv64
+          # wheels anywhere, so pip builds them from their sdists against the
+          # Rust toolchain installed above. polars and cryptography (pulled in by
+          # azure-storage-blob) are pinned to the newest riscv64 builds our
+          # registry publishes - left floating, pip picks PyPI's newer version
+          # and falls back to an sdist build.
+          CIBW_TEST_REQUIRES: >-
+            pytest pytest-mock pytest-timeout pytest-xdist pytest-benchmark
+            numpy azure-storage-blob opentelemetry-api opentelemetry-sdk
+            arro3-io polars==1.43.2 cryptography==50.0.0
+          # The suite resolves its fixture tables relative to `python/`, so both
+          # trees are staged at their original relative paths and the tests run
+          # from there.
+          CIBW_TEST_SOURCES: >-
+            python/tests python/conftest.py python/pyproject.toml
+            crates/test/tests/data
+          # Upstream's "Test without pyarrow and without pandas" job from
+          # python_build.yml: pyarrow has no riscv64 wheel yet. `--maxfail=0`
+          # lifts the `-x` in addopts so one run reports every failure.
+          CIBW_TEST_COMMAND: >-
+            cd python &&
+            python -m pytest tests -n auto --maxfail=0
+            -m "not pyarrow and not pandas and not datafusion and not integration and not benchmark"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: deltalake-${{ env.DELTALAKE_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish deltalake ${{ inputs.version || '1.6.3' }} to GitLab
+    needs: [setup, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: deltalake-${{ env.DELTALAKE_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,47 @@
+From 2076a33e21e5c83ed5309f89a79f4e69693be30b Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 27 Aug 2026 17:33:42 +0200
+Subject: [PATCH] build ONNX Runtime's bundled cpuinfo on riscv64
+
+Upstream-Status: Inappropriate [riscv64-specific workaround for an ONNX Runtime cmake limitation; the fix belongs in onnxruntime, not magika]
+
+rust/onnx/build.sh builds ONNX Runtime v1.24.2 as a static library, and
+the ort crate unconditionally links -lcpuinfo against it. ONNX Runtime
+only enables its bundled pytorch/cpuinfo when onnxruntime_target_platform
+matches an x86/arm allowlist, so on riscv64 it prints "Target processor
+architecture riscv64 is not supported in cpuinfo" and libcpuinfo.a is
+never produced; the wheel build then dies at the final link with "could
+not find native static library `cpuinfo`".
+
+pytorch/cpuinfo has supported riscv64 since it grew src/riscv, and the
+commit ONNX Runtime pins (403d652) contains it, so adding riscv64 to the
+allowlist is enough. ONNX Runtime's own uses of cpuinfo outside
+CPUIDINFO_ARCH_ARM and CPUIDINFO_ARCH_X86 are limited to
+cpuinfo_initialize, cpuinfo_get_processor, cpuinfo_get_core and
+cpuinfo_get_cores_count, all of which the riscv64 build provides.
+---
+ rust/onnx/build.sh | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/rust/onnx/build.sh b/rust/onnx/build.sh
+index eb59ac1..69fe4b7 100755
+--- a/rust/onnx/build.sh
++++ b/rust/onnx/build.sh
+@@ -43,6 +43,14 @@ else
+     target_compile_options(${target_name} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-Wno-uninitialized>")' \
+     cmake/CMakeLists.txt
+ 
++  # pytorch/cpuinfo builds for riscv64 (src/riscv/), but ONNX Runtime's cpuinfo
++  # architecture allowlist predates that support, so cpuinfo is not built and the
++  # ort crate then fails to link with "could not find native static library
++  # `cpuinfo`". The grep is there so a rewording upstream fails the build loudly.
++  sed -i 's/|aarch64|arm64)$")/|aarch64|arm64|riscv64)$")/' \
++    cmake/external/onnxruntime_external_deps.cmake
++  grep -q 'arm64|riscv64)$")' cmake/external/onnxruntime_external_deps.cmake
++
+   info "Build the static libraries."
+   x ./build.sh --config=Release --parallel $ONNX_RUNTIME_BUILD_FLAGS
+ 
+-- 
+2.50.1 (Apple Git-155)
+

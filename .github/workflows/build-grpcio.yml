@@ -1,0 +1,146 @@
+---
+name: Build grpcio wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'grpcio version to build (git tag without leading v, e.g. 1.82.1)'
+        required: true
+        default: '1.82.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-grpcio.yml'
+      - 'patches/grpcio/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.82.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GRPCIO_VERSION: ${{ inputs.version || '1.82.1' }}
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_ONLY_BINARY: ':all:'
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build grpcio ${{ inputs.version || '1.82.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        # grpcio doesn't advertise free-threaded support yet
+        # (src/python/grpcio/python_version.py lists only 3.10-3.14), so
+        # 3.14t is dropped from the usual default matrix.
+        # See also: https://github.com/grpc/grpc/issues/38762
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: "/project"
+      CCACHE_COMPILERCHECK: "content"
+
+    steps:
+      - name: Checkout grpc v${{ env.GRPCIO_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: grpc/grpc
+          ref: v${{ env.GRPCIO_VERSION }}
+          submodules: true
+          fetch-depth: 1  # grpc's submodules (boringssl, abseil, re2, ...) are large; skip history
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          fetch-depth: 1
+          persist-credentials: false
+
+      # install_all_python_modules.sh (run below via CIBW_TEST_COMMAND) would
+      # otherwise reinstall grpcio from source before testing, rather than
+      # testing the wheel this job just built.
+      - name: Patch grpc source
+        run: git apply python-wheels/patches/grpcio/${{ env.GRPCIO_VERSION }}/00*.patch
+
+      # The C++ core is identical across cp312/cp313/cp314; share ccache across
+      # builds assuming that the package version is the same.
+      - name: Restore compilation cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-wheels-grpcio-v${{ env.GRPCIO_VERSION }}-manylinux_riscv64-${{ matrix.python }}
+          restore-keys: |
+            ccache-wheels-grpcio-v${{ env.GRPCIO_VERSION }}-manylinux_riscv64-
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@294735312765b09d24a2fbec22660ce817587d55  # v4.1.0
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL: |
+            set -eux
+            CCACHE_VERSION=4.13.6
+            curl -fsSL https://github.com/ccache/ccache/releases/download/v${CCACHE_VERSION}/ccache-${CCACHE_VERSION}-linux-$(uname -m)-musl-static.tar.gz | \
+              tar -xvzf - --strip-components 1 -C /usr/local/bin ccache-${CCACHE_VERSION}-linux-$(uname -m)-musl-static/ccache
+            ccache --version
+            ccache --zero-stats
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # only-binary is test-scoped only: grpcio_tests pulls cryptography
+          # transitively (via oauth2client/google-auth), and an unbounded
+          # `pip install .` picks the newest PyPI version even when our
+          # registry has an older riscv64 wheel, forcing a maturin/Rust
+          # source build. Build phase still needs sdist compiles (cython
+          # has no riscv64 wheel anywhere), so this can't go in CIBW_ENVIRONMENT.
+          CIBW_TEST_ENVIRONMENT: "PIP_ONLY_BINARY=:all:"
+          CIBW_ENVIRONMENT_PASS_LINUX: >-
+            CCACHE_BASEDIR
+            CCACHE_COMPILERCHECK
+          CIBW_CONTAINER_ENGINE: "docker; create_args: --volume ${{ env.CCACHE_DIR }}:/root/.ccache"
+          CIBW_BEFORE_BUILD: pip install -r requirements.txt
+          CIBW_REPAIR_WHEEL_COMMAND: auditwheel repair --strip -w {dest_dir} {wheel}
+          CIBW_TEST_REQUIRES: setuptools
+          CIBW_TEST_COMMAND: >-
+            cd {project}/tools/distrib &&
+            PIP_NO_BUILD_ISOLATION=0 ./install_all_python_modules.sh &&
+            cd {project}/src/python/grpcio_tests && python setup.py test_lite
+
+      - name: Save compilation cache
+        if: always() && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-wheels-grpcio-v${{ env.GRPCIO_VERSION }}-manylinux_riscv64-${{ matrix.python }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: grpcio-${{ env.GRPCIO_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish grpcio ${{ inputs.version || '1.82.1' }} to GitLab
+    needs: [setup, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: grpcio-${{ env.GRPCIO_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

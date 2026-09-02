@@ -1,0 +1,209 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/google/magika/blob/python-v1.0.3/.github/workflows/python-build-and-release-package.yml
+# (its build-wheels + test-wheels jobs), which drive maturin with rust/onnx/maturin.sh
+# as the manylinux before-script.
+name: Build magika wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'magika version to build (git tag without the python-v prefix, e.g. 1.0.3)'
+        required: true
+        default: '1.0.3'
+  pull_request:
+    paths:
+      - '.github/workflows/build-magika.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.0.3' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MAGIKA_VERSION: ${{ inputs.version || '1.0.3' }}
+  # Upstream builds in manylinux 2_28; this is the only riscv64 manylinux image.
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # The version upstream's maturin-action used for the 1.0.3 wheels.
+  MATURIN_VERSION: '1.13.1'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheel:
+    needs: [setup]
+    name: Build magika ${{ inputs.version || '1.0.3' }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440  # 24h: ONNX Runtime is built from source
+
+    steps:
+      - name: Checkout magika python-v${{ env.MAGIKA_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: google/magika
+          ref: python-v${{ env.MAGIKA_VERSION }}
+          persist-credentials: false
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply --verbose python-wheels/patches/magika/${{ env.MAGIKA_VERSION }}/*.patch
+
+      - name: Write container script
+        run: |
+          cat > riscv64-build.sh <<'EOF'
+          #!/bin/bash
+          set -e -x
+
+          # ONNX Runtime's build scripts, and several of its dependencies, invoke a bare `python3`.
+          export PATH="/opt/python/cp312-cp312/bin:${PATH}"
+
+          # The manylinux image ships no Rust; rustup provisions a native riscv64gc toolchain.
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          . "${HOME}/.cargo/env"
+
+          # openssl-sys, which ort pulls in through its default `tls-native` feature.
+          dnf install -y openssl-devel
+
+          # rust/onnx/maturin.sh, minus its `yum` line (above) and its `rust/cli/test.sh`
+          # call (the wheel is exercised by the test job instead). We only need the static
+          # libraries, and --skip_tests alone still *builds* ONNX Runtime's gtest suite
+          # (onnxruntime_BUILD_UNIT_TESTS defaults to ON), which costs hours on this
+          # runner. --compile_no_warning_as_error for the riscv64 code paths.
+          export ONNX_RUNTIME_BUILD_FLAGS="--allow_running_as_root --skip_tests --compile_no_warning_as_error --cmake_extra_defines onnxruntime_BUILD_UNIT_TESTS=OFF"
+          (cd rust/onnx && ./build.sh)
+
+          # The ort crate links a fixed list of ONNX Runtime's static dependencies;
+          # print what the build actually produced so a missing one is diagnosable.
+          find rust/onnx/runtime/build/Linux -name '*.a' | sort
+
+          # maturin only globs LICEN[CS]E*/NOTICE* next to pyproject.toml, so upstream's
+          # wheels carry neither magika's own licence nor that of the statically linked
+          # ONNX Runtime. RISE redistributes these wheels, so stage all three.
+          cp LICENSE python/LICENSE
+          cp rust/onnx/runtime/LICENSE python/LICENSE.onnxruntime
+          cp rust/onnx/runtime/ThirdPartyNotices.txt python/NOTICE.onnxruntime
+
+          python3 -m pip install "maturin==${MATURIN_VERSION}"
+          cd python
+          maturin build --release --compatibility manylinux_2_39 --out /magika_src/dist
+          EOF
+
+      - name: Build wheel
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "${PWD}":/magika_src \
+            --workdir /magika_src \
+            -e MATURIN_VERSION="${MATURIN_VERSION}" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            --pull=newer \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /magika_src/riscv64-build.sh
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: magika-${{ env.MAGIKA_VERSION }}-py3-none-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test magika ${{ inputs.version || '1.0.3' }} ${{ matrix.python }}
+    needs: [setup, build_wheel]
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout magika python-v${{ env.MAGIKA_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: google/magika
+          ref: python-v${{ env.MAGIKA_VERSION }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: magika-${{ env.MAGIKA_VERSION }}-py3-none-manylinux_riscv64
+          path: dist
+
+      - name: Write container script
+        run: |
+          cat > riscv64-test.sh <<'EOF'
+          #!/bin/bash
+          set -e -x
+
+          case "${PYTHON_TAG}" in
+            *t) python_dir="/opt/python/${PYTHON_TAG%t}-${PYTHON_TAG}/bin" ;;
+            *) python_dir="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin" ;;
+          esac
+          export PATH="${python_dir}:${PATH}"
+
+          # dacite and tqdm come from upstream's `dev` dependency group, which its
+          # test suite imports.
+          python -m pip install --only-binary=:all: /magika_src/dist/*.whl pytest dacite tqdm
+
+          # Upstream's test-wheels job.
+          magika --version
+          python -c 'import magika; m = magika.Magika(); print(m)'
+          magika -r tests_data/basic
+          python ./python/scripts/run_quick_test_magika_cli.py
+          python ./python/scripts/run_quick_test_magika_module.py
+
+          # The licences staged by the build job have to reach the installed wheel.
+          python - <<'PY'
+          import importlib.metadata as md
+
+          expected = {"LICENSE", "LICENSE.onnxruntime", "NOTICE.onnxruntime"}
+          shipped = {p.name for p in md.files("magika") if ".dist-info/" in str(p)}
+          assert expected <= shipped, sorted(expected - shipped)
+          PY
+
+          # Upstream's python-test-suite job. The container runs as root, for which a
+          # 0o000 file is still readable, so the permission-error test cannot pass here.
+          cd python
+          python -m pytest tests -m "not slow" -k "not test_magika_module_with_permission_error"
+          EOF
+
+      - name: Test wheel
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "${PWD}":/magika_src \
+            --workdir /magika_src \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            --pull=newer \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /magika_src/riscv64-test.sh
+
+  publish:
+    name: Publish magika ${{ inputs.version || '1.0.3' }} to GitLab
+    needs: [setup, build_wheel, test_wheel]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: magika-${{ env.MAGIKA_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

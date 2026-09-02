@@ -1,0 +1,131 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/explosion/gha-cibuildwheel/blob/main/.github/workflows/cibuildwheel.yml,
+# which https://github.com/explosion/srsly/blob/release-v2.5.3/.github/workflows/cibuildwheel.yml
+# calls, and on the `tests` job of
+# https://github.com/explosion/srsly/blob/release-v2.5.3/.github/workflows/tests.yml.
+name: Build srsly wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'srsly version to build (git tag without the release-v prefix, e.g. 2.5.3)'
+        required: true
+        default: '2.5.3'
+  pull_request:
+    paths:
+      - '.github/workflows/build-srsly.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.5.3' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  SRSLY_VERSION: ${{ inputs.version || '2.5.3' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build srsly ${{ inputs.version || '2.5.3' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      # Releases are tagged release-v*; the plain v* tag is only created afterwards.
+      - name: Checkout srsly ${{ env.SRSLY_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: explosion/srsly
+          ref: release-v${{ env.SRSLY_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # The wheel ships the vendored ruamel.yaml but not its licence.
+      - name: Patch srsly source
+        run: |
+          git apply python-wheels/patches/srsly/${{ env.SRSLY_VERSION }}/00*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # The extensions do not declare free-threading support, so importing them under
+          # cp314t re-enables the GIL with a RuntimeWarning that -Werror turns fatal;
+          # asking for the GIL up front is the same outcome without the warning. Ignored
+          # on the GIL builds.
+          CIBW_TEST_ENVIRONMENT: PYTHON_GIL=1
+          # The suite ships in the wheel, so upstream runs it with --pyargs. From
+          # requirements.txt, psutil is only used by the skipped cloudpickle tests and
+          # nothing left has a pytest-timeout marker.
+          CIBW_TEST_REQUIRES: pytest>=4.6.5 mock>=2.0.0,<3.0.0 numpy>=1.15.0
+          # srsly/tests/cloudpickle was left behind by the cloudpickle 3.1.2 bump in the
+          # release commit and no longer imports (srsly.cloudpickle.compat and
+          # cloudpickle.cell_set are both gone); it fails the same way on every
+          # architecture. The licence check guards the patch above.
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m; f = sorted(p.name for p in m.files('srsly') if '.dist-info/licenses/' in str(p)); assert f == ['LICENSE', 'LICENSE.ruamel_yaml'], f" &&
+            python -m pytest --pyargs srsly -Werror
+            --ignore="$(python -c 'import srsly, os; print(os.path.join(os.path.dirname(srsly.__file__), "tests", "cloudpickle"))')"
+
+      - name: Check the extension modules made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          expected = {"srsly/msgpack/_epoch", "srsly/msgpack/_packer",
+                      "srsly/msgpack/_unpacker", "srsly/ujson/ujson"}
+          for whl in sys.argv[1:]:
+              found = {n.split(".", 1)[0] for n in zipfile.ZipFile(whl).namelist()
+                       if n.endswith(".so")}
+              assert expected <= found, (whl, found)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: srsly-${{ env.SRSLY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish srsly ${{ inputs.version || '2.5.3' }} to GitLab
+    needs: [setup, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: srsly-${{ env.SRSLY_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

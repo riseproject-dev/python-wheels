@@ -1,0 +1,90 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build_wheels` job of
+# https://github.com/closeio/ciso8601/blob/v2.3.3/.github/workflows/build-wheels.yml
+# and the test invocation of
+# https://github.com/closeio/ciso8601/blob/v2.3.3/tox.ini
+name: Build ciso8601 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'ciso8601 version to build (git tag without leading v, e.g. 2.3.3)'
+        required: true
+        default: '2.3.3'
+  pull_request:
+    paths:
+      - '.github/workflows/build-ciso8601.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.3.3' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  CISO8601_VERSION: ${{ inputs.version || '2.3.3' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build ciso8601 ${{ inputs.version || '2.3.3' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # No cp314t: the extension uses single-phase init, so importing it
+        # re-enables the GIL, and upstream ships no free-threaded wheel.
+        python: ["cp312", "cp313", "cp314"]
+
+    steps:
+      - name: Checkout ciso8601 v${{ env.CISO8601_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: closeio/ciso8601
+          ref: v${{ env.CISO8601_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # generate_test_timestamps.py sits at the repo root and is imported by tests.
+          CIBW_TEST_SOURCES: tests generate_test_timestamps.py
+          CIBW_TEST_REQUIRES: pytz
+          CIBW_TEST_COMMAND: >-
+            python -c "import ciso8601; assert ciso8601.__file__.endswith('.so'), ciso8601.__file__" &&
+            python -m unittest
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ciso8601-${{ env.CISO8601_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish ciso8601 ${{ inputs.version || '2.3.3' }} to GitLab
+    needs: [setup, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: ciso8601-${{ env.CISO8601_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

@@ -2,17 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import glob
+import html
 import os
 import re
-
 import packaging.version as packaging_version
 import requests
 import yaml
 
+from html.parser import HTMLParser
 
 GITLAB_PROJECT_ID = "56254198"
 GITLAB_REGISTRY_URL = (
     f"https://gitlab.com/api/v4/projects/{GITLAB_PROJECT_ID}/packages"
+)
+GITLAB_PYPI_SIMPLE_URL = (
+    f"https://gitlab.com/api/v4/projects/{GITLAB_PROJECT_ID}/packages/pypi/simple"
 )
 GITLAB_WHEEL_BUILDER_URL = (
     "https://gitlab.com/riseproject/python/wheel_builder/-/tree/main"
@@ -24,6 +28,37 @@ PYPI_INDEX_URL = "https://pypi.riseproject.dev/simple/"
 
 # Match RST inline external refs: `Label <url>`_ or `Label <url>`__
 RST_LINK_RE = re.compile(r"`([^`<]+?)\s*<([^>]+)>`_+")
+PACKAGE_NORMALIZE_RE = re.compile(r"[-_.]+")
+
+
+class SimplePageParser(HTMLParser):
+    """Collect PEP 503 link attributes from a GitLab simple page."""
+
+    def __init__(self):
+        super().__init__()
+        self.links = []
+        self._link = None
+        self._text = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            self._link = dict(attrs)
+            self._text = []
+
+    def handle_data(self, data):
+        if self._link is not None:
+            self._text.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self._link is not None:
+            self.links.append((self._link, "".join(self._text)))
+            self._link = None
+            self._text = []
+
+
+def normalize_package_name(package_name):
+    """Return the normalized project name required by the Simple API."""
+    return PACKAGE_NORMALIZE_RE.sub("-", package_name).lower()
 
 
 def rst_to_md(text):
@@ -98,6 +133,71 @@ def _callout(lines, label, text):
     for ln in rst_to_md(text).splitlines():
         lines.append(f"> {ln}" if ln else ">")
     lines.append("")
+
+
+def generate_simple_page(yaml_file, output_html):
+    """Generate a static PEP 503 package page from a package YAML file."""
+    try:
+        with open(yaml_file, "r", encoding="utf-8") as f:
+            package_data = yaml.safe_load(f)
+    except (FileNotFoundError, yaml.YAMLError) as e:
+        print(f"Error reading {yaml_file}: {e}")
+        return None, None
+
+    package_name = package_data.get("package-name")
+    if not package_name:
+        print(f"Error reading {yaml_file}: package-name is missing")
+        return None, None
+
+    normalized_name = normalize_package_name(package_name)
+    url = f"{GITLAB_PYPI_SIMPLE_URL}/{normalized_name}"
+    try:
+        response = requests.get(url, timeout=30)
+    except requests.RequestException as e:
+        print(f"Request error fetching {url}: {e}")
+        return None, None
+    if response.status_code != 200:
+        print(f"Error fetching {url}: {response.status_code} - {response.text}")
+        return None, None
+
+    parser = SimplePageParser()
+    parser.feed(response.text)
+
+    lines = [
+        "<!DOCTYPE html>",
+        '<html lang="en">',
+        "  <head>",
+        '    <meta charset="utf-8">',
+        f"    <title>Links for {html.escape(package_name)}</title>",
+        "  </head>",
+        "  <body>",
+        f"    <h1>Links for {html.escape(package_name)}</h1>",
+    ]
+    for attrs, link_text in parser.links:
+        href = attrs.get("href")
+        if not href:
+            continue
+        rendered_attrs = [f'href="{html.escape(href, quote=True)}"']
+        # These optional attributes are defined by the Simple Repository API.
+        for attr in ("data-requires-python", "data-yanked", "data-core-metadata"):
+            if attr in attrs:
+                rendered_attrs.append(
+                    f'{attr}="{html.escape(attrs[attr] or "", quote=True)}"'
+                )
+        lines.append(
+            f"    <a {' '.join(rendered_attrs)}>{html.escape(link_text)}</a>"
+        )
+    lines += ["  </body>", "</html>"]
+
+    try:
+        os.makedirs(os.path.dirname(output_html), exist_ok=True)
+        with open(output_html, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except IOError as e:
+        print(f"Error writing {output_html}: {e}")
+        return None, None
+
+    return package_name, output_html
 
 
 def generate_md_page(yaml_file, output_md, package_list):
@@ -268,15 +368,56 @@ def process_all_yaml_files(package_list):
         return
 
     package_entries = []
+    simple_entries = []
+    simple_dir = os.path.join(os.path.dirname(out_dir), "simple")
     for yaml_file in yaml_files:
+        print(f"Processing {yaml_file}...")
         base = os.path.basename(yaml_file).replace(".yaml", ".md")
         md_file = os.path.join(out_dir, base)
         name, fname = generate_md_page(yaml_file, md_file, package_list)
         if name and fname:
             package_entries.append((name, os.path.basename(fname)))
 
+        package_name = os.path.basename(yaml_file).removesuffix(".yaml")
+        simple_file = os.path.join(
+            simple_dir, normalize_package_name(package_name), "index.html"
+        )
+        simple_name, simple_fname = generate_simple_page(yaml_file, simple_file)
+        if simple_name and simple_fname:
+            simple_entries.append(simple_name)
+
     package_entries.sort(key=lambda x: x[0].lower())
     generate_index(package_entries, out_dir)
+    generate_simple_index(simple_entries, simple_dir)
+
+
+def generate_simple_index(package_names, simple_dir):
+    """Generate the static root page for the PEP 503 Simple API."""
+    lines = [
+        "<!DOCTYPE html>",
+        '<html lang="en">',
+        "  <head>",
+        '    <meta charset="utf-8">',
+        "    <title>Simple index</title>",
+        "  </head>",
+        "  <body>",
+        "    <h1>Simple index</h1>",
+    ]
+    for package_name in sorted(package_names, key=str.lower):
+        normalized_name = normalize_package_name(package_name)
+        lines.append(
+            f'    <a href="{html.escape(normalized_name, quote=True)}/">{html.escape(package_name)}</a>'
+        )
+    lines += ["  </body>", "</html>"]
+
+    index_path = os.path.join(simple_dir, "index.html")
+    try:
+        os.makedirs(simple_dir, exist_ok=True)
+        with open(index_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        print(f"Generated: {index_path}")
+    except IOError as e:
+        print(f"Error writing {index_path}: {e}")
 
 
 def generate_index(package_entries, out_dir):

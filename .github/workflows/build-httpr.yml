@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/thomasht86/httpr/blob/v0.6.0/.github/workflows/CI.yml
+name: Build httpr wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'httpr version to build (git tag without the leading v, e.g. 0.6.0)'
+        required: true
+        default: '0.6.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-httpr.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.6.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.6.0 there.
+  HTTPR_VERSION: ${{ inputs.version || '0.6.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build httpr ${{ inputs.version || '0.6.0' }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # pyo3's abi3-py310 feature gives one wheel for every GIL-ful
+          # interpreter; pyo3 disables abi3 under Py_GIL_DISABLED, so the
+          # free-threaded build is a separate per-interpreter wheel. cp313t is
+          # dropped: the riscv64 manylinux image ships no cp313t.
+          - tag: cp310-abi3
+            build: >-
+              cp312-manylinux_riscv64 cp313-manylinux_riscv64
+              cp314-manylinux_riscv64
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+
+    steps:
+      - name: Checkout httpr v${{ env.HTTPR_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: thomasht86/httpr
+          ref: v${{ env.HTTPR_VERSION }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Set version
+        # The version in the checkout is the 0.0.0.dev0 placeholder upstream's
+        # release job stamps from the tag.
+        run: |
+          uv run --no-project --with tomlkit python .github/workflows/set_version.py "${HTTPR_VERSION}"
+          grep -q "version = \"${HTTPR_VERSION}\"" pyproject.toml
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # httpr ships no [tool.cibuildwheel], so the Rust toolchain its
+          # maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Without it pip prefers PyPI's newer releases, which have no riscv64
+          # wheel, and source-builds them in the container.
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=cryptography,cbor2
+          CIBW_TEST_REQUIRES: pytest pytest-asyncio pytest-httpbin cbor2 trustme certifi
+          CIBW_TEST_SOURCES: tests pyproject.toml
+          CIBW_TEST_COMMAND: >-
+            python -c "import httpr, pathlib; d = pathlib.Path(httpr.__file__).parent;
+            assert list(d.glob('httpr*.so')), sorted(d.iterdir())"
+            && python -m pytest -q tests/unit
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: httpr-${{ env.HTTPR_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish httpr ${{ inputs.version || '0.6.0' }} to GitLab
+    needs: [setup, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: httpr-${{ env.HTTPR_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

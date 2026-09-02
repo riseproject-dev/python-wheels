@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/dask/fastparquet/blob/2026.5.0/.github/workflows/wheel.yml
+# and its wheel test job: https://github.com/dask/fastparquet/blob/2026.5.0/.github/workflows/test_wheel.yaml
+name: Build fastparquet wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'fastparquet version to build (git tag, e.g. 2026.5.0)'
+        required: true
+        default: '2026.5.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-fastparquet.yml'
+      - 'patches/fastparquet/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2026.5.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 2026.5.0 there.
+  FASTPARQUET_VERSION: ${{ inputs.version || '2026.5.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build fastparquet ${{ inputs.version || '2026.5.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        include:
+          # pandas, a hard runtime requirement, publishes no free-threaded wheel on
+          # any architecture, so the suite cannot run under cp314t.
+          - python: "cp314t"
+            test_skip: "*"
+
+    steps:
+      - name: Checkout fastparquet ${{ env.FASTPARQUET_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: dask/fastparquet
+          ref: ${{ env.FASTPARQUET_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch fastparquet source
+        run: git apply python-wheels/patches/fastparquet/${{ env.FASTPARQUET_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # The patch dirties the checkout, so setuptools_scm would derive
+          # 2026.5.1.dev0 from `git describe` instead of the tag.
+          CIBW_ENVIRONMENT: SETUPTOOLS_SCM_PRETEND_VERSION_FOR_FASTPARQUET=${{ env.FASTPARQUET_VERSION }} PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # pandas and cramjam are newer on PyPI than the riscv64 wheels we ship;
+          # refusing sdists makes pip resolve back to the versions we have.
+          CIBW_TEST_ENVIRONMENT: 'PIP_ONLY_BINARY=:all:'
+          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
+          CIBW_TEST_REQUIRES: pytest "pandas<3"
+          CIBW_TEST_SOURCES: fastparquet/test test-data pyproject.toml
+          # test/util.py resolves test-data relative to the working directory, and
+          # upstream's test_wheel.yaml renames the source package out of the way so
+          # `import fastparquet` picks up the installed wheel.
+          CIBW_TEST_COMMAND: mv fastparquet fastparquet-src && python -m pytest fastparquet-src/test
+
+      - name: Check the Cython extensions made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          expected = {"fastparquet/cencoding", "fastparquet/speedups"}
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              got = {n.split(".", 1)[0] for n in names if n.endswith(".so")}
+              assert got == expected, f"{whl}: got {got}, expected {expected}"
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fastparquet-${{ env.FASTPARQUET_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish fastparquet ${{ inputs.version || '2026.5.0' }} to GitLab
+    needs: [setup, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: fastparquet-${{ env.FASTPARQUET_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

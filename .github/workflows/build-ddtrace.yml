@@ -1,0 +1,132 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's wheel builder:
+#   https://github.com/DataDog/dd-trace-py/blob/v4.13.1/.github/workflows/build_python_3.yml
+name: Build ddtrace wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'ddtrace version to build (git tag without leading v, e.g. 4.13.1)'
+        required: true
+        default: '4.13.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-ddtrace.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '4.13.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  DDTRACE_VERSION: ${{ inputs.version || '4.13.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # setup.py's LIBDDWAF_VERSION. Upstream downloads a prebuilt libddwaf, which
+  # is published for aarch64/x86_64 only, so riscv64 compiles it from source.
+  LIBDDWAF_VERSION: '2.0.0'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build ddtrace ${{ inputs.version || '4.13.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    strategy:
+      fail-fast: false
+      matrix:
+        # Upstream skips cp314t and publishes no free-threaded wheel anywhere.
+        python: ["cp312", "cp313", "cp314"]
+
+    steps:
+      - name: Checkout dd-trace-py v${{ env.DDTRACE_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: DataDog/dd-trace-py
+          ref: v${{ env.DDTRACE_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply riscv64 patches
+        run: git apply -v python-wheels/patches/ddtrace/${{ env.DDTRACE_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH=$PATH:$HOME/.cargo/bin
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # setup.py drops libddwaf into the wheel from
+          # ddtrace/appsec/_ddwaf/libddwaf/<arch>/lib/ and skips the download
+          # when that tree already exists, so building it here is enough.
+          CIBW_BEFORE_ALL_LINUX: |
+            set -euxo pipefail
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            dnf -y install libstdc++-static  # libddwaf links -static-libstdc++
+            git clone --depth 1 --branch "${{ env.LIBDDWAF_VERSION }}" \
+              https://github.com/DataDog/libddwaf.git /tmp/libddwaf
+            cmake -S /tmp/libddwaf -B /tmp/libddwaf/build \
+              -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+              -DLIBDDWAF_BUILD_STATIC=OFF -DLIBDDWAF_TESTING=OFF
+            cmake --build /tmp/libddwaf/build --parallel "$(nproc)"
+            cmake --install /tmp/libddwaf/build --prefix /tmp/libddwaf/install
+            install -D /tmp/libddwaf/install/lib*/libddwaf.so \
+              {project}/ddtrace/appsec/_ddwaf/libddwaf/riscv64/lib/libddwaf.so
+          # setup.py drives CMake through the `cmake` PyPI package, whose oldest
+          # riscv64 wheel is 4.1.0 — outside pyproject.toml's `cmake<3.28` pin,
+          # hence the preinstall and pip's unvalidated --no-build-isolation.
+          CIBW_BEFORE_BUILD: >-
+            pip install cython "cmake>=4.1" "setuptools-rust<2"
+            "patchelf>=0.17.0.0" setuptools wheel
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          CIBW_TEST_COMMAND: python {project}/tests/smoke_test.py
+
+      - name: Check the native extensions made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = [n for n in zipfile.ZipFile(whl).namelist() if n.endswith(".so")]
+              assert "ddtrace/appsec/_ddwaf/libddwaf/riscv64/lib/libddwaf.so" in names, whl
+              assert len(names) > 15, (whl, names)
+              print(whl, len(names), "shared objects")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ddtrace-${{ env.DDTRACE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish ddtrace ${{ inputs.version || '4.13.1' }} to GitLab
+    needs: [setup, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: ddtrace-${{ env.DDTRACE_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,89 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build_wheels` job of
+# https://github.com/sumerc/yappi/blob/v1.7.6/.github/workflows/github-deploy.yml
+# and the test invocation of
+# https://github.com/sumerc/yappi/blob/v1.7.6/.github/workflows/main.yml
+name: Build yappi wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'yappi version to build (e.g. 1.7.6)'
+        required: true
+        default: '1.7.6'
+  pull_request:
+    paths:
+      - '.github/workflows/build-yappi.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.7.6' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  YAPPI_VERSION: ${{ inputs.version || '1.7.6' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build yappi ${{ inputs.version || '1.7.6' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # cp314t is excluded by upstream's `[tool.cibuildwheel] skip`.
+        python: ["cp312", "cp313", "cp314"]
+
+    steps:
+      - name: Checkout yappi v${{ env.YAPPI_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: sumerc/yappi
+          ref: v${{ env.YAPPI_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          # musllinux is dropped: gevent, the test dependency, has no musl riscv64 wheel.
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Upstream builds its wheels untested and runs this suite separately.
+          CIBW_TEST_EXTRAS: test
+          CIBW_TEST_SOURCES: tests run_tests.py
+          CIBW_TEST_COMMAND: python run_tests.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: yappi-${{ env.YAPPI_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish yappi ${{ inputs.version || '1.7.6' }} to GitLab
+    needs: [setup, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: yappi-${{ env.YAPPI_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

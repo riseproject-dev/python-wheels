@@ -1,0 +1,139 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/alesanfra/dlib-wheels/blob/master/.github/workflows/build.yaml
+name: Build dlib-bin wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'dlib-bin version to build (e.g. 20.0.1)'
+        required: true
+        default: '20.0.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-dlib-bin.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '20.0.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 20.0.1 there.
+  DLIB_BIN_VERSION: ${{ inputs.version || '20.0.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build dlib-bin ${{ inputs.version || '20.0.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 600
+    strategy:
+      fail-fast: false
+      # Upstream publishes no free-threaded wheel, so cp314t is not built.
+      matrix:
+        python: ["cp312", "cp313", "cp314"]
+
+    steps:
+      - name: Checkout dlib ${{ env.DLIB_BIN_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: davisking/dlib
+          ref: v${{ env.DLIB_BIN_VERSION }}
+          persist-credentials: false
+
+      - name: Patch dlib configuration
+        run: |
+          sed -i'' -e "s/name='dlib'/name='dlib-bin'/" setup.py
+          sed -i'' -e "s/version=read_version_from_cmakelists('dlib\/CMakeLists.txt')/version='$DLIB_BIN_VERSION'/" setup.py
+          sed -i'' -e "s/url='https:\/\/github\.com\/davisking\/dlib'/url='https:\/\/github\.com\/alesanfra\/dlib-wheels'/" setup.py
+          sed -i'' -e "s/_cmake_extra_options = \[\]/_cmake_extra_options = \['-DDLIB_NO_GUI_SUPPORT=ON'\]/" setup.py
+          grep -q "name='dlib-bin'" setup.py
+          grep -q "version='$DLIB_BIN_VERSION'" setup.py
+
+      # dlib compiles its bundled libpng, zlib and libjpeg into the extension
+      # whenever the system libraries are absent, which they are in the
+      # manylinux image, and the bindings are built with pybind11. Upstream
+      # ships none of their licences, on any architecture.
+      - name: Stage the bundled libraries' licences
+        run: |
+          cp dlib/external/libpng/LICENSE LICENSE.libpng
+          cp dlib/external/pybind11/LICENSE LICENSE.pybind11
+          sed -n '/Copyright (C) 1995-2017 Jean-loup Gailly/,/madler@alumni.caltech.edu/p' \
+            dlib/external/zlib/zlib.h > LICENSE.zlib
+          sed -n '/^LEGAL ISSUES$/,/^REFERENCES$/p' dlib/external/libjpeg/README \
+            | sed '$d' > LICENSE.libjpeg
+          for f in LICENSE.libpng LICENSE.pybind11 LICENSE.zlib LICENSE.libjpeg; do
+            test -s "$f" || { echo "$f is empty"; exit 1; }
+          done
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_BUILD: pip install cmake
+          # Upstream's wheel job only imports dlib; this runs the suite dlib's
+          # own build_python.yml runs, staged so the checkout cannot shadow the
+          # wheel. numpy resolves from the RISE registry.
+          CIBW_TEST_REQUIRES: pytest numpy
+          CIBW_TEST_SOURCES: tools/python/test examples/faces
+          CIBW_TEST_COMMAND: python -m pytest tools/python/test
+          CIBW_TEST_ENVIRONMENT: >-
+            PIP_ONLY_BINARY=numpy
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+
+      - name: Check the wheel ships the extension and the licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert any(
+              n.startswith("_dlib_pybind11.") and n.endswith(".so") for n in names
+          ), names
+          licences = {
+              n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n
+          } - {""}
+          assert licences == {
+              "LICENSE.txt",
+              "LICENSE.libjpeg",
+              "LICENSE.libpng",
+              "LICENSE.pybind11",
+              "LICENSE.zlib",
+          }, licences
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dlib-bin-${{ env.DLIB_BIN_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish dlib-bin ${{ inputs.version || '20.0.1' }} to GitLab
+    needs: [setup, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: dlib-bin-${{ env.DLIB_BIN_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

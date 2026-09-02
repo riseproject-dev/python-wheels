@@ -1,0 +1,265 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# Mirrors upstream's own wheel builder almost verbatim, trimmed to the Linux
+# glibc/riscv64 case:
+#   https://github.com/pyca/cryptography/blob/50.0.0/.github/workflows/wheel-builder.yml
+# Dropped: macos, windows, musllinux (no riscv64 musl Rust target, see
+# "Skipping musl Builds" in docs/development.md), the pypy311 matrix row, and
+# the `vectors` sdist+wheel (cryptography_vectors is pure-Python and already
+# published on public PyPI for every cryptography release, so the test job
+# installs it directly instead of building it from vectors/).
+#
+# The `manylinux` job can't reuse upstream's own `container:` job as-is:
+# their ghcr.io/pyca/cryptography-manylinux2014:x86_64-style images (with
+# Rust, a static OpenSSL build, and an SBOM preinstalled at
+# /opt/pyca/cryptography/openssl) don't exist for riscv64, and the closest
+# available image (quay.io/pypa/manylinux_2_39_riscv64) ships no Node, so a
+# native `container:` job can't run the checkout/artifact actions inside it.
+# We drive that image with `podman run` instead (see build-orjson.yml for the
+# same pattern), keeping the actions on the host and running upstream's own
+# build/repair/smoketest commands inside - only substituting the OpenSSL
+# linkage (dynamic system OpenSSL via pkg-config, since there's no prebuilt
+# static one for riscv64) and installing Rust ourselves.
+name: Build cryptography wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'cryptography version to build (git tag, e.g. 50.0.0)'
+        required: true
+        default: '50.0.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-cryptography.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '50.0.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  CRYPTOGRAPHY_VERSION: ${{ inputs.version || '50.0.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  sdist:
+    needs: [setup]
+    name: Build cryptography ${{ inputs.version || '50.0.0' }} sdist
+    runs-on: ubuntu-latest
+    outputs:
+      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
+      package_version: ${{ steps.sdist.outputs.package_version }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: pyca/cryptography
+          ref: ${{ env.CRYPTOGRAPHY_VERSION }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      # Same as upstream's "Make sdist (cryptography)" step, minus
+      # --build-constraint/--require-hashes: those hash-pin against upstream's
+      # own PyPI-hosted build deps, which don't match the riscv64 wheels our
+      # own registry serves for the same versions (e.g. cffi) - see gotcha 30.
+      - name: Make sdist (cryptography)
+        id: sdist
+        run: |
+          set -euo pipefail
+          uv build --sdist
+          sdist_name="$(ls dist)"
+          {
+            echo "sdist_name=${sdist_name}"
+            echo "package_version=$(echo "${sdist_name}" | sed -En 's/cryptography-(.+)\.tar\.gz/\1/p')"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ steps.sdist.outputs.sdist_name }}
+          path: dist/${{ steps.sdist.outputs.sdist_name }}
+          if-no-files-found: error
+
+  # Same PYTHON matrix shape as upstream's `manylinux` job (one abi3 build
+  # plus one free-threaded build), with a single MANYLINUX row added for
+  # riscv64 in place of upstream's x86_64/aarch64/ppc64le/armv7l rows.
+  # Upstream builds two abi3 floors (py39, py311) from one cp311 interpreter
+  # to serve their whole public; RISE's own floor is cp312 (docs/development.md),
+  # so we drop the py39 row and build the single abi3 floor we need directly
+  # with a cp312 interpreter instead of overriding it down from cp311 - no
+  # ABI_VERSION/PY_LIMITED_API needed, since pyo3's plain `abi3` feature
+  # already floors at whichever interpreter did the build.
+  manylinux:
+    needs: [setup, sdist]
+    name: "${{ matrix.PYTHON.TAG }} for manylinux_riscv64"
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        PYTHON:
+          - { VERSION: "cp312-cp312", TAG: 'cp312-cp312' }
+          - { VERSION: "cp314-cp314t", TAG: 'cp314-cp314t' }
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ needs.sdist.outputs.sdist_name }}
+          path: dist/
+      - run: mkdir tmpwheelhouse wheelhouse
+
+      # Corresponds to upstream's "Build the wheel" + "auditwheel repair"
+      # steps. The image has no Rust and no OpenSSL dev headers/pkg-config,
+      # so install them first (upstream's own container bakes these in);
+      # openssl-sys then finds the image's dynamic system OpenSSL via
+      # pkg-config (there's no static build to point OPENSSL_DIR/
+      # OPENSSL_STATIC at, so both are dropped, along with --sbom-include,
+      # which points at a static build's generated sbom.json that has no
+      # riscv64 equivalent).
+      - name: Build the wheel
+        run: |
+          podman run -t \
+            --network=host \
+            -v "$(pwd)":/workspace \
+            --workdir /workspace \
+            -e PYTHON_VERSION="${{ matrix.PYTHON.VERSION }}" \
+            -e PIP_EXTRA_INDEX_URL="https://pypi.riseproject.dev/simple/" \
+            "${{ env.MANYLINUX_RISCV64_IMAGE }}" \
+            bash -c '
+              set -euo pipefail
+              dnf install -y openssl-devel pkgconfig
+
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+              export PATH="$PATH:$HOME/.cargo/bin"
+
+              manylinux-entrypoint uv build --python="/opt/python/$PYTHON_VERSION/bin/python" \
+                --wheel dist/cryptography*.tar.gz -o tmpwheelhouse/
+
+              auditwheel repair --plat manylinux_2_39_riscv64 tmpwheelhouse/cryptography*.whl -w wheelhouse/
+
+              unzip -q wheelhouse/*.whl -d execstack.check
+              results=$(readelf -lW execstack.check/cryptography/hazmat/bindings/*.so)
+              count=$(echo "$results" | grep -c "GNU_STACK.*[R ][W ]E" || true)
+              test "$count" -eq 0
+            '
+
+      # Corresponds to upstream's "Smoketest" step (their
+      # .github/actions/wheel-smoketest composite action). It can't be
+      # `uses:`'d directly - it needs to run against the manylinux image's
+      # own /opt/python interpreter, and this job never becomes a native
+      # `container:` job (see the workflow-level comment) - so its two checks
+      # (install with no index, then confirm the OpenSSL backend loads) are
+      # reproduced inline here instead. The manylinux_riscv64 image has no
+      # SHA1-restricting crypto-policy the way a distro-derived host might,
+      # so no config override is needed for this smoke check.
+      - name: Smoketest
+        run: |
+          podman run -t \
+            --network=host \
+            -v "$(pwd)":/workspace \
+            --workdir /workspace \
+            -e PYTHON_VERSION="${{ matrix.PYTHON.VERSION }}" \
+            -e PIP_EXTRA_INDEX_URL="https://pypi.riseproject.dev/simple/" \
+            "${{ env.MANYLINUX_RISCV64_IMAGE }}" \
+            bash -c '
+              set -euo pipefail
+              "/opt/python/$PYTHON_VERSION/bin/python" -m venv /tmp/smoketest-venv
+              . /tmp/smoketest-venv/bin/activate
+              pip install "cffi>=2.0.0"
+              pip install cryptography --no-index -f wheelhouse/
+              python -c "from cryptography.hazmat.backends.openssl.backend import backend; print(\"Loaded:\", backend.openssl_version_text()); print(\"Linked Against:\", backend._ffi.string(backend._lib.OPENSSL_VERSION_TEXT).decode(\"ascii\"))"
+            '
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: "cryptography-${{ needs.sdist.outputs.package_version }}-${{ matrix.PYTHON.TAG }}-manylinux_riscv64"
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  # Runs the real upstream test suite against the built wheel - upstream's
+  # own wheel-builder.yml only smoketests (the full suite runs separately in
+  # ci.yml, from a source checkout across many OpenSSL variants, which is out
+  # of scope here). cryptography_vectors comes straight from public PyPI
+  # (see the workflow-level comment); --wycheproof-root/--x509-limbo-root are
+  # left unset, which upstream's own conftest treats as skip (external vector
+  # repos - large downloads, a justified skip).
+  test:
+    needs: [setup, sdist, manylinux]
+    name: "${{ matrix.PYTHON.TAG }} tests"
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        PYTHON:
+          - { VERSION: "cp312-cp312", TAG: 'cp312-cp312' }
+          - { VERSION: "cp314-cp314t", TAG: 'cp314-cp314t' }
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: pyca/cryptography
+          ref: ${{ env.CRYPTOGRAPHY_VERSION }}
+          persist-credentials: false
+          sparse-checkout: |
+            tests
+            pyproject.toml
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: "cryptography-${{ needs.sdist.outputs.package_version }}-${{ matrix.PYTHON.TAG }}-manylinux_riscv64"
+          path: wheelhouse/
+
+      - name: Run test suite
+        run: |
+          podman run -t \
+            --network=host \
+            -v "$(pwd)":/workspace \
+            --workdir /workspace \
+            -e PYTHON_VERSION="${{ matrix.PYTHON.VERSION }}" \
+            -e PIP_EXTRA_INDEX_URL="https://pypi.riseproject.dev/simple/" \
+            "${{ env.MANYLINUX_RISCV64_IMAGE }}" \
+            bash -c '
+              set -euo pipefail
+              "/opt/python/$PYTHON_VERSION/bin/python" -m venv /tmp/test-venv
+              . /tmp/test-venv/bin/activate
+              pip install "cffi>=2.0.0"
+              pip install cryptography --no-index -f wheelhouse/
+              pip install cryptography_vectors=="${{ needs.sdist.outputs.package_version }}" \
+                "pytest>=7.4.0" "pytest-benchmark>=4.0" "pytest-xdist>=3.5.0" "pretend>=0.7" "certifi>=2024"
+
+              # The image system openssl.cnf applies RHEL-style crypto-policies
+              # that reject SHA1 signing/verification by default; the upstream
+              # unrestricted static OpenSSL build never hits this. That config
+              # is not bundled by auditwheel (only the .so is), so it never
+              # reaches the shipped wheel - it only affects this test run.
+              printf "openssl_conf = openssl_init\n\n[openssl_init]\nalg_section = evp_properties\n\n[evp_properties]\nrh-allow-sha1-signatures = yes\n" > /tmp/rise-allow-sha1.cnf
+              OPENSSL_CONF=/tmp/rise-allow-sha1.cnf python -m pytest -n auto --dist=worksteal tests
+            '
+
+  publish:
+    name: Publish cryptography ${{ inputs.version || '50.0.0' }} to GitLab
+    needs: [setup, sdist, manylinux, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: cryptography-${{ needs.sdist.outputs.package_version }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

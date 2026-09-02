@@ -1,0 +1,70 @@
+From c206515f6113a87fa92e216720b9459d43299a30 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 27 Aug 2026 02:45:49 +0200
+Subject: [PATCH] set the riscv64 ELF interpreter explicitly when linking
+ wandb-core
+
+Upstream-Status: Inappropriate [works around golang/go#77209 in the Go toolchain core/go.mod pins; the fix belongs in Go, not in wandb, and this can be dropped once the pinned Go version carries CL 737180]
+
+wandb-core vendors github.com/ebitengine/purego, whose
+dlfcn_nocgo_linux.go declares //go:cgo_import_dynamic for dlopen/dlsym.
+That makes Go's internal linker emit a dynamic executable even with
+CGO_ENABLED=0, so the binary carries a PT_INTERP.
+
+Go hardcodes /lib/ld.so.1 as the riscv64 dynamic loader, and no glibc
+distribution installs that name -- Debian, Ubuntu and the manylinux
+riscv64 image all ship /lib/ld-linux-riscv64-lp64d.so.1 only.  The wheel
+therefore built fine and then failed at run time with
+"FileNotFoundError: [Errno 2] ... wandb/bin/wandb-core", which is what
+execve reports for a missing interpreter.
+
+golang/go#77209 fixed this in Go (CL 737180), after the go1.26.5 that
+core/go.mod pins.  Until the pinned toolchain carries the fix, pass the
+correct path with the linker's -I flag; it is a no-op on the platforms
+that link statically.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ core/hatch.py | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/core/hatch.py b/core/hatch.py
+index 7722923..9dbce91 100644
+--- a/core/hatch.py
++++ b/core/hatch.py
+@@ -53,7 +53,9 @@ def build_wandb_core(
+     race_detect_flags = ["-race"] if with_race_detection else []
+     output_flags = ["-o", str(".." / output_path)]
+ 
+-    ld_flags = [f"-ldflags={_go_linker_flags(wandb_commit_sha=wandb_commit_sha)}"]
++    ld_flags = [
++        f"-ldflags={_go_linker_flags(wandb_commit_sha, target_arch=target_arch)}"
++    ]
+ 
+     vendor_flags = ["-mod=vendor"]
+ 
+@@ -120,7 +122,7 @@ def _strip_dynamic_elf_metadata(
+         pass
+ 
+ 
+-def _go_linker_flags(wandb_commit_sha: str | None) -> str:
++def _go_linker_flags(wandb_commit_sha: str | None, target_arch: str) -> str:
+     """Returns linker flags for the Go binary as a string."""
+     flags = [
+         "-s",  # Omit the symbol table and debug info.
+@@ -130,6 +132,12 @@ def _go_linker_flags(wandb_commit_sha: str | None) -> str:
+         f"main.commit={wandb_commit_sha or 'unknown'}",
+     ]
+ 
++    # purego's //go:cgo_import_dynamic makes the internal linker emit a dynamic
++    # executable, and Go <=1.26 hardcodes /lib/ld.so.1 as the riscv64 ELF
++    # interpreter, which no glibc distribution installs (golang/go#77209).
++    if target_arch == "riscv64":
++        flags += ["-I", "/lib/ld-linux-riscv64-lp64d.so.1"]
++
+     return " ".join(flags)
+ 
+ 
+-- 
+2.50.1 (Apple Git-155)
+

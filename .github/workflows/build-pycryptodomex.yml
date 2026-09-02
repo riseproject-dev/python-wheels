@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's wheel builder:
+#   https://github.com/Legrandin/pycryptodome/blob/v3.23.0x/.github/workflows/wheels.yml
+name: Build pycryptodomex wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pycryptodomex version to build (git tag without leading v and trailing x, e.g. 3.23.0)'
+        required: true
+        default: '3.23.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pycryptodomex.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '3.23.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # The Cryptodome namespace is built from the same tree, tagged with a trailing "x"
+  # (that tag adds the .separate_namespace marker setup.py keys off).
+  PYCRYPTODOMEX_VERSION: ${{ inputs.version || '3.23.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Upstream's requirements-test.txt; without it SelfTest skips its Wycheproof vectors.
+  TEST_REQUIRES: pycryptodome-test-vectors==1.0.22
+  TEST_COMMAND: python -m Cryptodome.SelfTest --skip-slow-tests
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_abi3:
+    needs: [setup]
+    name: Build pycryptodomex ${{ inputs.version || '3.23.0' }} cp37-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout pycryptodome v${{ env.PYCRYPTODOMEX_VERSION }}x
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: Legrandin/pycryptodome
+          ref: v${{ env.PYCRYPTODOMEX_VERSION }}x
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_REQUIRES: ${{ env.TEST_REQUIRES }}
+          CIBW_TEST_COMMAND: ${{ env.TEST_COMMAND }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pycryptodomex-${{ env.PYCRYPTODOMEX_VERSION }}-cp37-abi3-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  # Free-threaded builds get no abi3 wheel (setup.py skips py_limited_api under
+  # Py_GIL_DISABLED); cp314t is the only free-threaded interpreter in the image.
+  build_freethreaded:
+    needs: [setup]
+    name: Build pycryptodomex ${{ inputs.version || '3.23.0' }} cp314t-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout pycryptodome v${{ env.PYCRYPTODOMEX_VERSION }}x
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: Legrandin/pycryptodome
+          ref: v${{ env.PYCRYPTODOMEX_VERSION }}x
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: cp314t-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_REQUIRES: ${{ env.TEST_REQUIRES }}
+          CIBW_TEST_COMMAND: ${{ env.TEST_COMMAND }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pycryptodomex-${{ env.PYCRYPTODOMEX_VERSION }}-cp314t-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pycryptodomex ${{ inputs.version || '3.23.0' }} to GitLab
+    needs: [setup, build_abi3, build_freethreaded]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: pycryptodomex-${{ env.PYCRYPTODOMEX_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
