@@ -1,0 +1,89 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/fonttools/py-zopfli/blob/v0.4.3/.github/workflows/ci.yml
+name: Build zopfli wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'zopfli version to build (git tag without leading v, e.g. 0.4.3)'
+        required: true
+        default: '0.4.3'
+  pull_request:
+    paths:
+      - '.github/workflows/build-zopfli.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.4.3' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  ZOPFLI_VERSION: ${{ inputs.version || '0.4.3' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build zopfli ${{ inputs.version || '0.4.3' }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout zopfli v${{ env.ZOPFLI_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: fonttools/py-zopfli
+          ref: v${{ env.ZOPFLI_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          # cp310 first, as upstream does: zopflimodule.c relies on PY_SSIZE_T_CLEAN,
+          # whose PyArg_Parse* aliases were dropped in 3.13, so an abi3 wheel compiled
+          # on a newer interpreter raises SystemError on 3.10-3.12 despite its tag.
+          # The later entries build nothing; they re-test the one wheel.
+          CIBW_BUILD: >-
+            cp310-manylinux_riscv64 cp311-manylinux_riscv64 cp312-manylinux_riscv64
+            cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # setuptools_scm can't see the tag from the shallow checkout.
+          CIBW_ENVIRONMENT: SETUPTOOLS_SCM_PRETEND_VERSION_FOR_ZOPFLI=${{ env.ZOPFLI_VERSION }}
+          CIBW_TEST_EXTRAS: test
+          CIBW_TEST_COMMAND: pytest {package}/tests -v
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: zopfli-${{ env.ZOPFLI_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish zopfli ${{ inputs.version || '0.4.3' }} to GitLab
+    needs: [setup, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: zopfli-${{ env.ZOPFLI_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

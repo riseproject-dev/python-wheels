@@ -1,0 +1,91 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build-wheels` job of
+# https://github.com/newrelic/newrelic-python-agent/blob/v13.5.0/.github/workflows/deploy.yml
+name: Build newrelic wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'newrelic version to build (git tag without leading v, e.g. 13.5.0)'
+        required: true
+        default: '13.5.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-newrelic.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '13.5.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  NEWRELIC_VERSION: ${{ inputs.version || '13.5.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build newrelic ${{ inputs.version || '13.5.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      # setuptools_scm derives the version with `git describe`, so the tag history is needed.
+      - name: Checkout newrelic v${{ env.NEWRELIC_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: newrelic/newrelic-python-agent
+          ref: v${{ env.NEWRELIC_VERSION }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # setup.py catches every build_ext error and falls back to a pure-Python
+          # wheel; this makes a compile failure fatal instead.
+          CIBW_ENVIRONMENT: NEW_RELIC_EXTENSIONS=true
+          CIBW_TEST_REQUIRES: pytest certifi WebTest
+          CIBW_TEST_COMMAND: >-
+            python -c "import newrelic.core._thread_utilization as t, newrelic.packages.wrapt._wrappers as w;
+            assert t.__file__.endswith('.so'), t.__file__;
+            assert w.__file__.endswith('.so'), w.__file__" &&
+            PYTHONPATH={project}/tests pytest {project}/tests/agent_unittests -vx
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: newrelic-${{ env.NEWRELIC_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish newrelic ${{ inputs.version || '13.5.0' }} to GitLab
+    needs: [setup, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: newrelic-${{ env.NEWRELIC_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

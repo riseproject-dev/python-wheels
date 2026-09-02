@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/grantjenks/py-tree-sitter-languages/blob/v1.10.2/.github/workflows/release.yml
+name: Build tree-sitter-languages wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'tree-sitter-languages version to build (git tag without the leading v, e.g. 1.10.2)'
+        required: true
+        default: '1.10.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-tree-sitter-languages.yml'
+      - 'patches/tree-sitter-languages/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.10.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.10.2 there.
+  TREE_SITTER_LANGUAGES_VERSION: ${{ inputs.version || '1.10.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # build.py needs Language.build_library and core.pyx needs Language(path, name);
+  # both were removed in tree-sitter 0.22.
+  TREE_SITTER_SPEC: 'tree-sitter<0.22'
+  # Upstream pins cython==3.0.8, which predates free threading and cannot compile
+  # core.pyx under cp314t.
+  CYTHON_SPEC: 'cython==3.3.0'
+  # setuptools 79.0.0 dropped -shared from distutils' C++ link command, so
+  # build.py links languages.so as an executable and fails on `main`.
+  SETUPTOOLS_SPEC: 'setuptools<79'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build tree-sitter-languages ${{ inputs.version || '1.10.2' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout tree-sitter-languages v${{ env.TREE_SITTER_LANGUAGES_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: grantjenks/py-tree-sitter-languages
+          ref: v${{ env.TREE_SITTER_LANGUAGES_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch tree-sitter-languages source
+        run: git apply python-wheels/patches/tree-sitter-languages/${{ env.TREE_SITTER_LANGUAGES_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream runs `pip install -e . && python build.py`, which resolves
+          # tree-sitter to whatever is newest; install the pinned one instead.
+          CIBW_BEFORE_BUILD: pip install "${{ env.CYTHON_SPEC }}" "${{ env.TREE_SITTER_SPEC }}" "${{ env.SETUPTOOLS_SPEC }}" wheel && python build.py
+          # setup.py imports Cython at module level and declares no build-system
+          # table, so the build has to see the preinstalled one.
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          CIBW_TEST_REQUIRES: pytest ${{ env.TREE_SITTER_SPEC }}
+          # Assert the patched license_files glob still ships the 46 vendored
+          # grammar licences, then run upstream's suite over all 48 grammars.
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as md; f = [str(p) for p in md.files('tree_sitter_languages') if '.dist-info/licenses/vendor/' in str(p)]; assert len(f) == 46, f"
+            && pytest --showlocals {package}/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tree-sitter-languages-${{ env.TREE_SITTER_LANGUAGES_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish tree-sitter-languages ${{ inputs.version || '1.10.2' }} to GitLab
+    needs: [setup, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: tree-sitter-languages-${{ env.TREE_SITTER_LANGUAGES_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

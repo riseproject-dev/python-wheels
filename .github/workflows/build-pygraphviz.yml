@@ -1,0 +1,306 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/pygraphviz/pygraphviz/blob/pygraphviz-2.0.1/.github/workflows/release.yml
+name: Build pygraphviz wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pygraphviz version to build (e.g. 2.0.1)'
+        required: true
+        default: '2.0.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pygraphviz.yml'
+      - 'patches/pygraphviz/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.0.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 2.0.1 there.
+  PYGRAPHVIZ_VERSION: ${{ inputs.version || '2.0.1' }}
+  GRAPHVIZ_VERSION: '14.1.5'
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pygraphviz ${{ inputs.version || '2.0.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      # Upstream builds cp310-cp314 and publishes no free-threaded wheel.
+      matrix:
+        python: ["cp312", "cp313", "cp314"]
+
+    steps:
+      - name: Checkout pygraphviz ${{ env.PYGRAPHVIZ_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: pygraphviz/pygraphviz
+          ref: pygraphviz-${{ env.PYGRAPHVIZ_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pygraphviz source
+        run: git apply python-wheels/patches/pygraphviz/${{ env.PYGRAPHVIZ_VERSION }}/*.patch
+
+      - name: Stage the licence-collection script
+        run: |
+          cat > collect-licenses.sh <<'COLLECT_EOF'
+          #!/bin/bash
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # Stage, at the project root, the licence of every shared library auditwheel
+          # vendors into the wheel out of the build image. pyproject.toml's LICENSE.*
+          # pattern then copies them into the wheel beside pygraphviz's own.
+          set -euo pipefail
+
+          project="${1:?usage: collect-licenses.sh <project-dir> <graphviz-prefix>}"
+          prefix="${2:?usage: collect-licenses.sh <project-dir> <graphviz-prefix>}"
+
+          # Everything the wheel holds: the libraries the extension links, the plugins it
+          # loads, and the CLI tools copied into pygraphviz/bin. ldd is transitive, so this
+          # is the whole closure. Graphviz's own libraries are not rpm-owned and are
+          # covered by the checked-in LICENSE.graphviz.
+          roots=(
+              "$prefix"/lib/libcdt.so "$prefix"/lib/libcgraph.so "$prefix"/lib/libgvc.so
+              "$prefix"/lib/graphviz/libgvplugin_core.so
+              "$prefix"/lib/graphviz/libgvplugin_dot_layout.so
+              "$prefix"/lib/graphviz/libgvplugin_neato_layout.so
+              "$prefix"/lib/graphviz/libgvplugin_gd.so
+              "$prefix"/lib/graphviz/libgvplugin_pango.so
+              "$prefix"/bin/gc "$prefix"/bin/acyclic "$prefix"/bin/gvpr "$prefix"/bin/gvcolor
+              "$prefix"/bin/ccomps "$prefix"/bin/sccmap "$prefix"/bin/tred "$prefix"/bin/unflatten
+          )
+
+          # Libraries on auditwheel's allowlist are assumed present on the host and are
+          # never vendored, so they carry no obligation here.
+          mapfile -t allow < <(
+              "$(dirname "$(readlink -f "$(command -v auditwheel)")")/python" - <<'PY'
+          import json, pathlib, auditwheel
+
+          policy = pathlib.Path(auditwheel.__file__).parent / "policy" / "manylinux-policy.json"
+          policies = json.loads(policy.read_text())
+          print("\n".join(next(p["lib_whitelist"] for p in policies if p["name"] == "manylinux_2_39")))
+          PY
+          )
+
+          mapfile -t libs < <(
+              ldd "${roots[@]}" | tr ' ' '\n' | grep '^/' | sort -u |
+                  grep -vFf <(printf '%s\n' "${allow[@]}")
+          )
+
+          # `rpm -qf` reports unowned files on stdout, so keep only bare package names.
+          mapfile -t pkgs < <(
+              rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null |
+                  grep -E '^[A-Za-z0-9._+-]+$' | sort -u
+          )
+
+          for pkg in "${pkgs[@]}"; do
+              mapfile -t files < <(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
+
+              # Some subpackages leave the licence to a sibling of the same source RPM.
+              if [ -z "${files[0]:-}" ]; then
+                  srpm=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg")
+                  mapfile -t files < <(
+                      rpm -qa --qf '%{SOURCERPM} %{NAME}\n' |
+                          awk -v s="$srpm" '$1 == s { print $2 }' |
+                          xargs -r rpm -q --licensefiles 2>/dev/null | sort -u
+                  )
+              fi
+
+              # Others mark it %doc rather than %license, and the image installs no docs.
+              if [ -z "${files[0]:-}" ]; then
+                  dnf -y reinstall --setopt=tsflags= "$pkg" >/dev/null
+                  mapfile -t files < <(rpm -qd "$pkg" | grep -iE '/(LICEN[CS]E|COPYING|NOTICE)')
+              fi
+
+              # A few ship the text only in the source RPM (libxcb's %license COPYING is
+              # not in the binary package).
+              if [ -z "${files[0]:-}" ]; then
+                  dnf -y install dnf-plugins-core >/dev/null
+                  rm -rf /tmp/srpm && mkdir -p /tmp/srpm && pushd /tmp/srpm >/dev/null
+                  dnf -y download --source "$pkg" >/dev/null
+                  rpm2archive -n ./*.src.rpm | tar x
+                  for tarball in ./*.tar.*; do
+                      tar xf "$tarball"
+                  done
+                  popd >/dev/null
+                  mapfile -t files < <(
+                      find /tmp/srpm -maxdepth 3 -type f -regextype posix-extended \
+                          -iregex '.*/(COPYING|LICEN[CS]E|NOTICE)[^/]*' | sort
+                  )
+              fi
+
+              for f in "${files[@]}"; do
+                  [ -f "$f" ] || continue
+                  cp "$f" "$project/LICENSE.${pkg}.$(basename "$f")"
+              done
+              compgen -G "$project/LICENSE.$pkg.*" >/dev/null ||
+                  { echo "no licence file found for $pkg" >&2; exit 1; }
+          done
+
+          ls -1 "$project"/LICENSE.* | sed "s|$project/||"
+          COLLECT_EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Graphviz from source, as upstream does; the release tarballs use
+          # autotools. CFLAGS=-fPIC is needed to link it into the extension.
+          # riscv64 links executables at 0x10000, which is also mmap_min_addr,
+          # so the segment auditwheel's patchelf prepends to the bundled CLI
+          # tools cannot be mapped and they segfault at startup; raise the base.
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf install -y gcc gcc-c++ bison flex expat-devel zlib-devel autoconf automake libtool gd-devel cairo-devel pango-devel &&
+            curl -L
+            "https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-releases/${{ env.GRAPHVIZ_VERSION }}/graphviz-${{ env.GRAPHVIZ_VERSION }}.tar.gz"
+            -o /tmp/graphviz.tar.gz &&
+            tar xzf /tmp/graphviz.tar.gz -C /tmp &&
+            cd /tmp/graphviz-${{ env.GRAPHVIZ_VERSION }} &&
+            ./configure
+            --prefix=/opt/graphviz
+            --with-pangocairo
+            --disable-swig
+            --disable-tcl
+            --disable-sharp
+            --disable-go
+            --disable-guile
+            --disable-java
+            --disable-lua
+            --disable-perl
+            --disable-php
+            --disable-python
+            --disable-python3
+            --disable-r
+            --disable-ruby
+            --disable-man-pdfs
+            --with-expat
+            --with-zlib
+            CFLAGS="-fPIC"
+            LDFLAGS="-Wl,-Ttext-segment=0x200000" &&
+            make -j$(nproc) &&
+            make install &&
+            ldconfig &&
+            bash {project}/collect-licenses.sh {project} /opt/graphviz
+          CIBW_ENVIRONMENT_LINUX: >-
+            GRAPHVIZ_PREFIX=/opt/graphviz
+            LD_LIBRARY_PATH=/opt/graphviz/lib:/opt/graphviz/lib/graphviz
+            PATH="$PATH:/opt/graphviz/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_BEFORE_BUILD_LINUX: >-
+            mkdir -p {package}/pygraphviz/bin &&
+            cp /opt/graphviz/bin/gc
+            /opt/graphviz/bin/acyclic
+            /opt/graphviz/bin/gvpr
+            /opt/graphviz/bin/gvcolor
+            /opt/graphviz/bin/ccomps
+            /opt/graphviz/bin/sccmap
+            /opt/graphviz/bin/tred
+            /opt/graphviz/bin/unflatten
+            {package}/pygraphviz/bin/
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: >-
+            python -c "import os, tempfile, pygraphviz as p; print('pygraphviz', p.__version__); G = p.AGraph(); G.add_edge('a', 'b'); f = os.path.join(tempfile.mkdtemp(), 't.png'); G.draw(f, prog='dot'); assert os.path.getsize(f) > 0; print('PNG render OK:', f)" &&
+            pytest --pyargs pygraphviz
+
+      - name: Check the wheel ships the extension and the bundled licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert any(n.startswith("pygraphviz/_graphviz.") and n.endswith(".so") for n in names), names
+          vendored = {
+              n.split("/")[-1].split("-")[0]
+              for n in names
+              if n.startswith("pygraphviz.libs/") and not n.endswith("/")
+          }
+          licences = {
+              n.split("/")[-1] for n in names if ".dist-info/licenses/" in n and not n.endswith("/")
+          }
+          print("\n".join(sorted(vendored)))
+          print("\n".join(sorted(licences)))
+          assert {"LICENSE", "LICENSE.graphviz"} <= licences, licences
+          for lib, pkg in [
+              ("libcairo", "cairo"), ("libpango", "pango"),
+              ("libfreetype", "freetype"), ("libgd", "gd"),
+          ]:
+              assert lib in vendored, (lib, vendored)
+              assert any(n.startswith(f"LICENSE.{pkg}.") for n in licences), (pkg, licences)
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pygraphviz-${{ env.PYGRAPHVIZ_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    name: Collect GPL sources for pygraphviz ${{ inputs.version || '2.0.1' }}
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      # Every copyleft library auditwheel vendors out of the build image.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: >-
+            cairo freetype fribidi glib2 graphite2 jbigkit-libs libdatrie
+            libmount libselinux libthai libtool-ltdl libzstd pango pcre2 xz-libs
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pygraphviz-${{ env.PYGRAPHVIZ_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish pygraphviz ${{ inputs.version || '2.0.1' }} to GitLab
+    needs: [setup, build_wheels, gpl_sources]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: pygraphviz-${{ env.PYGRAPHVIZ_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          gpl-sources-artifact: pygraphviz-${{ env.PYGRAPHVIZ_VERSION }}-gpl-sources
+          gpl-sources-release-tag: pygraphviz-v${{ env.PYGRAPHVIZ_VERSION }}
+          gpl-sources-description: the copyleft libraries bundled in the wheel

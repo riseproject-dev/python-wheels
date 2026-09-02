@@ -1,0 +1,146 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel builder:
+#   https://github.com/rapidfuzz/Levenshtein/blob/v0.27.4/.github/workflows/pythonbuild.yml
+name: Build levenshtein wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'levenshtein version to build (git tag without leading v, e.g. 0.27.4)'
+        required: true
+        default: '0.27.4'
+  pull_request:
+    paths:
+      - '.github/workflows/build-levenshtein.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.27.4' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  LEVENSHTEIN_VERSION: ${{ inputs.version || '0.27.4' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_sdist:
+    needs: [setup]
+    name: Build levenshtein ${{ inputs.version || '0.27.4' }} sdist
+    runs-on: ubuntu-latest
+    outputs:
+      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
+      package_version: ${{ steps.sdist.outputs.package_version }}
+    steps:
+      - name: Checkout Levenshtein v${{ env.LEVENSHTEIN_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: rapidfuzz/Levenshtein
+          ref: v${{ env.LEVENSHTEIN_VERSION }}
+          submodules: 'true'
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      # The extension compiles in the bundled rapidfuzz-cpp headers, whose MIT
+      # terms want the notice to travel with the binary; upstream's wheel carries
+      # only Levenshtein's own LICENSE.
+      - name: Patch Levenshtein source
+        run: |
+          git apply python-wheels/patches/levenshtein/${{ env.LEVENSHTEIN_VERSION }}/00*.patch
+
+      - name: Build sdist
+        id: sdist
+        run: |
+          uv pip install "Cython>=3.1.6,<3.3.0" build twine
+          chmod +x ./src/Levenshtein/generate.sh
+          ./src/Levenshtein/generate.sh
+          git apply ./tools/sdist.patch
+          python -m build --sdist
+          twine check dist/*
+          sdists=(dist/*.tar.gz)
+          sdist_name="$(basename "${sdists[0]}")"
+          echo "sdist_name=${sdist_name}" >> "$GITHUB_OUTPUT"
+          echo "package_version=$(echo "${sdist_name}" | sed -En 's/levenshtein-(.+)\.tar\.gz/\1/p')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: levenshtein-${{ env.LEVENSHTEIN_VERSION }}-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_sdist]
+    name: Build levenshtein ${{ inputs.version || '0.27.4' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: levenshtein-${{ env.LEVENSHTEIN_VERSION }}-sdist
+          path: dist/
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          # Upstream feeds cibuildwheel the sdist tarball too: it bundles the
+          # cythonised .cxx, so the wheel build needs no Cython, and it carries
+          # the tests the inherited test-command runs.
+          package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream's test-requires/test-command come from the sdist's
+          # pyproject.toml; only the licence assertion is ours.
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m; l = sorted(str(p).rsplit('/', 1)[-1] for p in m.files('levenshtein') if '.dist-info/licenses/' in str(p)); assert l == ['LICENSE', 'LICENSE.rapidfuzz-cpp'], l"
+            && pytest {package}/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: levenshtein-${{ needs.build_sdist.outputs.package_version }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish levenshtein ${{ inputs.version || '0.27.4' }} to GitLab
+    needs: [setup, build_sdist, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: levenshtein-${{ needs.build_sdist.outputs.package_version }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

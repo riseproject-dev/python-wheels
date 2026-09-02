@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Wed, 27 Aug 2026 00:00:00 +0000
+Subject: [PATCH] tests: allow for interpreter startup in the --gil sample bound
+
+test_longsleep records longsleep.py for 2s with --gil and asserts that at
+most 10 samples come back, the point being that a sleeping thread holds the
+GIL essentially never. But py-spy launches the interpreter itself, so the
+recording also covers CPython's startup, and the GIL is legitimately held
+throughout those imports. The bound is therefore really a statement about
+how fast the machine starts an interpreter.
+
+On the riscv64 runner startup is slow enough to overshoot it, marginally and
+intermittently - 11 samples against a bound of 10, every one of them an
+importlib/site/encodings frame:
+
+    Frame(file='<frozen importlib._bootstrap>', name='_find_and_load', ...)
+    Frame(file='<frozen site>', name='addsitepackages', ...)
+
+At the default 100Hz that is 0.11s of startup. Raise the bound to 50 (0.5s)
+so slower hardware has room, which still fails loudly if the GIL were held
+for any real part of the 2s window (200 samples) rather than just startup.
+Faster machines are unaffected - they simply stay far below either bound.
+
+The companion assertion is untouched, and test_busyloop still requires >=95
+GIL samples, so GIL detection itself remains covered.
+
+Upstream-Status: To upstream [not yet submitted; the bound is hardware-speed-dependent rather than riscv64-specific and wants a maintainer's view on whether to raise it or to skip the interpreter's startup window instead]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/tests/integration_test.py b/tests/integration_test.py
+--- a/tests/integration_test.py
++++ b/tests/integration_test.py
+@@ -68,7 +68,7 @@ class TestPyspy(unittest.TestCase):
+         # running with the gil flag should have ~ no samples returned
+         if GIL:
+             profile = self._sample_process(_get_script("longsleep.py"), GIL)
+             print(profile)
+-            assert sum(profile.values()) <= 10
++            assert sum(profile.values()) <= 50
+ 
+         # running with the idle flag should have > 95%  of samples in the sleep call
+         profile = self._sample_process(_get_script("longsleep.py"), ["--idle"])

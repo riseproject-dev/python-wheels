@@ -56,11 +56,50 @@ def normalize_label(label):
     return label.translate(removal_map).lower()
 
 
+# "License :: OSI Approved :: BSD License" -> "BSD"
+TROVE_LICENSE_PREFIX = "License :: "
+
+
+def license_from_classifiers(message):
+    for classifier in message.get_all("Classifier", []):
+        if not classifier.startswith(TROVE_LICENSE_PREFIX):
+            continue
+        name = classifier.rsplit(" :: ", 1)[-1].strip()
+        if name and name != "OSI Approved":
+            return name
+    return None
+
+
 def extract_license(message):
+    """
+    Core metadata < 2.4 allows the whole licence text in `License`, and projects
+    such as scipy ship exactly that. Only take that field when it is a short
+    identifier; otherwise fall back to the trove classifier, which stays short.
+    """
     license = message.get("License-Expression")
-    if not license:
-        license = message.get("License", "Unknown")
-    return license
+    if license:
+        return license
+
+    license = message.get("License")
+    if license and "\n" not in license.strip() and len(license.strip()) <= 64:
+        return license.strip()
+
+    return license_from_classifiers(message) or "Unknown"
+
+
+# Trove names that say a family rather than a licence. They are good enough for a
+# brand-new package's top-level entry but cannot establish that a version's licence
+# changed, so a per-version key is not worth emitting for them.
+VAGUE_LICENSES = frozenset(
+    {
+        "BSD License",
+        "Apache Software License",
+        "MIT License",
+        "GNU General Public License (GPL)",
+        "GNU Lesser General Public License v2 or later (LGPLv2+)",
+        "Python Software Foundation License",
+    }
+)
 
 
 def extract_source_code_url(message):
@@ -169,7 +208,7 @@ def append_version(content, package_data, version, license, patch_dir, comment=N
     lines = [f"  - {yaml_line('version', version)}"]
     if patch_dir is not None:
         lines.append("    patched:")
-    if license and license != top_level_license:
+    if license and license != top_level_license and license not in VAGUE_LICENSES:
         lines.append(f"    {yaml_line('license', license)}")
     if comment:
         lines.append(f"    {yaml_line('comment', comment)}")
@@ -185,8 +224,39 @@ def add_to_packages_file(slug):
     PACKAGES_FILE.write_text("\n".join(header + entries) + "\n")
 
 
-def git_run(*args):
-    subprocess.run(["git", *args], check=True)
+def git_run(*args, check=True):
+    return subprocess.run(["git", *args], check=check)
+
+
+def checkout_shared_branch(branch):
+    """
+    Check out the shared docs branch as a local worktree HEAD, based on
+    origin/<branch> if it already exists, otherwise on origin/main.
+
+    All docs updates are pushed to this single branch, so a run needs to build
+    on whatever is already there rather than starting from main each time.
+    """
+    git_run("fetch", "origin")
+    remote_ref = f"origin/{branch}"
+    exists = git_run("rev-parse", "--verify", "--quiet", remote_ref, check=False).returncode == 0
+    base = remote_ref if exists else "origin/main"
+    git_run("switch", "--force-create", branch, base)
+
+
+def pr_exists(branch):
+    """Return True if an open PR already targets this branch as its head."""
+    out = subprocess.run(
+        [
+            "gh", "pr", "list",
+            "--repo", REPO,
+            "--head", branch,
+            "--state", "open",
+            "--json", "number",
+            "--jq", "length",
+        ],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    return out.isdigit() and int(out) > 0
 
 
 def configure_git_identity():
@@ -222,24 +292,30 @@ def main():
     patch_dir = find_patch_dir(slug, version)
     comment = render_gpl_sources_comment()
     yaml_path = DOCS_DIR / f"{slug}.yaml"
-    is_new = not yaml_path.exists()
-    old_content = None if is_new else yaml_path.read_text()
 
-    if is_new:
-        new_content = render_new_yaml(slug, source_code, license, version, patch_dir, comment)
-    else:
-        package_data = yaml.safe_load(old_content) or {}
-        new_content = append_version(
-            old_content, package_data, version, license, patch_dir, comment
-        )
+    branch = "github-actions/update-doc"
+    pr_title = "docs: Update projects"
+
+    def compute_content():
+        """Read the current YAML (if any) and return (is_new, old_content, new_content)."""
+        is_new = not yaml_path.exists()
+        old_content = None if is_new else yaml_path.read_text()
+        if is_new:
+            new_content = render_new_yaml(
+                slug, source_code, license, version, patch_dir, comment
+            )
+        else:
+            package_data = yaml.safe_load(old_content) or {}
+            new_content = append_version(
+                old_content, package_data, version, license, patch_dir, comment
+            )
+        return is_new, old_content, new_content
+
+    if DRY_RUN:
+        is_new, old_content, new_content = compute_content()
         if new_content is None:
             print(f"{slug} {version} is already documented; nothing to do")
             return
-
-    branch = f"github-actions/{'add' if is_new else 'update'}-doc-for-{slug}"
-    pr_title = f"docs: {'add' if is_new else 'update'} {slug}"
-
-    if DRY_RUN:
         print("[dry-run] Not on main branch — no branch, commit, or PR will be created.")
         print(f"[dry-run] Would write {yaml_path}:")
         diff = difflib.unified_diff(
@@ -254,10 +330,17 @@ def main():
         print(f"[dry-run] Would open PR '{pr_title}' from branch '{branch}' against main")
         return
 
-    yaml_path.write_text(new_content)
     configure_git_identity()
+    checkout_shared_branch(branch)
 
-    git_run("switch", "-c", branch)
+    # Compute the change against the shared branch's contents, so a package
+    # already documented there by an earlier run in this batch is seen.
+    is_new, _old_content, new_content = compute_content()
+    if new_content is None:
+        print(f"{slug} {version} is already documented; nothing to do")
+        return
+
+    yaml_path.write_text(new_content)
     git_run("add", str(yaml_path))
 
     if is_new:
@@ -267,18 +350,22 @@ def main():
     else:
         git_run("commit", "-s", "-m", f"docs: update {slug}\n\nAdd version {version}")
 
-    git_run("push", "origin", branch)
+    git_run("push", "origin", f"HEAD:{branch}")
+
+    if pr_exists(branch):
+        print(f"[+] PR already open for branch '{branch}'; pushed update")
+        return
 
     result = subprocess.run(
         [
-            "gh", "pr", "create", "--draft",
+            "gh", "pr", "create",
             "--repo", REPO,
             "--base", "main",
             "--head", branch,
-            "--reviewer", "threexc,justeph",
+            "--reviewer", "threexc,justeph,luhenry",
             "--title", pr_title,
             "--body",
-            "Automatically generated PR to document a newly published wheel. "
+            "Automatically generated PR to document newly published wheels. "
             "Please review it carefully before merging.\n\n"
             "If necessary, force-push this branch.",
         ],

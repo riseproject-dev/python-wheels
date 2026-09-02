@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+name: Build opencv-python-headless wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'opencv-python-headless version to build (e.g. 5.0.0.93)'
+        required: true
+        default: '5.0.0.93'
+  pull_request:
+    paths:
+      - '.github/workflows/build-opencv-python-headless.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '5.0.0.93' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  OPENCV_PYTHON_VERSION: ${{ inputs.version || '5.0.0.93' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build opencv-python-headless ${{ inputs.version || '5.0.0.93' }} cp37-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+
+    steps:
+      # Upstream tags a release by its build number alone: 5.0.0.93 is tag `93`.
+      - name: Resolve upstream tag
+        run: echo "OPENCV_TAG=${OPENCV_PYTHON_VERSION##*.}" >> "$GITHUB_ENV"
+
+      - name: Checkout opencv-python ${{ env.OPENCV_PYTHON_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: opencv/opencv-python
+          ref: ${{ env.OPENCV_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Checked out one by one and shallow: `submodules: true` alongside the
+      # fetch-depth 0 above pulls ~1.8 GB of OpenCV history.
+      - name: Resolve submodule commits
+        run: |
+          {
+            echo "OPENCV_SHA=$(git rev-parse HEAD:opencv)"
+            echo "OPENCV_EXTRA_SHA=$(git rev-parse HEAD:opencv_extra)"
+          } >> "$GITHUB_ENV"
+
+      - name: Checkout OpenCV sources
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: opencv/opencv
+          ref: ${{ env.OPENCV_SHA }}
+          path: opencv
+          persist-credentials: false
+
+      - name: Checkout OpenCV test data
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: opencv/opencv_extra
+          ref: ${{ env.OPENCV_EXTRA_SHA }}
+          path: opencv_extra
+          persist-credentials: false
+
+      # setup.py re-derives cv2/version.py from `git describe` whenever .git is
+      # present, so stamp it here and drop the repositories: the build then runs
+      # no git at all, and cibuildwheel copies ~1 GB less into the container.
+      # Without .git the stamped `headless` flag is what selects the package
+      # name, so ENABLE_HEADLESS below cannot be the only place it is set.
+      - name: Stamp the package version
+        run: |
+          python3 find_version.py False True False False
+          grep -Fqx "opencv_version = \"${OPENCV_PYTHON_VERSION}\"" cv2/version.py
+          grep -Fqx "headless = True" cv2/version.py
+          rm -rf .git opencv/.git opencv_extra/.git
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          # setup.py always configures -DPYTHON3_LIMITED_API=ON, so the one
+          # cp37-abi3 wheel built on cp312 is reused to test 3.13 and 3.14.
+          # Upstream publishes no free-threaded wheel, hence no cp314t entry.
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BUILD_FRONTEND: build
+          CIBW_CONFIG_SETTINGS: --build-option=--py-limited-api=cp37
+          # PNG_RISCV_RVV defaults to OpenCV's CPU_RVV_SUPPORTED, which is set from a
+          # -march=rv64gc_v *dispatch* probe; libpng then re-probes the intrinsics with
+          # the baseline flags and fails the build. Its own sources get no -march either,
+          # so RVV can only be off here.
+          CIBW_ENVIRONMENT: >-
+            ENABLE_HEADLESS=1
+            MAKEFLAGS=-j$(nproc)
+            CMAKE_ARGS=-DPNG_RISCV_RVV=off
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_ENVIRONMENT: 'PIP_ONLY_BINARY=:all:'
+          CIBW_TEST_COMMAND: >-
+            python {project}/tests/get_build_info.py &&
+            cd {project}/opencv &&
+            OPENCV_TEST_DATA_PATH={project}/opencv_extra/testdata
+            python modules/python/test/test.py -v --repo .
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: opencv-python-headless-${{ env.OPENCV_PYTHON_VERSION }}-cp37-abi3-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish opencv-python-headless ${{ inputs.version || '5.0.0.93' }} to GitLab
+    needs: [setup, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: opencv-python-headless-${{ env.OPENCV_PYTHON_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

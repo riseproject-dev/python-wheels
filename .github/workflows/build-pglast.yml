@@ -1,0 +1,109 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/lelit/pglast/blob/v8.4/.github/workflows/ci.yml
+name: Build pglast wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pglast version to build (e.g. 8.4)'
+        required: true
+        default: '8.4'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pglast.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '8.4' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PGLAST_VERSION: ${{ inputs.version || '8.4' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pglast ${{ inputs.version || '8.4' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      - name: Checkout pglast ${{ env.PGLAST_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: lelit/pglast
+          ref: v${{ env.PGLAST_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      # The extension statically links libpg_query, which bundles the PostgreSQL
+      # parser; upstream ships neither licence in the wheel.
+      - name: Stage the licences of the statically linked sources
+        run: |
+          cp libpg_query/LICENSE LICENSE.libpg_query
+          cp libpg_query/src/postgres/COPYRIGHT LICENSE.postgres
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_REQUIRES: coverage pytest pytest-cov
+          CIBW_TEST_COMMAND: py.test {project}/tests
+
+      - name: Check the extension and the licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("pglast/parser.") and n.endswith(".so")
+                         for n in names), whl
+              licences = {n.rsplit("/", 1)[1] for n in names
+                          if ".dist-info/licenses/" in n} - {""}
+              assert licences == {"LICENSE.libpg_query", "LICENSE.postgres"}, (whl, licences)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pglast-${{ env.PGLAST_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pglast ${{ inputs.version || '8.4' }} to GitLab
+    needs: [setup, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: pglast-${{ env.PGLAST_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

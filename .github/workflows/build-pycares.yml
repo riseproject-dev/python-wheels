@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/saghul/pycares/blob/v5.0.1/.github/workflows/run-cibuildwheel.yml
+# and the test step of
+# https://github.com/saghul/pycares/blob/v5.0.1/.github/workflows/test.yml
+name: Build pycares wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pycares version to build (git tag without leading v, e.g. 5.0.1)'
+        required: true
+        default: '5.0.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pycares.yml'
+      - 'patches/pycares/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '5.0.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYCARES_VERSION: ${{ inputs.version || '5.0.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pycares ${{ inputs.version || '5.0.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout pycares v${{ env.PYCARES_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: saghul/pycares
+          ref: v${{ env.PYCARES_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # The extension statically links the bundled c-ares but ships only pycares' own LICENSE.
+      - name: Patch pycares source
+        run: |
+          git apply python-wheels/patches/pycares/${{ env.PYCARES_VERSION }}/00*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # cffi has no riscv64 wheel on public PyPI; ours saves a source build in both phases.
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_EXTRAS: idna
+          # cibuildwheel runs the tests in an empty directory, so stage upstream's suite there.
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m; n=sorted(str(p).split('licenses/', 1)[1] for p in m.files('pycares') if 'licenses/' in str(p)); assert n == ['LICENSE', 'deps/c-ares/AUTHORS', 'deps/c-ares/LICENSE.md', 'deps/c-ares/LICENSES/APSL-2.0.txt', 'deps/c-ares/LICENSES/BSD-3-Clause.txt'], n" &&
+            python -m unittest -v
+
+      - name: Check the compiled extension made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("pycares/_cares") and n.endswith(".so") for n in names), whl
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pycares-${{ env.PYCARES_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pycares ${{ inputs.version || '5.0.1' }} to GitLab
+    needs: [setup, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: pycares-${{ env.PYCARES_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

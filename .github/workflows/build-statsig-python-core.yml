@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on: https://github.com/statsig-io/statsig-server-core/blob/0.22.0/.github/workflows/build.yml
+# Upstream builds the Linux wheels with `maturin build --release --strip` inside its own
+# manylinux2014 image; this is the same build driven by cibuildwheel.
+name: Build statsig-python-core wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'statsig-python-core version to build (git tag, e.g. 0.22.0)'
+        required: true
+        default: '0.22.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-statsig-python-core.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.22.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  STATSIG_VERSION: ${{ inputs.version || '0.22.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build statsig-python-core ${{ inputs.version || '0.22.0' }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+
+    steps:
+      - name: Checkout statsig-server-core ${{ env.STATSIG_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: statsig-io/statsig-server-core
+          ref: ${{ env.STATSIG_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          sparse-checkout: patches/statsig-python-core
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply -v python-wheels/patches/statsig-python-core/${{ env.STATSIG_VERSION }}/*.patch
+
+      # The pyproject.toml sits in statsig-pyo3/ while the ISC LICENSE is at the repo
+      # root, so maturin's licence glob finds nothing and upstream's wheels carry no
+      # licence text on any platform.
+      - name: Stage the project licence beside pyproject.toml
+        run: cp LICENSE statsig-pyo3/LICENSE
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: statsig-pyo3
+          output-dir: wheelhouse/
+          # `[tool.maturin] features` carries pyo3/abi3-py310, so this one build covers
+          # every non-free-threaded CPython >= 3.10.
+          only: cp310-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream's image bakes in rustup and a protoc release build; Rocky 10's CRB
+          # repo (enabled in the manylinux image) has protoc.
+          CIBW_BEFORE_ALL_LINUX: >-
+            yum install -y protobuf-compiler protobuf-devel &&
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          # PROTOC_INCLUDE is needed because protoc 3.19 resolves google/protobuf/*.proto
+          # from disk rather than from the binary.
+          CIBW_ENVIRONMENT: >-
+            PATH=$PATH:$HOME/.cargo/bin
+            PROTOC_INCLUDE=/usr/include
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # tests/utils.py reads its fixtures through ../../statsig-rust/tests/data, so
+          # both trees are staged at their positions relative to the repo root.
+          CIBW_TEST_SOURCES: statsig-pyo3/tests statsig-rust/tests/data
+          CIBW_TEST_REQUIRES: pytest pytest-httpserver pytest-rerunfailures uvloop
+          CIBW_TEST_COMMAND: >-
+            python -c "from statsig_python_core import statsig_python_core as m;
+            assert m.__file__.endswith('.so'), m.__file__;
+            import importlib.metadata as md;
+            assert any('.dist-info/licenses/LICENSE' in str(p) for p in md.files('statsig_python_core'))" &&
+            cd statsig-pyo3 && python -m pytest tests -v --reruns 3
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: statsig_python_core-${{ env.STATSIG_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish statsig-python-core ${{ inputs.version || '0.22.0' }} to GitLab
+    needs: [setup, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: statsig_python_core-${{ env.STATSIG_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

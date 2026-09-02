@@ -1,0 +1,128 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/shapely/shapely/blob/2.1.2/.github/workflows/release.yml
+name: Build shapely wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'shapely version to build (git tag, e.g. 2.1.2)'
+        required: true
+        default: '2.1.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-shapely.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.1.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  SHAPELY_VERSION: ${{ inputs.version || '2.1.2' }}
+  GEOS_VERSION: '3.13.1'
+  BASEIMAGE: manylinux_2_39_riscv64
+  BASETAG: '2026.08.24-1'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build shapely ${{ inputs.version || '2.1.2' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout shapely ${{ env.SHAPELY_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: shapely/shapely
+          ref: ${{ env.SHAPELY_VERSION }}
+          fetch-depth: 0  # versioneer derives the version from the tag history
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+        with:
+          install: true
+          buildkitd-flags: --debug
+
+      - name: Build Docker image with GEOS
+        # using build-push-action (without push) to make use of cache arguments
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: .
+          file: ci/Dockerfile
+          platforms: linux/riscv64
+          tags: ${{ env.BASEIMAGE }}_geos:${{ env.GEOS_VERSION }}
+          build-args: |
+            BASEIMAGE=quay.io/pypa/${{ env.BASEIMAGE }}:${{ env.BASETAG }}
+            GEOS_VERSION=${{ env.GEOS_VERSION }}
+          push: false
+          load: true
+          cache-from: type=gha,scope=${{ env.BASEIMAGE }}
+          cache-to: type=gha,mode=max,scope=${{ env.BASEIMAGE }}
+        env:
+          BUILDKIT_PROGRESS: plain
+
+      - name: Add GEOS LICENSE
+        run: cp ci/wheelbuilder/LICENSE_GEOS .
+
+      # cibuildwheel 4 dropped the `cpython-freethreading` enable group shapely's
+      # pyproject.toml still asks for, and CIBW_ENABLE appends to that list rather
+      # than replacing it, so stay on 3.x as upstream does.
+      - name: Build wheels
+        uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084  # v3.4.1
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.BASEIMAGE }}_geos:${{ env.GEOS_VERSION }}
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          CIBW_BEFORE_BUILD: pip install cython numpy setuptools wheel
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+
+      - name: Check the wheel ships the GEOS licence and the compiled extensions
+        run: |
+          python3 - <<'EOF'
+          import glob, zipfile
+
+          names = zipfile.ZipFile(glob.glob("wheelhouse/*.whl")[0]).namelist()
+          assert any(n.endswith("LICENSE_GEOS") for n in names), names
+          assert any(n.endswith(".so") for n in names), names
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: shapely-${{ env.SHAPELY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish shapely ${{ inputs.version || '2.1.2' }} to GitLab
+    needs: [setup, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: shapely-${{ env.SHAPELY_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

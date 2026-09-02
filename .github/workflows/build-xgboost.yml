@@ -1,0 +1,149 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's macOS wheel job, the only one that drives cibuildwheel and
+# builds libxgboost from source:
+#   https://github.com/dmlc/xgboost/blob/v3.4.1/ops/pipeline/build-python-wheels-macos.sh
+# The test invocation is upstream's `cpu-arm64` suite:
+#   https://github.com/dmlc/xgboost/blob/v3.4.1/ops/pipeline/test-python-wheel.sh
+name: Build xgboost wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'xgboost version to build (git tag without leading v, e.g. 3.4.1)'
+        required: true
+        default: '3.4.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-xgboost.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '3.4.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  XGBOOST_VERSION: ${{ inputs.version || '3.4.1' }}
+  # Pinned explicitly so the gpl_sources job pulls the same image the wheel's
+  # vendored libgomp came from.
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build xgboost ${{ inputs.version || '3.4.1' }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+
+    steps:
+      - name: Checkout xgboost v${{ env.XGBOOST_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: dmlc/xgboost
+          ref: v${{ env.XGBOOST_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      # The committed pyproject.toml is the CUDA variant and pulls in
+      # nvidia-nccl-cu13 on Linux, which does not exist for riscv64. Regenerate
+      # it without that dependency, as upstream already does for every platform
+      # it ships a non-CUDA `xgboost` wheel for.
+      - name: Select the NCCL-free xgboost variant
+        run: |
+          uv pip install packaging
+          python ops/script/pypi_variants.py --use-suffix=na --require-nccl-dep=na
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python-package
+          output-dir: wheelhouse/
+          # wheel.py-api = "py3", so one build serves every interpreter.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Every scientific dependency resolves to our registry's riscv64 wheels
+          # rather than to a newer sdist on public PyPI. scikit-learn is in the
+          # list now that we publish it; without it pip compiled it in-container,
+          # which the whole suite needs because xgboost.testing importorskips
+          # sklearn.datasets at module level.
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,scipy,pandas,scikit-learn
+          CIBW_TEST_REQUIRES: pytest hypothesis joblib pandas scikit-learn
+          CIBW_TEST_SOURCES: tests/pytest.ini tests/python demo/data
+          CIBW_TEST_COMMAND: >-
+            pytest -v -s -rxXs --durations=0
+            tests/python/test_basic.py tests/python/test_basic_models.py
+            tests/python/test_model_compatibility.py
+
+      # Mirrors the libgomp check in ops/pipeline/build-python-wheels-cpu.sh.
+      - name: Check the wheel carries libxgboost and a vendored libgomp
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          for want in ("xgboost/lib/libxgboost.so", "libgomp"):
+              if not any(want in n for n in names):
+                  raise SystemExit(f"error: {want} missing from {sys.argv[1]}")
+          print("\n".join(n for n in names if ".so" in n))
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: xgboost-${{ env.XGBOOST_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    name: Collect GPL sources (gcc) for xgboost ${{ inputs.version || '3.4.1' }}
+    runs-on: ubuntu-24.04-riscv
+    steps:
+      # auditwheel vendors the image's libgomp.so.1 into the wheel.
+      - name: Collect gcc source RPM from manylinux_riscv64
+        uses: riseproject-dev/python-wheels/actions/collect-gpl-sources@main
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: xgboost-${{ env.XGBOOST_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish xgboost ${{ inputs.version || '3.4.1' }} to GitLab
+    needs: [setup, build_wheels, gpl_sources]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: xgboost-${{ env.XGBOOST_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          gpl-sources-artifact: xgboost-${{ env.XGBOOST_VERSION }}-gpl-sources
+          gpl-sources-release-tag: xgboost-v${{ env.XGBOOST_VERSION }}
+          gpl-sources-description: gcc

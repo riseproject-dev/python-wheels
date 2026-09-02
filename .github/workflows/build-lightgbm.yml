@@ -1,0 +1,186 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's wheel build:
+#   https://github.com/lightgbm-org/LightGBM/blob/v4.7.0/.github/workflows/python_package.yml
+#   https://github.com/lightgbm-org/LightGBM/blob/v4.7.0/.ci/test.sh (TASK=bdist)
+name: Build lightgbm wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'lightgbm version to build (git tag without leading v, e.g. 4.7.0)'
+        required: true
+        default: '4.7.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-lightgbm.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '4.7.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  LIGHTGBM_VERSION: ${{ inputs.version || '4.7.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  python_sdist:
+    needs: [setup]
+    name: Build lightgbm ${{ inputs.version || '4.7.0' }} sdist
+    runs-on: ubuntu-latest
+    outputs:
+      sdist_artifact_name: ${{ steps.build_sdist.outputs.sdist_artifact_name }}
+      package_version: ${{ steps.build_sdist.outputs.package_version }}
+    steps:
+      - name: Checkout LightGBM v${{ env.LIGHTGBM_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: lightgbm-org/LightGBM
+          ref: v${{ env.LIGHTGBM_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # 0001: lib_lightgbm compiles in Eigen, fmt, fast_double_parser and nanoarrow, whose
+      # licences upstream's `license-files = ["LICENSE"]` leaves out of the wheel.
+      # 0002: libgomp's dynamic and guided schedules segfault on the riscv64 runners
+      # (riseproject-dev/python-wheels#617); static is unaffected.
+      - name: Patch LightGBM source
+        run: git apply python-wheels/patches/lightgbm/${{ env.LIGHTGBM_VERSION }}/00*.patch
+
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build sdist
+        id: build_sdist
+        run: |
+          uv pip install build
+          sh ./build-python.sh sdist
+          sdist_name="$(ls ./dist)"
+          {
+            echo "sdist_artifact_name=${sdist_name}"
+            echo "package_version=$(echo "${sdist_name}" | sed -En 's/lightgbm-(.+)\.tar\.gz/\1/p')"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ steps.build_sdist.outputs.sdist_artifact_name }}
+          path: dist/${{ steps.build_sdist.outputs.sdist_artifact_name }}
+          if-no-files-found: error
+
+  build_wheels:
+    name: Build lightgbm ${{ inputs.version || '4.7.0' }} py3-none-manylinux_riscv64
+    needs: [setup, python_sdist]
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+
+    steps:
+      # The test suite and the example datasets it trains on ship in the repository, not the sdist.
+      - name: Checkout LightGBM v${{ env.LIGHTGBM_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: lightgbm-org/LightGBM
+          ref: v${{ env.LIGHTGBM_VERSION }}
+          persist-credentials: false
+
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ needs.python_sdist.outputs.sdist_artifact_name }}
+          path: dist
+
+      - name: Extract sdist
+        run: tar zxf "dist/${{ needs.python_sdist.outputs.sdist_artifact_name }}" -C dist
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: dist/lightgbm-${{ needs.python_sdist.outputs.package_version }}
+          output-dir: wheelhouse/
+          # `wheel.py-api = "py3"` makes one wheel that serves every interpreter, so one build covers them all.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Upstream leaves libgomp a system dependency, to avoid two OpenMP runtimes in one process.
+          # Their Linux bdist also passes --integrated-opencl, which clones Boost 1.74 to build an
+          # OpenCL ICD loader; riscv64 has no OpenCL device to target, so this build skips it.
+          CIBW_REPAIR_WHEEL_COMMAND: >-
+            auditwheel repair --exclude 'libgomp.so*' --lib-sdir ''
+            --wheel-dir {dest_dir} {wheel}
+          # test_plotting renders trees with the `dot` binary, which upstream gets from conda.
+          CIBW_BEFORE_TEST_LINUX: dnf -y install graphviz
+          # Resolve these to our registry's riscv64 wheels rather than to a newer sdist on
+          # public PyPI. scikit-learn is deliberately left out: it has no riscv64 wheel
+          # anywhere, and every test module imports it, so it is compiled in-container.
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,scipy,pandas,matplotlib,contourpy,kiwisolver,pillow
+          # Upstream's conda test env minus pyarrow, polars and dask, none of which have a
+          # riscv64 wheel; their test modules are importorskip-guarded.
+          CIBW_TEST_REQUIRES: >-
+            pytest scikit-learn cloudpickle joblib psutil matplotlib graphviz pandas
+          # Several tests read datasets as `<tests>/../../examples/...`, so `examples` has to
+          # keep its position relative to `tests` in the staged test directory.
+          CIBW_TEST_SOURCES: tests examples
+          CIBW_TEST_COMMAND: python -m pytest -ra ./tests
+
+      - name: Check the compiled library and the vendored licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          expected = {
+              "LICENSE",
+              "external_libs/eigen/COPYING.MPL2",
+              "external_libs/eigen/COPYING.README",
+              "external_libs/fast_double_parser/LICENSE",
+              "external_libs/fast_double_parser/LICENSE.BSL",
+              "external_libs/fmt/LICENSE",
+              "external_libs/nanoarrow/LICENSE.txt",
+              "external_libs/nanoarrow/NOTICE.txt",
+          }
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith(".so") for n in names), f"no compiled library in {whl}"
+              licenses = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                          if ".dist-info/licenses/" in n and not n.endswith("/")}
+              assert licenses == expected, f"{whl}: {sorted(licenses)}"
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lightgbm-${{ needs.python_sdist.outputs.package_version }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish lightgbm ${{ inputs.version || '4.7.0' }} to GitLab
+    needs: [setup, python_sdist, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: lightgbm-${{ needs.python_sdist.outputs.package_version }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

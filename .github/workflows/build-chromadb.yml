@@ -1,0 +1,161 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on https://github.com/chroma-core/chroma/blob/1.5.9/.github/workflows/_build_release_pypi.yml
+# (wheel build) and .github/workflows/_python-tests.yml (test-rust-bindings job).
+name: Build chromadb wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'chromadb version to build (git tag, e.g. 1.5.9)'
+        required: true
+        default: '1.5.9'
+  pull_request:
+    paths:
+      - '.github/workflows/build-chromadb.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.5.9' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.5.9 there.
+  CHROMADB_VERSION: ${{ inputs.version || '1.5.9' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build chromadb ${{ inputs.version || '1.5.9' }} cp39-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+
+    steps:
+      - name: Checkout chromadb ${{ env.CHROMADB_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: chroma-core/chroma
+          ref: ${{ env.CHROMADB_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: |
+          set -euo pipefail
+          git apply -v python-wheels/patches/chromadb/${{ env.CHROMADB_VERSION }}/*.patch
+
+      # The tag leaves the version dynamic (setuptools_scm), but the build backend
+      # is maturin, which would fall back to the crate version (0.1.0). Upstream's
+      # release workflow rewrites pyproject.toml the same way before building.
+      - name: Pin the package version
+        run: |
+          set -euo pipefail
+          sed -i 's/^dynamic = \["version"\]$/version = "${{ env.CHROMADB_VERSION }}"/' pyproject.toml
+          grep -q '^version = "${{ env.CHROMADB_VERSION }}"$' pyproject.toml
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ARCHS: riscv64
+          # pyo3 is pinned to `abi3-py39` workspace-wide, so every interpreter
+          # yields the same cp39-abi3 wheel: cibuildwheel compiles once and reuses
+          # it for cp313/cp314 while still running the test suite on each.
+          CIBW_BUILD: "cp312-* cp313-* cp314-*"
+          # rustup.rs ships no riscv64 musl toolchain.
+          CIBW_SKIP: "*-musllinux_*"
+          # protoc builds the chroma-types gRPC stubs; it lives in Rocky's CRB repo.
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf -y --enablerepo=crb install protobuf-compiler protobuf-devel &&
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          # PROTOC_INCLUDE points prost-build at the well-known .proto files, which
+          # the distro packages install outside protoc's own search path.
+          # `[tool.maturin] strip = true` discards the debug info upstream's
+          # `[profile.release] debug = 2` produces, so it only costs build time here.
+          CIBW_ENVIRONMENT: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PROTOC_INCLUDE=/usr/include
+            CARGO_PROFILE_RELEASE_DEBUG=0
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Upstream's requirements_dev.txt minus the lint/codegen tooling the
+          # rust-bindings suite never loads.
+          CIBW_TEST_REQUIRES: >-
+            pytest pytest-asyncio psutil pandas hypothesis[numpy]==6.112.2
+            fastapi uvicorn[standard] snowballstemmer
+            opentelemetry-instrumentation-fastapi chroma-hnswlib==0.7.6
+          # `schemas/` is resolved relative to the source tree by
+          # chromadb/utils/embedding_functions/schemas/schema_utils.py, and
+          # pyproject.toml carries the pytest config (asyncio_mode, pythonpath).
+          CIBW_TEST_SOURCES: chromadb schemas pyproject.toml
+          # PyPI's newest grpcio/pandas have no riscv64 wheel, so without
+          # PIP_ONLY_BINARY pip picks them over the registry's and compiles both
+          # in-container. chroma-hnswlib has no riscv64 wheel either and its own
+          # release workflow sets HNSWLIB_NO_NATIVE, so the sdist build matches.
+          CIBW_TEST_ENVIRONMENT: >-
+            CHROMA_RUST_BINDINGS_TEST_ONLY=1 RUST_BACKTRACE=1
+            PIP_ONLY_BINARY=grpcio,numpy,pandas
+            HNSWLIB_NO_NATIVE=true
+          # The compiled extension lives in its own top-level package, so the
+          # staged `chromadb/` source tree cannot shadow it - assert it is the
+          # installed .so before running upstream's glob. `-x` is dropped so one
+          # riscv64 cycle reports every failure.
+          CIBW_TEST_COMMAND: >-
+            python -c "import chromadb;
+            from chromadb_rust_bindings import chromadb_rust_bindings as ext;
+            assert ext.__file__.endswith('.so'), ext.__file__;
+            print(ext.__file__)"
+            && python -m pytest chromadb/test
+            --ignore-glob 'chromadb/test/property/*'
+            --ignore-glob 'chromadb/test/stress/*'
+            --ignore-glob 'chromadb/test/distributed/*'
+            -v --color=yes --durations 10
+
+      - name: Verify the wheel ships the compiled extension
+        run: |
+          set -euo pipefail
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = [n for n in names if n.endswith(".so")]
+          assert "chromadb_rust_bindings/chromadb_rust_bindings.abi3.so" in sos, sos
+          print(sys.argv[1], "->", sos)
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: chromadb-${{ env.CHROMADB_VERSION }}-cp39-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish chromadb ${{ inputs.version || '1.5.9' }} to GitLab
+    needs: [setup, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: chromadb-${{ env.CHROMADB_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

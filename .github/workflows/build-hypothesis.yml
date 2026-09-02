@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `release-build-wheels` job in:
+# https://github.com/HypothesisWorks/hypothesis/blob/v6.165.10/.github/workflows/release.yml
+name: Build hypothesis wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'hypothesis version to build (git tag without the leading v, e.g. 6.165.10)'
+        required: true
+        default: '6.165.10'
+  pull_request:
+    paths:
+      - '.github/workflows/build-hypothesis.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '6.165.10' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 6.165.10 there.
+  HYPOTHESIS_VERSION: ${{ inputs.version || '6.165.10' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build hypothesis ${{ inputs.version || '6.165.10' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout hypothesis v${{ env.HYPOTHESIS_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: HypothesisWorks/hypothesis
+          ref: v${{ env.HYPOTHESIS_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: hypothesis
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BUILD_FRONTEND: build
+          # Upstream marks riscv64 `abi3-only`, so it ships cp310-abi3 and a cp315
+          # abi3t wheel; abi3t starts at 3.15, leaving cp314t with no wheel. These are
+          # upstream's per-interpreter builds, which it runs only for x86_64/aarch64.
+          CIBW_BEFORE_ALL_LINUX: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT: >-
+            PATH=$PATH:$HOME/.cargo/bin
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Paths are relative to cibuildwheel's cwd (the checkout root), not package-dir.
+          # Staging only tests/ keeps src/hypothesis out of the test cwd, so the wheel is imported.
+          CIBW_TEST_SOURCES: hypothesis/tests
+          CIBW_TEST_REQUIRES: pytest pytest-xdist
+          # Upstream's `brief` tox env, plus a check that the compiled module is the one imported.
+          CIBW_TEST_COMMAND: >-
+            python -c "import hypothesis._native as n; assert n.__file__.endswith('.so'), n.__file__" &&
+            python -bb -X dev -m pytest -n auto hypothesis/tests/cover/test_testdecorators.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: hypothesis-${{ env.HYPOTHESIS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish hypothesis ${{ inputs.version || '6.165.10' }} to GitLab
+    needs: [setup, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: hypothesis-${{ env.HYPOTHESIS_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

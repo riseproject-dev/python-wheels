@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-wheels` job of
+# https://github.com/oxfordcontrol/Clarabel.rs/blob/v0.11.1/.github/workflows/pypi.yaml
+name: Build clarabel wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'clarabel version/tag to build (without the leading v, e.g. 0.11.1)'
+        required: true
+        default: '0.11.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-clarabel.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.11.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.11.1 there.
+  CLARABEL_VERSION: ${{ inputs.version || '0.11.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build clarabel ${{ inputs.version || '0.11.1' }} cp39-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout Clarabel.rs v${{ env.CLARABEL_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: oxfordcontrol/Clarabel.rs
+          ref: v${{ env.CLARABEL_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # pyo3's abi3-py39 feature makes this one wheel; it is built on cp39,
+          # the oldest interpreter its tag claims, and re-tested on the newer
+          # ones via find_compatible_wheel. musllinux is dropped: rustup.rs
+          # ships no riscv64 musl toolchain.
+          CIBW_BUILD: >-
+            cp39-manylinux_riscv64 cp312-manylinux_riscv64
+            cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          # numpy and scipy, which clarabel imports at load time, have no
+          # riscv64 wheel below cp312.
+          CIBW_TEST_SKIP: cp39-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Clarabel.rs ships no [tool.cibuildwheel], so the Rust toolchain its
+          # maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          # maturin 1.9.2 stopped merging Cargo.toml metadata into a PEP 621
+          # `[project]` table, which drops clarabel's summary, licence and
+          # repository URL from the wheel. Upstream's own wheels predate it.
+          CIBW_BEFORE_BUILD: pip install "maturin>=1.0,<1.9.2"
+          CIBW_BUILD_FRONTEND: 'build; args: --no-isolation'
+          # pardiso-panua replaces upstream's x86_64 `pardiso`: the mkl half of
+          # that feature fails the build on any other architecture. It is the
+          # same feature set upstream builds its aarch64 wheels with.
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            MATURIN_PEP517_ARGS="--features python,pardiso-panua"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Without it pip prefers PyPI's releases, which have no riscv64
+          # wheels, and source-builds them in the container.
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,scipy,cffi
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: python/clarabel/tests examples/python examples/data
+          CIBW_TEST_COMMAND: >-
+            python -m pytest -v python/clarabel/tests &&
+            python examples/python/example_qp.py &&
+            python examples/python/example_sdp.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: clarabel-${{ env.CLARABEL_VERSION }}-cp39-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish clarabel ${{ inputs.version || '0.11.1' }} to GitLab
+    needs: [setup, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: clarabel-${{ env.CLARABEL_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
