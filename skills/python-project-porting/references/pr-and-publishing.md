@@ -106,9 +106,9 @@ shape (it is in the diff), or any debugging history. Do not hard-wrap (see PR / 
 - Sanity that the `publish` job **dry-ran** on your PR branch (grep its log for
   "Dry run (not on main branch …)"); it should list the wheels it *would* upload
   without uploading.
-- **Merging does not publish.** `publish-wheels`/`publish-to-gitlab` only do the real thing
-  (twine upload, GPL-sources release, docs PR) when the run's ref is `main`; on any other
-  ref they print a dry run — resolved globs, the twine command, the branch/PR title
+- **Merging does not publish.** `_publish_wheel.yml` only does the real thing
+  (immutable GitHub Release and docs PR) when the run's ref is `main`; on any other
+  ref it prints a dry run — resolved artifacts, release details, and the branch/PR title
   `update_doc.py` would have used. That is deliberate: only reviewed, merged workflows push
   packages. After your PR merges, **re-trigger the workflow from `main`** for the wheels to
   actually reach the registry.

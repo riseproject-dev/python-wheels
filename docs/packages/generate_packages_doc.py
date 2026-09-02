@@ -5,55 +5,17 @@ import glob
 import html
 import os
 import re
+from urllib.parse import quote
+
 import packaging.version as packaging_version
-import requests
 import yaml
 
-from html.parser import HTMLParser
-
-GITLAB_PROJECT_ID = "56254198"
-GITLAB_REGISTRY_URL = (
-    f"https://gitlab.com/api/v4/projects/{GITLAB_PROJECT_ID}/packages"
-)
-GITLAB_PYPI_SIMPLE_URL = (
-    f"https://gitlab.com/api/v4/projects/{GITLAB_PROJECT_ID}/packages/pypi/simple"
-)
-GITLAB_WHEEL_BUILDER_URL = (
-    "https://gitlab.com/riseproject/python/wheel_builder/-/tree/main"
-)
-GITHUB_PYTHON_WHEELS_URL = (
-    "https://github.com/riseproject-dev/python-wheels/tree/main"
-)
+GITHUB_PYTHON_WHEELS_URL = "https://github.com/riseproject-dev/python-wheels/tree/main"
 PYPI_INDEX_URL = "https://pypi.riseproject.dev/simple/"
 
 # Match RST inline external refs: `Label <url>`_ or `Label <url>`__
 RST_LINK_RE = re.compile(r"`([^`<]+?)\s*<([^>]+)>`_+")
 PACKAGE_NORMALIZE_RE = re.compile(r"[-_.]+")
-
-
-class SimplePageParser(HTMLParser):
-    """Collect PEP 503 link attributes from a GitLab simple page."""
-
-    def __init__(self):
-        super().__init__()
-        self.links = []
-        self._link = None
-        self._text = []
-
-    def handle_starttag(self, tag, attrs):
-        if tag == "a":
-            self._link = dict(attrs)
-            self._text = []
-
-    def handle_data(self, data):
-        if self._link is not None:
-            self._text.append(data)
-
-    def handle_endtag(self, tag):
-        if tag == "a" and self._link is not None:
-            self.links.append((self._link, "".join(self._text)))
-            self._link = None
-            self._text = []
 
 
 def normalize_package_name(package_name):
@@ -66,64 +28,6 @@ def rst_to_md(text):
     if not text:
         return text
     return RST_LINK_RE.sub(r"[\1](\2)", text)
-
-
-def get_all_packages():
-    """Fetch all package data from GitLab, handling pagination."""
-    session = requests.Session()
-    packages = []
-    page = 1
-
-    try:
-        while True:
-            response = session.get(
-                GITLAB_REGISTRY_URL, params={"per_page": 100, "page": page}
-            )
-            if response.status_code != 200:
-                print(
-                    f"Error fetching packages: {response.status_code} - {response.text}"
-                )
-                return []
-
-            data = response.json()
-            if not data:
-                break
-
-            packages.extend(data)
-            next_page = response.headers.get("X-Next-Page")
-            if not next_page:
-                break
-            page = int(next_page)
-
-    except requests.RequestException as e:
-        print(f"Request error: {e}")
-        return []
-
-    return packages
-
-
-def get_package_id(package_name, version, package_list):
-    return next(
-        (
-            pkg["id"]
-            for pkg in package_list
-            if pkg["name"] == package_name and pkg["version"].startswith(version)
-        ),
-        None,
-    )
-
-
-def get_upstream_tag(package_name, version, package_list):
-    return next(
-        (
-            pkg["pipeline"]["ref"]
-            for pkg in package_list
-            if pkg["name"] == package_name
-            and pkg["version"].startswith(version)
-            and "pipeline" in pkg
-        ),
-        None,
-    )
 
 
 def _callout(lines, label, text):
@@ -149,20 +53,6 @@ def generate_simple_page(yaml_file, output_html):
         print(f"Error reading {yaml_file}: package-name is missing")
         return None, None
 
-    normalized_name = normalize_package_name(package_name)
-    url = f"{GITLAB_PYPI_SIMPLE_URL}/{normalized_name}"
-    try:
-        response = requests.get(url, timeout=30)
-    except requests.RequestException as e:
-        print(f"Request error fetching {url}: {e}")
-        return None, None
-    if response.status_code != 200:
-        print(f"Error fetching {url}: {response.status_code} - {response.text}")
-        return None, None
-
-    parser = SimplePageParser()
-    parser.feed(response.text)
-
     lines = [
         "<!DOCTYPE html>",
         '<html lang="en">',
@@ -173,20 +63,35 @@ def generate_simple_page(yaml_file, output_html):
         "  <body>",
         f"    <h1>Links for {html.escape(package_name)}</h1>",
     ]
-    for attrs, link_text in parser.links:
-        href = attrs.get("href")
-        if not href:
-            continue
-        rendered_attrs = [f'href="{html.escape(href, quote=True)}"']
-        # These optional attributes are defined by the Simple Repository API.
-        for attr in ("data-requires-python", "data-yanked", "data-core-metadata"):
-            if attr in attrs:
-                rendered_attrs.append(
-                    f'{attr}="{html.escape(attrs[attr] or "", quote=True)}"'
+    for version in package_data.get("versions", []):
+        releases = version.get("releases")
+        if releases is None:
+            raise ValueError(
+                f"{yaml_file}: version {version.get('version')} has no releases"
+            )
+        for release in releases:
+            tag = release["tag"]
+            for file_data in release.get("files", []):
+                filename = file_data["filename"]
+                href = (
+                    "https://github.com/riseproject-dev/python-wheels/releases/"
+                    f"download/{quote(tag, safe='')}/{quote(filename, safe='')}"
+                    f"#sha256={file_data['sha256']}"
                 )
-        lines.append(
-            f"    <a {' '.join(rendered_attrs)}>{html.escape(link_text)}</a>"
-        )
+                rendered_attrs = [f'href="{html.escape(href, quote=True)}"']
+                requires_python = file_data.get("requires-python")
+                if requires_python:
+                    rendered_attrs.append(
+                        'data-requires-python="'
+                        f'{html.escape(str(requires_python), quote=True)}"'
+                    )
+                if "yanked" in file_data:
+                    rendered_attrs.append(
+                        f'data-yanked="{html.escape(str(file_data["yanked"] or ""), quote=True)}"'
+                    )
+                lines.append(
+                    f"    <a {' '.join(rendered_attrs)}>{html.escape(filename)}</a>"
+                )
     lines += ["  </body>", "</html>"]
 
     try:
@@ -200,7 +105,7 @@ def generate_simple_page(yaml_file, output_html):
     return package_name, output_html
 
 
-def generate_md_page(yaml_file, output_md, package_list):
+def generate_md_page(yaml_file, output_md):
     """Generate a Markdown page from a single package YAML file."""
     try:
         with open(yaml_file, "r", encoding="utf-8") as f:
@@ -296,45 +201,44 @@ def generate_md_page(yaml_file, output_md, package_list):
             lines.append(f"**License:** {lic}")
             lines.append("")
 
-        package_id = get_package_id(package_name, version_number, package_list)
-        if package_id:
-            registry_link = (
-                f"https://gitlab.com/riseproject/python/wheel_builder/-/packages/{package_id}"
-            )
-            lines.append(
-                f"**Download files:** [{registry_link}]({registry_link})"
-            )
+        releases = version.get("releases", [])
+        if releases:
+            release_links = []
+            for release in releases:
+                tag = release["tag"]
+                release_url = (
+                    "https://github.com/riseproject-dev/python-wheels/releases/tag/"
+                    f"{quote(tag, safe='')}"
+                )
+                release_links.append(f"[{tag}]({release_url})")
+            lines.append(f"**Download files:** {', '.join(release_links)}")
             lines.append("")
+            for release in releases:
+                gpl_sources = release.get("gpl-sources")
+                if not gpl_sources:
+                    continue
+                tag = release["tag"]
+                filename = gpl_sources.get("filename", "gpl-sources.tar")
+                source_url = (
+                    "https://github.com/riseproject-dev/python-wheels/releases/"
+                    f"download/{quote(tag, safe='')}/{quote(filename, safe='')}"
+                )
+                description = gpl_sources.get("description")
+                suffix = f" ({description})" if description else ""
+                _callout(
+                    lines,
+                    "note",
+                    f"[Sources of bundled GPL libraries]({source_url}){suffix}",
+                )
 
         if "patched" in version and source_code:
-            project_name = (
-                source_code.removesuffix("/").removesuffix(".git").split("/")[-1]
+            patch_link = (
+                f"{GITHUB_PYTHON_WHEELS_URL}/"
+                f"patches/{package_name}/{version_number}"
             )
-            upstream_tag = get_upstream_tag(
-                package_name, version_number, package_list
+            lines.append(
+                f"**Patch applied for this version:** " f"[{patch_link}]({patch_link})"
             )
-            if upstream_tag:
-                patch_link = (
-                    f"{GITLAB_WHEEL_BUILDER_URL}/wheel_builder/"
-                    f"{project_name}/patches/{upstream_tag}"
-                )
-                lines.append(
-                    f"**Patch applied for this version:** "
-                    f"[{patch_link}]({patch_link})"
-                )
-                lines.append("")
-            else:
-                # if upstream tag is not present, it means the package was uploaded from github action
-                # on github we changed the way we store patches: we use package_name and version
-                # instead of project_name and tag
-                patch_link = (
-                    f"{GITHUB_PYTHON_WHEELS_URL}/"
-                    f"patches/{package_name}/{version_number}"
-                )
-                lines.append(
-                    f"**Patch applied for this version:** "
-                    f"[{patch_link}]({patch_link})"
-                )
 
         if version.get("comment"):
             _callout(lines, "note", version["comment"])
@@ -360,7 +264,7 @@ def generate_md_page(yaml_file, output_md, package_list):
     return package_name, output_md
 
 
-def process_all_yaml_files(package_list):
+def process_all_yaml_files():
     out_dir = os.path.dirname(os.path.abspath(__file__))
     yaml_files = sorted(glob.glob(os.path.join(out_dir, "*.yaml")))
     if not yaml_files:
@@ -374,7 +278,7 @@ def process_all_yaml_files(package_list):
         print(f"Processing {yaml_file}...")
         base = os.path.basename(yaml_file).replace(".yaml", ".md")
         md_file = os.path.join(out_dir, base)
-        name, fname = generate_md_page(yaml_file, md_file, package_list)
+        name, fname = generate_md_page(yaml_file, md_file)
         if name and fname:
             package_entries.append((name, os.path.basename(fname)))
 
@@ -453,5 +357,4 @@ def generate_index(package_entries, out_dir):
 
 
 if __name__ == "__main__":
-    package_list = get_all_packages()
-    process_all_yaml_files(package_list)
+    process_all_yaml_files()

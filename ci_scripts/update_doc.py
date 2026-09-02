@@ -13,6 +13,7 @@ truth; it never touches docs/packages/*.md or index.md directly.
 """
 
 import difflib
+import hashlib
 import os
 import re
 import string
@@ -29,15 +30,13 @@ REPO = "riseproject-dev/python-wheels"
 DOCS_DIR = Path("docs/packages")
 PACKAGES_FILE = Path("ci_scripts/packages.txt")
 ARTIFACTS_PATH = os.environ.get("ARTIFACTS_PATH", "dist")
-GPL_SOURCES_URL = os.environ.get("GPL_SOURCES_URL")
+RELEASE_TAG = os.environ.get("RELEASE_TAG")
 GPL_SOURCES_DESCRIPTION = os.environ.get("GPL_SOURCES_DESCRIPTION", "").strip()
 DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() == "true"
 
 
-def find_wheel_file(path):
-    for file in Path(path).glob("*.whl"):
-        return file
-    return None
+def find_wheel_files(path):
+    return sorted(Path(path).glob("*.whl"))
 
 
 def normalize_name(name):
@@ -142,19 +141,29 @@ def extract_metadata_from_whl(whl_path):
             "version": message.get("Version"),
             "license": extract_license(message),
             "source_code": extract_source_code_url(message),
+            "filename": whl_path.name,
+            "sha256": hashlib.sha256(whl_path.read_bytes()).hexdigest(),
+            "requires-python": message.get("Requires-Python"),
         }
 
 
-def render_gpl_sources_comment():
-    """
-    Render a doc comment linking to a permanently-hosted GPL sources
-    artifact (e.g. a manylinux toolchain's src.rpm), if the calling workflow
-    published one for this build.
-    """
-    if not GPL_SOURCES_URL:
-        return None
-    suffix = f" ({GPL_SOURCES_DESCRIPTION})" if GPL_SOURCES_DESCRIPTION else ""
-    return f"`Link <{GPL_SOURCES_URL}>`__ to sources of bundled GPL libraries{suffix}"
+def release_entry(release_tag, wheel_metadata, gpl_sources_description=""):
+    files = []
+    for metadata in wheel_metadata:
+        file_data = {
+            "filename": metadata["filename"],
+            "sha256": metadata["sha256"],
+        }
+        if metadata["requires-python"]:
+            file_data["requires-python"] = metadata["requires-python"]
+        files.append(file_data)
+    release = {"tag": release_tag, "files": files}
+    if gpl_sources_description:
+        release["gpl-sources"] = {
+            "filename": "gpl-sources.tar",
+            "description": gpl_sources_description,
+        }
+    return release
 
 
 def find_patch_dir(slug, version):
@@ -176,7 +185,9 @@ def yaml_line(key, value):
     ).rstrip("\n")
 
 
-def render_new_yaml(slug, source_code, license, version, patch_dir, comment=None):
+def render_new_yaml(
+    slug, source_code, license, version, patch_dir, release, comment=None
+):
     """Render a brand-new docs/packages/<slug>.yaml for a package's first version."""
     lines = [yaml_line("package-name", slug)]
     if source_code:
@@ -188,21 +199,38 @@ def render_new_yaml(slug, source_code, license, version, patch_dir, comment=None
         lines.append("    patched:")
     if comment:
         lines.append(f"    {yaml_line('comment', comment)}")
+    release_yaml = yaml.safe_dump(
+        {"releases": [release]}, sort_keys=False, allow_unicode=True
+    ).rstrip("\n")
+    lines.extend(f"    {line}" for line in release_yaml.splitlines())
     return "\n".join(lines) + "\n"
 
 
-def append_version(content, package_data, version, license, patch_dir, comment=None):
+def append_version(
+    content, package_data, version, license, patch_dir, release, comment=None
+):
     """
     Append a new version entry to the end of an existing package YAML file's
     `versions:` list, preserving the rest of the file byte-for-byte.
 
-    Returns None if this exact version is already documented.
+    An existing version receives another immutable release entry.
     """
-    existing_versions = {
-        str(v.get("version")) for v in (package_data.get("versions") or [])
-    }
-    if str(version) in existing_versions:
-        return None
+    existing_version = next(
+        (
+            item
+            for item in (package_data.get("versions") or [])
+            if str(item.get("version")) == str(version)
+        ),
+        None,
+    )
+    if existing_version is not None:
+        if any(
+            item.get("tag") == release["tag"]
+            for item in existing_version.get("releases", [])
+        ):
+            return None
+        existing_version.setdefault("releases", []).append(release)
+        return yaml.safe_dump(package_data, sort_keys=False, allow_unicode=True)
 
     top_level_license = package_data.get("license")
     lines = [f"  - {yaml_line('version', version)}"]
@@ -212,13 +240,19 @@ def append_version(content, package_data, version, license, patch_dir, comment=N
         lines.append(f"    {yaml_line('license', license)}")
     if comment:
         lines.append(f"    {yaml_line('comment', comment)}")
+    release_yaml = yaml.safe_dump(
+        {"releases": [release]}, sort_keys=False, allow_unicode=True
+    ).rstrip("\n")
+    lines.extend(f"    {line}" for line in release_yaml.splitlines())
 
     return content.rstrip("\n") + "\n" + "\n".join(lines) + "\n"
 
 
 def add_to_packages_file(slug):
     lines = PACKAGES_FILE.read_text().splitlines()
-    header_end = next(i for i, line in enumerate(lines) if line and not line.startswith("#"))
+    header_end = next(
+        i for i, line in enumerate(lines) if line and not line.startswith("#")
+    )
     header, entries = lines[:header_end], [line for line in lines[header_end:] if line]
     entries = sorted(set(entries) | {slug}, key=str.casefold)
     PACKAGES_FILE.write_text("\n".join(header + entries) + "\n")
@@ -238,7 +272,10 @@ def checkout_shared_branch(branch):
     """
     git_run("fetch", "origin")
     remote_ref = f"origin/{branch}"
-    exists = git_run("rev-parse", "--verify", "--quiet", remote_ref, check=False).returncode == 0
+    exists = (
+        git_run("rev-parse", "--verify", "--quiet", remote_ref, check=False).returncode
+        == 0
+    )
     base = remote_ref if exists else "origin/main"
     git_run("switch", "--force-create", branch, base)
 
@@ -247,21 +284,32 @@ def pr_exists(branch):
     """Return True if an open PR already targets this branch as its head."""
     out = subprocess.run(
         [
-            "gh", "pr", "list",
-            "--repo", REPO,
-            "--head", branch,
-            "--state", "open",
-            "--json", "number",
-            "--jq", "length",
+            "gh",
+            "pr",
+            "list",
+            "--repo",
+            REPO,
+            "--head",
+            branch,
+            "--state",
+            "open",
+            "--json",
+            "number",
+            "--jq",
+            "length",
         ],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
     return out.isdigit() and int(out) > 0
 
 
 def configure_git_identity():
     git_run("config", "user.name", "github-actions[bot]")
-    git_run("config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com")
+    git_run(
+        "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"
+    )
 
 
 def extract_pr_url(stdout):
@@ -273,24 +321,31 @@ def extract_pr_url(stdout):
 
 
 def main():
-    whl_file = find_wheel_file(ARTIFACTS_PATH)
-    if not whl_file:
+    wheel_files = find_wheel_files(ARTIFACTS_PATH)
+    if not wheel_files:
         print(f"No .whl file found in {ARTIFACTS_PATH}")
         sys.exit(1)
+    if not RELEASE_TAG:
+        print("RELEASE_TAG must be set")
+        sys.exit(1)
 
-    metadata = extract_metadata_from_whl(whl_file)
+    wheel_metadata = [extract_metadata_from_whl(path) for path in wheel_files]
+    names = {normalize_name(item["name"]) for item in wheel_metadata if item["name"]}
+    versions = {item["version"] for item in wheel_metadata if item["version"]}
+    if len(names) != 1 or len(versions) != 1:
+        print("Wheels contain mixed or missing package names or versions")
+        sys.exit(1)
+
+    metadata = wheel_metadata[0]
     display_name = metadata["name"]
     version = metadata["version"]
     license = metadata["license"]
     source_code = metadata["source_code"]
-
-    if not display_name or not version:
-        print("Name or version could not be extracted")
-        sys.exit(1)
+    release = release_entry(RELEASE_TAG, wheel_metadata, GPL_SOURCES_DESCRIPTION)
 
     slug = normalize_name(display_name)
     patch_dir = find_patch_dir(slug, version)
-    comment = render_gpl_sources_comment()
+    comment = None
     yaml_path = DOCS_DIR / f"{slug}.yaml"
 
     branch = "github-actions/update-doc"
@@ -302,12 +357,12 @@ def main():
         old_content = None if is_new else yaml_path.read_text()
         if is_new:
             new_content = render_new_yaml(
-                slug, source_code, license, version, patch_dir, comment
+                slug, source_code, license, version, patch_dir, release, comment
             )
         else:
             package_data = yaml.safe_load(old_content) or {}
             new_content = append_version(
-                old_content, package_data, version, license, patch_dir, comment
+                old_content, package_data, version, license, patch_dir, release, comment
             )
         return is_new, old_content, new_content
 
@@ -316,7 +371,9 @@ def main():
         if new_content is None:
             print(f"{slug} {version} is already documented; nothing to do")
             return
-        print("[dry-run] Not on main branch — no branch, commit, or PR will be created.")
+        print(
+            "[dry-run] Not on main branch — no branch, commit, or PR will be created."
+        )
         print(f"[dry-run] Would write {yaml_path}:")
         diff = difflib.unified_diff(
             (old_content or "").splitlines(keepends=True),
@@ -327,7 +384,9 @@ def main():
         sys.stdout.writelines(diff)
         if is_new:
             print(f"[dry-run] Would add '{slug}' to {PACKAGES_FILE}")
-        print(f"[dry-run] Would open PR '{pr_title}' from branch '{branch}' against main")
+        print(
+            f"[dry-run] Would open PR '{pr_title}' from branch '{branch}' against main"
+        )
         return
 
     configure_git_identity()
@@ -358,18 +417,27 @@ def main():
 
     result = subprocess.run(
         [
-            "gh", "pr", "create",
-            "--repo", REPO,
-            "--base", "main",
-            "--head", branch,
-            "--reviewer", "threexc,justeph,luhenry",
-            "--title", pr_title,
+            "gh",
+            "pr",
+            "create",
+            "--repo",
+            REPO,
+            "--base",
+            "main",
+            "--head",
+            branch,
+            "--reviewer",
+            "threexc,justeph,luhenry",
+            "--title",
+            pr_title,
             "--body",
             "Automatically generated PR to document newly published wheels. "
             "Please review it carefully before merging.\n\n"
             "If necessary, force-push this branch.",
         ],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     pr_url = extract_pr_url(result.stdout)
     print(f"[+] Opened PR: {pr_url or '(URL not found in output)'}")

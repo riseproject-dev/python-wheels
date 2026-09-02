@@ -250,7 +250,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
     Status) rather than the port.
     - **An `origin/github-actions/add-doc-for-<pkg>` branch is the strongest single tell**,
       and it shows up in a plain `git branch -a | grep <pkg>` before you have asked GitHub
-      anything: only `publish-wheels` creates it, and only on a run whose ref was `main`.
+      anything: only `_publish_wheel.yml` creates it, and only on a run whose ref was `main`.
       Its existence proves the wheels reached the registry. The matching `docs: add <pkg>`
       PR is the maintainer's to merge, not yours.
     - **`docs/packages/<pkg>.yaml` missing from `main` is not evidence the port is

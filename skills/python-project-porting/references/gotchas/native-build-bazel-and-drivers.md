@@ -165,7 +165,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       `apt-get source` equivalent inline: flip `Types: deb` to `Types: deb deb-src` in
       `/etc/apt/sources.list.d/ubuntu.sources`, map the shipped libraries back to source
       packages with `dpkg -S` + `dpkg-query -W -f='${source:Package}\n'`, and tar the
-      result for `publish-wheels`' `gpl-sources-artifact`. ports.ubuntu.com does carry
+      result for `_publish_wheel.yml`' `gpl-sources-artifact`. ports.ubuntu.com does carry
       `main/source/Sources.gz`, so this works on riscv64.
     - **Validate the bootstrap half under QEMU even when the full build is impossible.**
       The apt list, the opam binary, `opam init`, the repository pin and

@@ -107,30 +107,22 @@ When cibuildwheel doesn't fit, drive the build container yourself. Two sub-shape
   runner — used when the build script already lives in the upstream repo or when orjson-style
   per-interpreter looping is needed. See gotcha 15 for the heavy C++ variant.
 
-The `publish` job is always the shared action — it dry-runs off `main`, so it's
-safe on PR branches:
+The `publish` job always calls the shared reusable workflow — it dry-runs off
+`main`, so it is safe on PR branches:
 
 ```yaml
 publish:
   needs: [<build jobs>]
-  runs-on: ubuntu-latest
   permissions: { contents: write, pull-requests: write }
-  steps:
-    - uses: riseproject-dev/python-wheels/actions/publish-wheels@main
-      with:
-        artifact-pattern: <pkg>-${{ needs.<sdist-job>.outputs.package_version }}-*-manylinux_riscv64
-        gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
-        gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
-        gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
-        gh-token: ${{ secrets.GITHUB_TOKEN }}
+  uses: $/.github/workflows/_publish_wheel.yml
+  with:
+    artifact-pattern: <pkg>-${{ needs.<sdist-job>.outputs.package_version }}-*-manylinux_riscv64
 ```
 
-`publish-wheels` auto-creates `docs/packages/<pkg>.yaml` from the wheel metadata on
+`_publish_wheel.yml` auto-creates `docs/packages/<pkg>.yaml` from the wheel metadata on
 first publish (`ci_scripts/update_doc.py`). Nightly checks and docs are driven off
 that YAML, so **a new package needs no manual registration anywhere** — just the
 workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
 `permissions` needs `contents: write` **and** `pull-requests: write` (not `contents: read`)
 because that docs step pushes a branch and opens a PR with the default `GITHUB_TOKEN`.
-Reach for the lower-level `publish-to-gitlab` action directly only when a workflow needs the
-upload without the docs-PR side effect.
 

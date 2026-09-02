@@ -25,11 +25,11 @@ considered sufficient without user review. For best practices, reference
    `HTTP 404`. The `pull_request: paths` run from opening the PR is what
    registers it. Never drop this trigger to "avoid a duplicate CI run" it's
    the only way a new package's build ever starts.
-3. The `publish-wheels` action must be used in place of any upstream deployment
-   procedure. It provides a dry-run mechanism for in-flight PRs, and consistent
-   deployment of wheels to the RISE registry on merge to `main`. In particular,
-   the contributor **must** check that the correct number of wheels are
-   generated and selected for upload.
+3. The `_publish_wheel.yml` reusable workflow must be used in place of any
+   upstream deployment procedure. It performs a dry run on pull requests and
+   publishes immutable GitHub Releases when dispatched from `main`. In
+   particular, the contributor **must** check that the correct number of wheels
+   are generated and selected for upload.
 4. Built wheels need to be inspected for license compliance, both to ensure that
    the package ships its own licensing information and that any third-party
    libraries which are statically linked are also properly handled (which is
@@ -37,20 +37,23 @@ considered sufficient without user review. For best practices, reference
    the build environment's `gcc`) end up linked into a wheel, the
    `collect-gpl-sources` action must be used to publish those sources
    permanently alongside the release.
-5. After the contribution is merged, the workflow needs to be re-triggered from
-   the `main` branch by a maintainer for the packages to be deployed to the RISE
-   registry, and a new documentation PR to be auto-generated for the new
-   version. The maintainer also opens (or reuses) a tracking issue for the
+5. After the contribution is merged, a maintainer must dispatch the workflow
+   again from `main`. That run creates a new immutable GitHub Release and opens
+   or updates the shared documentation PR. The release becomes visible through
+   the RISE Simple API only after that documentation PR is reviewed, merged,
+   and deployed. The maintainer also opens (or reuses) a tracking issue for the
    package and links it to the PR.
 
 ## Reviewing a Documentation PR
 
-Documentation updates are generated as part of the `publish-wheels` workflow,
-which runs the `ci_scripts/update_doc.py` script against the newly-built wheels'
-metadata. This is not to be confused with `.github/workflows/docs.yml`, which
-generates updates to the GitHub Pages documentation (including previews in docs
-PRs) based on these updates. The corresponding draft PRs need to be checked
-against the following criteria:
+Documentation updates are generated as part of the `_publish_wheel.yml`
+workflow, which runs `ci_scripts/update_doc.py` against every newly built wheel.
+Each version's YAML entry records immutable release tags and, for every wheel,
+the filename, SHA-256 hash, and optional `Requires-Python` value. These YAML
+files are the source of truth for both the package documentation and the static
+Simple API. This is separate from `.github/workflows/website.yml`, which builds
+and deploys the site, including documentation previews. The generated
+pull requests need to be checked against the following criteria:
 
 1. The `license` field indicating the current project license should only ever
    be placed near the top of the file, not under each new package version. The
@@ -64,9 +67,10 @@ against the following criteria:
    license text in the documentation file. This should be replaced with the
    actual license type. For valid license strings, review the [SPDX
    list](https://spdx.org/licenses/).
-3. If the package linked against one or more GPL-licensed projects as part of
-   the build, the documentation needs to provide a `comment:` field with links
-   to the GPL source archives generated as part of the workflows.
+3. Each release entry must list every expected wheel with the correct filename,
+   SHA-256 hash, and `Requires-Python` value. If the package linked against one
+   or more GPL-licensed projects, the same release entry must also record its
+   `gpl-sources.tar` asset.
 4. A `patched:` field should be added if one or more patches are applied to the
    source for each version. This will produce a link to the appropriate patches
    located under `patches/<package>/<version>`.
@@ -83,9 +87,9 @@ against the following criteria:
 To assist with contributions, the `python-wheels` repository contains the
 following workflows beyond those used for specific package builds:
 
-1. `docs.yml`: Builds and deploys documentation changes to GitHub Pages
+1. `website.yml`: Builds and deploys documentation changes to GitHub Pages
 2. `nightly.yml`: Performs a nightly comparison of supported package versions in
-   the RISE registry against those available upstream. It also creates
+   the RISE package index against those available upstream. It also creates
    'deprecation' PRs for packages which support riscv64 upstream (meaning that
    RISE no longer needs to support them separately), and runs a basic
    `pip_audit` run against our package list.
@@ -110,6 +114,6 @@ RISE makes use of the [RISC-V
 Wheels](https://stanfromireland.github.io/riscv-wheels/) dashboard, which tracks
 the status of riscv64 compatibility for 360 binary Python wheels. This provides
 a detailed look at ecosystem-wide support, including wheels which are available
-in the RISE registry but not yet upstream. It should be the first reference when
+in the RISE package index but not yet upstream. It should be the first reference when
 determining which packages to contribute support for and at what level (i.e.
 upstream versus `python-wheels`).

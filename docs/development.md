@@ -128,13 +128,12 @@ when invoked.
 
 ### Using the python-wheels Repository in Workflows
 
-The `python-wheels` repository contains some custom Actions we require, and
-patch files to apply for certain projects. The one every `build-<package>.yml`
-workflow needs is `publish-wheels`, which performs the following steps:
+The `python-wheels` repository contains reusable workflows and patch files to
+apply for certain projects. Every `build-<package>.yml` workflow calls
+`_publish_wheel.yml`, which performs the following steps:
 
 1. Downloads the built wheel(s) from the previous job
-2. Uploads them to the GitLab PyPI registry (via the lower-level
-   `publish-to-gitlab` Action)
+2. Creates an immutable GitHub Release containing the wheels
 3. Opens a PR against `docs/packages/<name>.yaml` documenting the new version
    (via `ci_scripts/update_doc.py`), which `docs/packages/generate_packages_doc.py`
    later renders into the published Markdown page. With it in place, the
@@ -142,32 +141,23 @@ workflow needs is `publish-wheels`, which performs the following steps:
 
 ```
 publish:
-  name: Publish numpy ${{ inputs.version || '2.5.0' }} to GitLab
+  name: Publish numpy ${{ inputs.version || '2.5.0' }}
   needs: build_wheels
-  runs-on: ubuntu-latest
   permissions:
     contents: write
     pull-requests: write
-
-  steps:
-    - name: Publish wheels and open docs PR
-      uses: riseproject-dev/python-wheels/actions/publish-wheels@main
-      with:
-        artifact-pattern: numpy-${{ env.NUMPY_VERSION }}-*-manylinux_riscv64
-        gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
-        gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
-        gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
-        gh-token: ${{ secrets.GITHUB_TOKEN }}
+  uses: $/.github/workflows/_publish_wheel.yml
+  with:
+    artifact-pattern: numpy-${{ inputs.version || '2.5.0' }}-*-manylinux_riscv64
 ```
 
 `permissions` needs `contents: write` and `pull-requests: write` here (not just
 `contents: read`) since the docs step pushes a branch and opens a PR with the
 default `GITHUB_TOKEN`.
 
-Other workflows need to follow the same process, modifying `artifact-pattern` to
-match their own artifact naming scheme and otherwise reusing `publish-wheels`
-like the example. The `publish-to-gitlab` Action should only be used directly if
-a workflow needs the upload step without the docs PR side effect.
+Other workflows follow the same process, modifying `artifact-pattern` to match
+their own artifact naming scheme and otherwise reusing `_publish_wheel.yml` like
+the example.
 
 ## Testing a New Workflow
 
@@ -223,28 +213,44 @@ workflow. In this scenario, follow these steps:
 
 **Note: Patching should be performed and reviewed on a case-by-case basis - as
 much functionality as possible should be tested by our system to ensure a smooth
-user experience when consuming wheels from RISE's package registry.**
+user experience when consuming wheels from RISE's package index.**
 
-## Releasing a Wheel
+## Merging and Publishing a Wheel
 
-The `publish-to-gitlab` and `publish-wheels` actions only perform their real
-side effects (twine upload, GPL sources release, docs PR) when the workflow is
-triggered from `main`. On any other ref they print a dry-run instead — the
-resolved file globs, the twine command that would have run, and the branch/PR
-title `update_doc.py` would have used — without uploading anything or opening
-a PR. This is intentional, and is meant to ensure that only those workflows
-which have been fully tested, reviewed, and merged are used to build and push
-packages, while still letting a PR run demonstrate what publishing would do.
-Following the merge of a PR, the workflow(s) must be re-triggered from the
-`main` branch in order to actually release the wheels to the package registry.
+A pull request run builds and tests the wheels, then calls `_publish_wheel.yml`
+in dry-run mode. Review the publish job and confirm that it selected exactly the
+expected wheels and derived the expected normalized package name and version.
+Pull request runs never create releases or documentation pull requests.
+
+Merging the pull request does not publish its artifacts. After merge, a
+maintainer must dispatch the package workflow again from the `main` branch with
+the reviewed version. The successful `main` run:
+
+1. creates a draft GitHub Release targeting the workflow's commit;
+2. names the release `<normalized-package>-v<version>` and gives its tag a UTC
+   timestamp suffix, `<normalized-package>-v<version>-<yyyymmddhhmmss>`;
+3. uploads all selected wheels and any required `gpl-sources.tar` asset;
+4. publishes the release, at which point repository-level immutable releases
+   freeze its tag and assets; and
+5. opens or updates the shared documentation pull request with the release tag,
+   wheel filenames, SHA-256 hashes, and `Requires-Python` metadata.
+
+Every `main` run creates a new release; existing releases are never reused or
+modified. Its description links back to the workflow run that produced it.
+Publishing fails if immutable releases are disabled.
+
+The generated `/simple/` package index reads only `docs/packages/*.yaml`. The
+new release does not become discoverable through pip until the generated
+documentation pull request has been reviewed, merged, and deployed. Review that
+pull request promptly to complete publication.
 
 ## Other Workflow Tips and Tricks
 
 ### Licensing
 
 The wheels built by the `python-wheels` project use a variety of open-source
-licenses. Since RISE is the distributor of riscv64 wheels in the corresponding
-package registry, we must ensure that the wheels adhere to each project's
+licenses. Since RISE is the distributor of riscv64 wheels through its package
+index, we must ensure that the wheels adhere to each project's
 licensing requirements. More specifically, check:
 
 1. The built wheel contains one or more `LICENSE` files corresponding to those
@@ -295,18 +301,16 @@ collected actually correspond to the toolchain that produced the wheels (see
 `build-numpy.yml` for a complete example).
 
 Then add `gpl_sources` to the `publish` job's `needs:`, and pass the artifact
-through to `publish-wheels`:
+through to `_publish_wheel.yml`:
 
 ```
 gpl-sources-artifact: <package>-${{ inputs.version }}-gpl-sources
-gpl-sources-release-tag: <package>-v${{ inputs.version }}
 gpl-sources-description: gcc
 ```
 
-`publish-wheels` publishes the tar as a permanent asset on a GitHub Release
-(created if it doesn't already exist) and passes its download URL to
-`ci_scripts/update_doc.py`, which renders it as a `comment:` on the new
-version entry automatically - no manual doc edit needed.
+`_publish_wheel.yml` publishes the tar as a permanent asset on the newly created
+immutable GitHub Release and records it in the new version's release metadata —
+no manual documentation edit is needed.
 
 ### Adding Builds for Rust Packages
 
