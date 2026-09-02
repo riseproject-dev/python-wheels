@@ -114,12 +114,12 @@ The `publish` job always calls the shared reusable workflow — it dry-runs off
 publish:
   needs: [<build jobs>]
   permissions: { contents: write, pull-requests: write }
-  uses: $/.github/workflows/_publish_wheel.yml
+  uses: $/.github/workflows/_publish-wheel.yml
   with:
     artifact-pattern: <pkg>-${{ needs.<sdist-job>.outputs.package_version }}-*-manylinux_riscv64
 ```
 
-`_publish_wheel.yml` auto-creates `docs/packages/<pkg>.yaml` from the wheel metadata on
+`_publish-wheel.yml` auto-creates `docs/packages/<pkg>.yaml` from the wheel metadata on
 first publish (`ci_scripts/update_doc.py`). Nightly checks and docs are driven off
 that YAML, so **a new package needs no manual registration anywhere** — just the
 workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.

@@ -28,7 +28,7 @@ with all wheel and GPL-source assets, and then published.
 
 Immutable releases must remain enabled under the repository's release settings.
 Once published, a release's tag and assets cannot be changed or deleted. The
-`_publish_wheel.yml` reusable workflow checks this setting before publishing and
+`_publish-wheel.yml` reusable workflow checks this setting before publishing and
 verifies that the resulting release is immutable.
 
 The workflow uses the repository-provided `GITHUB_TOKEN`; callers grant the

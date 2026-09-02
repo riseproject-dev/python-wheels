@@ -25,7 +25,7 @@ considered sufficient without user review. For best practices, reference
    `HTTP 404`. The `pull_request: paths` run from opening the PR is what
    registers it. Never drop this trigger to "avoid a duplicate CI run" it's
    the only way a new package's build ever starts.
-3. The `_publish_wheel.yml` reusable workflow must be used in place of any
+3. The `_publish-wheel.yml` reusable workflow must be used in place of any
    upstream deployment procedure. It performs a dry run on pull requests and
    publishes immutable GitHub Releases when dispatched from `main`. In
    particular, the contributor **must** check that the correct number of wheels
@@ -46,7 +46,7 @@ considered sufficient without user review. For best practices, reference
 
 ## Reviewing a Documentation PR
 
-Documentation updates are generated as part of the `_publish_wheel.yml`
+Documentation updates are generated as part of the `_publish-wheel.yml`
 workflow, which runs `ci_scripts/update_doc.py` against every newly built wheel.
 Each version's YAML entry records immutable release tags and, for every wheel,
 the filename, SHA-256 hash, and optional `Requires-Python` value. These YAML

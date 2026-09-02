@@ -130,7 +130,7 @@ when invoked.
 
 The `python-wheels` repository contains reusable workflows and patch files to
 apply for certain projects. Every `build-<package>.yml` workflow calls
-`_publish_wheel.yml`, which performs the following steps:
+`_publish-wheel.yml`, which performs the following steps:
 
 1. Downloads the built wheel(s) from the previous job
 2. Creates an immutable GitHub Release containing the wheels
@@ -146,7 +146,7 @@ publish:
   permissions:
     contents: write
     pull-requests: write
-  uses: $/.github/workflows/_publish_wheel.yml
+  uses: $/.github/workflows/_publish-wheel.yml
   with:
     artifact-pattern: numpy-${{ inputs.version || '2.5.0' }}-*-manylinux_riscv64
 ```
@@ -156,7 +156,7 @@ publish:
 default `GITHUB_TOKEN`.
 
 Other workflows follow the same process, modifying `artifact-pattern` to match
-their own artifact naming scheme and otherwise reusing `_publish_wheel.yml` like
+their own artifact naming scheme and otherwise reusing `_publish-wheel.yml` like
 the example.
 
 ## Testing a New Workflow
@@ -217,7 +217,7 @@ user experience when consuming wheels from RISE's package index.**
 
 ## Merging and Publishing a Wheel
 
-A pull request run builds and tests the wheels, then calls `_publish_wheel.yml`
+A pull request run builds and tests the wheels, then calls `_publish-wheel.yml`
 in dry-run mode. Review the publish job and confirm that it selected exactly the
 expected wheels and derived the expected normalized package name and version.
 Pull request runs never create releases or documentation pull requests.
@@ -301,14 +301,14 @@ collected actually correspond to the toolchain that produced the wheels (see
 `build-numpy.yml` for a complete example).
 
 Then add `gpl_sources` to the `publish` job's `needs:`, and pass the artifact
-through to `_publish_wheel.yml`:
+through to `_publish-wheel.yml`:
 
 ```
 gpl-sources-artifact: <package>-${{ inputs.version }}-gpl-sources
 gpl-sources-description: gcc
 ```
 
-`_publish_wheel.yml` publishes the tar as a permanent asset on the newly created
+`_publish-wheel.yml` publishes the tar as a permanent asset on the newly created
 immutable GitHub Release and records it in the new version's release metadata —
 no manual documentation edit is needed.
 

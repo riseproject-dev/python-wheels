@@ -47,7 +47,7 @@ gpl-sources-artifact: <pkg>-<version>-gpl-sources
 gpl-sources-description: gcc
 ```
 
-`_publish_wheel.yml` attaches the tar to the same immutable GitHub Release as the wheels and
+`_publish-wheel.yml` attaches the tar to the same immutable GitHub Release as the wheels and
 records it in the package YAML — no manual docs edit. `build-numpy.yml` is the complete
 example.
 

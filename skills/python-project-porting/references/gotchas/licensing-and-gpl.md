@@ -140,7 +140,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
     - **Its artifact must not match the publish job's `artifact-pattern`.** Name it
       `<pkg>-<ver>-gpl-sources` and keep the pattern anchored on `*-manylinux_riscv64`,
       then pass it separately via `gpl-sources-artifact`/`-release-tag`/`-description`;
-      `_publish_wheel.yml` attaches it to a GitHub Release and renders the URL as the
+      `_publish-wheel.yml` attaches it to a GitHub Release and renders the URL as the
       version's docs `comment:`.
     - **Upstream usually tells you first.** A project shipping a
       `build_tools/wheels/LICENSE_*.txt` (or any "this binary distribution also bundles"
@@ -396,7 +396,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
     pyav-ffmpeg's `scripts/pkg.py` is importable on its own (`dataclasses` + `platform` only),
     so `exec`ing it yields `name`, `source_url` and `sha256` for all 17 dependencies. A job on
     `ubuntu-latest` (gotcha 4 — sources are arch-independent) downloads each tarball, verifies
-    the pin, and hands the result to `_publish_wheel.yml`' `gpl-sources-artifact` as
+    the pin, and hands the result to `_publish-wheel.yml`' `gpl-sources-artifact` as
     `gpl-sources.tar`, which is the same mechanism `collect-gpl-sources` feeds.
     - **The build repo itself is part of the corresponding source.** It carries the configure
       arguments and, usually, patches against the dependencies (pyav-ffmpeg patches FFmpeg,
