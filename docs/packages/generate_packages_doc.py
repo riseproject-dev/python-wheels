@@ -64,34 +64,33 @@ def generate_simple_page(yaml_file, output_html):
         f"    <h1>Links for {html.escape(package_name)}</h1>",
     ]
     for version in package_data.get("versions", []):
-        releases = version.get("releases")
-        if releases is None:
+        tag = version.get("tag")
+        files = version.get("files")
+        if tag is None or files is None:
             raise ValueError(
-                f"{yaml_file}: version {version.get('version')} has no releases"
+                f"{yaml_file}: version {version.get('version')} has no tag or files"
             )
-        for release in releases:
-            tag = release["tag"]
-            for file_data in release.get("files", []):
-                filename = file_data["filename"]
-                href = (
-                    "https://github.com/riseproject-dev/python-wheels/releases/"
-                    f"download/{quote(tag, safe='')}/{quote(filename, safe='')}"
-                    f"#sha256={file_data['sha256']}"
+        for file_data in files:
+            filename = file_data["filename"]
+            href = (
+                "https://github.com/riseproject-dev/python-wheels/releases/"
+                f"download/{quote(tag, safe='')}/{quote(filename, safe='')}"
+                f"#sha256={file_data['sha256']}"
+            )
+            rendered_attrs = [f'href="{html.escape(href, quote=True)}"']
+            requires_python = file_data.get("requires-python")
+            if requires_python:
+                rendered_attrs.append(
+                    'data-requires-python="'
+                    f'{html.escape(str(requires_python), quote=True)}"'
                 )
-                rendered_attrs = [f'href="{html.escape(href, quote=True)}"']
-                requires_python = file_data.get("requires-python")
-                if requires_python:
-                    rendered_attrs.append(
-                        'data-requires-python="'
-                        f'{html.escape(str(requires_python), quote=True)}"'
-                    )
-                if "yanked" in file_data:
-                    rendered_attrs.append(
-                        f'data-yanked="{html.escape(str(file_data["yanked"] or ""), quote=True)}"'
-                    )
-                lines.append(
-                    f"    <a {' '.join(rendered_attrs)}>{html.escape(filename)}</a>"
+            if "yanked" in file_data:
+                rendered_attrs.append(
+                    f'data-yanked="{html.escape(str(file_data["yanked"] or ""), quote=True)}"'
                 )
+            lines.append(
+                f"    <a {' '.join(rendered_attrs)}>{html.escape(filename)}</a>"
+            )
     lines += ["  </body>", "</html>"]
 
     try:
@@ -201,23 +200,16 @@ def generate_md_page(yaml_file, output_md):
             lines.append(f"**License:** {lic}")
             lines.append("")
 
-        releases = version.get("releases", [])
-        if releases:
-            release_links = []
-            for release in releases:
-                tag = release["tag"]
-                release_url = (
-                    "https://github.com/riseproject-dev/python-wheels/releases/tag/"
-                    f"{quote(tag, safe='')}"
-                )
-                release_links.append(f"[{tag}]({release_url})")
-            lines.append(f"**Download files:** {', '.join(release_links)}")
+        tag = version.get("tag")
+        if tag:
+            release_url = (
+                "https://github.com/riseproject-dev/python-wheels/releases/tag/"
+                f"{quote(tag, safe='')}"
+            )
+            lines.append(f"**Download files:** [{tag}]({release_url})")
             lines.append("")
-            for release in releases:
-                gpl_sources = release.get("gpl-sources")
-                if not gpl_sources:
-                    continue
-                tag = release["tag"]
+            gpl_sources = version.get("gpl-sources")
+            if gpl_sources:
                 filename = gpl_sources.get("filename", "gpl-sources.tar")
                 source_url = (
                     "https://github.com/riseproject-dev/python-wheels/releases/"
@@ -231,7 +223,7 @@ def generate_md_page(yaml_file, output_md):
                     f"[Sources of bundled GPL libraries]({source_url}){suffix}",
                 )
 
-        if "patched" in version and source_code:
+        if version.get("patched", False) and source_code:
             patch_link = (
                 f"{GITHUB_PYTHON_WHEELS_URL}/"
                 f"patches/{package_name}/{version_number}"

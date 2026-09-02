@@ -67,12 +67,14 @@ pull requests need to be checked against the following criteria:
    license text in the documentation file. This should be replaced with the
    actual license type. For valid license strings, review the [SPDX
    list](https://spdx.org/licenses/).
-3. Each release entry must list every expected wheel with the correct filename,
-   SHA-256 hash, and `Requires-Python` value. If the package linked against one
-   or more GPL-licensed projects, the same release entry must also record its
+3. Each version entry must contain the latest release tag and list every
+   expected wheel with the correct filename, SHA-256 hash, and
+   `Requires-Python` value. If the package linked against one or more
+   GPL-licensed projects, the same version entry must also record its
    `gpl-sources.tar` asset.
-4. A `patched:` field should be added if one or more patches are applied to the
-   source for each version. This will produce a link to the appropriate patches
+4. `patched: true` should be added if one or more patches are applied to the
+   source for each version. If omitted, it defaults to `false`. This will
+   produce a link to the appropriate patches
    located under `patches/<package>/<version>`.
 5. If the package workflow deviates significantly from the upstream
    equivalent but does so **without** using a patch file (such as disabling

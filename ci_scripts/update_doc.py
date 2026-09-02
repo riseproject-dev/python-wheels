@@ -147,7 +147,7 @@ def extract_metadata_from_whl(whl_path):
         }
 
 
-def release_entry(release_tag, wheel_metadata, gpl_sources_description=""):
+def publication_metadata(release_tag, wheel_metadata, gpl_sources_description=""):
     files = []
     for metadata in wheel_metadata:
         file_data = {
@@ -157,13 +157,13 @@ def release_entry(release_tag, wheel_metadata, gpl_sources_description=""):
         if metadata["requires-python"]:
             file_data["requires-python"] = metadata["requires-python"]
         files.append(file_data)
-    release = {"tag": release_tag, "files": files}
+    publication = {"tag": release_tag, "files": files}
     if gpl_sources_description:
-        release["gpl-sources"] = {
+        publication["gpl-sources"] = {
             "filename": "gpl-sources.tar",
             "description": gpl_sources_description,
         }
-    return release
+    return publication
 
 
 def find_patch_dir(slug, version):
@@ -186,7 +186,7 @@ def yaml_line(key, value):
 
 
 def render_new_yaml(
-    slug, source_code, license, version, patch_dir, release, comment=None
+    slug, source_code, license, version, patch_dir, publication, comment=None
 ):
     """Render a brand-new docs/packages/<slug>.yaml for a package's first version."""
     lines = [yaml_line("package-name", slug)]
@@ -196,24 +196,26 @@ def render_new_yaml(
     lines.append("versions:")
     lines.append(f"  - {yaml_line('version', version)}")
     if patch_dir is not None:
-        lines.append("    patched:")
+        lines.append("    patched: true")
     if comment:
         lines.append(f"    {yaml_line('comment', comment)}")
-    release_yaml = yaml.safe_dump(
-        {"releases": [release]}, sort_keys=False, allow_unicode=True
+    publication_yaml = yaml.safe_dump(
+        publication, sort_keys=False, allow_unicode=True
     ).rstrip("\n")
-    lines.extend(f"    {line}" for line in release_yaml.splitlines())
+    lines.extend(f"    {line}" for line in publication_yaml.splitlines())
     return "\n".join(lines) + "\n"
 
 
 def append_version(
-    content, package_data, version, license, patch_dir, release, comment=None
+    content, package_data, version, license, patch_dir, publication, comment=None
 ):
     """
     Append a new version entry to the end of an existing package YAML file's
     `versions:` list, preserving the rest of the file byte-for-byte.
 
-    An existing version receives another immutable release entry.
+    An existing version's publication metadata is replaced by the latest tag.
+    Older immutable GitHub Releases remain available for tracking, but only the
+    latest release is exposed through the package YAML and Simple API.
     """
     existing_version = next(
         (
@@ -224,26 +226,31 @@ def append_version(
         None,
     )
     if existing_version is not None:
-        if any(
-            item.get("tag") == release["tag"]
-            for item in existing_version.get("releases", [])
-        ):
+        publication_keys = ("tag", "files", "gpl-sources")
+        current = {
+            key: existing_version[key]
+            for key in publication_keys
+            if key in existing_version
+        }
+        if current == publication:
             return None
-        existing_version.setdefault("releases", []).append(release)
+        for key in publication_keys:
+            existing_version.pop(key, None)
+        existing_version.update(publication)
         return yaml.safe_dump(package_data, sort_keys=False, allow_unicode=True)
 
     top_level_license = package_data.get("license")
     lines = [f"  - {yaml_line('version', version)}"]
     if patch_dir is not None:
-        lines.append("    patched:")
+        lines.append("    patched: true")
     if license and license != top_level_license and license not in VAGUE_LICENSES:
         lines.append(f"    {yaml_line('license', license)}")
     if comment:
         lines.append(f"    {yaml_line('comment', comment)}")
-    release_yaml = yaml.safe_dump(
-        {"releases": [release]}, sort_keys=False, allow_unicode=True
+    publication_yaml = yaml.safe_dump(
+        publication, sort_keys=False, allow_unicode=True
     ).rstrip("\n")
-    lines.extend(f"    {line}" for line in release_yaml.splitlines())
+    lines.extend(f"    {line}" for line in publication_yaml.splitlines())
 
     return content.rstrip("\n") + "\n" + "\n".join(lines) + "\n"
 
@@ -341,7 +348,9 @@ def main():
     version = metadata["version"]
     license = metadata["license"]
     source_code = metadata["source_code"]
-    release = release_entry(RELEASE_TAG, wheel_metadata, GPL_SOURCES_DESCRIPTION)
+    publication = publication_metadata(
+        RELEASE_TAG, wheel_metadata, GPL_SOURCES_DESCRIPTION
+    )
 
     slug = normalize_name(display_name)
     patch_dir = find_patch_dir(slug, version)
@@ -357,12 +366,18 @@ def main():
         old_content = None if is_new else yaml_path.read_text()
         if is_new:
             new_content = render_new_yaml(
-                slug, source_code, license, version, patch_dir, release, comment
+                slug, source_code, license, version, patch_dir, publication, comment
             )
         else:
             package_data = yaml.safe_load(old_content) or {}
             new_content = append_version(
-                old_content, package_data, version, license, patch_dir, release, comment
+                old_content,
+                package_data,
+                version,
+                license,
+                patch_dir,
+                publication,
+                comment,
             )
         return is_new, old_content, new_content
 
