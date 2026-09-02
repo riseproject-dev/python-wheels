@@ -51,7 +51,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
     up in the `.whl` filename (driven by `BUILD_VERSION`) must match, byte for byte:
     (1) the wheel filename, (2) the `docs/packages/<pkg>.yaml` `version:` key
     (auto-populated by `update_doc.py` from the wheel), and (3) the
-    `patches/<pkg>/<version>/` directory name — `docs/.../generate_packages_doc.py`
+    `patches/<pkg>/<version>/` directory name — `generate_packages_doc.py`
     links patches as the literal path `patches/{name}/{version}`, so a mismatch is a
     404. torch ships a **local segment** (`2.13.0+cpu`, pytorch's CPU-index
     convention) so its patches live under `patches/torch/2.13.0+cpu/`.

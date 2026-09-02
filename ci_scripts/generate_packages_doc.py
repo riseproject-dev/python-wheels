@@ -4,6 +4,7 @@
 import glob
 import html
 import os
+from pathlib import Path
 import re
 from urllib.parse import quote
 
@@ -16,6 +17,9 @@ PYPI_INDEX_URL = "https://pypi.riseproject.dev/simple/"
 # Match RST inline external refs: `Label <url>`_ or `Label <url>`__
 RST_LINK_RE = re.compile(r"`([^`<]+?)\s*<([^>]+)>`_+")
 PACKAGE_NORMALIZE_RE = re.compile(r"[-_.]+")
+
+CI_SCRIPTS_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
+DOCS_DIR = (CI_SCRIPTS_DIR / ".." / "docs" / "packages").resolve()
 
 
 def normalize_package_name(package_name):
@@ -256,8 +260,8 @@ def generate_md_page(yaml_file, output_md):
     return package_name, output_md
 
 
-def process_all_yaml_files():
-    out_dir = os.path.dirname(os.path.abspath(__file__))
+def process_all_yaml_files(out_dir):
+    print(f"Processing all YAML files in {out_dir}...")
     yaml_files = sorted(glob.glob(os.path.join(out_dir, "*.yaml")))
     if not yaml_files:
         print(f"No YAML files found in {out_dir}")
@@ -349,4 +353,4 @@ def generate_index(package_entries, out_dir):
 
 
 if __name__ == "__main__":
-    process_all_yaml_files()
+    process_all_yaml_files(DOCS_DIR)

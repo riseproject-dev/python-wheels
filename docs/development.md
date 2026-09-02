@@ -135,7 +135,7 @@ apply for certain projects. Every `build-<package>.yml` workflow calls
 1. Downloads the built wheel(s) from the previous job
 2. Creates an immutable GitHub Release containing the wheels
 3. Opens a PR against `docs/packages/<name>.yaml` documenting the new version
-   (via `ci_scripts/update_doc.py`), which `docs/packages/generate_packages_doc.py`
+   (via `ci_scripts/update_doc.py`), which `ci_scripts/generate_packages_doc.py`
    later renders into the published Markdown page. With it in place, the
    `build-numpy.yml` script's `publish` job looks like this:
 

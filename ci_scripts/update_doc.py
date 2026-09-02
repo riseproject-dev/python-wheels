@@ -7,7 +7,7 @@ Extract metadata from a just-built riscv64 wheel, add or update the
 corresponding docs/packages/<name>.yaml entry with the new version, and open
 a pull request with the change.
 
-docs/packages/generate_packages_doc.py renders this YAML into the published
+generate_packages_doc.py renders this YAML into the published
 Markdown pages, so this script only needs to maintain the YAML source of
 truth; it never touches docs/packages/*.md or index.md directly.
 """
@@ -27,8 +27,9 @@ from pathlib import Path
 import yaml
 
 REPO = "riseproject-dev/python-wheels"
-DOCS_DIR = Path("docs/packages")
-PACKAGES_FILE = Path("ci_scripts/packages.txt")
+CI_SCRIPTS_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
+DOCS_DIR = (CI_SCRIPTS_DIR / ".." / "docs" / "packages").resolve()
+PACKAGES_FILE = CI_SCRIPTS_DIR / "packages.txt"
 ARTIFACTS_PATH = os.environ.get("ARTIFACTS_PATH", "dist")
 RELEASE_TAG = os.environ.get("RELEASE_TAG")
 GPL_SOURCES_DESCRIPTION = os.environ.get("GPL_SOURCES_DESCRIPTION", "").strip()
