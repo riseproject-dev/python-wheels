@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/tornadoweb/tornado/blob/v6.5.8/.github/workflows/build.yml
+name: Build tornado wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'tornado version to build (git tag without leading v)'
+        required: true
+        default: '6.5.8'
+  pull_request:
+    paths:
+      - '.github/workflows/build-tornado.yml'
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 6.5.8 there.
+  TORNADO_VERSION: ${{ inputs.version || '6.5.8' }}
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_ONLY_BINARY: ':all:'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '6.5.8' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  build_wheels:
+    name: Build wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # remove other os, and keep only riscv64
+        # os: [ubuntu-22.04, ubuntu-22.04-arm, windows-2022, macos-15]
+        os: [ubuntu-24.04-riscv]
+
+    steps:
+      # we need to checkout upstream source
+      - name: Checkout tornado ${{ env.TORNADO_VERSION }}
+        uses: actions/checkout@v4
+        with:
+          repository: tornadoweb/tornado
+          ref: v${{ env.TORNADO_VERSION }}
+          persist-credentials: false
+
+      # we use uv instead of setup-python see https://pypi.riseproject.dev/python-wheels/development.html#uv
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        name: Install Python
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build wheels
+        # We need a more recent version of cibuildwheel to support riscv
+        # uses: pypa/cibuildwheel@v3.4.0
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074 # v4.2.0
+        env:
+          # we try to reduce the number of builds so only build for 3.12+
+          # see our documentation https://pypi.riseproject.dev/python-wheels/development.html#target-python-versions
+          CIBW_BUILD: "cp312* cp313* cp314* cp314t*"
+          # increase timeout for riscv64 runners that are slower than usual build server
+          CIBW_ENVIRONMENT: 'ASYNC_TEST_TIMEOUT=30'
+          # 3.14t test succeeded but log an error on stderr which is interpreted as an error making the build fail.
+          # use --fail-if-logs=false to the test command, as upstream does on Windows
+          # https://github.com/tornadoweb/tornado/blob/0096f2897c98facdcd9716009ee934a7381af5ef/pyproject.toml#L26
+          CIBW_TEST_COMMAND: "python -m tornado.test --fail-if-logs=false"
+
+      - name: Audit ABI3 compliance
+        # This may be moved into cibuildwheel itself in the future. See
+        # https://github.com/pypa/cibuildwheel/issues/1342
+        run: "uv pip install abi3audit && abi3audit --verbose --summary ./wheelhouse/*.whl"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.os }}
+          path: ./wheelhouse/*.whl
+
+  publish:
+    name: Publish tornado ${{ inputs.version || '6.5.8' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: artifacts-*
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

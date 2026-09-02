@@ -1,0 +1,95 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# mypy compiles itself with mypyc and ships per-interpreter compiled wheels on
+# PyPI for every platform except riscv64. This builds the riscv64 ones, mirroring
+# upstream's recipe in mypyc/mypy_mypyc-wheels (cibuildwheel.toml).
+name: Build mypy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'mypy version to build (PyPI version, e.g. 2.3.1)'
+        required: true
+        default: '2.3.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-mypy.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.3.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MYPY_VERSION: ${{ inputs.version || '2.3.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  build_wheels:
+    name: Build mypy ${{ inputs.version || '2.3.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    # mypy self-compiles ~230 modules at -O3 (~40min alone on fast hardware), then runs its full test suite; both are much slower on the riscv runner.
+    timeout-minutes: 720
+    strategy:
+      fail-fast: false
+      matrix:
+        # mypyc emits per-interpreter (non-abi3) wheels, so each CPython builds separately.
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      # Tag is v-prefixed; the wheel version (mypy/version.py) is the plain MYPY_VERSION.
+      - name: Checkout mypy ${{ env.MYPY_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: python/mypy
+          ref: v${{ env.MYPY_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BUILD_FRONTEND: build
+          # MYPY_USE_MYPYC=1 is the mypyc opt-in; without it setup.py silently ships a pure-Python wheel. Opt/debug levels match upstream's release build.
+          CIBW_ENVIRONMENT: >-
+            MYPY_USE_MYPYC=1
+            MYPYC_OPT_LEVEL=3
+            MYPYC_DEBUG_LEVEL=0
+          CIBW_BEFORE_TEST: pip install -r {project}/test-requirements.txt
+          # Upstream's wheel test: run mypy.test + mypyc.test against the installed compiled wheel from a temp cwd, with mypy's pytest config copied beside the install and the test-data prefix pointed back at the checkout.
+          CIBW_TEST_COMMAND: >-
+            DIR=$(python -c 'import mypy, os; dn = os.path.dirname; print(dn(dn(mypy.__path__[0])))')
+            && cp '{project}/pyproject.toml' '{project}/conftest.py' "$DIR"
+            && MYPY_TEST_DIR=$(python -c 'import mypy.test; print(mypy.test.__path__[0])')
+            && MYPYC_TEST_DIR=$(python -c 'import mypyc.test; print(mypyc.test.__path__[0])')
+            && MYPY_TEST_PREFIX='{project}' pytest "$MYPY_TEST_DIR" "$MYPYC_TEST_DIR" -k 'not test_external'
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mypy-${{ env.MYPY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish mypy ${{ inputs.version || '2.3.1' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: mypy-${{ env.MYPY_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

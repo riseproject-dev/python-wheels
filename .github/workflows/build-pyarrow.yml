@@ -1,0 +1,328 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Arrow C++ is built from source with ARROW_DEPENDENCY_SOURCE=BUNDLED rather than via
+# cibuildwheel: the riscv64 image has no vcpkg cache, unlike upstream's x86/arm images.
+name: Build pyarrow wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pyarrow version to build (git tag without the apache-arrow- prefix, e.g. 25.0.1)'
+        required: true
+        default: '25.0.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pyarrow.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '25.0.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYARROW_VERSION: ${{ inputs.version || '25.0.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # build/test deps (numpy, libcst, pandas) have no public-PyPI riscv64 wheels
+  PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+
+  # ── Arrow feature set (single source of truth) ──────────────────────────────
+  ARROW_DATASET: "ON"
+  ARROW_ACERO: "ON"
+  ARROW_PARQUET: "ON"
+  ARROW_ORC: "ON"
+  ARROW_SUBSTRAIT: "ON"
+  ARROW_FLIGHT: "ON"
+  PARQUET_REQUIRE_ENCRYPTION: "ON"
+  ARROW_HDFS: "ON"
+  ARROW_MIMALLOC: "ON"
+  # off until their bundled dep trees are verified on riscv64; jemalloc is page-size fragile
+  ARROW_S3: "OFF"
+  ARROW_GCS: "OFF"
+  ARROW_AZURE: "OFF"
+  ARROW_GANDIVA: "OFF"
+  ARROW_JEMALLOC: "OFF"
+  ARROW_WITH_OPENTELEMETRY: "OFF"
+  ARROW_TENSORFLOW: "OFF"
+
+jobs:
+  build_wheels:
+    name: Build pyarrow ${{ inputs.version || '25.0.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440  # 24h — Arrow C++ + all deps built from source on riscv64
+    strategy:
+      fail-fast: false
+      # one job per interpreter so a single failure doesn't block the rest; ccache warms across them
+      matrix:
+        python:
+          - cp312-cp312
+          - cp313-cp313
+          - cp314-cp314
+          - cp314-cp314t
+
+    steps:
+      - name: Checkout apache/arrow apache-arrow-${{ env.PYARROW_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: apache/arrow
+          ref: apache-arrow-${{ env.PYARROW_VERSION }}
+          path: arrow
+          # submodules carry the pytest data (PARQUET_TEST_DATA / ARROW_TEST_DATA)
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Build Arrow C++ and pyarrow wheel
+        run: |
+          mkdir -p output "$HOME/.cache/pyarrow-ccache"
+          docker run -i --rm \
+            -v "$PWD/arrow:/arrow" \
+            -v "$PWD/output:/output" \
+            -v "$HOME/.cache/pyarrow-ccache:/ccache" \
+            -e CCACHE_DIR=/ccache \
+            -e ARROW_VERSION="$PYARROW_VERSION" \
+            -e PIP_EXTRA_INDEX_URL \
+            -e ARROW_DATASET -e ARROW_ACERO -e ARROW_PARQUET \
+            -e PARQUET_REQUIRE_ENCRYPTION -e ARROW_ORC -e ARROW_SUBSTRAIT \
+            -e ARROW_FLIGHT -e ARROW_S3 -e ARROW_GCS -e ARROW_AZURE \
+            -e ARROW_HDFS -e ARROW_GANDIVA -e ARROW_JEMALLOC -e ARROW_MIMALLOC \
+            -e ARROW_WITH_OPENTELEMETRY -e ARROW_TENSORFLOW \
+            "$MANYLINUX_RISCV64_IMAGE" bash -s <<'PYARROW_BUILD_EOF'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+
+          ARROW_VERSION="${ARROW_VERSION:?must be set, e.g. 25.0.1}"
+          PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL:?riscv64 wheel registry index URL}"
+
+          ARROW_DATASET="${ARROW_DATASET:-ON}"
+          ARROW_ACERO="${ARROW_ACERO:-ON}"
+          ARROW_PARQUET="${ARROW_PARQUET:-ON}"
+          PARQUET_REQUIRE_ENCRYPTION="${PARQUET_REQUIRE_ENCRYPTION:-OFF}"
+          ARROW_ORC="${ARROW_ORC:-OFF}"
+          ARROW_SUBSTRAIT="${ARROW_SUBSTRAIT:-OFF}"
+          ARROW_FLIGHT="${ARROW_FLIGHT:-OFF}"
+          ARROW_S3="${ARROW_S3:-OFF}"
+          ARROW_GCS="${ARROW_GCS:-OFF}"
+          ARROW_AZURE="${ARROW_AZURE:-OFF}"
+          ARROW_HDFS="${ARROW_HDFS:-ON}"
+          ARROW_GANDIVA="${ARROW_GANDIVA:-OFF}"
+          ARROW_JEMALLOC="${ARROW_JEMALLOC:-OFF}"
+          ARROW_MIMALLOC="${ARROW_MIMALLOC:-ON}"
+          ARROW_WITH_OPENTELEMETRY="${ARROW_WITH_OPENTELEMETRY:-OFF}"
+          ARROW_TENSORFLOW="${ARROW_TENSORFLOW:-OFF}"
+
+          ARROW_SRC=/arrow
+          DIST=/tmp/arrow-dist
+          BUILD=/tmp/arrow-build
+
+          # ninja and OpenSSL headers aren't in the base image
+          dnf install -y --setopt=install_weak_deps=False ninja-build openssl-devel
+
+          mkdir -p "$BUILD"
+          pushd "$BUILD"
+          # The image ships OpenSSL shared-only, so force it shared (the rest stay static).
+          # UNITY_BUILD off: bundled c-ares isn't unity-clean and upstream never compiles it.
+          cmake \
+              -DARROW_DEPENDENCY_SOURCE=BUNDLED \
+              -DARROW_DEPENDENCY_USE_SHARED=OFF \
+              -DARROW_OPENSSL_USE_SHARED=ON \
+              -DARROW_BUILD_SHARED=ON \
+              -DARROW_BUILD_STATIC=OFF \
+              -DARROW_BUILD_TESTS=OFF \
+              -DARROW_COMPUTE=ON \
+              -DARROW_CSV=ON \
+              -DARROW_JSON=ON \
+              -DARROW_FILESYSTEM=ON \
+              -DARROW_DATASET="${ARROW_DATASET}" \
+              -DARROW_ACERO="${ARROW_ACERO}" \
+              -DARROW_PARQUET="${ARROW_PARQUET}" \
+              -DPARQUET_REQUIRE_ENCRYPTION="${PARQUET_REQUIRE_ENCRYPTION}" \
+              -DARROW_ORC="${ARROW_ORC}" \
+              -DARROW_SUBSTRAIT="${ARROW_SUBSTRAIT}" \
+              -DARROW_FLIGHT="${ARROW_FLIGHT}" \
+              -DARROW_S3="${ARROW_S3}" \
+              -DARROW_GCS="${ARROW_GCS}" \
+              -DARROW_AZURE="${ARROW_AZURE}" \
+              -DARROW_HDFS="${ARROW_HDFS}" \
+              -DARROW_GANDIVA="${ARROW_GANDIVA}" \
+              -DARROW_JEMALLOC="${ARROW_JEMALLOC}" \
+              -DARROW_MIMALLOC="${ARROW_MIMALLOC}" \
+              -DARROW_WITH_BROTLI=ON \
+              -DARROW_WITH_BZ2=ON \
+              -DARROW_WITH_LZ4=ON \
+              -DARROW_WITH_SNAPPY=ON \
+              -DARROW_WITH_ZLIB=ON \
+              -DARROW_WITH_ZSTD=ON \
+              -DARROW_WITH_OPENTELEMETRY="${ARROW_WITH_OPENTELEMETRY}" \
+              -DARROW_TENSORFLOW="${ARROW_TENSORFLOW}" \
+              -DARROW_RPATH_ORIGIN=ON \
+              -DARROW_USE_CCACHE=ON \
+              -DCMAKE_BUILD_TYPE=release \
+              -DCMAKE_INSTALL_PREFIX="$DIST" \
+              -DCMAKE_INSTALL_LIBDIR=lib \
+              -DCMAKE_UNITY_BUILD=OFF \
+              -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
+              -Dxsimd_SOURCE=BUNDLED \
+              -G Ninja \
+              "$ARROW_SRC/cpp"
+          cmake --build . --target install -j "$(nproc)"
+          popd
+
+          # symbol visibility check, from upstream's build script
+          nm --demangle --dynamic "$DIST/lib/libarrow.so" > nm_arrow.log
+          allowed_symbols='(arrow|\b_init\b|\b_fini\b)'
+          if [ "${ARROW_WITH_OPENTELEMETRY}" = "ON" ]; then
+              allowed_symbols="${allowed_symbols}|(opentelemetry)"
+          fi
+          grep ' T ' nm_arrow.log | grep -v -E "${allowed_symbols}" > visible_symbols.log || true
+          if [ -s visible_symbols.log ]; then
+              echo "== Unexpected symbols exported by libarrow.so =="
+              cat visible_symbols.log
+              exit 1
+          fi
+
+          export PYARROW_BUNDLE_ARROW_CPP=ON
+          export ARROW_HOME="$DIST"
+          export CMAKE_PREFIX_PATH="$DIST"
+          export PYARROW_WITH_DATASET="${ARROW_DATASET}"
+          export PYARROW_WITH_ACERO="${ARROW_ACERO}"
+          export PYARROW_WITH_PARQUET="${ARROW_PARQUET}"
+          export PYARROW_WITH_PARQUET_ENCRYPTION="${PARQUET_REQUIRE_ENCRYPTION}"
+          export PYARROW_WITH_ORC="${ARROW_ORC}"
+          export PYARROW_WITH_SUBSTRAIT="${ARROW_SUBSTRAIT}"
+          export PYARROW_WITH_FLIGHT="${ARROW_FLIGHT}"
+          export PYARROW_WITH_S3="${ARROW_S3}"
+          export PYARROW_WITH_GCS="${ARROW_GCS}"
+          export PYARROW_WITH_AZURE="${ARROW_AZURE}"
+          export PYARROW_WITH_HDFS="${ARROW_HDFS}"
+          export PYARROW_WITH_GANDIVA="${ARROW_GANDIVA}"
+          # Shallow checkout → setuptools_scm git-describe is unreliable; pin it.
+          export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PYARROW="${ARROW_VERSION}"
+
+          pybin="/opt/python/${{ matrix.python }}/bin/python"
+          echo "=== (${{ matrix.python }}) Building pyarrow wheel ==="
+          # numpy/libcst: riscv64 wheels only in our registry
+          "$pybin" -m pip install -U --extra-index-url "$PIP_EXTRA_INDEX_URL" \
+              --only-binary=numpy,libcst "numpy>=2.0.0" "libcst>=1.8.6"
+          "$pybin" -m pip install -U "cython>=3.1" scikit-build-core setuptools_scm wheel build
+          mkdir -p /output
+          pushd "$ARROW_SRC/python"
+          "$pybin" -m build --wheel --no-isolation \
+              -C build.verbose=true \
+              -C cmake.build-type=release \
+              -C cmake.args="-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF"
+          auditwheel repair --strip dist/pyarrow-*.whl -w /output
+          popd
+
+          echo "=== Built wheels ==="
+          ls -la /output
+          PYARROW_BUILD_EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          # per-job artifact; publish-wheels' pattern + merge-multiple recombine them
+          name: pyarrow-${{ env.PYARROW_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: output/*.whl
+          if-no-files-found: error
+
+      - name: Test pyarrow wheel
+        run: |
+          docker run -i --rm \
+            -v "$PWD/arrow:/arrow" \
+            -v "$PWD/output:/output" \
+            -e PIP_EXTRA_INDEX_URL \
+            -e ARROW_DATASET -e ARROW_ACERO -e ARROW_PARQUET \
+            -e PARQUET_REQUIRE_ENCRYPTION -e ARROW_ORC -e ARROW_SUBSTRAIT \
+            -e ARROW_FLIGHT -e ARROW_S3 -e ARROW_GCS -e ARROW_AZURE \
+            -e ARROW_HDFS -e ARROW_GANDIVA \
+            "$MANYLINUX_RISCV64_IMAGE" bash -s <<'PYARROW_TEST_EOF'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+
+          PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL:?riscv64 wheel registry index URL}"
+
+          ARROW_DATASET="${ARROW_DATASET:-ON}"
+          ARROW_ACERO="${ARROW_ACERO:-ON}"
+          ARROW_PARQUET="${ARROW_PARQUET:-ON}"
+          PARQUET_REQUIRE_ENCRYPTION="${PARQUET_REQUIRE_ENCRYPTION:-OFF}"
+          ARROW_ORC="${ARROW_ORC:-OFF}"
+          ARROW_SUBSTRAIT="${ARROW_SUBSTRAIT:-OFF}"
+          ARROW_FLIGHT="${ARROW_FLIGHT:-OFF}"
+          ARROW_S3="${ARROW_S3:-OFF}"
+          ARROW_GCS="${ARROW_GCS:-OFF}"
+          ARROW_AZURE="${ARROW_AZURE:-OFF}"
+          ARROW_HDFS="${ARROW_HDFS:-ON}"
+          ARROW_GANDIVA="${ARROW_GANDIVA:-OFF}"
+
+          ARROW_SRC=/arrow
+
+          export PYARROW_TEST_ACERO="${ARROW_ACERO}"
+          export PYARROW_TEST_DATASET="${ARROW_DATASET}"
+          export PYARROW_TEST_PARQUET="${ARROW_PARQUET}"
+          export PYARROW_TEST_PARQUET_ENCRYPTION="${PARQUET_REQUIRE_ENCRYPTION}"
+          export PYARROW_TEST_ORC="${ARROW_ORC}"
+          export PYARROW_TEST_SUBSTRAIT="${ARROW_SUBSTRAIT}"
+          export PYARROW_TEST_FLIGHT="${ARROW_FLIGHT}"
+          export PYARROW_TEST_HDFS="${ARROW_HDFS}"
+          export PYARROW_TEST_S3="${ARROW_S3}"
+          export PYARROW_TEST_GCS="${ARROW_GCS}"
+          export PYARROW_TEST_AZURE="${ARROW_AZURE}"
+          export PYARROW_TEST_GANDIVA="${ARROW_GANDIVA}"
+          export PYARROW_TEST_CYTHON=OFF
+          export PYARROW_TEST_TENSORFLOW=OFF
+
+          export ARROW_TEST_DATA="$ARROW_SRC/testing/data"
+          export PARQUET_TEST_DATA="$ARROW_SRC/cpp/submodules/parquet-testing/data"
+
+          pybin="/opt/python/${{ matrix.python }}/bin/python"
+          echo "=== (${{ matrix.python }}) Testing pyarrow wheel ==="
+          "$pybin" -m pip install --extra-index-url "$PIP_EXTRA_INDEX_URL" \
+              /output/pyarrow-*-"${{ matrix.python }}"-*.whl
+
+          # import smoke test: always-on modules, then enabled features
+          "$pybin" -c "import pyarrow, pyarrow.csv, pyarrow.json, pyarrow.dataset, pyarrow.fs, pyarrow._hdfs; print('pyarrow', pyarrow.__version__)"
+          [ "${ARROW_PARQUET}" = ON ]   && "$pybin" -c "import pyarrow.parquet"
+          [ "${ARROW_ORC}" = ON ]       && "$pybin" -c "import pyarrow.orc"
+          [ "${ARROW_SUBSTRAIT}" = ON ] && "$pybin" -c "import pyarrow.substrait"
+          [ "${ARROW_FLIGHT}" = ON ]    && "$pybin" -c "import pyarrow.flight"
+          [ "${ARROW_S3}" = ON ]        && "$pybin" -c "import pyarrow._s3fs"
+          [ "${ARROW_GCS}" = ON ]       && "$pybin" -c "import pyarrow._gcsfs"
+
+          # hypothesis is only-binary too: upstream ships no cp314t riscv64 wheel (it builds
+          # riscv64 abi3-only, and abi3t starts at 3.15), so without this pip falls back to its
+          # sdist and the Rust build dies on a triple rustup does not have. Ours comes from the registry.
+          "$pybin" -m pip install -U --only-binary=numpy,cffi,hypothesis \
+              --extra-index-url "$PIP_EXTRA_INDEX_URL" \
+              pytest hypothesis cffi pytz packaging "numpy>=2.0.0"
+          # pandas may lack a free-threaded riscv64 wheel; skip its tests if so
+          if "$pybin" -m pip install -U --only-binary=pandas \
+              --extra-index-url "$PIP_EXTRA_INDEX_URL" pandas; then
+              export PYARROW_TEST_PANDAS=ON
+          else
+              echo "WARNING: pandas has no riscv64 wheel for ${{ matrix.python }}; disabling pandas tests."
+              export PYARROW_TEST_PANDAS=OFF
+          fi
+
+          "$pybin" -c 'import pyarrow; pyarrow.create_library_symlinks()'
+          "$pybin" -m pytest -r s --pyargs pyarrow
+          PYARROW_TEST_EOF
+
+  publish:
+    name: Publish pyarrow ${{ inputs.version || '25.0.1' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: pyarrow-${{ env.PYARROW_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

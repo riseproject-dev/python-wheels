@@ -1,0 +1,126 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/pytorch/audio/blob/main/.github/workflows/build_wheels_linux.yml
+name: Build torchaudio wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'torchaudio version to build (git tag without leading v, e.g. 2.11.0)'
+        required: true
+        default: '2.11.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-torchaudio.yml'
+
+run-name: build-torchaudio - ${{ inputs.version || '2.11.0' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.11.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default there.
+  TORCHAUDIO_VERSION: ${{ inputs.version || '2.11.0' }}
+
+jobs:
+  build_wheels:
+    name: Build torchaudio ${{ inputs.version || '2.11.0' }} cp${{ matrix.python-version }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Match torch's own riscv64 matrix on the registry. torchaudio links
+        # libtorch_python (version-specific), so - despite py_limited_api=True -
+        # each CPython needs its own build; there is no single abi3 wheel.
+        # See https://pypi.riseproject.dev/python-wheels/development.html#target-python-versions
+        python-version: [312, 313, 314, 314t]
+
+    steps:
+      - name: Checkout torchaudio v${{ env.TORCHAUDIO_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: pytorch/audio
+          ref: v${{ env.TORCHAUDIO_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_BUILD: "cp${{ matrix.python-version }}-manylinux_riscv64"
+          # torchaudio's setup.py does `import torch` at module top and declares
+          # no [build-system] table, so the build backend is legacy setuptools
+          # with no PEP 517 isolation available anyway. Preinstall torch (+ the
+          # setuptools/ninja build tools) and disable isolation so setup.py can
+          # import the already-installed torch.
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          # --only-binary=:all: torch: never let pip fall back to building torch
+          # from an sdist inside the container (public PyPI has no riscv64 torch
+          # wheel; ours does). ninja/setuptools/wheel likewise come as wheels.
+          # torch>=2.11 (not a pin): torchaudio 2.11 builds against the stable
+          # libtorch ABI (TORCH_TARGET_VERSION in tools/setup_helpers/extension.py)
+          # and pins no torch at runtime, so it's forward-compatible with any
+          # torch >=2.11 - resolve to the latest on our registry.
+          CIBW_BEFORE_BUILD: >-
+            pip install --only-binary=:all:
+            torch>=2.11 setuptools wheel ninja
+          # USE_CUDA=0: CPU-only build (no CUDA toolchain on riscv64).
+          # BUILD_VERSION pins a clean wheel version; without it setup.py appends
+          # +<gitsha> to version.txt. The tag maps 1:1 to the package version
+          # (v2.11.0 -> 2.11.0), so no tag->version translation is needed.
+          # PIP_EXTRA_INDEX_URL lets torch's deps (and the before-build torch
+          # itself) resolve from our registry inside the container.
+          CIBW_ENVIRONMENT: >-
+            USE_CUDA=0
+            BUILD_VERSION=${{ env.TORCHAUDIO_VERSION }}
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # torchaudio's extension links libtorch/libc10/libgomp etc., which are
+          # provided by the torch wheel at runtime (torch is imported before
+          # torchaudio and loads them RTLD_GLOBAL). Exclude them from the repair
+          # so auditwheel does not vendor ~130MB of libtorch into our wheel -
+          # this mirrors how upstream torchaudio wheels are built.
+          CIBW_REPAIR_WHEEL_COMMAND: >-
+            auditwheel repair -w {dest_dir} {wheel}
+            --exclude libtorch.so
+            --exclude libtorch_cpu.so
+            --exclude libtorch_python.so
+            --exclude libtorch_global_deps.so
+            --exclude libc10.so
+            --exclude libgomp.so.1
+            --exclude libgfortran.so.5
+            --exclude libopenblas.so.0
+          # Run torchaudio's own smoke test (imports torchaudio + all
+          # subpackages) against the freshly built wheel. torch is pulled from
+          # our registry; numpy silences torch's "Failed to initialize NumPy"
+          # warning and exercises the tensor<->numpy path torchaudio relies on.
+          CIBW_TEST_REQUIRES: torch>=2.11 numpy
+          CIBW_TEST_COMMAND: python {project}/test/smoke_test/smoke_test.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: torchaudio-${{ env.TORCHAUDIO_VERSION }}-cp${{ matrix.python-version }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish torchaudio ${{ inputs.version || '2.11.0' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: torchaudio-${{ env.TORCHAUDIO_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

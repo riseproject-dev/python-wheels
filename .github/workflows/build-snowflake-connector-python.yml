@@ -1,0 +1,169 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/snowflakedb/snowflake-connector-python/blob/v4.7.2/ci/build_linux.sh
+name: Build snowflake-connector-python wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'snowflake-connector-python version to build (git tag without the leading v, e.g. 4.7.2)'
+        required: true
+        default: '4.7.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-snowflake-connector-python.yml'
+      - 'patches/snowflake-connector-python/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '4.7.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 4.7.2 there.
+  SNOWFLAKE_CONNECTOR_VERSION: ${{ inputs.version || '4.7.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  WIREMOCK_VERSION: '3.11.0'
+
+jobs:
+  build_wheels:
+    name: Build snowflake-connector-python ${{ inputs.version || '4.7.2' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        # Per-interpreter (not abi3): the Cython extension links the version-specific ABI.
+        include:
+          - python: "cp312"
+            pytest_dist: "-n auto --dist loadfile"
+          - python: "cp313"
+            pytest_dist: "-n auto --dist loadfile"
+          - python: "cp314"
+            pytest_dist: "-n auto --dist loadfile"
+          # execnet's receiver thread segfaults intermittently under the
+          # free-threaded interpreter, so run this one in-process.
+          - python: "cp314t"
+            pytest_dist: "-n 0"
+
+    steps:
+      - name: Checkout snowflake-connector-python v${{ env.SNOWFLAKE_CONNECTOR_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: snowflakedb/snowflake-connector-python
+          ref: v${{ env.SNOWFLAKE_CONNECTOR_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Prepare the checkout
+        run: |
+          # ci/build_linux.sh keeps only the host platform's prebuilt minicore blob;
+          # there is none for riscv64, and a foreign-arch .so breaks auditwheel repair
+          # (a missing one is non-fatal — _utils._CoreLoader._load swallows it).
+          rm -rf src/snowflake/connector/minicore/*/
+          # cibuildwheel 4 dropped the cpython-freethreading enable group and errors
+          # out on the stale name; free-threaded builds are always selectable now.
+          sed -i '/^enable = \["cpython-freethreading"\]$/d' pyproject.toml
+          curl -fsSL --retry 5 --retry-all-errors \
+            "https://repo1.maven.org/maven2/org/wiremock/wiremock-standalone/${WIREMOCK_VERSION}/wiremock-standalone-${WIREMOCK_VERSION}.jar" \
+            --output .wiremock/wiremock-standalone.jar
+          git apply python-wheels/patches/snowflake-connector-python/${{ env.SNOWFLAKE_CONNECTOR_VERSION }}/00*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Replaces upstream's AUDITWHEEL_PLAT=manylinux2014_$(uname -m); there is no
+          # manylinux2014 policy for riscv64, so keep the image's manylinux_2_39_riscv64.
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Upstream disables cibuildwheel's repair because ci/build_linux.sh runs
+          # auditwheel itself; restore the default so the wheel gets a manylinux tag.
+          CIBW_REPAIR_WHEEL_COMMAND: auditwheel repair -w {dest_dir} {wheel}
+          # Upstream sets test-skip = "*" (wheels are tested in a separate CI job).
+          CIBW_TEST_SKIP: ''
+          # Test phase only (gotcha 12): wheels-only, so installing the built wheel
+          # backtracks cryptography to the newest riscv64 wheel on our registry
+          # instead of source-building the latest sdist (which needs a rustup
+          # target triple that does not exist for riscv64).
+          CIBW_TEST_ENVIRONMENT: "PIP_ONLY_BINARY=:all:"
+          # A JRE for the Wiremock server the auth/oauth/proxy unit tests spin up.
+          CIBW_BEFORE_ALL: dnf install -y java-21-openjdk-headless
+          # The [development] extra minus mitmproxy, whose aioquic/pylsqpack deps
+          # have no riscv64 wheels (its fixtures skip when mitmdump is absent).
+          CIBW_TEST_REQUIRES: >-
+            pytest<7.5.0 pytest-asyncio pytest-timeout pytest-rerunfailures<16.0
+            pytest-xdist more-itertools numpy responses azure-identity
+          # Mirrors tox's py3XX-unit-parallel-ci env, minus coverage. Dropped:
+          #   aio/            - aiohttp+aioboto extras have no riscv64 wheels
+          #   test_ocsp       - live OCSP responders, incl. an unreachable preprod
+          #                     host, so it stalls on TCP timeouts
+          #   test_proxies    - 2-3 Wiremock JVMs per test streaming large results;
+          #                     tens of minutes even on x86
+          #   ssl_..._handshake - real TLS handshake against an external host
+          # The first three -k names need a native minicore blob, which upstream
+          # ships for eight platforms but not riscv64; the last five chmod a path
+          # and expect the EACCES that root - which cibuildwheel runs the tests
+          # as - never gets.
+          CIBW_TEST_COMMAND: >-
+            python -c "from snowflake.connector.nanoarrow_arrow_iterator import PyArrowRowIterator" &&
+            pytest -m "unit and not sso and not pandas and not lambda and not aio"
+            -k "not (TestCoreLoader and test_e2e)
+            and not test_get_present_binaries_contains_expected_paths
+            and not test_pruner_agrees_with_runtime_loader
+            and not test_warn_config_file_owner
+            and not test_log_debug_config_file_parent_dir_permissions
+            and not test_read_only
+            and not test_config_file_inaccessible_path
+            and not test_put_error"
+            ${{ matrix.pytest_dist }}
+            --ignore {package}/test/unit/aio
+            --ignore {package}/test/unit/test_ocsp.py
+            --ignore {package}/test/unit/test_proxies.py
+            --ignore {package}/test/unit/test_ssl_partial_chain_handshake.py
+            {package}/test/unit
+
+      - name: Check the Cython extension made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith(".so") for n in names), f"no compiled extension in {whl}"
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: snowflake-connector-python-${{ env.SNOWFLAKE_CONNECTOR_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish snowflake-connector-python ${{ inputs.version || '4.7.2' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: snowflake-connector-python-${{ env.SNOWFLAKE_CONNECTOR_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

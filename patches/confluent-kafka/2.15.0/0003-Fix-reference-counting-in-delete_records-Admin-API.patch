@@ -1,0 +1,86 @@
+From 253e0c6cfd7a0f07e9c43ab686824dcc8bca1b4b Mon Sep 17 00:00:00 2001
+From: Ojasva Jain <ojain@confluent.io>
+Date: Mon, 24 Aug 2026 16:53:14 +0530
+Subject: [PATCH] Fix reference counting in delete_records Admin API (#2328)
+
+
+Backported to v2.15.0: the CHANGELOG.md hunk is dropped because that file has
+moved on upstream and the entry describes a release we do not build; the
+Admin.c fix and the regression test in tests/test_Admin.py apply unchanged.
+
+Without it, Admin_delete_records() Py_XDECREFs topic_partition_offsets, a
+borrowed reference it never incremented, on both the success and the error
+path. The caller's list is freed while still referenced, and the interpreter
+faults at whatever allocates next -- for us a SIGSEGV in re/_compiler.py in
+the following test module on cp314. Reproduces off-arch on macOS/arm64
+against the released 2.15.0 wheel, so it is not riscv64-specific.
+
+Fixed upstream in commit 253e0c6cfd7a0f07e9c43ab686824dcc8bca1b4b, merged
+2026-08-24 and not present in the 2.15.0 tag we build.
+
+Upstream-Status: Backport [https://github.com/confluentinc/confluent-kafka-python/pull/2328]
+---
+
+diff --git a/src/confluent_kafka/src/Admin.c b/src/confluent_kafka/src/Admin.c
+index 0c8a97070..10e76dfa1 100644
+--- a/src/confluent_kafka/src/Admin.c
++++ b/src/confluent_kafka/src/Admin.c
+@@ -3272,7 +3272,6 @@ PyObject *Admin_delete_records(Handle *self, PyObject *args, PyObject *kwargs) {
+         free(c_obj);
+ 
+         rd_kafka_topic_partition_list_destroy(c_topic_partition_offsets);
+-        Py_XDECREF(topic_partition_offsets);
+ 
+         Py_RETURN_NONE;
+ err:
+@@ -3288,7 +3287,6 @@ PyObject *Admin_delete_records(Handle *self, PyObject *args, PyObject *kwargs) {
+                 rd_kafka_topic_partition_list_destroy(
+                     c_topic_partition_offsets);
+         }
+-        Py_XDECREF(topic_partition_offsets);
+         return NULL;
+ }
+ 
+diff --git a/tests/test_Admin.py b/tests/test_Admin.py
+index a6d67628a..0892bf03d 100644
+--- a/tests/test_Admin.py
++++ b/tests/test_Admin.py
+@@ -1,5 +1,6 @@
+ #!/usr/bin/env python
+ import concurrent.futures
++import sys
+ 
+ import pytest
+ 
+@@ -1177,6 +1178,31 @@ def test_delete_records():
+         a.delete_records([TopicPartition("test-topic1")])
+ 
+ 
++def test_delete_records_does_not_corrupt_argument_refcount():
++    """
++    Regression test for #2275.
++    delete_records() must not decref the 'topic_partition_offsets' argument it only borrows.
++    """
++    a = AdminClient({"socket.timeout.ms": 10})
++    request = [TopicPartition("test-topic1", 0, 1)]
++
++    refcount_before = sys.getrefcount(request)
++    a.delete_records(request)
++    refcount_after = sys.getrefcount(request)
++
++    assert refcount_after == refcount_before
++
++    # The original bug corrupted the heap rather than crashing immediately,
++    # so a later, unrelated call is what actually segfaulted (list_topics()
++    # in the reported issue).
++    # With no broker configured this call can't succeed, but it must fail cleanly
++    # instead of crashing the interpreter.
++    try:
++        a.list_topics(timeout=0.2)
++    except KafkaException as e:
++        assert e.args[0].code() in (KafkaError._TIMED_OUT, KafkaError._TRANSPORT)
++
++
+ def test_elect_leaders():
+     a = AdminClient({"socket.timeout.ms": 10})
+ 
