@@ -1,0 +1,126 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/developmentseed/obstore/blob/py-v0.11.1/.github/workflows/wheels.yml
+name: Build obstore wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'obstore version to build (git tag without the leading py-v, e.g. 0.11.1)'
+        required: true
+        default: '0.11.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-obstore.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.11.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.11.1 there.
+  OBSTORE_VERSION: ${{ inputs.version || '0.11.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build obstore ${{ inputs.version || '0.11.1' }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Upstream builds one abi3 wheel with `-i 3.11 --features abi3-py311`
+          # plus per-interpreter wheels for 3.10, free-threaded and pypy.
+          # cp310 and pypy3.11 are dropped (this repo's floor is cp312 and it
+          # doesn't build PyPy wheels); cp313t is dropped: the riscv64
+          # manylinux image ships no cp313t.
+          - tag: cp311-abi3
+            # Built on cp311 -- the oldest interpreter the abi3 tag claims --
+            # and re-tested on the newer ones via find_compatible_wheel.
+            build: >-
+              cp311-manylinux_riscv64 cp312-manylinux_riscv64
+              cp313-manylinux_riscv64 cp314-manylinux_riscv64
+            features: --features abi3-py311 --features pyo3/extension-module
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+            features: --features pyo3/extension-module
+
+    steps:
+      - name: Checkout obstore py-v${{ env.OBSTORE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: developmentseed/obstore
+          ref: py-v${{ env.OBSTORE_VERSION }}
+          persist-credentials: false
+
+      - name: Stage the licence beside obstore's pyproject.toml
+        # maturin globs LICEN[CS]E* relative to the pyproject directory, which
+        # in this monorepo is obstore/ -- so upstream's published wheels carry
+        # no licence text at all, only the classifier.
+        run: cp LICENSE obstore/LICENSE
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: obstore
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # obstore ships no [tool.cibuildwheel], so the Rust toolchain its
+          # maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            MATURIN_PEP517_ARGS="${{ matrix.features }}"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # arro3-core (used by tests/test_list.py) has no riscv64 wheel on
+          # public PyPI, only on our own registry.
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=arro3-core
+          CIBW_TEST_REQUIRES: pytest pytest-asyncio docker minio requests arro3-core
+          CIBW_TEST_SOURCES: tests
+          # tests/test_fsspec.py and tests/auth/ need a live Planetary
+          # Computer/minio endpoint (fsspec, pystac); the handful of other
+          # tests needing a running minio container are deselected below --
+          # everything else runs against MemoryStore/LocalStore or constructs
+          # requests without ever reaching a server.
+          CIBW_TEST_COMMAND: >-
+            python -c "import obstore._obstore as m; assert m.__file__.endswith('.so'), m.__file__"
+            && python -m pytest -v tests
+            --ignore=tests/test_fsspec.py
+            --ignore=tests/auth
+            --deselect tests/test_delete.py::test_delete_prefix
+            --deselect tests/store/test_s3.py::test_list_async
+            --deselect tests/store/test_s3.py::test_get_async
+            --deselect tests/store/test_sign.py::test_sign_roundtrip_with_prefix
+            --deselect tests/store/test_sign.py::test_sign_batch_roundtrip_with_prefix
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: obstore-${{ env.OBSTORE_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish obstore ${{ inputs.version || '0.11.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: obstore-${{ inputs.version || '0.11.1' }}-*-manylinux_riscv64
