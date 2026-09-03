@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/sgl-project/sglang/blob/v0.5.18/.github/workflows/release-pypi.yml
+name: Build sglang wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'sglang version to build (git tag without leading v, e.g. 0.5.18)'
+        required: true
+        default: '0.5.18'
+  pull_request:
+    paths:
+      - '.github/workflows/build-sglang.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.5.18' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  SGLANG_VERSION: ${{ inputs.version || '0.5.18' }}
+
+jobs:
+  build_wheels:
+    name: Build sglang ${{ inputs.version || '0.5.18' }} ${{ matrix.python-version }}-riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Checkout sglang v${{ env.SGLANG_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: sgl-project/sglang
+          ref: v${{ env.SGLANG_VERSION }}
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      # Upstream's scripts/ci/utils/install_protoc.sh only knows x86_64/aarch64
+      # release zips; patchelf is what auditwheel shells out to.
+      - name: Install protoc and patchelf
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y --no-install-recommends protobuf-compiler patchelf
+
+      # rust/rust-toolchain.toml pins 1.92, but cargo is invoked from python/ so
+      # rustup never reads it.
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # master
+        with:
+          toolchain: '1.92'
+
+      - name: Install build tooling
+        run: uv pip install --upgrade pip build auditwheel
+
+      - name: Build wheel
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ env.SGLANG_VERSION }}
+        run: |
+          cd python
+          cp ../README.md ../LICENSE .
+          python -m build --wheel
+
+      - name: Repair wheel for manylinux
+        run: |
+          cd python
+          mkdir -p dist-repaired
+          python -m auditwheel repair dist/*.whl -w dist-repaired/
+          rm dist/*.whl
+          mv dist-repaired/*.whl dist/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sglang-${{ env.SGLANG_VERSION }}-${{ matrix.python-version }}-riscv64
+          path: python/dist/*.whl
+          if-no-files-found: error
+
+      # sglang's ~300 runtime dependencies (torch, transformers, the CUDA stack)
+      # are not installable on riscv64, so `import sglang` is out of reach: load
+      # each compiled PyO3 module straight off disk instead.
+      - name: Smoke-test the extension modules
+        env:
+          UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+          UV_INDEX_STRATEGY: unsafe-best-match
+          UV_ONLY_BINARY: ':all:'
+        run: |
+          cd python
+          uv pip install numpy
+          python -m zipfile -e dist/*.whl unpacked/
+          python - <<'EOF'
+          import importlib.machinery
+          import importlib.util
+          import pathlib
+
+          modules = sorted(pathlib.Path("unpacked/sglang/srt/rust_extensions").glob("_*.so"))
+          names = {path.name.split(".")[0] for path in modules}
+          assert names == {"_grpc", "_multimodal", "_server"}, names
+          for path in modules:
+              name = path.name.split(".")[0]
+              loader = importlib.machinery.ExtensionFileLoader(name, str(path))
+              spec = importlib.util.spec_from_loader(name, loader)
+              module = importlib.util.module_from_spec(spec)
+              loader.exec_module(module)
+              print(name, sorted(a for a in dir(module) if not a.startswith("_")))
+          EOF
+
+  publish:
+    name: Publish sglang ${{ inputs.version || '0.5.18' }} to GitLab
+    needs: [build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: sglang-${{ env.SGLANG_VERSION }}-*-riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
