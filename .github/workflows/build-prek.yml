@@ -1,0 +1,144 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux`/`linux-arm` jobs of
+# https://github.com/j178/prek/blob/v0.5.2/.github/workflows/build-release-binaries.yml
+name: Build prek wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'prek version to build (git tag without the leading v, e.g. 0.5.2)'
+        required: true
+        default: '0.5.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-prek.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.5.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.5.2 there.
+  PREK_VERSION: ${{ inputs.version || '0.5.2' }}
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheel:
+    needs: [setup]
+    name: Build prek ${{ inputs.version || '0.5.2' }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout prek v${{ env.PREK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: j178/prek
+          ref: v${{ env.PREK_VERSION }}
+          persist-credentials: false
+
+      # `[tool.maturin] bindings = "bin"`: the wheel is one compiled executable
+      # with no ABI tag, so a single native build covers every interpreter.
+      # self-update matches the feature set upstream's own published PyPI
+      # wheels are built with (build-release-binaries.yml's linux/linux-arm jobs).
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          maturin-version: v1.14.1
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --locked --out dist --features self-update
+          manylinux: '2_39'
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: prek-${{ env.PREK_VERSION }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test prek ${{ inputs.version || '0.5.2' }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    env:
+      # Without this uv would reuse the runner image's system CPython for 3.12
+      # and download a standalone build for the others.
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        # This repo's default interpreter matrix (gotcha in workflow-anatomy.md);
+        # the wheel is interpreter-agnostic (bindings = "bin"), so every
+        # interpreter -- including free-threaded -- exercises the same binary.
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Checkout prek v${{ env.PREK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: j178/prek
+          ref: v${{ env.PREK_VERSION }}
+          persist-credentials: false
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: prek-${{ env.PREK_VERSION }}-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . prek
+
+      # No pytest suite ships for the wheel; crates/prek's tests are Rust
+      # integration tests run by upstream's own cargo nextest. `--version`
+      # mirrors upstream's own dev-binary smoke check; `prek run --all-files`
+      # against the builtin-hooks sample config mirrors what the published
+      # `prek-action` runs, with no network fetch of a hooks repo needed.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          prek --version
+          python -m prek --version
+
+          work=$(mktemp -d)
+          cd "$work"
+          git init -q
+          git config user.email test@example.com
+          git config user.name test
+          prek sample-config -f --format toml
+          git add -A
+          git commit -q -m init
+          printf 'trailing whitespace   \nno newline at end' > bad.txt
+          git add -A
+
+          # First run applies fixes and exits non-zero (pre-commit convention).
+          prek run --all-files || true
+          git diff --stat bad.txt
+          # Second run is clean.
+          prek run --all-files
+
+  publish:
+    name: Publish prek ${{ inputs.version || '0.5.2' }}
+    needs: [setup, build_wheel, test_wheel]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: prek-${{ inputs.version || '0.5.2' }}-manylinux_riscv64
