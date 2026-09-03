@@ -1,0 +1,246 @@
+---
+name: Backtrace sentencepiece 1303 (riscv64 free-threading)
+
+# Companion to repro-sentencepiece-1303.yml, for the second thing the maintainer
+# asked for in https://github.com/google/sentencepiece/issues/1303: a gdb
+# backtrace from a build with debug symbols.
+#
+# Why this runs here and not on a board: the abort only shows up on this runner
+# pool. 90 runs on BananaPi F3 hardware (30x v0.2.2, 30x master head, 30x with
+# CI's pinned pytest-run-parallel) were clean, so riscv64 on its own is not
+# enough to trigger it and a debug build on a board would prove nothing.
+#
+# Two upstream defaults have to be patched or the wheel ships without usable
+# symbols:
+#   * python/setup.py appends -Wl,-strip-all to both cflags and libs on every
+#     non-AIX Linux build, which strips the extension module.
+#   * python/build_bundled.sh hardcodes -DCMAKE_CXX_FLAGS and never sets
+#     CMAKE_BUILD_TYPE, so the C++ static library carries no -g and the env
+#     CXXFLAGS a normal debug build would rely on is overridden.
+# The patch step below asserts both edits landed rather than assuming they did.
+#
+# The loop stops as soon as it has MAX_BACKTRACES aborts. At the ~24% per-run
+# rate measured in run 31597917788 that is usually a handful of iterations
+# rather than the full 25, which keeps the job near an hour instead of four.
+#
+# Temporary. Delete this file and its branch once the issue is answered.
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: 'Maximum iterations of the pytest command'
+        required: true
+        default: '25'
+      max_backtraces:
+        description: 'Stop early once this many aborts have been captured'
+        required: true
+        default: '2'
+  # workflow_dispatch only reaches a workflow that already exists on the
+  # default branch, and this file deliberately does not live there. Pushing to
+  # this branch is what starts it, the same reason repro-sentencepiece-1303.yml
+  # carries a push trigger. The branch name is deliberately NOT
+  # sentencepiece-1303-repro: pushing here must not re-fire that workflow's two
+  # 25x loop jobs, which already answered their question in run 31597917788.
+  push:
+    branches:
+      - sentencepiece-1303-backtrace
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Same master head the repro workflow used, so the backtrace and the 19/6
+  # pass/abort split describe the same binary.
+  MASTER_REF: 66415574ea544516e2d1250117f63d618d2be66b
+  ITERATIONS: ${{ inputs.iterations || '25' }}
+  MAX_BACKTRACES: ${{ inputs.max_backtraces || '2' }}
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  CIBUILDWHEEL_VERSION: '3.4.0'
+
+jobs:
+  build_debug:
+    name: Build sentencepiece cp314t with debug symbols
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout sentencepiece master head
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: google/sentencepiece
+          ref: ${{ env.MASTER_REF }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install cibuildwheel
+        run: uv pip install "cibuildwheel==${{ env.CIBUILDWHEEL_VERSION }}"
+
+      - name: Vendor the C++ tree
+        working-directory: python
+        run: |
+          mkdir -p src/sentencepiece/package_data
+          cp ../data/*.bin src/sentencepiece/package_data
+          python build_sdist.py
+
+      - name: Patch out the strip, patch in the symbols
+        working-directory: python
+        run: |
+          sed -i "s/^\( *\)cflags.append('-Wl,-strip-all')/\1pass  # debug build: keep symbols/" setup.py
+          sed -i "/^ *libs.append('-Wl,-strip-all')\$/d" setup.py
+          sed -i 's/-DCMAKE_CXX_FLAGS="-fPIC/-DCMAKE_CXX_FLAGS="-g -O0 -fPIC/' build_bundled.sh
+          # Assert, do not assume. A silently missed sed here costs a two-hour
+          # build that produces a stripped wheel and no backtrace.
+          if grep -q "strip-all" setup.py; then
+            echo "setup.py still strips:"; grep -n "strip-all" setup.py; exit 1
+          fi
+          grep -q -- '-DCMAKE_CXX_FLAGS="-g -O0 -fPIC' build_bundled.sh \
+            || { echo "build_bundled.sh not patched"; grep -n CMAKE_CXX_FLAGS build_bundled.sh; exit 1; }
+          echo "patches applied"
+
+      - name: Build wheel
+        working-directory: python
+        run: python -m cibuildwheel --output-dir wheelhouse
+        env:
+          CIBW_BUILD: "cp314t-*"
+          CIBW_ARCHS_LINUX: auto
+          CIBW_SKIP: "*-musllinux_*"
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BUILD_VERBOSITY: 1
+          CIBW_ENVIRONMENT: >-
+            CMAKE_BUILD_PARALLEL_LEVEL=8
+            CFLAGS='-g -O0'
+            CXXFLAGS='-g -O0'
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+
+      - name: Prove the wheel actually carries symbols
+        working-directory: python
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq binutils
+          for w in wheelhouse/*.whl; do
+            rm -rf unpack && mkdir unpack
+            python -m zipfile -e "$w" unpack
+            found=0
+            while IFS= read -r so; do
+              echo "--- $so"
+              file "$so"
+              if readelf -S "$so" | grep -q debug_info; then
+                found=1
+              else
+                echo "NO .debug_info in $so"; exit 1
+              fi
+            done < <(find unpack -name '*.so')
+            [ "$found" -eq 1 ] || { echo "no .so found in $w"; exit 1; }
+          done
+          echo "debug symbols present"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sentencepiece-master-cp314t-debug-manylinux_riscv64
+          path: ./python/wheelhouse/*.whl
+          if-no-files-found: error
+
+  backtrace:
+    name: Loop under gdb until it aborts
+    needs: [build_debug]
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout sentencepiece master tests
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: google/sentencepiece
+          ref: ${{ env.MASTER_REF }}
+          persist-credentials: false
+          sparse-checkout: |
+            python/test
+            python/tools
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: '3.14t'
+          activate-environment: true
+          enable-cache: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: sentencepiece-master-cp314t-debug-manylinux_riscv64
+          path: wheelhouse
+
+      - name: Install
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq gdb
+          uv pip install --find-links=wheelhouse sentencepiece
+          uv pip install pytest pytest-run-parallel numpy protobuf
+          gdb --version | head -1
+
+      - name: Loop under gdb
+        working-directory: python
+        run: |
+          mkdir -p /tmp/sp-bt
+          python -c "import sys, sentencepiece as s; \
+            print('python  :', sys.version); \
+            print('gil     :', sys._is_gil_enabled()); \
+            print('spm     :', s.__version__, s.__file__)"
+          pass=0; abort=0; fail=0; caught=0
+          for i in $(seq 1 "$ITERATIONS"); do
+            log="/tmp/sp-bt/run-$(printf '%03d' "$i").log"
+            set +e
+            gdb -q -batch \
+              -ex 'set confirm off' \
+              -ex 'set pagination off' \
+              -ex 'run' \
+              -ex 'echo \n===== THREADS =====\n' \
+              -ex 'info threads' \
+              -ex 'echo \n===== BACKTRACE (all threads) =====\n' \
+              -ex 'thread apply all bt full' \
+              --args python -m pytest -v --parallel-threads 4 \
+              >"$log" 2>&1
+            rc=$?
+            set -e
+            if grep -qE "SIGABRT|SIGSEGV|Fatal Python error|core dumped" "$log"; then
+              abort=$((abort + 1)); caught=$((caught + 1)); verdict=ABORT
+            elif [ "$rc" -eq 0 ] && grep -qE "^=+ .*passed" "$log"; then
+              pass=$((pass + 1)); verdict=PASS; rm -f "$log"
+            else
+              fail=$((fail + 1)); verdict="FAIL(rc=$rc)"
+            fi
+            echo "[$i/$ITERATIONS] $verdict (aborts so far: $abort)"
+            if [ "$caught" -ge "$MAX_BACKTRACES" ]; then
+              echo "captured $caught backtrace(s), stopping early"
+              break
+            fi
+          done
+          {
+            echo "**gdb loop**: pass=$pass abort=$abort fail=$fail"
+            echo ""
+            if [ "$abort" -gt 0 ]; then
+              echo "Captured $abort backtrace(s); see the artifact."
+            else
+              echo "No abort in $ITERATIONS runs under gdb. The same command"
+              echo "aborted 6 of 25 times without gdb in run 31597917788, so"
+              echo "read this as gdb perturbing the race, not as the bug being"
+              echo "gone. Next step would be core dumps rather than ptrace."
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
+          echo "pass=$pass abort=$abort fail=$fail"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: backtraces
+          path: /tmp/sp-bt
+          if-no-files-found: ignore
