@@ -115,34 +115,25 @@ jobs:
             || { echo "build_bundled.sh not patched"; grep -n CMAKE_CXX_FLAGS build_bundled.sh; exit 1; }
           echo "patches applied"
 
+      # The patch lives in this repo as a file rather than inline. A YAML block
+      # scalar strips a fixed indent from every line, which silently reshaped
+      # the C++ match string of the previous inline version and made it match
+      # nothing (run 33790096482, failed in 2 minutes at the assert rather than
+      # after a two-hour build -- which is what the assert is for).
+      - name: Check out this repo for the patch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: .ci
+          persist-credentials: false
+
       - name: Apply the pretokenizer GIL fix under test
-        working-directory: python
         run: |
-          python - <<'PY'
-          p = 'src/sentencepiece/sentencepiece_pybind.cc'
-          s = open(p, encoding='utf-8').read()
-          old = """            if (!pretokenizer.is_none()) {
-              components.pretokenizer =
-                  [pretokenizer](
-                      absl::string_view text) -> std::vector<std::string> {
-                py::gil_scoped_acquire acquire;
-                try {
-                  py::object py_text = py::str(text.data(), text.size());
-                  py::object result = pretokenizer(py_text);"""
-          new = """            if (!pretokenizer.is_none()) {
-              py::handle pretokenizer_handle = pretokenizer;
-              components.pretokenizer =
-                  [pretokenizer_handle](
-                      absl::string_view text) -> std::vector<std::string> {
-                py::gil_scoped_acquire acquire;
-                try {
-                  py::object py_text = py::str(text.data(), text.size());
-                  py::object result = pretokenizer_handle(py_text);"""
-          assert s.count(old) == 1, s.count(old)
-          open(p, 'w', encoding='utf-8').write(s.replace(old, new))
-          print('pretokenizer capture patched')
-          PY
-          grep -q 'pretokenizer_handle' src/sentencepiece/sentencepiece_pybind.cc
+          P=.ci/.github/patches/sentencepiece-1303-pretokenizer-gil.patch
+          git apply --check -p1 "$P"
+          git apply -p1 "$P"
+          grep -q 'pretokenizer_handle' python/src/sentencepiece/sentencepiece_pybind.cc \
+            || { echo "patch applied but marker absent"; exit 1; }
+          echo "pretokenizer GIL fix applied"
 
       - name: Build wheel
         working-directory: python

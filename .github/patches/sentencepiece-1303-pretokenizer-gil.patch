@@ -1,0 +1,26 @@
+--- a/python/src/sentencepiece/sentencepiece_pybind.cc	2026-09-03 17:44:41.759453361 +0200
++++ b/python/src/sentencepiece/sentencepiece_pybind.cc	2026-09-03 17:44:41.791455905 +0200
+@@ -1559,13 +1559,21 @@
+               components.sentence_iterator = py_iter.get();
+             }
+             if (!pretokenizer.is_none()) {
++              // Capture a non-owning handle, not the py::object. Train copies
++              // TrainerComponents into the trainer (trainer_interface.h:109),
++              // which copies this std::function and would inc_ref the callable
++              // -- and that copy happens inside the gil_scoped_release below,
++              // so the refcount would be touched with no attached thread state.
++              // The caller's `pretokenizer` argument outlives Train, so a
++              // borrowed handle is enough to keep it alive.
++              py::handle pretokenizer_handle = pretokenizer;
+               components.pretokenizer =
+-                  [pretokenizer](
++                  [pretokenizer_handle](
+                       absl::string_view text) -> std::vector<std::string> {
+                 py::gil_scoped_acquire acquire;
+                 try {
+                   py::object py_text = py::str(text.data(), text.size());
+-                  py::object result = pretokenizer(py_text);
++                  py::object result = pretokenizer_handle(py_text);
+                   std::vector<std::string> chunks;
+                   for (auto item : result.cast<py::sequence>()) {
+                     chunks.push_back(item.cast<std::string>());
