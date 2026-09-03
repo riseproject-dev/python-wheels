@@ -100,13 +100,13 @@ jobs:
         run: |
           sed -i "s/^\( *\)cflags.append('-Wl,-strip-all')/\1pass  # debug build: keep symbols/" setup.py
           sed -i "/^ *libs.append('-Wl,-strip-all')\$/d" setup.py
-          sed -i 's/-DCMAKE_CXX_FLAGS="-fPIC/-DCMAKE_CXX_FLAGS="-g -O0 -fPIC/' build_bundled.sh
+          sed -i 's/-DCMAKE_CXX_FLAGS="-fPIC/-DCMAKE_CXX_FLAGS="-g -fno-omit-frame-pointer -fPIC/' build_bundled.sh
           # Assert, do not assume. A silently missed sed here costs a two-hour
           # build that produces a stripped wheel and no backtrace.
           if grep -q "strip-all" setup.py; then
             echo "setup.py still strips:"; grep -n "strip-all" setup.py; exit 1
           fi
-          grep -q -- '-DCMAKE_CXX_FLAGS="-g -O0 -fPIC' build_bundled.sh \
+          grep -q -- '-DCMAKE_CXX_FLAGS="-g -fno-omit-frame-pointer -fPIC' build_bundled.sh \
             || { echo "build_bundled.sh not patched"; grep -n CMAKE_CXX_FLAGS build_bundled.sh; exit 1; }
           echo "patches applied"
 
@@ -119,10 +119,18 @@ jobs:
           CIBW_SKIP: "*-musllinux_*"
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           CIBW_BUILD_VERBOSITY: 1
+          # -DNDEBUG is in CPython's own sysconfig CFLAGS and setting CFLAGS
+          # replaces them rather than appending, so it has to be restated.
+          # Without it pybind11 compiles its GIL-held assertions in and the
+          # binary no longer matches the one whose abort we are chasing.
+          # -O2 rather than -O0 for the same reason: this is a race, and
+          # changing codegen and timing can move or hide it. -g and frame
+          # pointers are all the backtrace needs.
+          CIBW_TEST_SKIP: "*"
           CIBW_ENVIRONMENT: >-
             CMAKE_BUILD_PARALLEL_LEVEL=8
-            CFLAGS='-g -O0'
-            CXXFLAGS='-g -O0'
+            CFLAGS='-g -O2 -DNDEBUG -fno-omit-frame-pointer'
+            CXXFLAGS='-g -O2 -DNDEBUG -fno-omit-frame-pointer'
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
 
       - name: Prove the wheel actually carries symbols
