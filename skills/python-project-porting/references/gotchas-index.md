@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (190 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (192 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -93,6 +93,7 @@ The porting gotchas (190 of them) live in [`references/gotchas/`](gotchas/), spl
 - **147** — A Rust crate that downloads a prebuilt native library almost always has an
 - **155** — maturin abi3 can be an opt-in Cargo *feature*, so a plain PEP 517 build silently
 - **179** — A pinned *git* dependency that does not build on riscv64: redirect it with a cargo
+- **187** — A `bindings = "bin"` project that ships no wheel-level test suite at all (the
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
@@ -254,6 +255,7 @@ The porting gotchas (190 of them) live in [`references/gotchas/`](gotchas/), spl
 - **113** — The aarch64 validation run (gotcha 101) does NOT exercise from-source dependency
 - **178** — Run gotcha 101's riscv64 `pip download` check inside a *Linux* container, and run
 - **180** — The aarch64 rehearsal defaults to the *wrong* base image — pass
+- **188** — A fat-LTO maturin release profile makes a full QEMU riscv64 build-rehearsal too
 
 ### PR, CI, triggers, publishing & maintainer signals — [`gotchas/pr-ci-and-maintainer.md`](gotchas/pr-ci-and-maintainer.md)
 

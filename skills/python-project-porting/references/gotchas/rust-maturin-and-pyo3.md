@@ -16,6 +16,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
 - **147** — A Rust crate that downloads a prebuilt native library almost always has an
 - **155** — maturin abi3 can be an opt-in Cargo *feature*, so a plain PEP 517 build silently
 - **179** — A pinned *git* dependency that does not build on riscv64: redirect it with a cargo
+- **187** — A `bindings = "bin"` project that ships **no** wheel-level test suite at all (the
 
 ---
 
@@ -384,3 +385,22 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       abi3-py3* or abi3t-py3* feature must be specified when cross-compiling`. 230 crates
       type-checked in 12 seconds that way, which is what turned "py-spy may need porting"
       into a one-line change.
+
+187. **A `bindings = "bin"` project that ships no wheel-level test suite at all (the prek
+    case; see `build-prek.yml`): exercise the tool's own self-contained functionality
+    instead of settling for a bare `--version` check.** py-spy at least has
+    `tests/integration_test.py` to mirror (gotcha 117). Some CLI ports have nothing —
+    prek's `crates/prek/tests/*.rs` are Rust integration tests run by upstream's own
+    `cargo nextest`, never packaged into the wheel — so "same as upstream" is not an
+    option and `prek --version` alone would prove only that the binary starts. The fix is
+    to find the tool's own no-dependency demo path and drive it for real: prek's
+    `sample-config` subcommand writes a config whose hooks are all **builtin** (Rust code
+    compiled into the binary, not cloned from a hooks repo), so `prek run --all-files`
+    against it in a scratch git repo is a genuine end-to-end exercise — config parsing,
+    hook dispatch, file mutation — with no network dependency to flake on a shared runner.
+    Assert on behaviour, not just exit code: write a file with the defect each builtin
+    hook fixes (trailing whitespace, missing final newline), run once expecting the
+    pre-commit convention of "exit 1, files modified", `git diff --stat` to prove the
+    fix actually happened, then run again expecting a clean pass. A step that only checks
+    `--version` would go equally green whether the hook engine works or is entirely
+    broken.

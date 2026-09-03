@@ -13,6 +13,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
 - **113** — The aarch64 validation run (gotcha 101) does NOT exercise from-source dependency
 - **178** — Run gotcha 101's riscv64 `pip download` check inside a *Linux* container, and run
 - **180** — The aarch64 rehearsal defaults to the *wrong* base image — pass
+- **188** — A fat-LTO maturin release profile makes a full QEMU riscv64 build-rehearsal too
 
 ---
 
@@ -158,3 +159,26 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
     while the 2_39 run on the identical tree died at `/usr/bin/ld: cannot find -lstdc++`
     because RHEL 10 moved `libstdc++.a` into `libstdc++-static` (gotcha 77) — exactly the
     class of failure the rehearsal exists to find.
+
+188. **A fat-LTO maturin release profile makes a full QEMU riscv64 build-rehearsal too
+    slow to bother with — override it for the *local* run only, not the shipped
+    workflow (the prek case).** Gotcha 9's "use docker to run a full build+smoke loop
+    under QEMU" is cheap for most Rust ports, but a project whose `Cargo.toml` sets
+    `[profile.release] lto = "fat"` + `codegen-units = 1` (prek, like the delta-rs/polars
+    cases in gotcha 141's neighbourhood) turns that into a real multi-hour emulated
+    build before you have learned anything a `cargo check` cross-compile (gotcha 179)
+    didn't already tell you. Set `CARGO_PROFILE_RELEASE_LTO=off
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_PROFILE_RELEASE_OPT_LEVEL=0` as env vars
+    on the `docker run` invoking `maturin build --release` — this is the same
+    env-var-not-Cargo.toml mechanism gotcha 141 documents for shrinking a *shipped*
+    workflow's build cost, just applied only to your throwaway rehearsal — and a
+    ~400-crate riscv64gc-unknown-linux-gnu wheel (prek, `bindings = "bin"`) built end to
+    end under `quay.io/pypa/manylinux_2_39_riscv64` via QEMU in **13 minutes** instead of
+    however long fat LTO would have taken emulated. Confirms the same dependency graph,
+    `cmake`/`aws-lc-sys` linkage, licence globbing and wheel tag that the real build
+    produces — only the codegen cost differs. **Do not carry the override into the
+    workflow** unless the real runner actually cannot afford upstream's profile (check
+    gotcha 141's per-core timing table first): prek's native riscv64 build with the full
+    fat-LTO profile still finished in under an hour on the shared 4-core runners, well
+    inside the timeout, so shipping upstream's own profile unmodified was both correct
+    (goal 2: mirror upstream) and affordable.
