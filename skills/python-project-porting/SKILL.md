@@ -10,7 +10,7 @@ metadata:
 # Python project porting (riscv64 wheels)
 
 Guidance for adding a new package's riscv64 wheel build to this repo and publishing it to
-`pypi.riseproject.dev`. The 186 hard-won "gotchas" are split by theme under
+`pypi.riseproject.dev`. The 187 hard-won "gotchas" are split by theme under
 [`references/gotchas/`](references/gotchas/) and routed by
 [references/gotchas-index.md](references/gotchas-index.md) — **skim the index before you start,
 then read the themed file for the step you're on.** Many gotchas each cost a full CI cycle
@@ -146,7 +146,7 @@ Load these on demand — they are one level deep from here.
   `build-<pkg>.yml`: standard triggers, UV/env vars, the interpreter matrix, `setup-uv`
   vs `setup-python`, the two build shapes (sdist→bdist, build-from-checkout), driving the
   container yourself, and the shared `publish` job.
-- **[references/gotchas-index.md](references/gotchas-index.md)** — the router for all 186
+- **[references/gotchas-index.md](references/gotchas-index.md)** — the router for all 187
   gotchas: a topic→file table and the full number→file lookup. Start here when you have a
   symptom but not a number, or to resolve a "gotcha N" citation to its file. The gotchas
   themselves live in [`references/gotchas/`](references/gotchas/), split by theme (listed
@@ -162,7 +162,7 @@ Load these on demand — they are one level deep from here.
 
 ### Finding the right gotcha
 
-The 186 gotchas are split into themed files under `references/gotchas/`. **Read the one file
+The 187 gotchas are split into themed files under `references/gotchas/`. **Read the one file
 that matches your current step** rather than loading them all — each file opens with an
 `## In this file` list of its entries. Three ways in:
 

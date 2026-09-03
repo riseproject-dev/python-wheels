@@ -467,3 +467,43 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       than downloading 100 MB: sorting the entries by uncompressed size showed the single
       payload file and the 0.5 MB of Python beside it in one call, which is the whole
       finding.
+
+183. **`vendored-binary` is a category, not a verdict — the disposition still has to be
+    earned per package (closing the loop on gotcha 35, re-verified against playwright
+    1.62.0).** Gotchas 35 and 157 both stop at "this is `vendored-binary`, not
+    `not-feasible`", which answers *what kind of gap this is* but not *whether to port it*.
+    The actual call is whether the vendored payload's **primary function** has any riscv64
+    story at all, and playwright supplies the other worked example past `av` (which ships
+    it and is `in-review`): re-fetching the real v1.62.0 sources confirmed every fact in
+    gotcha 35 still holds (`NODE_VERSION` pins 24.18.1, `SHASUMS256.txt` has zero `riscv`
+    matches, `unofficial-builds.nodejs.org` does publish a `riscv64` tarball for that exact
+    version) and added the missing last link: `playwright-core`'s own
+    `hostPlatform.ts::calculatePlatform()` doesn't crash on an unrecognised Linux arch, it
+    *degrades gracefully* to `{hostPlatform: "<unknown>", isOfficiallySupportedPlatform:
+    false}` — which is worse for triage, because a wheel that merely throws would fail
+    loudly in one smoke test, while this one imports fine and only breaks the two calls
+    that are the entire reason anyone installs the package (`playwright install`, and any
+    local browser launch).
+    - **Ask "does the primary use case have a riscv64 story", not "can I assemble the
+      bytes".** `av` is `vendored-binary` too (bundled ffmpeg libs), but those libraries
+      *do* build for riscv64, so vendoring them is a packaging convenience with a real
+      target. playwright's vendored payload (a Node.js driver, and — one layer further in —
+      Chromium/Firefox/WebKit, which the driver launches) has no riscv64 build from its
+      vendor at any layer, official or otherwise usable: Microsoft ships no riscv64 browser
+      binary period, so an unofficial Node.js build would only get you a driver that can
+      start, not one that can do anything a user opened the package for.
+    - **An unofficial third-party build is not free even when it exists.** Swapping
+      `NODEJS_DIST` for `unofficial-builds.nodejs.org` in a patch is mechanically easy and
+      still the wrong move here, because it fixes the *shallower* of the two missing
+      artifacts (the driver) while leaving the *deeper* one (the browsers) permanently
+      unavailable — so the patch would ship a wheel that imports and then fails on its own
+      documented quick-start. Don't stop at "can this fetch succeed" — trace one level past
+      the vendored binary to what it does at runtime, same as gotcha 35's `coreBundle.js`
+      read.
+    - **Verdict: park a `vendored-binary` port when the primary function is unreachable, not
+      merely degraded.** This mirrors sglang's `parked` disposition ("buildable but not
+      installable") one layer up the stack: playwright's wheel would be *installable and
+      importable* but not *usable* for the thing it exists to do, on every currently
+      supported interpreter, with no patch that changes that — record it in `queue.yml` as
+      `parked` with the specific unreachable primitive named (here: no riscv64 browser
+      binary, at any layer, official or unofficial), not as a generic "no riscv64 wheel yet".
