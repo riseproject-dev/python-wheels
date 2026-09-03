@@ -195,15 +195,15 @@ def render_new_yaml(
         lines.append(yaml_line("source-code", source_code))
     lines.append(yaml_line("license", license))
     lines.append("versions:")
-    lines.append(f"  - {yaml_line('version', version)}")
+    lines.append(f"- {yaml_line('version', version)}")
     if patch_dir is not None:
-        lines.append("    patched: true")
+        lines.append("  patched: true")
     if comment:
-        lines.append(f"    {yaml_line('comment', comment)}")
+        lines.append(f"  {yaml_line('comment', comment)}")
     publication_yaml = yaml.safe_dump(
         publication, sort_keys=False, allow_unicode=True
     ).rstrip("\n")
-    lines.extend(f"    {line}" for line in publication_yaml.splitlines())
+    lines.extend(f"  {line}" for line in publication_yaml.splitlines())
     return "\n".join(lines) + "\n"
 
 
@@ -241,17 +241,17 @@ def append_version(
         return yaml.safe_dump(package_data, sort_keys=False, allow_unicode=True)
 
     top_level_license = package_data.get("license")
-    lines = [f"  - {yaml_line('version', version)}"]
+    lines = [f"- {yaml_line('version', version)}"]
     if patch_dir is not None:
-        lines.append("    patched: true")
+        lines.append("  patched: true")
     if license and license != top_level_license and license not in VAGUE_LICENSES:
-        lines.append(f"    {yaml_line('license', license)}")
+        lines.append(f"  {yaml_line('license', license)}")
     if comment:
-        lines.append(f"    {yaml_line('comment', comment)}")
+        lines.append(f"  {yaml_line('comment', comment)}")
     publication_yaml = yaml.safe_dump(
         publication, sort_keys=False, allow_unicode=True
     ).rstrip("\n")
-    lines.extend(f"    {line}" for line in publication_yaml.splitlines())
+    lines.extend(f"  {line}" for line in publication_yaml.splitlines())
 
     return content.rstrip("\n") + "\n" + "\n".join(lines) + "\n"
 
