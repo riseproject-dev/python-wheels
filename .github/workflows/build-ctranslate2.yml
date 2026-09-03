@@ -16,6 +16,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/build-ctranslate2.yml'
+      - 'patches/ctranslate2/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.version || '4.8.1' }}-${{ github.head_ref || github.run_id }}
@@ -55,6 +56,18 @@ jobs:
         run: |
           git submodule update --init third_party/spdlog third_party/ruy
           git -C third_party/ruy submodule update --init third_party/cpuinfo
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # Ruy's pinned cpuinfo commit predates cpuinfo recognizing riscv64, so it never
+      # defines _GNU_SOURCE for this arch even though src/api.c calls syscall()
+      # unconditionally on __linux__ - see the patch for the long version.
+      - name: Patch cpuinfo for riscv64
+        run: git apply python-wheels/patches/ctranslate2/${{ env.CTRANSLATE2_VERSION }}/*.patch
 
       # Upstream's own wheel carries none of these: setup.py's find_packages() only
       # globs inside python/, so the repo-root LICENSE never reaches dist-info/licenses/.
