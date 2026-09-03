@@ -21,6 +21,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **145** — A `py3-none-<platform>` wheel can also be a *compiled-from-source* binary —
 - **150** — Before writing any YAML, check whether a sibling package from the same upstream
 - **157** — A closed-source vendored runtime has no source to fall back on — and its platform
+- **185** — A sibling distribution can be selected by an upstream *source-transform script*
 
 ---
 
@@ -254,6 +255,38 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       `CIBW_ENVIRONMENT` — and the stamp step should `grep -Fqx "headless = True"` the way it
       already greps the version, since getting this wrong silently builds the *other* sibling
       under your artifact name after a two-hour compile.
+
+185. **A sibling distribution can be selected by an upstream *source-transform script*
+    rather than a build flag — mirror that script verbatim as its own workflow step (the
+    pi-heif/pillow-heif case; see `build-pi-heif.yml`).** Gotcha 79's opencv-python-headless
+    shape is the easy version: one `setup.py` branches on an env var and the package name
+    changes in metadata only. pillow_heif's `pi-heif` sibling is a step further — upstream's
+    own `wheels-pi_heif.yml` runs `cp -r ./pi-heif/* .` (overlaying a `setup.cfg` with the
+    other name plus any per-OS overrides) then `python3 .github/transform_to-pi_heif.py`,
+    which text-replaces `pillow_heif`→`pi_heif` in `setup.py`/`MANIFEST.in`/the `.c` source
+    and **renames the package directory and the C extension file themselves**
+    (`pillow_heif/_pillow_heif.c` → `pi_heif/_pi_heif.c`). Nothing about this is
+    reconstructable from reading `setup.py` alone — the transform script is the spec, so
+    checkout it, copy its two commands into a workflow step ahead of the build, and don't
+    hand-roll an equivalent sed. A build/link flag can still be layered on top for the parts
+    that *are* a simple toggle: pi-heif also sets `PH_LIGHT_ACTION=1`, which changes what
+    `libheif/build_libs.py` compiles (drops `x265`, so only `libheif`+`libde265` end up in
+    the wheel) — verify by downloading both siblings' real wheels off PyPI and diffing
+    `*.libs/` and `dist-info/licenses/`, since that's the wheel-content assertion a workflow
+    should check, not the source-tree transform.
+    - **The env var a source-transform flag sets can also gate a *test*, not just the
+      build** — thread it through `CIBW_ENVIRONMENT` (visible in `before-all`, `build`, and
+      `test`, confirmed by pi-heif's own CI relying on exactly this), not a one-off `export`
+      inside `CIBW_BEFORE_ALL_LINUX`, or the variant-specific correctness test silently
+      *skips* instead of running. pillow_heif's `tests/basic_test.py::test_light_build` is
+      `skipif(not PH_LIGHT_ACTION)` — set the flag only for the native-build step and this
+      test never executes, so a broken "light" build (e.g. x265 accidentally still linked)
+      would ship green.
+    - **A sibling can be a *last release*, not an ongoing one — check PyPI's own `version`
+      field before picking a tag, not just the source repo's tags.** pillow_heif discontinued
+      `pi-heif` between its own v1.4.0 and v1.5.0 (`chore: discontinue pi-heif package`); the
+      source repo still tags newer releases, but PyPI's `pi-heif` project has no wheel past
+      1.4.0. Pin to the sibling's own latest published version, not the source repo's.
 
 81. **A `py3-none-<platform>` wheel can hold a real compiled library — gotcha 27's stop
     rule needs a third branch (the xgboost case).** Gotcha 27 reads an all-`py3-none-*`

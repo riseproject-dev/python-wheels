@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (187 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (189 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -47,6 +47,7 @@ The porting gotchas (187 of them) live in [`references/gotchas/`](gotchas/), spl
 - **150** — Before writing any YAML, check whether a sibling package from the same upstream
 - **157** — A closed-source vendored runtime has no source to fall back on — and its platform
 - **183** — `vendored-binary` is a category, not a verdict — the disposition still has to be
+- **185** — A sibling distribution can be selected by an upstream *source-transform script*
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -169,6 +170,7 @@ The porting gotchas (187 of them) live in [`references/gotchas/`](gotchas/), spl
 - **57** — `before-build` runs outside the isolated build env, so an upstream *(reused number — this theme)*
 - **171** — A green wheel we publish can break a *different* package's build the moment it lands
 - **175** — One `PIP_BUILD_CONSTRAINT` file covers the project's build tool *and* every
+- **184** — `[tool.cibuildwheel] enable` is an enum, not a free-form list — a pinned older
 
 ### Testing: test-sources & shadowing — [`gotchas/testing-and-shadowing.md`](gotchas/testing-and-shadowing.md)
 

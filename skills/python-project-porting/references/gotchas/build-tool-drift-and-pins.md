@@ -16,6 +16,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
 - **57** — `before-build` runs outside the isolated build env, so an upstream
 - **171** — A green wheel we publish can break a *different* package's build the moment it lands
 - **175** — One `PIP_BUILD_CONSTRAINT` file covers the project's build tool *and* every
+- **184** — `[tool.cibuildwheel] enable` is an enum, not a free-form list — a pinned older
 
 ---
 
@@ -297,3 +298,25 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
       script = "build_ext.py"` puts the cythonize call inside the backend: there is no
       `setup.py` to preinstall for, and the generated `setup.py` is executed by the
       *isolated* env's interpreter.
+
+184. **`[tool.cibuildwheel] enable` is an enum, not a free-form list — a pinned older tag's
+    value can be rejected by the newer cibuildwheel this repo pins (the pi-heif case; see
+    `build-pi-heif.yml`).** This is the cibuildwheel-config mirror of gotcha 76: the *tool
+    itself* drifted between the upstream tag being built and the SHA this repo pins, and
+    the failure is a hard parse error, not a warning — `cibuildwheel: Failed to parse
+    enable group. Unknown enable group: cpython-freethreading. Valid group names are:
+    cpython-prerelease, graalpy, pypy, pypy-eol, pyodide-eol, pyodide-prerelease`, thrown
+    before any container starts, for **every** interpreter in the matrix (the whole
+    `[tool.cibuildwheel]` table is parsed up front, so `--only cp312-…` does not narrow
+    around it). `cpython-freethreading` was cibuildwheel's opt-in for free-threaded
+    (`cp3XXt`) wheels; newer cibuildwheel builds them without an enable flag at all, so the
+    token was removed outright rather than renamed. pillow_heif's own next tag
+    (`v1.5.0`) already carries the fix — dropping the token with no replacement — which is
+    the tell that this is upstream's own bug, not a riscv64-only one: diff `pyproject.toml`
+    between the pinned tag and the next one or two releases for the exact upstream commit,
+    cite it as `Upstream-Status: Backport`, and patch just that line rather than
+    hand-picking a "safe" enable list — the smallest correct patch is upstream's own diff.
+    - **Reproduces on any host, no CI cycle needed**: `cibuildwheel --print-build-identifiers
+      --only cp312-manylinux_x86_64` (or any target) against the unpatched checkout fails
+      identically on macOS/Linux/x86/arm, since the parse happens before any platform or
+      arch selection.
