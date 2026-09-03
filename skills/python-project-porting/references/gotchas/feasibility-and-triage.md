@@ -611,3 +611,42 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     reason it uses its own channel rather than conda-forge's — but it's a concrete lead
     for whoever eventually picks up the numba/llvmlite port, and worth checking again
     then rather than re-deriving from scratch.
+
+203. **A `py2.py3-none-<platform>` wheel bundling a runtime can be the *opposite* of
+    gotchas 35/183/186's vendored-binary pattern — check whether the build compiles that
+    runtime from source before assuming it is (the nodejs-wheel-binaries case).** Gotcha
+    35 finds playwright's `py3-none-<platform>` tag load-bearing because `setup.py`
+    downloads a prebuilt Node.js binary from `nodejs.org/dist`, and gotcha 186 shows
+    imageio-ffmpeg doing the same for a curated ffmpeg vendor — both are
+    `vendored-binary`, gated on whether the *vendor* publishes the target arch. Gotcha
+    145's magika case is the compiled-from-source counterpart, but there the port's own
+    Rust source is what maturin builds; here the port has no compiled code of its own at
+    all, and what gets built is a *third-party upstream project's own source*, fetched
+    fresh by the build. nodejs-wheel-binaries looks identical to the vendored-binary
+    cases at a glance (same `py2.py3-none-<platform>` tag, a Node.js binary is the whole
+    point) but its `CMakeLists.txt` has no download-a-binary step at all: an
+    `ExternalProject_Add` block fetches Node's own
+    **source** tarball (`https://github.com/nodejs/node/archive/refs/tags/v<ver>.tar.gz`)
+    and runs upstream's own `configure && make` — the identical recipe upstream's own CI
+    uses to build its x86_64/aarch64/macOS/Windows wheels. That makes it an ordinary
+    from-source heavy-C++ port (gotcha 15's family), not a vendored-binary one, so the
+    feasibility question is not "does a vendor publish riscv64" but "does the upstream
+    *project's own build* support riscv64" — settled by grepping the vendored project's
+    own configure/build-system for the arch (`grep -n riscv deps/v8/BUILD.gn
+    configure.py` in a fetched Node source tree both hit) and, as corroborating rather
+    than load-bearing evidence, that `unofficial-builds.nodejs.org` already ships a
+    working `node-v<ver>-linux-riscv64.tar.gz` built the same way.
+    - **Find the fetch, then read what it fetches — a URL alone doesn't say vendored vs.
+      source.** The same one-liner that settles gotcha 35 (`grep` the download base) has
+      to be followed by checking whether the URL path is a *release/dist asset*
+      (prebuilt, vendor-gated) or a *source archive/tag* (`archive/refs/tags/`, a
+      `.tar.gz` of the repo itself, compiled by the very build you're writing) —
+      `ExternalProject_Add`/`FetchContent` fetching a GitHub `archive/refs/tags/` URL is
+      close to definitive for the second case.
+    - **A from-source port of a runtime this size still needs the heavy-build
+      treatment**, not special-casing: `timeout-minutes: 1440` (Node's V8 + bundled ICU
+      is comparable in scope to the other 24h riscv64 jobs — pyarrow, torch,
+      onnxruntime), and gotcha 9's QEMU proxy validates cheaply — running the vendored
+      project's own `configure` (not just the outer CMake project's) under `docker run
+      --platform linux/riscv64 <manylinux image>` finishes in seconds and proves the arch
+      is recognized, without attempting the multi-hour compile locally.
