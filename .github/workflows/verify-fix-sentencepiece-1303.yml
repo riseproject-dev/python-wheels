@@ -1,0 +1,271 @@
+---
+name: Verify pretokenizer GIL fix (riscv64 free-threading)
+
+# The experiment that would actually settle google/sentencepiece#1303, rather
+# than describe it.
+#
+# _TrainFromMap captures the Python pretokenizer callable by value in a
+# std::function, and Train copy-assigns TrainerComponents into the trainer
+# (trainer_interface.h:109) inside a gil_scoped_release. That copy inc_refs the
+# callable with no attached thread state, and the matching dec_ref on
+# destruction is the refcount-corruption mechanism. pybind11's GIL assertion
+# catches it deterministically on x86_64 too, so the violation is not
+# riscv64-specific; what may be riscv64-specific is whether a corrupted
+# refcount turns into an abort, given weaker memory ordering than x86 TSO.
+#
+# Capturing a borrowed py::handle instead removes the refcount traffic. On
+# x86_64 with assertions on, that takes the three pretokenizer tests from
+# failing to passing and the suite to 46 passed under --parallel-threads 4.
+#
+# What that does NOT show is whether it fixes the aborts, because x86_64 never
+# aborted. This runs the fixed build through the same 25x loop as
+# repro-sentencepiece-1303.yml on the pool that does abort. Read against that
+# run's 19 pass / 6 abort baseline:
+#
+#   0 aborts in 25  -> the violation was the cause, and the patch is the fix
+#   ~6 aborts in 25 -> it is a real bug but a different one, and the abort
+#                      still needs its own explanation
+#
+# Both outcomes are worth having; the second is the one that stops us telling
+# the maintainer a tidy story that happens to be wrong.
+#
+# Unpatched control is repro-sentencepiece-1303.yml run 31597917788. Rerunning
+# the control is deliberately not part of this: that arm has already been run
+# on this pool and rerunning costs another four hours of runner time.
+#
+# Temporary. Delete with its siblings once the issue is answered.
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: 'Iterations of the pytest command'
+        required: true
+        default: '25'
+  # workflow_dispatch only reaches a workflow that already exists on the
+  # default branch, and this file deliberately does not live there. Pushing to
+  # this branch is what starts it, the same reason repro-sentencepiece-1303.yml
+  # carries a push trigger. The branch name is deliberately NOT
+  # sentencepiece-1303-repro: pushing here must not re-fire that workflow's two
+  # 25x loop jobs, which already answered their question in run 31597917788.
+  push:
+    branches:
+      - sentencepiece-1303-verify-fix
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Same master head the repro workflow used, so the backtrace and the 19/6
+  # pass/abort split describe the same binary.
+  MASTER_REF: 66415574ea544516e2d1250117f63d618d2be66b
+  ITERATIONS: ${{ inputs.iterations || '25' }}
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  CIBUILDWHEEL_VERSION: '3.4.0'
+
+jobs:
+  build_debug:
+    name: Build sentencepiece cp314t with debug symbols
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout sentencepiece master head
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: google/sentencepiece
+          ref: ${{ env.MASTER_REF }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install cibuildwheel
+        run: uv pip install "cibuildwheel==${{ env.CIBUILDWHEEL_VERSION }}"
+
+      - name: Vendor the C++ tree
+        working-directory: python
+        run: |
+          mkdir -p src/sentencepiece/package_data
+          cp ../data/*.bin src/sentencepiece/package_data
+          python build_sdist.py
+
+      - name: Patch out the strip, patch in the symbols
+        working-directory: python
+        run: |
+          sed -i "s/^\( *\)cflags.append('-Wl,-strip-all')/\1pass  # debug build: keep symbols/" setup.py
+          sed -i "/^ *libs.append('-Wl,-strip-all')\$/d" setup.py
+          sed -i 's/-DCMAKE_CXX_FLAGS="-fPIC/-DCMAKE_CXX_FLAGS="-g -fno-omit-frame-pointer -fPIC/' build_bundled.sh
+          # Assert, do not assume. A silently missed sed here costs a two-hour
+          # build that produces a stripped wheel and no backtrace.
+          if grep -q "strip-all" setup.py; then
+            echo "setup.py still strips:"; grep -n "strip-all" setup.py; exit 1
+          fi
+          grep -q -- '-DCMAKE_CXX_FLAGS="-g -fno-omit-frame-pointer -fPIC' build_bundled.sh \
+            || { echo "build_bundled.sh not patched"; grep -n CMAKE_CXX_FLAGS build_bundled.sh; exit 1; }
+          echo "patches applied"
+
+      - name: Apply the pretokenizer GIL fix under test
+        working-directory: python
+        run: |
+          python - <<'PY'
+          p = 'src/sentencepiece/sentencepiece_pybind.cc'
+          s = open(p, encoding='utf-8').read()
+          old = """            if (!pretokenizer.is_none()) {
+              components.pretokenizer =
+                  [pretokenizer](
+                      absl::string_view text) -> std::vector<std::string> {
+                py::gil_scoped_acquire acquire;
+                try {
+                  py::object py_text = py::str(text.data(), text.size());
+                  py::object result = pretokenizer(py_text);"""
+          new = """            if (!pretokenizer.is_none()) {
+              py::handle pretokenizer_handle = pretokenizer;
+              components.pretokenizer =
+                  [pretokenizer_handle](
+                      absl::string_view text) -> std::vector<std::string> {
+                py::gil_scoped_acquire acquire;
+                try {
+                  py::object py_text = py::str(text.data(), text.size());
+                  py::object result = pretokenizer_handle(py_text);"""
+          assert s.count(old) == 1, s.count(old)
+          open(p, 'w', encoding='utf-8').write(s.replace(old, new))
+          print('pretokenizer capture patched')
+          PY
+          grep -q 'pretokenizer_handle' src/sentencepiece/sentencepiece_pybind.cc
+
+      - name: Build wheel
+        working-directory: python
+        run: python -m cibuildwheel --output-dir wheelhouse
+        env:
+          CIBW_BUILD: "cp314t-*"
+          CIBW_ARCHS_LINUX: auto
+          CIBW_SKIP: "*-musllinux_*"
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BUILD_VERBOSITY: 1
+          # -DNDEBUG is in CPython's own sysconfig CFLAGS and setting CFLAGS
+          # replaces them rather than appending, so it has to be restated.
+          # Without it pybind11 compiles its GIL-held assertions in and the
+          # binary no longer matches the one whose abort we are chasing.
+          # -O2 rather than -O0 for the same reason: this is a race, and
+          # changing codegen and timing can move or hide it. -g and frame
+          # pointers are all the backtrace needs.
+          CIBW_TEST_SKIP: "*"
+          CIBW_ENVIRONMENT: >-
+            CMAKE_BUILD_PARALLEL_LEVEL=8
+            CFLAGS='-g -O2 -DNDEBUG -fno-omit-frame-pointer'
+            CXXFLAGS='-g -O2 -DNDEBUG -fno-omit-frame-pointer'
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+
+      - name: Prove the wheel actually carries symbols
+        working-directory: python
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq binutils
+          for w in wheelhouse/*.whl; do
+            rm -rf unpack && mkdir unpack
+            python -m zipfile -e "$w" unpack
+            found=0
+            while IFS= read -r so; do
+              echo "--- $so"
+              file "$so"
+              if readelf -S "$so" | grep -q debug_info; then
+                found=1
+              else
+                echo "NO .debug_info in $so"; exit 1
+              fi
+            done < <(find unpack -name '*.so')
+            [ "$found" -eq 1 ] || { echo "no .so found in $w"; exit 1; }
+          done
+          echo "debug symbols present"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sentencepiece-master-cp314t-gilfix-manylinux_riscv64
+          path: ./python/wheelhouse/*.whl
+          if-no-files-found: error
+
+  loop_fixed:
+    name: Loop the fixed build (${{ inputs.iterations || '25' }}x)
+    needs: [build_debug]
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout sentencepiece master tests
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: google/sentencepiece
+          ref: ${{ env.MASTER_REF }}
+          persist-credentials: false
+          sparse-checkout: |
+            python/test
+            python/tools
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: '3.14t'
+          activate-environment: true
+          enable-cache: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: sentencepiece-master-cp314t-gilfix-manylinux_riscv64
+          path: wheelhouse
+
+      - name: Install
+        run: |
+          uv pip install --find-links=wheelhouse sentencepiece
+          uv pip install pytest pytest-run-parallel numpy protobuf
+
+      # Byte-for-byte the loop from repro-sentencepiece-1303.yml, so the result
+      # is directly comparable with its 19 pass / 6 abort master-head arm.
+      - name: Loop
+        working-directory: python
+        env:
+          ARM: gilfix
+        run: |
+          mkdir -p /tmp/sp-loop-logs
+          python -c "import sys, sentencepiece as s; \
+            print('python  :', sys.version); \
+            print('gil     :', sys._is_gil_enabled()); \
+            print('spm     :', s.__version__, s.__file__)"
+          pass=0; abort=0; fail=0
+          for i in $(seq 1 "$ITERATIONS"); do
+            log="/tmp/sp-loop-logs/${ARM}-$(printf '%03d' "$i").log"
+            set +e
+            pytest -v --parallel-threads 4 >"$log" 2>&1
+            rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              pass=$((pass + 1)); verdict=PASS; rm -f "$log"
+            elif grep -qE "Fatal Python error|Aborted|core dumped" "$log"; then
+              abort=$((abort + 1)); verdict=ABORT
+            else
+              fail=$((fail + 1)); verdict="FAIL(rc=$rc)"
+            fi
+            echo "[$ARM $i/$ITERATIONS] $verdict"
+          done
+          {
+            echo "**$ARM**: pass=$pass abort=$abort fail=$fail of $ITERATIONS"
+            echo ""
+            echo "Baseline, same loop, unpatched master head, run 31597917788:"
+            echo "pass=19 abort=6 of 25."
+          } >>"$GITHUB_STEP_SUMMARY"
+          echo "$ARM: pass=$pass abort=$abort fail=$fail of $ITERATIONS"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: logs-gilfix
+          path: /tmp/sp-loop-logs
+          if-no-files-found: ignore
