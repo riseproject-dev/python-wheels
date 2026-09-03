@@ -1,0 +1,109 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/Qiskit/rustworkx/blob/0.18.1/.github/workflows/wheels.yml
+name: Build rustworkx wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'rustworkx version to build (git tag without the leading v, e.g. 0.18.1)'
+        required: true
+        default: '0.18.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-rustworkx.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.18.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.18.1 there.
+  RUSTWORKX_VERSION: ${{ inputs.version || '0.18.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build rustworkx ${{ inputs.version || '0.18.1' }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # pyo3 carries abi3-py310 unconditionally in Cargo.toml, so every
+          # CPython build is abi3 already and the free-threaded build needs no
+          # extra flag either (pyo3 disables abi3 under Py_GIL_DISABLED).
+          - tag: cp310-abi3
+            build: >-
+              cp310-manylinux_riscv64 cp311-manylinux_riscv64
+              cp312-manylinux_riscv64 cp313-manylinux_riscv64
+              cp314-manylinux_riscv64
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+
+    steps:
+      - name: Checkout rustworkx ${{ env.RUSTWORKX_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Qiskit/rustworkx
+          ref: ${{ env.RUSTWORKX_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Replaces (not merges into) upstream's own [tool.cibuildwheel.linux]
+          # environment table, so its PATH/CARGO_NET_GIT_FETCH_WITH_CLI are
+          # repeated here alongside our registry.
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            CARGO_NET_GIT_FETCH_WITH_CLI="true"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Upstream's own repair-wheel-command also runs abi3audit via pipx,
+          # which the riscv64 image doesn't carry; cibuildwheel's own default
+          # audit-command already abi3audits every abi3-tagged wheel natively
+          # after this repair step runs, so drop the pipx layer here.
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: auditwheel repair -w {dest_dir} {wheel}
+          # numpy has no riscv64 wheel on public PyPI; without this, before-test's
+          # `pip install numpy<2.5.0` would source-build it in the container.
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy
+
+      - name: Check wheel contains the compiled extension
+        run: |
+          set -eu
+          for whl in wheelhouse/*.whl; do
+            echo "$whl"
+            unzip -l "$whl" | grep '\.so$'
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rustworkx-${{ env.RUSTWORKX_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish rustworkx ${{ inputs.version || '0.18.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: rustworkx-${{ inputs.version || '0.18.1' }}-*-manylinux_riscv64
