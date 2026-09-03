@@ -22,6 +22,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **150** — Before writing any YAML, check whether a sibling package from the same upstream
 - **157** — A closed-source vendored runtime has no source to fall back on — and its platform
 - **185** — A sibling distribution can be selected by an upstream *source-transform script*
+- **186** — A sibling package's riscv64 vendor doesn't transfer if it publishes a different
 
 ---
 
@@ -540,3 +541,46 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       supported interpreter, with no patch that changes that — record it in `queue.yml` as
       `parked` with the specific unreachable primitive named (here: no riscv64 browser
       binary, at any layer, official or unofficial), not as a generic "no riscv64 wheel yet".
+
+186. **A sibling package's riscv64 vendor doesn't transfer if it publishes a different
+    *artifact shape* — libraries to link against are not the same deliverable as a
+    standalone executable (imageio-ffmpeg vs. `av`, closing the loop on gotcha 183).**
+    imageio-ffmpeg's 6 Linux/macOS/Windows wheels are all `py3-none-<platform>` for the
+    same reason as gotcha 35/183's cases: nothing is compiled, `setup.py` has zero
+    `ext_modules`, and `tasks.py`'s `build` task just drops a prebuilt per-platform
+    `ffmpeg` executable into `imageio_ffmpeg/binaries/` before hand-retagging the wheel
+    (`Root-Is-Purelib: true`, `Tag: py3-none-manylinux2014_x86_64`, …). The binary comes
+    from a curated vendor repo, `imageio/imageio-binaries` (raw-fetched by
+    `tasks.py:get_ffmpeg_binary`), whose Linux entries are themselves johnvansickle.com
+    static builds per a comment in `_definitions.py`. Both have zero riscv64 offering —
+    `gh api repos/imageio/imageio-binaries/contents/ffmpeg` lists only
+    linux-{x86_64,aarch64}, and johnvansickle.com/ffmpeg/ ships only
+    amd64/i686/arm64/armhf/armel — so per gotcha 183 the next question is whether an
+    *unofficial* riscv64 ffmpeg build exists anywhere else, official or otherwise.
+    - **One does — but check what it actually contains before assuming it transfers.**
+      `av` (gotcha 183's own positive worked example) vendors FFmpeg too, and its wheels
+      are `in-review` in this repo precisely because its vendor, `PyAV-Org/pyav-ffmpeg`,
+      *does* publish a riscv64 release (`ffmpeg-manylinux-riscv64.tar.gz`, confirmed by
+      downloading it). That looked, at first glance, like it would settle imageio-ffmpeg
+      too. It doesn't: `tar tzf` on that release shows only `include/*.h` and
+      `lib/*.so*` — headers and shared libraries meant for PyAV to link against via
+      `scripts/fetch-vendor.py`, **no `bin/ffmpeg` executable at all**. `av` needs a
+      *library* to link; imageio-ffmpeg needs a *standalone CLI binary* to shell out to
+      (`get_ffmpeg_exe()` returns a path, then `subprocess.check_call([exe, "-version"])`
+      elsewhere). Same upstream project (FFmpeg), same riscv64 target architecture, same
+      general vendoring pattern (`vendored-binary`), but a different artifact shape — and
+      a vendor publishing one shape says nothing about whether the other exists.
+    - **Producing the missing shape yourself is not "patching a URL" (gotcha 183's
+      "unofficial build is not free") — it's authoring a new build system.** Turning
+      pyav-ffmpeg's linkable libraries (or raw FFmpeg source) into a working `ffmpeg`
+      CLI executable for riscv64 would mean this repo compiling FFmpeg's `fftools/`
+      front end from source ourselves — something imageio-ffmpeg's own upstream CI
+      *never does on any platform* (it only ever copies a prebuilt exe out of
+      `imageio-binaries`). That fails goal 2 (a workflow should narrow upstream's own CI
+      to riscv64, not invent a CI upstream doesn't have) and is a different order of
+      scope than the URL-swap or config-flag patches this repo normally carries.
+      Contrast with `av`: PyAV's *own* existing fetch step already had a riscv64 target
+      at its vendor, so porting it is running upstream's process as-is. Verdict: park,
+      same as playwright — `vendored-binary`, no artifact of the shape needed exists
+      anywhere (official or unofficial), and producing one would require building an
+      unrelated new pipeline rather than porting an existing one.
