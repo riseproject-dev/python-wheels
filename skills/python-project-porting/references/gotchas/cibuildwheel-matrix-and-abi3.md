@@ -17,6 +17,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **102** — A `build.py` at the project root shadows the `build` module and kills
 - **107** — `CIBW_ENVIRONMENT` *replaces* upstream's `[tool.cibuildwheel] environment` table
 - **134** — cibuildwheel's default abi3 audit rejects a wheel for exporting its *own*
+- **204** — cibuildwheel 4.2.0 doesn't offer cp313t as a build target on *any* platform —
 - **56** — `py-build-cmake` projects: the free-threaded job dies at *configure* unless
 - **201** — When `package-dir` is a monorepo subdirectory and the package's own build script
 
@@ -299,3 +300,23 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
      after checkout, before `uses: pypa/cibuildwheel@…` with
      `package-dir: tools/distrib/python/grpcio_tools`, is enough: by the time cibuildwheel
      packages that subdirectory per matrix job, the vendored trees are already there.
+
+204. **cibuildwheel 4.2.0 doesn't offer cp313t as a build target on *any* platform —
+     sharpens gotcha 11's "the riscv64 image ships no cp313t" from an image gap to a tool
+     gap.** Porting pyyaml-ft (a free-threading fork of PyYAML whose own upstream CI
+     matrix is exactly `cp313`/`cp313t`), `python -m cibuildwheel --print-build-identifiers
+     --platform linux --archs aarch64 --enable cpython-freethreading` on the *native*
+     `manylinux_2_39_aarch64` image (no riscv64 involved at all) lists `cp313`, `cp314`,
+     `cp314t`, `cp315`, `cp315t` and no `cp313t`, `--enable cpython-freethreading` included.
+     Confirmed at the source: cibuildwheel's own bundled
+     `cibuildwheel/resources/build-platforms.toml` has zero `cp313t` entries under *any*
+     of its linux/macos/windows/pyodide/android/ios platform tables — cp313 stops at the
+     GIL build, and cp314t is the oldest free-threaded identifier cibuildwheel 4.2.0 knows
+     how to build, full stop. So even a hypothetical riscv64 image that *did* ship a
+     `cp313t-cp313t` interpreter under `/opt/python` would not fix this — cibuildwheel
+     itself has no `cp313t-manylinux_riscv64` build identifier to select. The fix is
+     gotcha 11's: build `cp313` (matches upstream's GIL wheel) and substitute `cp314t` for
+     upstream's `cp313t` free-threaded wheel, same two-job split as `build-bcrypt.yml`. Re-check
+     this gate on every cibuildwheel version bump — a future release could reinstate cp313t
+     (or drop cp314 the way this one already dropped cp313t's free-threaded pairing), and
+     `--print-build-identifiers` costs nothing to re-run before committing to a matrix.

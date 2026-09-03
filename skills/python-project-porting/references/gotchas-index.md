@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (196 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (198 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -82,6 +82,7 @@ The porting gotchas (196 of them) live in [`references/gotchas/`](gotchas/), spl
 - **134** — cibuildwheel's default abi3 audit rejects a wheel for exporting its *own*
 - **56** — `py-build-cmake` projects: the free-threaded job dies at *configure* unless *(reused number — this theme)*
 - **201** — When `package-dir` is a monorepo subdirectory and the package's own build script
+- **204** — cibuildwheel 4.2.0 doesn't offer cp313t as a build target on *any* platform —
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
