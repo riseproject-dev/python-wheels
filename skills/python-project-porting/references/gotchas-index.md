@@ -231,6 +231,7 @@ The porting gotchas (198 of them) live in [`references/gotchas/`](gotchas/), spl
 - **168** — Running a diagnostic on the riscv64 runner: drive it from `CIBW_TEST_COMMAND`, and
 - **169** — `astral-sh/setup-uv` hands you a python-build-standalone interpreter, and PBS links
 - **170** — `np.linalg.eig` on a symmetric matrix returns *real* eigenvalues on x86_64 and
+- **205** — A follow-up commit that fixes a broken `Upstream-Status:` line does not clear
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 

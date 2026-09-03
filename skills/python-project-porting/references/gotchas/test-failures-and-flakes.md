@@ -20,6 +20,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **168** — Running a diagnostic on the riscv64 runner: drive it from `CIBW_TEST_COMMAND`, and
 - **169** — `astral-sh/setup-uv` hands you a python-build-standalone interpreter, and PBS links
 - **170** — `np.linalg.eig` on a symmetric matrix returns *real* eigenvalues on x86_64 and
+- **205** — A follow-up commit that fixes a broken `Upstream-Status:` line does not clear
 
 ---
 
@@ -421,3 +422,21 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       against 2.4e-8 on aarch64 — gotcha 38's artificial-test-limitation shape. Loosening
       that tolerance only uncovers the next assertion in the same test (`res.mae < 1e-6`),
       so drop the one parametrisation and keep the sibling that is exact.
+
+205. **A follow-up commit that fixes a broken `Upstream-Status:` line does not clear
+    `check_patches` — it checks the patch file's content at *every* commit that
+    touched it, not just the final diff (extends gotcha 38's single-line rule).**
+    `check_patch.py`'s `main()` walks `git rev-list start..end`, and for each commit
+    re-extracts and re-validates every `.patch` file that commit added or modified
+    (`git show <commit>:<path>`). A commit that adds a patch with the wrapped
+    `Upstream-Status:` line, followed by a second commit that rewraps it onto one
+    line, still fails: the first commit's snapshot is still broken, and the job
+    replays it as its own check.
+    - **Squash instead of appending a fix commit.** `git reset --soft` to the
+      merge-base, recommit once with the corrected patch, then
+      `git push --force-with-lease` — the PR isn't reviewed yet, so rewriting its
+      own history is normal, not the "don't rewrite shared history" case the repo's
+      git safety rules guard against.
+    - **Run the exact CI invocation locally first**, on the full commit range, not
+      just the working tree: `git log --oneline origin/main..HEAD` shows every
+      commit `check_patches` will separately replay.
