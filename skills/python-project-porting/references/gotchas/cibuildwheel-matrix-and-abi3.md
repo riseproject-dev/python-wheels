@@ -18,6 +18,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **107** — `CIBW_ENVIRONMENT` *replaces* upstream's `[tool.cibuildwheel] environment` table
 - **134** — cibuildwheel's default abi3 audit rejects a wheel for exporting its *own*
 - **204** — cibuildwheel 4.2.0 doesn't offer cp313t as a build target on *any* platform —
+- **209** — A multi-grammar tree-sitter-`<lang>` repo does not necessarily need a
 - **56** — `py-build-cmake` projects: the free-threaded job dies at *configure* unless
 - **201** — When `package-dir` is a monorepo subdirectory and the package's own build script
 
@@ -320,3 +321,20 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
      this gate on every cibuildwheel version bump — a future release could reinstate cp313t
      (or drop cp314 the way this one already dropped cp313t's free-threaded pairing), and
      `--print-build-identifiers` costs nothing to re-run before committing to a matrix.
+
+209. **A multi-grammar tree-sitter-`<lang>` repo does not necessarily need a
+     `CIBW_BUILD`/wheel per grammar — read `setup.py`'s `ext_modules` to see whether the
+     grammars share one extension.** tree-sitter-php (PR #855) has two separate
+     `Extension()` entries (`php._binding`, `php_only._binding`), one per grammar, but both
+     still land in a single wheel from one `cibuildwheel` invocation — no matrix change
+     needed either way. tree-sitter-typescript (0.23.2) instead declares *one*
+     `Extension(name="_binding", sources=[...typescript/src..., ...tsx/src...])`: both
+     grammars' `parser.c`/`scanner.c` compile into the same `tree_sitter_typescript._binding`
+     shared object, which exports two functions (`language_typescript()`, `language_tsx()`)
+     via one `PyMethodDef` table — confirmed by reading `bindings/python/tree_sitter_typescript/binding.c`
+     and `__init__.py`'s `from ._binding import language_typescript, language_tsx`. Either
+     shape gets the same `build-tree-sitter-<lang>.yml`: one `cibuildwheel` step, `CIBW_TEST_SOURCES:
+     bindings/python/tests`, `CIBW_TEST_COMMAND: python -m unittest discover`, and upstream's
+     own `test_binding.py` already exercises every grammar function it exposes — don't add
+     a second build identifier or a second wheel artifact just because a repo advertises
+     more than one grammar.
