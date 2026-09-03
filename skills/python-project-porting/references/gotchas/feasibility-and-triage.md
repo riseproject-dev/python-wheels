@@ -584,3 +584,30 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       same as playwright — `vendored-binary`, no artifact of the shape needed exists
       anywhere (official or unofficial), and producing one would require building an
       unrelated new pipeline rather than porting an existing one.
+
+187. **Gotcha 40's numba wall catches more than numba itself — check a candidate
+    package's *own* `install_requires` for a hard, unconditional numba dependency before
+    assuming it's independently portable (the shap case), and when you do hit the wall
+    again, check the LLVM version by *conda channel*, not just by package name (a
+    refinement of gotcha 42).** shap 0.52.0's `pyproject.toml` requires numba
+    unconditionally on every platform except macOS+x86_64 (`'numba; sys_platform !=
+    "darwin" or platform_machine != "x86_64"'` — true for linux/riscv64), and it is not
+    an optional accelerator: `shap/utils/_masked_model.py` and
+    `shap/explainers/_partition.py` both do module-level `from numba import njit`, and
+    `shap/__init__.py` unconditionally imports `PartitionExplainer` at package-import
+    time, so `import shap` itself hard-fails without numba installed. Run gotcha 40's
+    dependency check (`info.requires_dist` from PyPI JSON, drop the extras) *before*
+    inspecting a candidate's own build system — a package with a clean, portable build of
+    its own is still blocked if a hard dependency isn't. Re-confirming gotcha 42's
+    conda-blocked verdict surfaced a wrinkle worth checking next time: llvmlite's build
+    script hardcodes the `numba/label/llvm_wheel` conda channel, which still publishes 0
+    `linux-riscv64` packages (`https://conda.anaconda.org/numba/label/llvm_wheel/linux-riscv64/repodata.json`)
+    — but **conda-forge's own `llvmdev`, a different channel entirely, does publish
+    `linux-riscv64` builds at the exact LLVM major llvmlite's `ffi/CMakeLists.txt`
+    requires** (`llvmdev-22.1.8`, confirmed via
+    `https://conda.anaconda.org/conda-forge/linux-riscv64/repodata.json`). That doesn't
+    by itself unblock llvmlite — the build script would need patching to source from a
+    different channel, and numba's own patches to LLVM (not just its version) are the
+    reason it uses its own channel rather than conda-forge's — but it's a concrete lead
+    for whoever eventually picks up the numba/llvmlite port, and worth checking again
+    then rather than re-deriving from scratch.

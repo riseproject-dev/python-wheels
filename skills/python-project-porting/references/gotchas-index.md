@@ -49,6 +49,7 @@ The porting gotchas (190 of them) live in [`references/gotchas/`](gotchas/), spl
 - **183** — `vendored-binary` is a category, not a verdict — the disposition still has to be
 - **185** — A sibling distribution can be selected by an upstream *source-transform script*
 - **186** — A sibling package's riscv64 vendor doesn't transfer if it publishes a different
+- **187** — Gotcha 40's numba wall catches more than numba itself — check a candidate
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
