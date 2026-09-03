@@ -1,0 +1,147 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/ets-labs/python-dependency-injector/blob/4.49.1/.github/workflows/publishing.yml
+name: Build dependency-injector wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'dependency-injector version to build (git tag, e.g. 4.49.1)'
+        required: true
+        default: '4.49.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-dependency-injector.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '4.49.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  DEPENDENCY_INJECTOR_VERSION: ${{ inputs.version || '4.49.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Mirrors upstream's tox testenv deps (tox.ini [testenv]).
+  TEST_REQUIRES: >-
+    pytest pytest-asyncio httpx fastapi flask aiohttp numpy scipy boto3
+    mypy_boto3_s3 pydantic-settings werkzeug fast-depends "cython>=3,<4" setuptools
+  TEST_COMMAND: python -m pytest tests/unit
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_abi3:
+    needs: [setup]
+    name: Build dependency-injector ${{ inputs.version || '4.49.1' }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout dependency-injector ${{ env.DEPENDENCY_INJECTOR_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ets-labs/python-dependency-injector
+          ref: ${{ env.DEPENDENCY_INJECTOR_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          # cp310 first, matching setup.py's py_limited_api="cp310" floor (gotcha 96):
+          # building the abi3 wheel on a newer interpreter can silently break older
+          # ones despite the tag. The later entries build nothing; they re-test it.
+          CIBW_BUILD: >-
+            cp310-manylinux_riscv64 cp311-manylinux_riscv64 cp312-manylinux_riscv64
+            cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            DEPENDENCY_INJECTOR_LIMITED_API=1
+          CIBW_TEST_REQUIRES: ${{ env.TEST_REQUIRES }}
+          CIBW_TEST_EXTRAS: yaml
+          CIBW_TEST_SOURCES: tests pyproject.toml
+          CIBW_TEST_COMMAND: ${{ env.TEST_COMMAND }}
+
+      - name: Check the Cython extensions made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile, posixpath
+          expected = {
+              "dependency_injector.containers",
+              "dependency_injector.providers",
+              "dependency_injector._cwiring",
+          }
+          for whl in sys.argv[1:]:
+              found = set()
+              for n in zipfile.ZipFile(whl).namelist():
+                  if not n.endswith(".so"):
+                      continue
+                  pkg, base = posixpath.split(n)
+                  # Extension filenames carry an ABI tag (e.g. containers.abi3.so).
+                  found.add(f"{pkg.replace('/', '.')}.{base.split('.', 1)[0]}")
+              assert expected <= found, (whl, found)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dependency-injector-${{ env.DEPENDENCY_INJECTOR_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  # Free-threaded builds get no abi3 wheel: setup.py drops py_limited_api under
+  # Py_GIL_DISABLED, same shape as build-pycryptodomex.yml. Upstream itself skips
+  # cp3??t-* in CIBW_SKIP, so this has no upstream wheel to mirror.
+  build_freethreaded:
+    needs: [setup]
+    name: Build dependency-injector ${{ inputs.version || '4.49.1' }} cp314t-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout dependency-injector ${{ env.DEPENDENCY_INJECTOR_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ets-labs/python-dependency-injector
+          ref: ${{ env.DEPENDENCY_INJECTOR_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: cp314t-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            DEPENDENCY_INJECTOR_LIMITED_API=1
+          CIBW_TEST_REQUIRES: ${{ env.TEST_REQUIRES }}
+          CIBW_TEST_EXTRAS: yaml
+          CIBW_TEST_SOURCES: tests pyproject.toml
+          CIBW_TEST_COMMAND: ${{ env.TEST_COMMAND }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dependency-injector-${{ env.DEPENDENCY_INJECTOR_VERSION }}-cp314t-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish dependency-injector ${{ inputs.version || '4.49.1' }}
+    needs: [setup, build_abi3, build_freethreaded]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: dependency-injector-${{ inputs.version || '4.49.1' }}-*-manylinux_riscv64
