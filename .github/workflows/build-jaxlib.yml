@@ -1,0 +1,345 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/jax-ml/jax/blob/jax-v0.11.1/ci/build_artifacts.sh
+# and ci/run_pytest_cpu.sh, which it mirrors through build/build.py.
+name: Build jaxlib wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'jaxlib version to build (git tag without leading jax-v, e.g. 0.11.1)'
+        required: true
+        default: '0.11.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-jaxlib.yml'
+      - 'patches/jaxlib/**'
+
+run-name: build-jaxlib - ${{ inputs.version || '0.11.1' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.11.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  JAXLIB_VERSION: ${{ inputs.version || '0.11.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # jax's .bazelversion; bazel publishes no riscv64 binary, so it is bootstrapped
+  # from the dist archive instead.
+  BAZEL_VERSION: '7.7.1'
+  # versions bazel 7.7.1's MODULE.bazel pins; both need a riscv64 fix below
+  RULES_PYTHON_VERSION: '0.33.2'
+  RULES_JAVA_VERSION: '7.6.5'
+  # the version bazel 7.7.1's MODULE.bazel.lock resolves; see the bootstrap script
+  BAZEL_FEATURES_VERSION: '1.27.0'
+  # jax resolves pip for the host platform only (see the patch), so the build-time
+  # deps that publish no riscv64 wheel come from our registry as `local_wheels`.
+  NUMPY_VERSION: '2.5.2'
+  SCIPY_VERSION: '1.18.1'
+  ML_DTYPES_VERSION: '0.5.4'
+
+jobs:
+  bazel:
+    name: Bootstrap bazel (riscv64)
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+
+    steps:
+      - name: Restore bazel binary
+        id: cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: bazel-bin
+          key: bazel-${{ env.BAZEL_VERSION }}-manylinux_riscv64
+
+      - name: Bootstrap bazel ${{ env.BAZEL_VERSION }}
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p bazel-bin
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e BAZEL_VERSION="${BAZEL_VERSION}" \
+            -e RULES_PYTHON_VERSION="${RULES_PYTHON_VERSION}" \
+            -e RULES_JAVA_VERSION="${RULES_JAVA_VERSION}" \
+            -e BAZEL_FEATURES_VERSION="${BAZEL_FEATURES_VERSION}" \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+
+          # rules_python 0.33.2's PLATFORMS has no riscv64 entry, aborting the bootstrap
+          # (bazelbuild/bazel#23018). Any linux entry is a safe stand-in: the toolchain it names
+          # is never selected on a riscv64 host. Fixed in bazel 8.2.0; the 7.x backport is open.
+          mkdir -p /tmp/rules_python
+          curl -fsSLo /tmp/rules_python.tar.gz "https://github.com/bazel-contrib/rules_python/releases/download/${RULES_PYTHON_VERSION}/rules_python-${RULES_PYTHON_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_python.tar.gz -C /tmp/rules_python --strip-components=1
+          sed -i 's|fail("No platform declared for host OS {} on arch {}".format(os_name, arch))|return "x86_64-unknown-linux-gnu"|' \
+            /tmp/rules_python/python/private/toolchains_repo.bzl
+
+          # rules_java 7.x maps riscv64 to a stray-colon include path, so libcpu_profiler.so
+          # can't find jni_md.h. Fixed in rules_java 8.x, never backported.
+          mkdir -p /tmp/rules_java
+          curl -fsSLo /tmp/rules_java.tar.gz "https://github.com/bazelbuild/rules_java/releases/download/${RULES_JAVA_VERSION}/rules_java-${RULES_JAVA_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_java.tar.gz -C /tmp/rules_java
+          sed -i 's|\[":include/linux"\]|["include/linux"]|g' /tmp/rules_java/toolchains/BUILD
+
+          # The scratch-built bazel that hosts the real build reports an empty
+          # native.bazel_version, which bazel_features reads as a dev version newer than
+          # everything, so it emits bazel 8's `macro` global and analysis dies with
+          # "name 'macro' is not defined". Tell it which bazel is actually running.
+          mkdir -p /tmp/bazel_features
+          curl -fsSLo /tmp/bazel_features.tar.gz "https://github.com/bazel-contrib/bazel_features/releases/download/v${BAZEL_FEATURES_VERSION}/bazel_features-v${BAZEL_FEATURES_VERSION}.tar.gz"
+          tar -xzf /tmp/bazel_features.tar.gz -C /tmp/bazel_features --strip-components=1
+          sed -i "s|v = \"999999.999999.999999\"|v = \"${BAZEL_VERSION}\"|" /tmp/bazel_features/private/parse.bzl
+
+          mkdir -p /tmp/bazel-src
+          cd /tmp/bazel-src
+          curl -fsSLo dist.zip "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-dist.zip"
+          unzip -q dist.zip
+
+          EXTRA_BAZEL_ARGS="--tool_java_runtime_version=local_jdk \
+            --override_module=rules_python=/tmp/rules_python \
+            --override_module=rules_java=/tmp/rules_java \
+            --override_module=bazel_features=/tmp/bazel_features" \
+            bash ./compile.sh
+          install -m 0755 output/bazel /work/bazel-bin/bazel
+          SCRIPT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin/bazel
+          if-no-files-found: error
+
+  build_wheels:
+    name: Build jaxlib ${{ inputs.version || '0.11.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440  # 24h
+    needs: [bazel]
+    strategy:
+      fail-fast: false
+      matrix:
+        # jaxlib is not abi3: upstream publishes one wheel per interpreter.
+        include:
+          - python: cp312
+            hermetic_python: '3.12'
+          - python: cp313
+            hermetic_python: '3.13'
+          - python: cp314
+            hermetic_python: '3.14'
+          - python: cp314t
+            hermetic_python: '3.14-ft'
+
+    steps:
+      - name: Checkout jax jax-v${{ env.JAXLIB_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: jax-ml/jax
+          ref: jax-v${{ env.JAXLIB_VERSION }}
+          path: jax
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          path: python-wheels
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Patch jax source
+        working-directory: jax
+        run: git apply ../python-wheels/patches/jaxlib/${{ env.JAXLIB_VERSION }}/00*.patch
+
+      - name: Download bazel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin
+
+      - name: Build wheel
+        run: |
+          mkdir -p wheelhouse
+          set -o pipefail
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work/jax \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            -e HERMETIC_PYTHON="${{ matrix.hermetic_python }}" \
+            -e NUMPY_VERSION="${NUMPY_VERSION}" \
+            -e SCIPY_VERSION="${SCIPY_VERSION}" \
+            -e ML_DTYPES_VERSION="${ML_DTYPES_VERSION}" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT' 2>&1 | tee build.log
+          set -eux
+
+          # clang, because rules_ml_toolchain ships no hermetic riscv64 toolchain and
+          # build/build.py falls back to --config=clang_local off any non-x86_64/aarch64 host.
+          dnf install -y --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip clang
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+          install -m 0755 /work/bazel-bin/bazel /usr/local/bin/bazel
+          git config --global --add safe.directory '*'
+
+          case "${PYTHON_TAG}" in
+            *t) python_dir="/opt/python/${PYTHON_TAG%t}-${PYTHON_TAG}/bin" ;;
+            *) python_dir="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin" ;;
+          esac
+          python_exe="${python_dir}/python"
+
+          # MODULE.bazel's `local_wheels` overrides read dist/ at the workspace root.
+          "${python_exe}" -m pip download --no-deps --only-binary=:all: -d dist \
+            "numpy==${NUMPY_VERSION}" "scipy==${SCIPY_VERSION}" "ml_dtypes==${ML_DTYPES_VERSION}"
+
+          # A multi-hour build's default curses progress output is large enough that
+          # GitHub drops the job log, taking the failure with it.
+          "${python_exe}" build/build.py build --wheels=jaxlib \
+            --python_version="${HERMETIC_PYTHON}" \
+            --bazel_path=/usr/local/bin/bazel \
+            --bazel_startup_options=--output_user_root=/work/.bazel \
+            --bazel_options=--repo_env=ML_WHEEL_TYPE=release \
+            --bazel_options="--//jaxlib/tools:jaxlib_git_hash=$(git rev-parse HEAD)" \
+            --bazel_options=--curses=no \
+            --bazel_options=--show_progress_rate_limit=60 \
+            --output_path=/work/dist-raw \
+            --verbose
+
+          auditwheel repair --strip -w /work/wheelhouse /work/dist-raw/jaxlib-*.whl
+          "${python_exe}" -c "
+          import glob, zipfile
+          whl = sorted(glob.glob('/work/wheelhouse/jaxlib-*.whl'))[0]
+          sos = [n for n in zipfile.ZipFile(whl).namelist() if n.endswith('.so')]
+          assert sos, 'no extension modules in ' + whl
+          print(whl, len(sos), 'shared objects')
+          "
+          SCRIPT
+
+      - name: Drop the bazel output tree
+        if: always()
+        run: |
+          docker run --rm -v "${GITHUB_WORKSPACE}:/work" "${MANYLINUX_RISCV64_IMAGE}" \
+            rm -rf /work/.bazel /work/dist-raw
+
+      - name: Keep the build log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: jaxlib-${{ env.JAXLIB_VERSION }}-${{ matrix.python }}-build-log
+          path: build.log
+          if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: jaxlib-${{ env.JAXLIB_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*-manylinux*_riscv64.whl
+          if-no-files-found: error
+
+  test_wheels:
+    name: Test jaxlib ${{ inputs.version || '0.11.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    needs: [build_wheels]
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout jax jax-v${{ env.JAXLIB_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: jax-ml/jax
+          ref: jax-v${{ env.JAXLIB_VERSION }}
+          path: jax
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: jaxlib-${{ env.JAXLIB_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse
+
+      - name: Run jax's CPU test suite
+        run: |
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            -e JAXLIB_VERSION="${JAXLIB_VERSION}" \
+            -e NUMPY_VERSION="${NUMPY_VERSION}" \
+            -e SCIPY_VERSION="${SCIPY_VERSION}" \
+            -e ML_DTYPES_VERSION="${ML_DTYPES_VERSION}" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          case "${PYTHON_TAG}" in
+            *t) python_dir="/opt/python/${PYTHON_TAG%t}-${PYTHON_TAG}/bin" ;;
+            *) python_dir="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin" ;;
+          esac
+          python_exe="${python_dir}/python"
+
+          # Pinned because pip resolves the highest version across both indexes and
+          # only then picks a file: PyPI's newest numpy/scipy/ml_dtypes have no
+          # riscv64 wheel, ours do.
+          "${python_exe}" -m pip install --only-binary=:all: --find-links /work/wheelhouse \
+            "jax==${JAXLIB_VERSION}" "jaxlib==${JAXLIB_VERSION}" \
+            "numpy==${NUMPY_VERSION}" "scipy==${SCIPY_VERSION}" "ml_dtypes==${ML_DTYPES_VERSION}" \
+            absl-py cloudpickle hypothesis opt_einsum pytest pytest-xdist
+
+          # The checkout has importable jax/ and jaxlib/ directories at its root, so
+          # pytest's rootdir insertion would shadow the installed wheel; stage the suite
+          # in a directory that holds neither.
+          mkdir -p /work/test-cwd
+          cp -a /work/jax/tests /work/jax/conftest.py /work/jax/pyproject.toml /work/test-cwd/
+          cd /work/test-cwd
+
+          "${python_exe}" -c "
+          import jaxlib, jax
+          print(jaxlib.__file__)
+          print(jax.default_backend(), jax.devices())
+          "
+
+          export PY_COLORS=1
+          export JAX_SKIP_SLOW_TESTS=true
+          # Upstream runs the whole `tests examples` tree; on the riscv64 runner that
+          # does not fit a CI slot, so this is the subset that covers the compiled
+          # backend end to end (tracing, lowering, XLA CPU execution, PRNG, autodiff).
+          # --maxprocesses mirrors the cap run_pytest_cpu.sh applies on aarch64, where
+          # the suite OOMs at full -n auto.
+          "${python_exe}" -m pytest -n auto --maxprocesses=16 --tb=short --maxfail=20 \
+            tests/api_test.py \
+            tests/lax_test.py \
+            tests/nn_test.py \
+            tests/random_test.py
+          SCRIPT
+
+  publish:
+    name: Publish jaxlib ${{ inputs.version || '0.11.1' }} to GitLab
+    needs: [build_wheels, test_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: jaxlib-${{ env.JAXLIB_VERSION }}-*-manylinux_riscv64
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

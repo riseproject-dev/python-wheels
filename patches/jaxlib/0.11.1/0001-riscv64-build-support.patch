@@ -1,0 +1,115 @@
+riscv64: let jaxlib's Bazel build target a native riscv64 host
+
+build/build.py already falls back to --config=clang_local plus the container's
+clang on any host that is not linux x86_64/aarch64, and XLA already carries
+riscv64 config settings (if_llvm_riscv_available, //xla/tsl:linux_riscv64), so
+what is missing is only the wheel/platform plumbing:
+
+* jaxlib/jax.bzl + jaxlib/tools/BUILD.bazel: a linux_riscv64 config setting and
+  the matching PLATFORM_TAGS_DICT/cpu entries. Without them jax_wheel's `cpu`
+  select() has no branch for the host and analysis fails before anything is
+  compiled.
+* MODULE.bazel + third_party/py/rules_python_riscv64.patch: rules_python's
+  default_platforms() enumerates only x86_64 and aarch64 for Linux, so every
+  `@pypi//...` alias is missing a riscv64 branch. Resolving pip for the host
+  platform alone additionally lets the existing `local_wheels` overrides supply
+  numpy/scipy/ml_dtypes, which publish no riscv64 wheels on the index.
+
+Upstream-Status: To upstream [blocked: upstream runs no riscv64 CI, and the rules_python hunk belongs in bazel-contrib/rules_python first]
+
+diff --git a/MODULE.bazel b/MODULE.bazel
+index 4dbfcbe..c29c540 100644
+--- a/MODULE.bazel
++++ b/MODULE.bazel
+@@ -100,6 +100,7 @@ single_version_override(
+         "//third_party/py:rules_python_local_wheel.patch",
+         "//third_party/py:rules_python_cpython_3_15.patch",
+         "//third_party/py:rules_python_windows_long_paths.patch",
++        "//third_party/py:rules_python_riscv64.patch",
+     ],
+     version = "2.2.0",
+ )
+@@ -171,13 +172,13 @@ pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip", dev_depen
+         "3.12",
+         "3.13",
+     ] else {
+-        "//build:requirements_lock_{}_ft.txt".format(python_version.replace(".", "_")): "linux_x86_64_freethreaded,windows_x86_64_freethreaded,linux_aarch64_freethreaded,osx_aarch64_freethreaded",
++        "//build:requirements_lock_{}_ft.txt".format(python_version.replace(".", "_")): "linux_x86_64_freethreaded,windows_x86_64_freethreaded,linux_aarch64_freethreaded,linux_riscv64_freethreaded,osx_aarch64_freethreaded",
+     },
+     requirements_lock = "//build:requirements_lock_{}.txt".format(python_version.replace(".", "_")),
+     target_platforms = [
+-        # Explicitly list both x86_64 and aarch64 to ensure cross-compilation works.
+-        "{os}_x86_64",
+-        "{os}_aarch64",
++        # riscv64 has no cross-compilation story and no riscv64 wheels on the
++        # index: resolving only the host platform lets `local_wheels` supply them.
++        "{os}_{arch}",
+         "{os}_{arch}_freethreaded",
+     ],
+     whl_modifications = {
+diff --git a/jaxlib/jax.bzl b/jaxlib/jax.bzl
+index 8611507..ca4869b 100644
+--- a/jaxlib/jax.bzl
++++ b/jaxlib/jax.bzl
+@@ -71,6 +71,7 @@ PLATFORM_TAGS_DICT = {
+     ("Linux", "x86_64"): ("manylinux_2_27", "x86_64"),
+     ("Linux", "aarch64"): ("manylinux_2_27", "aarch64"),
+     ("Linux", "ppc64le"): ("manylinux2014", "ppc64le"),
++    ("Linux", "riscv64"): ("manylinux_2_39", "riscv64"),
+     ("Darwin", "x86_64"): ("macosx_11_0", "x86_64"),
+     ("Darwin", "arm64"): ("macosx_11_0", "arm64"),
+     ("Windows", "AMD64"): ("win", "amd64"),
+@@ -634,6 +635,7 @@ def jax_wheel(
+             Label("//jaxlib/tools:win_amd64"): "AMD64",
+             Label("//jaxlib/tools:linux_aarch64"): "aarch64",
+             Label("//jaxlib/tools:linux_x86_64"): "x86_64",
++            Label("//jaxlib/tools:linux_riscv64"): "riscv64",
+         }),
+         source_files = source_files,
+     )
+diff --git a/jaxlib/tools/BUILD.bazel b/jaxlib/tools/BUILD.bazel
+index ff1c372..2b47f09 100644
+--- a/jaxlib/tools/BUILD.bazel
++++ b/jaxlib/tools/BUILD.bazel
+@@ -126,6 +126,14 @@ selects.config_setting_group(
+     ],
+ )
+ 
++selects.config_setting_group(
++    name = "linux_riscv64",
++    match_all = [
++        "@platforms//cpu:riscv64",
++        "@platforms//os:linux",
++    ],
++)
++
+ # Flags for the new wheel build rules.
+ 
+ string_flag(
+diff --git a/third_party/py/rules_python_riscv64.patch b/third_party/py/rules_python_riscv64.patch
+new file mode 100644
+index 0000000..6d04f0a
+--- /dev/null
++++ b/third_party/py/rules_python_riscv64.patch
+@@ -0,0 +1,21 @@
++# Patch for rules_python to define the linux_riscv64 pip target platforms.
++#
++# 1. python/private/pypi/extension.bzl:
++#    - default_platforms() only enumerates x86_64 and aarch64 for Linux, so a
++#      native riscv64 build gets no platform entry and every `@pypi//<pkg>` alias
++#      is missing a branch for the host. Adding riscv64 to the same loop reuses
++#      the existing wheel tag conventions (linux_riscv64, manylinux_*_riscv64).
++
++diff --git a/python/private/pypi/extension.bzl b/python/private/pypi/extension.bzl
++index 094cac7..bfe3bda 100644
++--- a/python/private/pypi/extension.bzl
+++++ b/python/private/pypi/extension.bzl
++@@ -75,7 +75,7 @@ def default_platforms():
++     platforms = {}
++ 
++     # Linux platforms
++-    for cpu in ["x86_64", "aarch64"]:
+++    for cpu in ["x86_64", "aarch64", "riscv64"]:
++         for freethreaded in ["", "_freethreaded"]:
++             platform_name = "linux_{}{}".format(cpu, freethreaded)
++             platforms[platform_name] = {
