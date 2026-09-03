@@ -1,0 +1,90 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/aiortc/pylsqpack/blob/0.3.24/.github/workflows/tests.yml
+name: Build pylsqpack wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pylsqpack version to build (git tag, e.g. 0.3.24)'
+        required: true
+        default: '0.3.24'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pylsqpack.yml'
+      - 'patches/pylsqpack/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.3.24' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYLSQPACK_VERSION: ${{ inputs.version || '0.3.24' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pylsqpack ${{ inputs.version || '0.3.24' }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout pylsqpack ${{ env.PYLSQPACK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: aiortc/pylsqpack
+          ref: ${{ env.PYLSQPACK_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pylsqpack source
+        run: git apply python-wheels/patches/pylsqpack/${{ env.PYLSQPACK_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          # cp310 first: binding.c defines PY_SSIZE_T_CLEAN, whose PyArg_Parse*
+          # aliases were dropped in 3.13, so an abi3 wheel compiled on a newer
+          # interpreter raises SystemError on 3.10-3.12 despite its tag (gotcha 96).
+          # The later entries build nothing; they re-test the one wheel.
+          CIBW_BUILD: >-
+            cp310-manylinux_riscv64 cp311-manylinux_riscv64 cp312-manylinux_riscv64
+            cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m; f = sorted(p.name for p in m.files('pylsqpack') if '.dist-info/licenses/' in str(p)); assert f == ['LICENSE', 'LICENSE.ls-qpack', 'LICENSE.xxhash'], f"
+            && python -m unittest discover -v -s {project}/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pylsqpack-${{ env.PYLSQPACK_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pylsqpack ${{ inputs.version || '0.3.24' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pylsqpack-${{ inputs.version || '0.3.24' }}-*-manylinux_riscv64
