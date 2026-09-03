@@ -1,0 +1,149 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+name: Build grpcio-tools wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'grpcio-tools version to build (git tag without leading v, e.g. 1.83.1)'
+        required: true
+        default: '1.83.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-grpcio-tools.yml'
+      - 'patches/grpcio-tools/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.83.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GRPCIO_TOOLS_VERSION: ${{ inputs.version || '1.83.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build grpcio-tools ${{ inputs.version || '1.83.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        # Mirrors build-grpcio.yml: grpcio-tools shares python_version.py's
+        # supported-version list with grpcio and doesn't declare free-threaded
+        # support either.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: "/project"
+      CCACHE_COMPILERCHECK: "content"
+
+    steps:
+      - name: Checkout grpc v${{ env.GRPCIO_TOOLS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: grpc/grpc
+          ref: v${{ env.GRPCIO_TOOLS_VERSION }}
+          submodules: true
+          fetch-depth: 1  # grpc's submodules (protobuf, abseil-cpp, ...) are large; skip history
+          persist-credentials: false
+
+      # grpcio_tools' setup.py builds its protoc plugin against copies of
+      # src/compiler, include/ and the protobuf/abseil-cpp submodules staged
+      # under tools/distrib/python/grpcio_tools/ (grpc_root/, third_party/,
+      # both gitignored). Upstream's own install_all_python_modules.sh runs
+      # this same script (as ../make_grpcio_tools.py) before building. The
+      # bazel query it also attempts (to regenerate protoc_lib_deps.py) fails
+      # without bazel installed, but that failure is non-fatal - the script
+      # falls back to the dependency list already committed for this tag.
+      - name: Generate grpcio_tools build sources
+        run: python3 tools/distrib/python/make_grpcio_tools.py
+
+      # The compiled objects (protobuf/abseil-cpp sources) are identical
+      # across cp312/cp313/cp314; share ccache across builds.
+      - name: Restore compilation cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-wheels-grpcio-tools-v${{ env.GRPCIO_TOOLS_VERSION }}-manylinux_riscv64-${{ matrix.python }}
+          restore-keys: |
+            ccache-wheels-grpcio-tools-v${{ env.GRPCIO_TOOLS_VERSION }}-manylinux_riscv64-
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: tools/distrib/python/grpcio_tools
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL: |
+            set -eux
+            CCACHE_VERSION=4.13.6
+            curl -fsSL https://github.com/ccache/ccache/releases/download/v${CCACHE_VERSION}/ccache-${CCACHE_VERSION}-linux-$(uname -m)-musl-static.tar.gz | \
+              tar -xvzf - --strip-components 1 -C /usr/local/bin ccache-${CCACHE_VERSION}-linux-$(uname -m)-musl-static/ccache
+            ccache --version
+            ccache --zero-stats
+          # The extension only needs Cython at build time (declared in
+          # pyproject.toml's build-system.requires); unlike grpcio's own
+          # setup.py, grpcio_tools' doesn't fall back to cythonizing
+          # automatically - it requires this flag or it looks for a
+          # pre-generated _protoc_compiler.cpp that doesn't exist in a fresh
+          # checkout. Matches install_all_python_modules.sh.
+          CIBW_ENVIRONMENT: GRPC_PYTHON_BUILD_WITH_CYTHON=1 PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Fail fast rather than fall back to a from-source grpcio build if
+          # our registry doesn't yet carry a matching riscv64 wheel (same
+          # reasoning as build-grpcio.yml's CIBW_TEST_ENVIRONMENT).
+          CIBW_TEST_ENVIRONMENT: "PIP_ONLY_BINARY=:all:"
+          CIBW_ENVIRONMENT_PASS_LINUX: >-
+            CCACHE_BASEDIR
+            CCACHE_COMPILERCHECK
+          CIBW_CONTAINER_ENGINE: "docker; create_args: --volume ${{ env.CCACHE_DIR }}:/root/.ccache"
+          CIBW_REPAIR_WHEEL_COMMAND: auditwheel repair --strip -w {dest_dir} {wheel}
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tools/distrib/python/grpcio_tools/grpc_tools/test
+          # Mirrors upstream's own binary distribtest (test/distrib/python/test_packages.sh:
+          # "$PYTHON" -m grpc_tools.protoc --help), plus grpc_tools' own unit
+          # tests (grpc_tools/test/protoc_test.py) for real coverage of the
+          # dynamic/static proto-compilation code paths. complicated_pb2 is
+          # normally generated by Bazel's py_proto_library for the bazel test
+          # target; reproduce that with a plain protoc invocation.
+          CIBW_TEST_COMMAND: >-
+            python -m grpc_tools.protoc --help &&
+            python -m grpc_tools.protoc
+            -Itools/distrib/python/grpcio_tools/grpc_tools/test
+            --python_out=tools/distrib/python/grpcio_tools/grpc_tools/test
+            tools/distrib/python/grpcio_tools/grpc_tools/test/simplest.proto
+            tools/distrib/python/grpcio_tools/grpc_tools/test/complicated.proto &&
+            python -m pytest tools/distrib/python/grpcio_tools/grpc_tools/test/protoc_test.py
+
+      - name: Save compilation cache
+        if: always() && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-wheels-grpcio-tools-v${{ env.GRPCIO_TOOLS_VERSION }}-manylinux_riscv64-${{ matrix.python }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: grpcio-tools-${{ env.GRPCIO_TOOLS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish grpcio-tools ${{ inputs.version || '1.83.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: grpcio-tools-${{ inputs.version || '1.83.1' }}-*-manylinux_riscv64
