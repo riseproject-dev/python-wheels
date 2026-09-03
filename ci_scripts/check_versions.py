@@ -28,6 +28,11 @@ REGISTRY_URL = "https://pypi.riseproject.dev/simple/"
 PACKAGES_FILE = "ci_scripts/packages.txt"
 REPO = "riseproject-dev/python-wheels"
 
+# Python versions (interpreter tags) a package must have upstream riscv64
+# wheels for before we deprecate our own build. "3.14t" is the free-threaded
+# build — a distinct ABI from "3.14", so it needs its own wheel.
+TARGET_PYTHON_VERSIONS = ["3.12", "3.13", "3.14", "3.14t"]
+
 # Cap on how many new versions get dispatched per upgrade PR. When the registry
 # drifts far behind PyPI, an unbounded loop could kick off dozens of workflow
 # runs per package. Three keeps the retry cost bounded while still covering the
@@ -103,13 +108,55 @@ def get_pypi_package_url(package_info: Dict) -> str:
     return package_info["info"]["package_url"]
 
 
-def has_riscv64_wheel(package_info: Dict, target_version: str) -> bool:
-    """Check if a specific version has riscv64 wheels available."""
-    releases = package_info.get("releases", {})
-    for release in releases.get(target_version, []):
-        if "riscv64" in release.get("filename", "").lower():
-            return True
+def _parse_wheel_tags(filename: str) -> Optional[tuple]:
+    """Split a wheel filename into (python_tag, abi_tag, platform_tag)."""
+    if not filename.endswith(".whl"):
+        return None
+    parts = filename[:-len(".whl")].split("-")
+    if len(parts) < 5:
+        return None
+    return parts[-3], parts[-2], parts[-1]
+
+
+def _wheel_matches_python(python_tag: str, abi_tag: str, target: str) -> bool:
+    """Check if a wheel's (python_tag, abi_tag) satisfies a target like "3.12" or "3.14t"."""
+    free_threaded = target.endswith("t")
+    interp_tag = "cp" + target.rstrip("t").replace(".", "")
+
+    if free_threaded:
+        return python_tag == interp_tag and abi_tag == f"{interp_tag}t"
+
+    if python_tag == interp_tag:
+        return abi_tag == interp_tag
+
+    if abi_tag == "abi3" and re.fullmatch(r"cp3\d+", python_tag):
+        return int(python_tag[3:]) <= int(interp_tag[3:])
+
     return False
+
+
+def matching_riscv64_wheels(
+    package_info: Dict, target_version: str, python_versions: List[str] = TARGET_PYTHON_VERSIONS
+) -> Dict[str, List[str]]:
+    """Map each target python version to the riscv64 wheel filenames that satisfy it."""
+    riscv64_wheels = []
+    for release in package_info.get("releases", {}).get(target_version, []):
+        filename = release.get("filename", "")
+        tags = _parse_wheel_tags(filename)
+        if tags and "riscv64" in tags[2].lower():
+            riscv64_wheels.append((filename, tags))
+
+    return {
+        pv: [fn for fn, (python_tag, abi_tag, _) in riscv64_wheels if _wheel_matches_python(python_tag, abi_tag, pv)]
+        for pv in python_versions
+    }
+
+
+def has_riscv64_wheel(
+    package_info: Dict, target_version: str, python_versions: List[str] = TARGET_PYTHON_VERSIONS
+) -> bool:
+    """Check whether a version has upstream riscv64 wheels covering every python_versions entry."""
+    return all(matching_riscv64_wheels(package_info, target_version, python_versions).values())
 
 
 def is_pure_python_wheel(package_info: Dict, target_version: str) -> bool:
@@ -565,8 +612,16 @@ def check_package(package: str, create_prs: bool = False) -> Dict[str, any]:
         }
 
     if has_riscv64_wheel(pypi_info, pypi_version):
-        print(f"[-] {package} v{pypi_version} has riscv64 wheels on PyPI. Can be deprecated.")
-        reason = f"{package} v{pypi_version} has riscv64 wheels on PyPI: {pypi_package_url}"
+        py_list = ", ".join(TARGET_PYTHON_VERSIONS)
+        wheels_by_version = matching_riscv64_wheels(pypi_info, pypi_version)
+        print(f"[-] {package} v{pypi_version} has riscv64 wheels on PyPI for Python {py_list}. Can be deprecated.")
+        wheel_lines = [f"- {pv}: {fn}" for pv, files in wheels_by_version.items() for fn in files]
+        for line in wheel_lines:
+            print(f"        {line}")
+        reason = (
+            f"{package} v{pypi_version} has riscv64 wheels on PyPI for Python {py_list}: "
+            f"{pypi_package_url}\n\n" + "\n".join(wheel_lines)
+        )
         pr_url = create_deprecation_pr(package, reason) if create_prs else None
         return {
             "status": "can_deprecate",
@@ -662,6 +717,34 @@ def print_summary(results: List[Dict[str, any]]):
     print("\n" + "=" * 80)
 
 
+def _self_test():
+    """Sanity-check has_riscv64_wheel's per-interpreter matching. Run with --self-test."""
+    releases = {
+        "1.0": [
+            {"filename": "pkg-1.0-cp312-cp312-manylinux_2_34_riscv64.whl"},
+            {"filename": "pkg-1.0-cp313-cp313-manylinux_2_34_riscv64.whl"},
+            {"filename": "pkg-1.0-cp314-cp314-manylinux_2_34_riscv64.whl"},
+            {"filename": "pkg-1.0-cp312-abi3-manylinux_2_34_x86_64.whl"},  # not riscv64
+        ]
+    }
+    info = {"releases": releases}
+    # Missing 3.14t -> not all target versions covered.
+    assert has_riscv64_wheel(info, "1.0") is False
+    assert has_riscv64_wheel(info, "1.0", ["3.12", "3.13"]) is True
+
+    releases["1.0"].append({"filename": "pkg-1.0-cp314-cp314t-manylinux_2_34_riscv64.whl"})
+    assert has_riscv64_wheel(info, "1.0") is True
+
+    # abi3 wheel covers any cp3X >= its floor, but never a free-threaded target.
+    abi3_info = {"releases": {"1.0": [
+        {"filename": "pkg-1.0-cp39-abi3-manylinux_2_34_riscv64.whl"},
+    ]}}
+    assert has_riscv64_wheel(abi3_info, "1.0", ["3.12", "3.13", "3.14"]) is True
+    assert has_riscv64_wheel(abi3_info, "1.0", ["3.14t"]) is False
+
+    print("[+] self-test passed")
+
+
 def main():
     import argparse
 
@@ -669,8 +752,13 @@ def main():
     parser.add_argument("packages", nargs="*", help="Specific packages to check (default: all packages from packages.txt)")
     parser.add_argument("--create-prs", action="store_true", help="Create pull requests for packages that can be deprecated or upgraded")
     parser.add_argument("--summary", action="store_true", help="Show detailed summary at the end")
+    parser.add_argument("--self-test", action="store_true", help="Run internal sanity checks and exit")
 
     args = parser.parse_args()
+
+    if args.self_test:
+        _self_test()
+        return
 
     if args.packages:
         packages = args.packages
