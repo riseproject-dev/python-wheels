@@ -277,3 +277,4 @@ The porting gotchas (198 of them) live in [`references/gotchas/`](gotchas/), spl
 - **158** — Editing a PR's *description* is free on a parked port; pushing a commit is not
 - **163** — A maintainer hold that *names* a condition is an instruction to come back and
 - **173** — `gh pr list --state open --head <pkg>` does not see a *merged* PR, so a finished
+- **208** — A fresh `main` publish dispatch finishing green does not mean

@@ -16,6 +16,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
 - **158** — Editing a PR's *description* is free on a parked port; pushing a commit is not
 - **163** — A maintainer hold that *names* a condition is an instruction to come back and
 - **173** — `gh pr list --state open --head <pkg>` does not see a *merged* PR, so a finished
+- **208** — A fresh `main` publish dispatch finishing green does not mean
 
 ---
 
@@ -256,3 +257,19 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
     - **`docs/packages/<pkg>.yaml` missing from `main` is not evidence the port is
       incomplete** — it arrives through that separate docs PR, so it lags the wheels by
       however long the maintainer takes.
+
+208. **A fresh `main` publish dispatch finishing green does not mean
+    `pypi.riseproject.dev/simple/<pkg>/` is live yet — it can 404 for a while first.**
+    Gotcha 30's 200-vs-302 check assumes the package is already on the registry or never
+    will be; it misses a third, transient state. Right after `_publish-wheel.yml` runs on
+    `main` and reports success (draft release created, "Verify release is immutable"
+    green, `docs/packages/<pkg>.yaml` written), the endpoint can still answer `404` —
+    tree-sitter-yaml's did, immediately after its own dispatch, while a same-day publish
+    from two hours earlier (pyyaml-ft) was already `200`, and two more from the prior
+    30 minutes (pylsqpack, opencv-contrib-python) were still `404` too. The index that
+    backs `/simple/` is rebuilt on its own schedule, decoupled from the GitHub Release.
+    Don't read a post-dispatch `404` as a failed publish and don't re-dispatch to "fix"
+    it — re-running `build-<pkg>.yml` on `main` after a successful run just hits
+    gotcha 173's `HTTPError: 400 Bad Request` re-upload for no reason. Confirm the
+    dispatch worked from the run's own conclusion and the release, not from the index;
+    a `404` a few minutes old is not yet evidence of anything.
