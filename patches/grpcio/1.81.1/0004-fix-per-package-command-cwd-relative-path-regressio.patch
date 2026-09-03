@@ -1,0 +1,197 @@
+From: RISE python-wheels <noreply@riseproject.dev>
+Subject: [PATCH] fix per-package command cwd-relative path regression from #40833
+
+Same regression as the grpcio_tests/commands.py GatherProto fix
+(0003-fix-GatherProto-cwd-relative-path-regression.patch): the
+pyproject.toml migration (#40833) made these per-package "preprocess"/
+"build_package_protos" setuptools Command classes cwd-relative instead
+of anchored to GRPC_ROOT_ABS_PATH/ROOT_DIR (both already computed
+absolute in each file). install_all_python_modules.sh pushd's into each
+package's own directory before running these commands, so the relative
+paths ("src/proto/...", "./LICENSE", ROOT_REL_DIR) don't resolve there -
+symptoms range from a silently-skipped proto copy to
+grpc_tools.command.build_package_protos() finding zero .proto files and
+silently emitting no *_pb2.py, e.g.:
+
+    ImportError: cannot import name 'health_pb2' from 'grpc_health.v1'
+
+Fixes the same way as 0003: revert each file's constants/run() bodies to
+use the already-computed absolute ROOT_DIR/GRPC_ROOT_ABS_PATH instead of
+the relative ROOT_REL_DIR, matching pre-#40833 behavior. Affects every
+per-package command module install_all_python_modules.sh's PACKAGES loop
+touches that generates protos or copies LICENSE: grpcio_channelz,
+grpcio_health_checking, grpcio_reflection, grpcio_status, grpcio_testing.
+(grpcio_tests/commands.py is 0003; grpcio/commands.py and grpcio_csds/
+grpcio_admin/grpcio_csm_observability are unaffected - the former is
+invoked from repo root, the latter three carry no such module.)
+
+Upstream-Status: To upstream
+
+Signed-off-by: Trevor Gamblin <tgamblin@baylibre.com>
+---
+diff --git a/src/python/grpcio_channelz/channelz_commands.py b/src/python/grpcio_channelz/channelz_commands.py
+index 3a1cc26..8c2cae5 100644
+--- a/src/python/grpcio_channelz/channelz_commands.py
++++ b/src/python/grpcio_channelz/channelz_commands.py
+@@ -20,9 +20,10 @@ import setuptools
+ 
+ ROOT_DIR = os.path.abspath(os.path.dirname(os.path.abspath(__file__)))
+ GRPC_ROOT_ABS_PATH = os.path.join(ROOT_DIR, "../../..")
+-ROOT_REL_DIR = os.path.relpath(ROOT_DIR, start=GRPC_ROOT_ABS_PATH)
+-CHANNELZ_PROTO = "src/proto/grpc/channelz/channelz.proto"
+-LICENSE = "./LICENSE"
++CHANNELZ_PROTO = os.path.join(
++    GRPC_ROOT_ABS_PATH, "src/proto/grpc/channelz/channelz.proto"
++)
++LICENSE = os.path.join(GRPC_ROOT_ABS_PATH, "LICENSE")
+ 
+ 
+ class Preprocess(setuptools.Command):
+@@ -43,10 +44,10 @@ class Preprocess(setuptools.Command):
+         if os.path.isfile(CHANNELZ_PROTO):
+             shutil.copyfile(
+                 CHANNELZ_PROTO,
+-                os.path.join(ROOT_REL_DIR, "grpc_channelz/v1/channelz.proto"),
++                os.path.join(ROOT_DIR, "grpc_channelz/v1/channelz.proto"),
+             )
+         if os.path.isfile(LICENSE):
+-            shutil.copyfile(LICENSE, os.path.join(ROOT_REL_DIR, "LICENSE"))
++            shutil.copyfile(LICENSE, os.path.join(ROOT_DIR, "LICENSE"))
+ 
+ 
+ class BuildPackageProtos(setuptools.Command):
+@@ -65,4 +66,4 @@ class BuildPackageProtos(setuptools.Command):
+         from grpc_tools import command
+ 
+         # find and build all protos in the current package
+-        command.build_package_protos(ROOT_REL_DIR, strict_mode=True)
++        command.build_package_protos(ROOT_DIR, strict_mode=True)
+diff --git a/src/python/grpcio_health_checking/health_commands.py b/src/python/grpcio_health_checking/health_commands.py
+index 6b90962..d8a7bc9 100644
+--- a/src/python/grpcio_health_checking/health_commands.py
++++ b/src/python/grpcio_health_checking/health_commands.py
+@@ -20,9 +20,10 @@ import setuptools
+ 
+ ROOT_DIR = os.path.abspath(os.path.dirname(os.path.abspath(__file__)))
+ GRPC_ROOT_ABS_PATH = os.path.join(ROOT_DIR, "../../..")
+-ROOT_REL_DIR = os.path.relpath(ROOT_DIR, start=GRPC_ROOT_ABS_PATH)
+-HEALTH_PROTO = "src/proto/grpc/health/v1/health.proto"
+-LICENSE = "./LICENSE"
++HEALTH_PROTO = os.path.join(
++    GRPC_ROOT_ABS_PATH, "src/proto/grpc/health/v1/health.proto"
++)
++LICENSE = os.path.join(GRPC_ROOT_ABS_PATH, "LICENSE")
+ 
+ 
+ class Preprocess(setuptools.Command):
+@@ -43,10 +44,10 @@ class Preprocess(setuptools.Command):
+         if os.path.isfile(HEALTH_PROTO):
+             shutil.copyfile(
+                 HEALTH_PROTO,
+-                os.path.join(ROOT_REL_DIR, "grpc_health/v1/health.proto"),
++                os.path.join(ROOT_DIR, "grpc_health/v1/health.proto"),
+             )
+         if os.path.isfile(LICENSE):
+-            shutil.copyfile(LICENSE, os.path.join(ROOT_REL_DIR, "LICENSE"))
++            shutil.copyfile(LICENSE, os.path.join(ROOT_DIR, "LICENSE"))
+ 
+ 
+ class BuildPackageProtos(setuptools.Command):
+@@ -65,4 +66,4 @@ class BuildPackageProtos(setuptools.Command):
+         from grpc_tools import command
+ 
+         # find and build all protos in the current package
+-        command.build_package_protos(ROOT_REL_DIR, strict_mode=True)
++        command.build_package_protos(ROOT_DIR, strict_mode=True)
+diff --git a/src/python/grpcio_reflection/reflection_commands.py b/src/python/grpcio_reflection/reflection_commands.py
+index 49cd4c4..af443b8 100644
+--- a/src/python/grpcio_reflection/reflection_commands.py
++++ b/src/python/grpcio_reflection/reflection_commands.py
+@@ -20,9 +20,10 @@ import setuptools
+ 
+ ROOT_DIR = os.path.abspath(os.path.dirname(os.path.abspath(__file__)))
+ GRPC_ROOT_ABS_PATH = os.path.join(ROOT_DIR, "../../..")
+-ROOT_REL_DIR = os.path.relpath(ROOT_DIR, start=GRPC_ROOT_ABS_PATH)
+-REFLECTION_PROTO = "src/proto/grpc/reflection/v1alpha/reflection.proto"
+-LICENSE = "./LICENSE"
++REFLECTION_PROTO = os.path.join(
++    GRPC_ROOT_ABS_PATH, "src/proto/grpc/reflection/v1alpha/reflection.proto"
++)
++LICENSE = os.path.join(GRPC_ROOT_ABS_PATH, "LICENSE")
+ 
+ 
+ class Preprocess(setuptools.Command):
+@@ -44,11 +45,11 @@ class Preprocess(setuptools.Command):
+             shutil.copyfile(
+                 REFLECTION_PROTO,
+                 os.path.join(
+-                    ROOT_REL_DIR, "grpc_reflection/v1alpha/reflection.proto"
++                    ROOT_DIR, "grpc_reflection/v1alpha/reflection.proto"
+                 ),
+             )
+         if os.path.isfile(LICENSE):
+-            shutil.copyfile(LICENSE, os.path.join(ROOT_REL_DIR, "LICENSE"))
++            shutil.copyfile(LICENSE, os.path.join(ROOT_DIR, "LICENSE"))
+ 
+ 
+ class BuildPackageProtos(setuptools.Command):
+@@ -67,4 +68,4 @@ class BuildPackageProtos(setuptools.Command):
+         from grpc_tools import command
+ 
+         # find and build all protos in the current package
+-        command.build_package_protos(ROOT_REL_DIR, strict_mode=True)
++        command.build_package_protos(ROOT_DIR, strict_mode=True)
+diff --git a/src/python/grpcio_status/status_commands.py b/src/python/grpcio_status/status_commands.py
+index dec7c78..d2705b2 100644
+--- a/src/python/grpcio_status/status_commands.py
++++ b/src/python/grpcio_status/status_commands.py
+@@ -20,10 +20,11 @@ import setuptools
+ 
+ ROOT_DIR = os.path.abspath(os.path.dirname(os.path.abspath(__file__)))
+ GRPC_ROOT_ABS_PATH = os.path.join(ROOT_DIR, "../../..")
+-ROOT_REL_DIR = os.path.relpath(ROOT_DIR, start=GRPC_ROOT_ABS_PATH)
+-STATUS_PROTO = "third_party/googleapis/google/rpc/status.proto"
++STATUS_PROTO = os.path.join(
++    GRPC_ROOT_ABS_PATH, "third_party/googleapis/google/rpc/status.proto"
++)
+ PACKAGE_STATUS_PROTO_DIR = "grpc_status/google/rpc"
+-LICENSE = "./LICENSE"
++LICENSE = os.path.join(GRPC_ROOT_ABS_PATH, "LICENSE")
+ 
+ 
+ class Preprocess(setuptools.Command):
+@@ -40,7 +41,7 @@ class Preprocess(setuptools.Command):
+ 
+     def run(self):
+         package_status_proto_rel_path = os.path.join(
+-            ROOT_REL_DIR, PACKAGE_STATUS_PROTO_DIR
++            ROOT_DIR, PACKAGE_STATUS_PROTO_DIR
+         )
+ 
+         if os.path.isfile(STATUS_PROTO):
+@@ -51,4 +52,4 @@ class Preprocess(setuptools.Command):
+                 os.path.join(package_status_proto_rel_path, "status.proto"),
+             )
+         if os.path.isfile(LICENSE):
+-            shutil.copyfile(LICENSE, os.path.join(ROOT_REL_DIR, "LICENSE"))
++            shutil.copyfile(LICENSE, os.path.join(ROOT_DIR, "LICENSE"))
+diff --git a/src/python/grpcio_testing/testing_commands.py b/src/python/grpcio_testing/testing_commands.py
+index cf8594b..2931837 100644
+--- a/src/python/grpcio_testing/testing_commands.py
++++ b/src/python/grpcio_testing/testing_commands.py
+@@ -20,8 +20,7 @@ import setuptools
+ 
+ ROOT_DIR = os.path.abspath(os.path.dirname(os.path.abspath(__file__)))
+ GRPC_ROOT_ABS_PATH = os.path.join(ROOT_DIR, "../../..")
+-ROOT_REL_DIR = os.path.relpath(ROOT_DIR, start=GRPC_ROOT_ABS_PATH)
+-LICENSE = "./LICENSE"
++LICENSE = os.path.join(GRPC_ROOT_ABS_PATH, "LICENSE")
+ 
+ 
+ class Preprocess(setuptools.Command):
+@@ -38,4 +37,4 @@ class Preprocess(setuptools.Command):
+ 
+     def run(self):
+         if os.path.isfile(LICENSE):
+-            shutil.copyfile(LICENSE, os.path.join(ROOT_REL_DIR, "LICENSE"))
++            shutil.copyfile(LICENSE, os.path.join(ROOT_DIR, "LICENSE"))
