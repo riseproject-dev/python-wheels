@@ -1,0 +1,170 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's wheel builder:
+#   https://github.com/Quansight-Labs/pyyaml-ft/blob/v8.0.0/.github/workflows/ci.yaml
+# Upstream builds a static libyaml itself (packaging/build/libyaml.sh) and links the
+# Cython extension against it; we do the same here. Only cp313/cp313t are in upstream's
+# own matrix; the riscv64 image has no cp313t interpreter (gotcha 11), so cp314t stands
+# in as the free-threaded target, same pattern as build-bcrypt.yml.
+name: Build pyyaml-ft wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pyyaml-ft version to build (git tag without leading v, e.g. 8.0.0)'
+        required: true
+        default: '8.0.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pyyaml-ft.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '8.0.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYYAML_FT_VERSION: ${{ inputs.version || '8.0.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # libyaml ref matches upstream ci.yaml's own LIBYAML_REF default.
+  BEFORE_ALL_LIBYAML: >-
+    set -eux &&
+    curl -L -o libyaml.tar.gz https://github.com/yaml/libyaml/archive/refs/tags/0.2.5.tar.gz &&
+    tar xzf libyaml.tar.gz && rm libyaml.tar.gz && cd libyaml-0.2.5 &&
+    ./bootstrap &&
+    ./configure --disable-dependency-tracking --with-pic --enable-shared=no &&
+    make install &&
+    cd .. && rm -rf libyaml-0.2.5
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_sdist:
+    needs: [setup]
+    name: Build pyyaml-ft ${{ inputs.version || '8.0.0' }} sdist
+    runs-on: ubuntu-latest
+    outputs:
+      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
+      package_version: ${{ steps.sdist.outputs.package_version }}
+    steps:
+      - name: Checkout pyyaml-ft ${{ env.PYYAML_FT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Quansight-Labs/pyyaml-ft
+          ref: v${{ env.PYYAML_FT_VERSION }}
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build sdist
+        id: sdist
+        env:
+          PYYAML_FORCE_CYTHON: 1
+          PYYAML_FORCE_LIBYAML: 0
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          uv pip install build
+          python -m build --sdist --outdir dist
+
+          sdist_name="$(ls dist)"
+          {
+            echo "sdist_name=${sdist_name}"
+            echo "package_version=$(echo "${sdist_name}" | sed -En 's/pyyaml_ft-(.+)\.tar\.gz/\1/p')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ steps.sdist.outputs.sdist_name }}
+          path: dist/${{ steps.sdist.outputs.sdist_name }}
+          if-no-files-found: error
+
+  # Mirrors upstream's cp313 (GIL) build.
+  build_gil:
+    needs: [setup, build_sdist]
+    name: Build pyyaml-ft ${{ inputs.version || '8.0.0' }} cp313-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ needs.build_sdist.outputs.sdist_name }}
+          path: dist/
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: 'cp313-*'
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: ${{ env.BEFORE_ALL_LIBYAML }}
+          CIBW_ENVIRONMENT: PYYAML_FORCE_CYTHON=1 PYYAML_FORCE_LIBYAML=1
+          CIBW_TEST_REQUIRES: pytest pytest-run-parallel
+          CIBW_TEST_COMMAND: >-
+            pytest {package} &&
+            pytest --parallel-threads=auto --iterations=20 {package}/tests/free_threading
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyyaml-ft-${{ env.PYYAML_FT_VERSION }}-cp313-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  # Free-threaded wheel: only cp314t - the riscv64 image has no cp313t interpreter
+  # (gotcha 11), even though upstream's own matrix targets cp313t.
+  build_freethreaded:
+    needs: [setup, build_sdist]
+    name: Build pyyaml-ft ${{ inputs.version || '8.0.0' }} cp314t-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ needs.build_sdist.outputs.sdist_name }}
+          path: dist/
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: 'cp314t-*'
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: ${{ env.BEFORE_ALL_LIBYAML }}
+          CIBW_ENVIRONMENT: PYYAML_FORCE_CYTHON=1 PYYAML_FORCE_LIBYAML=1
+          CIBW_TEST_REQUIRES: pytest pytest-run-parallel
+          CIBW_TEST_COMMAND: >-
+            pytest {package} &&
+            pytest --parallel-threads=auto --iterations=20 {package}/tests/free_threading
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyyaml-ft-${{ env.PYYAML_FT_VERSION }}-cp314t-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyyaml-ft ${{ inputs.version || '8.0.0' }}
+    needs: [setup, build_sdist, build_gil, build_freethreaded]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pyyaml-ft-${{ needs.build_sdist.outputs.package_version }}-*-manylinux_riscv64
