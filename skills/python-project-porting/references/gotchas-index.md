@@ -123,6 +123,7 @@ The porting gotchas (198 of them) live in [`references/gotchas/`](gotchas/), spl
 - **124** — A wheel whose compiled payload is a Go binary builds fine and then dies at
 - **138** — Two more manylinux-image facts, in the vein of gotchas 46 and 51.
 - **139** — RISC-V SIMD in an upstream that already supports riscv64: two traps, both invisible
+- **207** — A vendored dependency three submodules deep can declare a `cmake_minimum_required`
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
@@ -137,6 +138,7 @@ The porting gotchas (198 of them) live in [`references/gotchas/`](gotchas/), spl
 - **143** — Static-with-PIC dependency inside a *shared* dependency: one bundled `.so`
 - **159** — Bundling shared libraries next to a binary: `patchelf --set-rpath` writes
 - **160** — An architecture `select()` that supplies *source* files and ends in
+- **206** — A C++ ML/inference engine that gates its fast BLAS backend to x86 usually
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 

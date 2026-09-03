@@ -17,6 +17,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
 - **143** — Static-with-PIC dependency inside a *shared* dependency: one bundled `.so`
 - **159** — Bundling shared libraries next to a binary: `patchelf --set-rpath` writes
 - **160** — An architecture `select()` that supplies *source* files and ends in
+- **206** — A C++ ML/inference engine that gates its fast BLAS backend to x86 usually
 
 ---
 
@@ -354,3 +355,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
       whatever else is staged before the loop, and check with
       `git clean -n -f -f -x -d -e <existing> | grep <your file>` — a dry run costs nothing
       and the real thing costs the whole build.
+
+206. **A C++ ML/inference engine that gates its fast BLAS backend (MKL/oneDNN) to x86
+    usually already has a portable one wired in for the same reason aarch64 needs it —
+    reach for that, not a from-source OpenBLAS build (the ctranslate2 case).**
+    CTranslate2's CMakeLists exposes `WITH_MKL`/`WITH_DNNL`/`WITH_ACCELERATE`/
+    `WITH_OPENBLAS`/`WITH_RUY`, and upstream's own aarch64 Linux CI already builds
+    `-DWITH_MKL=OFF -DWITH_OPENBLAS=ON -DWITH_RUY=ON -DOPENMP_RUNTIME=COMP` — read the
+    dependency's own backend-selection code (`src/cpu/backend.cc`'s `get_gemm_backend()`)
+    before copying that whole recipe: Ruy alone already handles both `FLOAT32` and every
+    `INT8*` compute type, so OpenBLAS is redundant on riscv64 and its own from-source
+    build (a `make TARGET=ARMV8`-style dance, arch-specific to begin with) can be dropped
+    entirely — set just `WITH_RUY=ON`.
+    - **Ruy's own portability comes from a preprocessor platform check, not a config
+      flag** (`ruy/platform.h`'s `RUY_PLATFORM_X86`/`RUY_PLATFORM_ARM` macros both read
+      `0` on riscv64), so it silently takes the generic scalar path with no patch needed
+      — the same shape as the parent project's own `CT2_BUILD_ARCH`/`CpuIsa::GENERIC`
+      fallback when neither `CT2_X86_BUILD` nor `CT2_ARM64_BUILD` gets defined.
+    - **Ruy's vendored `cpuinfo` (pytorch/cpuinfo) submodule degrades to a harmless
+      warning on an unrecognized `CMAKE_SYSTEM_PROCESSOR`, not a fatal error** — even a
+      pre-riscv64-support pin (CTranslate2 4.8.1 pins a 2023 commit with no riscv64
+      branch at all) just sets `CPUINFO_SUPPORTED_PLATFORM FALSE` and makes
+      `cpuinfo_initialize()` a permanent no-op; nothing on Ruy's call path requires it to
+      succeed on this arch. Read the dependency's actual `CMakeLists.txt` at the pinned
+      commit (`git show <sha>:CMakeLists.txt`) before assuming an old pin blocks the
+      build outright.
+    - **A backend swap (OpenBLAS+Ruy on the real aarch64 wheel vs. Ruy-only here) can
+      surface as a single test failure with a byte-for-byte different result, not a
+      crash** — an int8-quantized wav2vec2 transcription test came back one character
+      off under Ruy-only int8 GEMM. Same divergence class as gotcha 170, now confirmed in
+      ML inference / quantization rather than linear algebra: deselect the specific test
+      with a one-line reason, don't chase the difference as a bug.

@@ -15,6 +15,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **124** — A wheel whose compiled payload is a Go binary builds fine and then dies at
 - **138** — Two more manylinux-image facts, in the vein of gotchas 46 and 51.
 - **139** — RISC-V SIMD in an upstream that already supports riscv64: two traps, both invisible
+- **207** — A vendored dependency three submodules deep can declare a `cmake_minimum_required`
 
 ---
 
@@ -244,3 +245,24 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       hardware has it instead of disabling the kernels. Check the dispatcher falls back to
       a scalar level first; QEMU reports the V bit set, so this cannot be tested by
       emulation alone, only read.
+
+207. **A vendored dependency three submodules deep can declare a `cmake_minimum_required`
+    below CMake 4's hard floor even when the top-level project and its direct submodule
+    don't — and only a CMake new enough to need the workaround has a riscv64 PyPI wheel
+    at all (the ctranslate2/Ruy/cpuinfo/clog case).** CTranslate2's own
+    `cmake_minimum_required(VERSION 3.7)` and Ruy's `VERSION 3.13` are both fine; the
+    failure is three levels down, in Ruy's vendored `third_party/cpuinfo/deps/clog`,
+    which CMake 4 refuses outright (`Compatibility with CMake < 3.5 has been removed`)
+    rather than warning. There is no `dnf install`-around-it either: the riscv64
+    manylinux image's own repo `cmake` is fine, but a `CIBW_BEFORE_ALL_LINUX` script that
+    does `pip install cmake` to get a version newer than whatever the image ships hits
+    this on riscv64 specifically, because the *first* riscv64 wheel on PyPI is
+    `cmake==4.1.0` — every version old enough to predate this CMake policy change (<4.0)
+    has no riscv64 wheel to fall back to, so there is no way to sidestep the collision by
+    pinning an older `cmake` the way an x86_64/aarch64 build could.
+    - **The fix is `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` on the top-level configure line**;
+      it is a no-op for a project already declaring 3.5 or higher and unblocks the
+      deeply-vendored one three `add_subdirectory()` calls down.
+    - **Confirm exactly which vendored `CMakeLists.txt` needs it by reading the
+      "CMake Error at ..." path in the configure log**, not by guessing from the
+      top-level project's own declared minimum — it is rarely the direct dependency.
