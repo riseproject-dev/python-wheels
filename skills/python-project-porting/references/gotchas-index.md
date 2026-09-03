@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (192 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (195 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -80,6 +80,7 @@ The porting gotchas (192 of them) live in [`references/gotchas/`](gotchas/), spl
 - **107** — `CIBW_ENVIRONMENT` *replaces* upstream's `[tool.cibuildwheel] environment` table
 - **134** — cibuildwheel's default abi3 audit rejects a wheel for exporting its *own*
 - **56** — `py-build-cmake` projects: the free-threaded job dies at *configure* unless *(reused number — this theme)*
+- **201** — When `package-dir` is a monorepo subdirectory and the package's own build script
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
@@ -107,6 +108,7 @@ The porting gotchas (192 of them) live in [`references/gotchas/`](gotchas/), spl
 - **133** — bazel 7.x pins the same rules_python/rules_java across the whole minor series, so
 - **136** — Upstream builds its wheels in a vcpkg image: replace the image, keep the workflow
 - **142** — cibuildwheel copies the
+- **202** — A monorepo's "regenerate deps from Bazel" helper may already tolerate a missing
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
@@ -160,6 +162,7 @@ The porting gotchas (192 of them) live in [`references/gotchas/`](gotchas/), spl
 - **125** — A dependency with no riscv64 wheel anywhere is only a blocker if it cannot build
 - **149** — cp314t can be un-*testable* while staying perfectly buildable — skip its tests,
 - **172** — An abi3 build compiles the wheel once but rebuilds the *test venv* per
+- **200** — A monorepo sibling ported in a separate PR can pin `install_requires` to its own
 
 ### Build-tool drift & pins — [`gotchas/build-tool-drift-and-pins.md`](gotchas/build-tool-drift-and-pins.md)
 

@@ -17,6 +17,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
 - **125** — A dependency with no riscv64 wheel anywhere is only a blocker if it cannot build
 - **149** — cp314t can be un-*testable* while staying perfectly buildable — skip its tests,
 - **172** — An abi3 build compiles the wheel once but rebuilds the *test venv* per
+- **200** — A monorepo sibling ported in a separate PR can pin `install_requires` to its own
 
 ---
 
@@ -312,3 +313,24 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       obvious response is to deselect it: this port arrived carrying a PR-description note
       claiming exactly that test "needs network", when re-running it with the venv on
       `PATH` passes in 0.4s.
+
+200. **A monorepo sibling ported in a separate PR can pin `install_requires` to its own
+     exact version, so testing the wheel needs a package that is itself mid-port (the
+     grpcio-tools/grpcio case).** grpcio-tools 1.83.1's `install_requires` reads
+     `grpcio>={version}` with `{version}` filled in as grpcio-tools' *own* tag, so
+     `pip install`-ing the freshly built wheel needs grpcio 1.83.1 specifically - not just
+     "some grpcio" - even though grpcio and grpcio-tools are two separately ported
+     packages from the same source tree. If the sibling hasn't published that exact
+     version yet (its own patch-version-bump PR still open), `CIBW_TEST_ENVIRONMENT:
+     PIP_ONLY_BINARY=:all:` turns the gap into a fast, legible failure - `ERROR: Could not
+     find a version that satisfies the requirement grpcio>=1.83.1 (from versions: 1.72.0,
+     1.75.1, 1.76.0, 1.78.0)` - at the automatic wheel-install-for-test step, instead of a
+     multi-hour from-source rebuild of the sibling's C++ core on shared riscv64 runners.
+     - **Confirm the build is sound first.** All three interpreters compiling and
+       auditwheel-repairing cleanly is what turns the test-phase failure into proof of a
+       registry gap rather than a broken workflow - grep the log for `Successfully built
+       <pkg>` before trusting the failure's cause.
+     - **Open as a draft citing the exact blocking PR**, per the existing "blocked on an
+       unpublished dependency" convention (see PR/CI conventions in
+       `pr-and-publishing.md`). It goes green on its own once the sibling merges and
+       publishes - no workflow change needed, just re-running CI.

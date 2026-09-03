@@ -18,6 +18,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **107** — `CIBW_ENVIRONMENT` *replaces* upstream's `[tool.cibuildwheel] environment` table
 - **134** — cibuildwheel's default abi3 audit rejects a wheel for exporting its *own*
 - **56** — `py-build-cmake` projects: the free-threaded job dies at *configure* unless
+- **201** — When `package-dir` is a monorepo subdirectory and the package's own build script
 
 ---
 
@@ -281,3 +282,20 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
       failure and proved the fix in ~4 minutes on an arm64 laptop — versus a ~25-minute
       round trip on the self-hosted riscv64 runner. Reach for it whenever the failure is
       in *configure* or in Python-ABI detection rather than in generated code.
+
+201. **When `package-dir` is a monorepo subdirectory and the package's own build script
+     vendors sibling source trees into itself, run that vendoring step as a plain host-side
+     workflow step *before* cibuildwheel runs — not inside `CIBW_BEFORE_ALL`/`BEFORE_BUILD`
+     (extends gotcha 5).** `{project}` being the whole checkout doesn't help if the
+     package's own tooling expects those sibling sources to already be physically staged
+     *inside* `package-dir` — MANIFEST.in/pyproject.toml only pick up what already exists
+     on disk there at sdist-assembly time, which cibuildwheel does per-interpreter from
+     `package-dir`'s current contents. The grpcio-tools case:
+     `tools/distrib/python/make_grpcio_tools.py` copies `src/compiler`, `include/`, and
+     `third_party/{protobuf,abseil-cpp}` from the checkout root into `grpc_root/` and
+     `third_party/` *inside* `tools/distrib/python/grpcio_tools/` (both gitignored —
+     upstream's own `install_all_python_modules.sh` runs the same script before building).
+     A single `run: python3 tools/distrib/python/make_grpcio_tools.py` step placed right
+     after checkout, before `uses: pypa/cibuildwheel@…` with
+     `package-dir: tools/distrib/python/grpcio_tools`, is enough: by the time cibuildwheel
+     packages that subdirectory per matrix job, the vendored trees are already there.

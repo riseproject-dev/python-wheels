@@ -16,6 +16,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
 - **133** — bazel 7.x pins the same rules_python/rules_java across the whole minor series, so
 - **136** — Upstream builds its wheels in a vcpkg image: replace the image, keep the workflow
 - **142** — cibuildwheel copies the
+- **202** — A monorepo's "regenerate deps from Bazel" helper may already tolerate a missing
 
 ---
 
@@ -300,3 +301,17 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       concluding a Bazel-only upstream needs gotcha 47's bootstrap: the fallback is often
       the plain setuptools build every distro packager uses, and on riscv64 it is the only
       one that can run at all.
+
+202. **A monorepo's "regenerate deps from Bazel" helper may already tolerate a missing
+     bazel binary — check its exception handling before bootstrapping Bazel just to run it
+     (the inverse of gotcha 47).** grpc's `tools/distrib/python/make_grpcio_tools.py`
+     copies the C++/proto sources grpcio-tools' `setup.py` needs (step 1, plain file
+     copies, no Bazel), then tries to regenerate `protoc_lib_deps.py` via `bazel query`
+     (step 2) — wrapped in a bare `except Exception: return` that leaves the
+     already-committed deps file untouched on failure. Confirmed by running it for real
+     against a fresh `v1.83.1` checkout with no bazel installed: it printed a non-fatal
+     traceback and kept going, and every one of the 369 `CC_FILES` + 15 `PROTO_FILES` the
+     pre-generated `protoc_lib_deps.py` references still resolved against the checkout.
+     Verify a script's fallback directly — run it, read the `except` clause — rather than
+     assuming a Bazel-adjacent monorepo always needs Bazel bootstrapped for a build step
+     that only *regenerates* a file already checked in for the tag you're building.
