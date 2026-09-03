@@ -1,0 +1,110 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on
+# https://github.com/bigcat88/pillow_heif/blob/v1.4.0/.github/workflows/wheels-pi_heif.yml
+# (the `wheels_linux_amd64`/`wheels_linux_arm64` jobs). `pi-heif` is `pillow-heif` built from
+# the same pillow_heif sources with PH_LIGHT_ACTION=1, which skips bundling libx265 (see
+# libheif/build_libs.py) -- the Raspberry-Pi-oriented variant upstream ships for platforms
+# where GPL-licensed x265 is undesirable.
+name: Build pi-heif wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pi-heif version to build (pillow_heif git tag without leading v, e.g. 1.4.0)'
+        required: true
+        default: '1.4.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pi-heif.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.4.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PI_HEIF_VERSION: ${{ inputs.version || '1.4.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pi-heif ${{ inputs.version || '1.4.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout pillow_heif v${{ env.PI_HEIF_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: bigcat88/pillow_heif
+          ref: v${{ env.PI_HEIF_VERSION }}
+          persist-credentials: false
+
+      - name: Transform to Pi-Heif
+        run: |
+          cp -r -v ./pi-heif/* .
+          python3 .github/transform_to-pi_heif.py
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream installs `cmake==3.31.6` from PyPI, which ships no riscv64 wheel; the
+          # image already provides cmake 4.4.2.
+          CIBW_BEFORE_ALL_LINUX: |
+            set -e
+            yum makecache && yum install -y libjpeg-turbo-devel lcms2-devel zlib-devel
+            export BUILD_DIR=/tmp/ph_build_stuff
+            python3 {package}/libheif/build_libs.py
+          # PH_LIGHT_ACTION=1 (upstream's own wheels-pi_heif.yml flag) makes build_libs.py
+          # skip x265 (see libheif/build_libs.py) and is also read at test time by
+          # tests/basic_test.py::test_light_build. Pillow ships no riscv64 wheel on public
+          # PyPI; ours is what the test env installs.
+          CIBW_ENVIRONMENT: >-
+            PH_LIGHT_ACTION=1
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+
+      - name: Check the wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("_pi_heif.") and n.endswith(".so") for n in names), whl
+              libs = sorted(n.split("/")[1].split("-")[0] for n in names if n.startswith("pi_heif.libs/") and n != "pi_heif.libs/")
+              assert libs == ["libde265", "libheif"], (whl, libs)
+              licenses = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+              assert licenses == {"LICENSE.txt", "LICENSES_bundled.txt"}, (whl, licenses)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pi_heif-${{ env.PI_HEIF_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pi-heif ${{ inputs.version || '1.4.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pi_heif-${{ inputs.version || '1.4.0' }}-*-manylinux_riscv64
