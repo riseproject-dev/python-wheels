@@ -17,6 +17,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **139** — RISC-V SIMD in an upstream that already supports riscv64: two traps, both invisible
 - **207** — A vendored dependency three submodules deep can declare a `cmake_minimum_required`
 - **226** — GCC 14 turns `-Wincompatible-pointer-types` (and `-Wimplicit-function-declaration`,
+- **235** — The manylinux image's bundled `/opt/python/cpXY-cpXY` interpreters have
 
 ---
 
@@ -289,3 +290,30 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       text names the diagnostic (`error: ... incompatible-pointer-types` in
       `[-Wincompatible-pointer-types]`), and it appears identically on any sufficiently
       new GCC/Clang regardless of architecture — nothing riscv64-specific to chase.
+
+235. **The manylinux image's bundled `/opt/python/cpXY-cpXY` interpreters have
+    `sqlite3` loadable extensions disabled — test anything using
+    `sqlite3.Connection.enable_load_extension` on the runner's own Python instead (the
+    sqlite-vec case).** These are python-build-standalone-style builds, compiled with a
+    feature set that differs from a normal distro Python — confirmed with
+    `python3 -c "import sqlite3; print(hasattr(sqlite3.connect(':memory:'),
+    'enable_load_extension'))"` returning `False` in `/opt/python/cp312-cp312` through
+    `cp314-cp314` inside `quay.io/pypa/manylinux_2_39_riscv64`, and `True` for both
+    Rocky 10's own system `python3` (inside the same image) and Ubuntu 24.04's apt
+    `python3` on the real `ubuntu-24.04-riscv` runner target. A package whose whole
+    purpose is `conn.load_extension(...)` therefore cannot be exercised inside the
+    build container at all — the AttributeError looks like a build problem but is a
+    property of that specific Python build, present on every architecture, not
+    riscv64-specific.
+    - **Test on the host runner, not the container, when this hits.** Since
+      `ubuntu-24.04-riscv` runs glibc 2.39 — the same version the `manylinux_2_39_riscv64`
+      tag promises — a wheel built inside the container installs and loads correctly
+      when tested directly on the runner afterward (outside `docker run`), which is also
+      what a real end user's environment looks like. Building in the container and
+      testing on the host is not a compromise here; it is the only combination that
+      exercises the feature at all.
+    - **Not unique to `sqlite3`** — any stdlib module a python-build-standalone-style
+      interpreter compiles out (readline, tkinter, and others depending on the build
+      profile) will show the same "works everywhere except `/opt/python`" shape. `python3
+      -c "import <mod>"` inside `/opt/python/cpXY-cpXY` is a five-second check before
+      assuming a `CIBW_TEST_COMMAND` failure is riscv64-specific.

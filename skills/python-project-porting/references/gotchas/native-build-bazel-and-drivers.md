@@ -18,6 +18,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
 - **142** — cibuildwheel copies the
 - **202** — A monorepo's "regenerate deps from Bazel" helper may already tolerate a missing
 - **219** — GDAL's cmake build produces no `gdal-config` script — a second consumer of the
+- **233** — A package can have no Python build backend at all — the wheel comes from an
 
 ---
 
@@ -350,3 +351,38 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
        libzstd-devel lz4-devel json-c-devel` (all present in Rocky 10 appstream/crb on
        riscv64) added to the image's `dnf install`, or entire driver families silently
        aren't there to test.
+
+233. **A package can have no Python build backend at all — the wheel comes from an
+    external packer tool with its own platform table (the sqlite-vec case; see
+    `build-sqlite-vec.yml`).** Gotcha 15's "drive the container yourself" is for a
+    *heavy* C++ build cibuildwheel can't reach; this is the opposite shape: sqlite-vec's
+    repo carries no `setup.py`/`pyproject.toml` at all. `make loadable` compiles one C
+    file (`sqlite-vec.c`, linked against a vendored SQLite amalgamation fetched by
+    `scripts/vendor.sh`) into a loadable `.so`, and a *separate* Rust CLI in its own repo,
+    `asg017/sqlite-dist`, assembles the actual pip wheel by hand-writing dist-info files
+    and zipping them. That tool's `src/targets/pip.rs::platform_target_tag()` is a bare
+    `match (os, cpu)` over `{macos,linux,windows}×{x86_64,aarch64}` ending `_ =>
+    unreachable!()`, so it cannot target riscv64 at any version. cibuildwheel doesn't
+    apply — there is no `pip wheel` invocation for it to wrap — so the workflow
+    reproduces the packer's own templates (`base_init_py`, `dist_info_metadata`/`WHEEL`/
+    `RECORD`) inline as a `run:` heredoc Python script, matching its exact wheel shape
+    (`py3-none-<platform>` tag, `<pkg>/__init__.py` plus the loadable file,
+    `.dist-info/licenses/`) so the artifact is indistinguishable from one the real tool
+    would produce for a supported arch.
+    - **Read the *wheel*, not the repo, to find the packer.** `unzip -p <whl> '*/WHEEL'`
+      names it (`Generator: sqlite-dist 0.0.1-alpha.22`); its GitHub repo is then one
+      `gh repo view` away, and — if public, as here — its wheel-writing source is the
+      spec to copy, far cheaper than reverse-engineering the dist-info layout from wheel
+      bytes alone.
+    - **Validate the hand-written wheel by running upstream's own test suite against
+      it**, not just `unzip -l`. `make loadable && uv sync --directory tests && make
+      test-loadable` is upstream's real CI step; running it against the riscv64-built
+      `.so` (91 passed, 4 skipped here, matching the x86_64/aarch64 jobs' skip count) is
+      stronger evidence than a green build, since the packaging step itself carries zero
+      test coverage anywhere in upstream's own pipeline — `release.yaml` runs
+      `sqlite-dist build` and uploads straight to PyPI with no test in between.
+    - **The rebuilt tool needs only the one code path this port exercises, not feature
+      parity.** `sqlite-dist`'s `pip` target also emits `datasette`/`sqlite_utils`
+      sibling wheels and `entry_points.txt` shims for other targets; only
+      `write_base_packages` (the base `pip` wheel) matters here, so the heredoc
+      reproduces that function alone and ignores the rest of the tool.

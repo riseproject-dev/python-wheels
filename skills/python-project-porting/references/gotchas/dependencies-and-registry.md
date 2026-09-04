@@ -21,6 +21,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
 - **210** — A test dependency our registry already carries as a wheel can still fail from
 - **215** — A registry gap for one interpreter can be narrowed to just the one optional
 - **232** — Matching upstream's newest interpreter tier can silently trade a fast port for a
+- **234** — A stock distro `pip` can be too old to *recognize* a riscv64 manylinux wheel at
 
 ---
 
@@ -415,3 +416,30 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
     naming numpy as the reason). Re-check both indexes before the next version bump — the
     day numpy ships a `cp315` riscv64 wheel anywhere, the dropped tier costs nothing to add
     back.
+
+234. **A stock distro `pip` can be too old to *recognize* a riscv64 manylinux wheel at
+    all — the fix is upgrading pip itself, not the wheel (the sqlite-vec case).**
+    manylinux tag compatibility is computed from pip's own **vendored** copy of
+    `packaging`, not any `packaging` installed into the venv's site-packages —
+    `pip install -U packaging` does nothing for this, and neither does a correct
+    `platform.libc_ver()`/`packaging._manylinux._get_glibc_version()` reading (both
+    already report `2.39` when this fails). Ubuntu 24.04's apt `python3-pip` (24.0) lists
+    **zero** `manylinux_*_riscv64` tags in `pip debug --verbose` — only bare
+    `linux_riscv64` — so `pip install <riscv64 wheel>` fails outright with `... is not a
+    supported wheel on this platform`, and `pip install numpy` (which *is* on our
+    registry) silently falls back to a from-source build that cascades into missing
+    build tools (`ninja`→`cmake`→`Could not find OpenSSL`) instead of failing cleanly.
+    `pip install --upgrade pip` first (26.2.1, checked) fixes both: `pip debug --verbose`
+    then lists 690 compatible tags headed by `cp312-cp312-manylinux_2_39_riscv64`.
+    - **This is a property of the *installing* pip, not of the wheel or the registry** —
+      the identical riscv64 wheel that fails under old pip installs cleanly once pip is
+      upgraded, for a self-built wheel exactly as much as for anything already on
+      `pypi.riseproject.dev`. Any workflow step (or real end user) invoking system `pip`
+      directly on `ubuntu-24.04-riscv` — i.e. outside the manylinux container, gotcha
+      235's territory — needs the upgrade first.
+    - **Two different old-pip environments, same root cause.** Rocky 10's own system
+      `python3` (inside the manylinux image, distinct from `/opt/python`) shows the
+      identical zero-manylinux-tags symptom with its bundled pip 23.3.2; `/opt/python/
+      cpXY-cpXY`'s bundled pip is unaffected because it ships current. Grep `pip debug
+      --verbose | grep -c manylinux` before trusting any install step that runs outside
+      `/opt/python`.

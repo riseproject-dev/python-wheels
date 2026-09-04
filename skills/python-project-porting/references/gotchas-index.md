@@ -123,6 +123,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **142** — cibuildwheel copies the
 - **202** — A monorepo's "regenerate deps from Bazel" helper may already tolerate a missing
 - **219** — GDAL's cmake build produces no `gdal-config` script — a second consumer of the
+- **233** — A package can have no Python build backend at all — the wheel comes from an
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
@@ -137,6 +138,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **139** — RISC-V SIMD in an upstream that already supports riscv64: two traps, both invisible
 - **207** — A vendored dependency three submodules deep can declare a `cmake_minimum_required`
 - **226** — GCC 14 turns `-Wincompatible-pointer-types` (and `-Wimplicit-function-declaration`,
+- **235** — The manylinux image's bundled `/opt/python/cpXY-cpXY` interpreters have
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
@@ -185,6 +187,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **210** — A test dependency our registry already carries as a wheel can still fail from
 - **215** — A registry gap for one interpreter can be narrowed to just the one optional
 - **232** — Matching upstream's newest interpreter tier can silently trade a fast port for a
+- **234** — A stock distro `pip` can be too old to *recognize* a riscv64 manylinux wheel at
 
 ### Build-tool drift & pins — [`gotchas/build-tool-drift-and-pins.md`](gotchas/build-tool-drift-and-pins.md)
 
