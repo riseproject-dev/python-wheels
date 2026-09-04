@@ -59,12 +59,13 @@ jobs:
           buildkitd-flags: --debug
 
       # fiona/setup.py detects GDAL purely through `gdal-config` (no env-var fallback for
-      # include/library paths, unlike pyogrio or rasterio's PACKAGE_DATA-driven builds), so
-      # the image only needs to produce a working gdal-config; GDAL's CMake build generates
-      # and installs one unconditionally (cmake/helpers/GdalGenerateConfig.cmake, gated only
-      # on `NOT GDAL_ENABLE_MACOSX_FRAMEWORK`), independent of BUILD_APPS. fiona is OGR-only
-      # (vector), so this reuses build-pyogrio.yml's leaner image shape rather than
-      # build-rasterio.yml's raster-codec-heavy, BUILD_APPS=ON one.
+      # include/library paths like pyogrio's, and no `gdalinfo` fallback like rasterio's).
+      # GDAL's modern cmake build produces neither script (gotcha 219), so this image writes
+      # a minimal gdal-config itself, answering only the four flags setup.py calls
+      # (--cflags/--libs/--datadir/--version) from the known install layout. That sidesteps
+      # rasterio's BUILD_APPS=ON fix (fiona's setup.py has no gdalinfo path to benefit from
+      # it), so this otherwise reuses build-pyogrio.yml's leaner, BUILD_APPS=OFF image shape
+      # - fiona is OGR-only (vector), with no raster codec drivers to link against.
       - name: Write the GDAL image build context
         run: |
           mkdir -p "$RUNNER_TEMP/gdal-ctx"
@@ -219,6 +220,8 @@ jobs:
                   -DBUILD_CSHARP_BINDINGS=OFF \
               && cmake --build build -j"$(nproc)" \
               && cmake --install build \
+              && printf '#!/bin/bash\ncase "$1" in\n  --cflags) echo "-I%s/include" ;;\n  --libs) echo "-L%s/lib -lgdal" ;;\n  --datadir) echo "%s/share/gdal" ;;\n  --version) echo "%s" ;;\n  *) exit 1 ;;\nesac\n' "${PREFIX}" "${PREFIX}" "${PREFIX}" "${GDAL_VERSION}" > "${PREFIX}/bin/gdal-config" \
+              && chmod +x "${PREFIX}/bin/gdal-config" \
               && ldconfig \
               && rm -rf /src/*
 
@@ -426,6 +429,8 @@ jobs:
                   -DBUILD_CSHARP_BINDINGS=OFF \
               && cmake --build build -j"$(nproc)" \
               && cmake --install build \
+              && printf '#!/bin/bash\ncase "$1" in\n  --cflags) echo "-I%s/include" ;;\n  --libs) echo "-L%s/lib -lgdal" ;;\n  --datadir) echo "%s/share/gdal" ;;\n  --version) echo "%s" ;;\n  *) exit 1 ;;\nesac\n' "${PREFIX}" "${PREFIX}" "${PREFIX}" "${GDAL_VERSION}" > "${PREFIX}/bin/gdal-config" \
+              && chmod +x "${PREFIX}/bin/gdal-config" \
               && ldconfig \
               && rm -rf /src/*
 
