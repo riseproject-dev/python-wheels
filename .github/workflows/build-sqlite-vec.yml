@@ -1,0 +1,192 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Upstream ships pip wheels via a separate tool, asg017/sqlite-dist, whose
+# platform table (src/targets/pip.rs) has no riscv64 entry. This workflow
+# reproduces that tool's pip target (base_init_py/dist_info_* templates) for
+# riscv64, building the loadable extension the same way upstream's own
+# release.yaml does (scripts/vendor.sh && make loadable).
+name: Build sqlite-vec wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'sqlite-vec version to build (git tag without leading v, e.g. 0.1.9)'
+        required: true
+        default: '0.1.9'
+  pull_request:
+    paths:
+      - '.github/workflows/build-sqlite-vec.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.1.9' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  SQLITE_VEC_VERSION: ${{ inputs.version || '0.1.9' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build sqlite-vec ${{ inputs.version || '0.1.9' }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout sqlite-vec v${{ env.SQLITE_VEC_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: asg017/sqlite-vec
+          ref: v${{ env.SQLITE_VEC_VERSION }}
+          persist-credentials: false
+
+      - name: Write pip wheel packaging script
+        run: |
+          cat > build_wheel.py <<'PY'
+          import hashlib
+          import os
+          import sys
+          import zipfile
+          from base64 import urlsafe_b64encode
+
+          PKG = "sqlite-vec"
+          PY_PKG = "sqlite_vec"
+          VERSION, PLATFORM_TAG, ENTRYPOINT_SO, OUT_DIR = sys.argv[1:5]
+          ROOT = os.path.dirname(os.path.abspath(__file__))
+
+          WHEEL_TAG = f"py3-none-{PLATFORM_TAG}"
+          DIST_INFO = f"{PY_PKG}-{VERSION}.dist-info"
+
+          INIT_PY = f'''
+          from os import path
+          import sqlite3
+
+          __version__ = "{VERSION}"
+          __version_info__ = tuple(__version__.split("."))
+
+          def loadable_path():
+            """ Returns the full path to the {PKG} loadable SQLite extension bundled with this package """
+
+            loadable_path = path.join(path.dirname(__file__), "vec0")
+            return path.normpath(loadable_path)
+
+          def load(conn: sqlite3.Connection)  -> None:
+            """ Load the {PKG} SQLite extension into the given database connection. """
+
+            conn.load_extension(loadable_path())
+
+          ''' + open(os.path.join(ROOT, "bindings", "python", "extra_init.py")).read()
+
+          METADATA = f"""Metadata-Version: 2.4
+          Name: {PKG}
+          Version: {VERSION}
+          Summary: A vector search SQLite extension that runs anywhere!
+          Home-page: https://alexgarcia.xyz/sqlite-vec
+          Author: Alex Garcia
+          License-Expression: MIT OR Apache-2.0
+          Project-URL: Homepage, https://alexgarcia.xyz/sqlite-vec
+          Project-URL: Source, https://github.com/asg017/sqlite-vec
+          Description-Content-Type: text/markdown
+
+          A vector search SQLite extension that runs anywhere! See
+          https://github.com/asg017/sqlite-vec for documentation.
+          """
+
+          WHEEL = f"""Wheel-Version: 1.0
+          Generator: python-wheels-riscv64-port
+          Root-Is-Purelib: false
+          Tag: {WHEEL_TAG}
+          """
+
+          os.makedirs(OUT_DIR, exist_ok=True)
+          wheel_path = os.path.join(OUT_DIR, f"{PY_PKG}-{VERSION}-{WHEEL_TAG}.whl")
+          records = []
+
+          def write(zf, arcname, data):
+              zf.writestr(arcname, data)
+              digest = urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+              records.append(f"{arcname},sha256={digest},{len(data)}")
+
+          with zipfile.ZipFile(wheel_path, "w", zipfile.ZIP_DEFLATED) as zf:
+              write(zf, f"{PY_PKG}/__init__.py", INIT_PY.encode())
+              with open(ENTRYPOINT_SO, "rb") as f:
+                  write(zf, f"{PY_PKG}/vec0.so", f.read())
+              write(zf, f"{DIST_INFO}/METADATA", METADATA.encode())
+              write(zf, f"{DIST_INFO}/WHEEL", WHEEL.encode())
+              write(zf, f"{DIST_INFO}/top_level.txt", f"{PY_PKG}\n".encode())
+              for lic in ("LICENSE-MIT", "LICENSE-APACHE"):
+                  with open(os.path.join(ROOT, lic), "rb") as f:
+                      write(zf, f"{DIST_INFO}/licenses/{lic}", f.read())
+              record_name = f"{DIST_INFO}/RECORD"
+              zf.writestr(record_name, "\n".join(records + [f"{record_name},,"]) + "\n")
+
+          print(wheel_path)
+          PY
+
+      - name: Build the loadable extension and package the wheel
+        run: |
+          docker run --rm \
+            -v "$(pwd)":/workspace \
+            --workdir /workspace \
+            -e SQLITE_VEC_VERSION="${{ env.SQLITE_VEC_VERSION }}" \
+            "${{ env.MANYLINUX_RISCV64_IMAGE }}" \
+            bash -c '
+              set -euo pipefail
+              dnf -y -q install gettext unzip
+              ./scripts/vendor.sh
+              make loadable
+              python3 build_wheel.py "$SQLITE_VEC_VERSION" manylinux_2_39_riscv64 dist/vec0.so wheelhouse
+            '
+
+      # python-build-standalone (bundled in the manylinux image under
+      # /opt/python) is built with loadable extensions disabled, so the
+      # extension can only be exercised with a Python that has them enabled
+      # (the runner's own, which is also what a real riscv64 user gets).
+      # This runs upstream's own tests/test-*.py suite (make test-loadable's
+      # target) against the just-built dist/vec0.so, then installs the wheel
+      # itself the same way a user would.
+      - name: Run upstream's test suite and install the built wheel
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install -q --upgrade pip
+          pip install -q \
+            --index-url https://pypi.org/simple/ \
+            --extra-index-url https://pypi.riseproject.dev/simple/ \
+            pytest numpy syrupy wheelhouse/*.whl
+          python3 -m pytest -vv tests/test-*.py
+          python3 -c "
+          import sqlite3, sqlite_vec
+          db = sqlite3.connect(':memory:')
+          db.enable_load_extension(True)
+          sqlite_vec.load(db)
+          db.enable_load_extension(False)
+          version = db.execute('select vec_version()').fetchone()[0]
+          assert version == 'v${{ env.SQLITE_VEC_VERSION }}', version
+          "
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sqlite-vec-${{ env.SQLITE_VEC_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish sqlite-vec ${{ inputs.version || '0.1.9' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: sqlite-vec-${{ inputs.version || '0.1.9' }}-*-manylinux_riscv64
