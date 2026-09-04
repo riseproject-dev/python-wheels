@@ -17,6 +17,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
 - **155** — maturin abi3 can be an opt-in Cargo *feature*, so a plain PEP 517 build silently
 - **179** — A pinned *git* dependency that does not build on riscv64: redirect it with a cargo
 - **187** — A `bindings = "bin"` project that ships **no** wheel-level test suite at all (the
+- **224** — `python -m <name>` is not a given for every `bindings = "bin"` wheel — it only
 
 ---
 
@@ -404,3 +405,24 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
     fix actually happened, then run again expecting a clean pass. A step that only checks
     `--version` would go equally green whether the hook engine works or is entirely
     broken.
+
+224. **`python -m <name>` is not a given for every `bindings = "bin"` wheel — it only
+    works when *upstream's own source tree* ships a hand-written `<name>/__init__.py` +
+    `__main__.py` shim; verify by inspecting the built wheel, not by copying the test
+    step from another `bin` port (the zizmor case).** Gotcha 117 identifies a `bindings =
+    "bin"` wheel by "one file under `<dist>-<ver>.data/scripts/<name>` with no `.so` and
+    no importable package" — but that description covers two different shapes. prek and
+    pyrefly both carry an extra `<name>/` Python package in their own repos solely to make
+    `python -m <name>` work (`unzip -l` on their wheels shows `prek/__init__.py`,
+    `prek/__main__.py`, `prek/_find_prek.py`; `pyrefly/__init__.py`, `__main__.py`,
+    `py.typed`), so a workflow copied from either one that includes `python -m <name>
+    --version` in the test step happens to pass. zizmor's `pyproject.toml` declares no
+    `python-source` and its repo has no such package, so its wheel is the *bare* shape —
+    `unzip -l` shows only `zizmor-<ver>.data/scripts/zizmor` plus `.dist-info/` — and
+    `python -m zizmor --version` fails every interpreter with `No module named zizmor`,
+    even though `zizmor --version` (the installed console script) works fine. This is a
+    same-day repeat of gotcha 223's point from the opposite angle: don't guess the
+    behaviour of the *actual artifact* your workflow builds, download the already-built
+    wheel from your own PR's `build_wheel` job (`gh run download <run-id> -n
+    <pkg>-<ver>-manylinux_riscv64`) and `unzip -l` it before deciding what the test step
+    can assert — cheaper than finding out from four failed matrix legs.

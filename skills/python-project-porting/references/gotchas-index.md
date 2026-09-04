@@ -103,6 +103,7 @@ The porting gotchas (200 of them) live in [`references/gotchas/`](gotchas/), spl
 - **155** — maturin abi3 can be an opt-in Cargo *feature*, so a plain PEP 517 build silently
 - **179** — A pinned *git* dependency that does not build on riscv64: redirect it with a cargo
 - **187** — A `bindings = "bin"` project that ships no wheel-level test suite at all (the
+- **224** — `python -m <name>` is not a given for every `bindings = "bin"` wheel — it only
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
