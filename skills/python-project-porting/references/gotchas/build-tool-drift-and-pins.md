@@ -17,6 +17,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
 - **171** — A green wheel we publish can break a *different* package's build the moment it lands
 - **175** — One `PIP_BUILD_CONSTRAINT` file covers the project's build tool *and* every
 - **184** — `[tool.cibuildwheel] enable` is an enum, not a free-form list — a pinned older
+- **211** — `pip install wheel` does not restore `distutils` on Python 3.12+ — only
 
 ---
 
@@ -320,3 +321,27 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
       --only cp312-manylinux_x86_64` (or any target) against the unpatched checkout fails
       identically on macOS/Linux/x86/arm, since the parse happens before any platform or
       arch selection.
+
+211. **`pip install wheel` does not restore `distutils` on Python 3.12+ — only
+    `setuptools` ships the compatibility shim (the libclang case; see
+    `build-libclang.yml`).** Not a cibuildwheel build: a hand-rolled `setup_ext.py` run
+    directly against `/opt/python/cp312-cp312/bin/python3` inside the manylinux image,
+    after `pip install wheel` alone (no `setuptools`) — the setup script's own `from
+    distutils.command.build import build` dies with `ModuleNotFoundError: No module
+    named 'distutils'`, 10 hours into a from-scratch LLVM/Clang build, because Python
+    3.12 removed `distutils` from the stdlib entirely (PEP 632). `wheel` has no
+    `distutils` dependency of its own, so it installs clean and gives no hint anything
+    is missing. `setuptools`, unlike `wheel`, ships `setuptools/_distutils` plus a
+    `distutils-precedence.pth` that runs at interpreter *startup* — before the script's
+    own imports — and redirects `import distutils` to that vendored copy.
+    - **The fix is one word**: `pip install setuptools wheel` (not `pip install wheel`
+      alone). No pin needed — setuptools 84 (current as of this writing) still carries
+      the shim.
+    - **Settle it in seconds against the real image, no LLVM rebuild required**:
+      `docker run --platform linux/riscv64 quay.io/pypa/manylinux_2_39_riscv64
+      /opt/python/cp312-cp312/bin/python3 -c 'import distutils'` fails on a bare image,
+      then passes once `setuptools` is pip-installed — the whole reproduction is two
+      `pip install`s and an `import`, independent of the package being ported.
+    - Distinct from gotcha 29 (setuptools *removing* `pkg_resources` in 82.0.0): this is
+      the stdlib removing `distutils` in 3.12, and setuptools is the fix here rather than
+      the thing that broke.
