@@ -168,6 +168,7 @@ The porting gotchas (199 of them) live in [`references/gotchas/`](gotchas/), spl
 - **149** — cp314t can be un-*testable* while staying perfectly buildable — skip its tests,
 - **172** — An abi3 build compiles the wheel once but rebuilds the *test venv* per
 - **200** — A monorepo sibling ported in a separate PR can pin `install_requires` to its own
+- **210** — A test dependency our registry already carries as a wheel can still fail from
 
 ### Build-tool drift & pins — [`gotchas/build-tool-drift-and-pins.md`](gotchas/build-tool-drift-and-pins.md)
 

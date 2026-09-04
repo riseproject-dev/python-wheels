@@ -18,6 +18,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
 - **149** — cp314t can be un-*testable* while staying perfectly buildable — skip its tests,
 - **172** — An abi3 build compiles the wheel once but rebuilds the *test venv* per
 - **200** — A monorepo sibling ported in a separate PR can pin `install_requires` to its own
+- **210** — A test dependency our registry already carries as a wheel can still fail from
 
 ---
 
@@ -334,3 +335,28 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
        unpublished dependency" convention (see PR/CI conventions in
        `pr-and-publishing.md`). It goes green on its own once the sibling merges and
        publishes - no workflow change needed, just re-running CI.
+
+210. **A test dependency our registry already carries as a wheel can still fail from
+     source, because pip resolves to whatever version is *newest*, not whatever version
+     has a wheel (the pikepdf/hypothesis case).** pikepdf's `test` dependency group pins
+     only `hypothesis>=6.36`; our registry ships `hypothesis-6.165.10` for
+     cp312/cp313/cp314/cp314t, well above that floor, but a plain `pip install` during
+     `CIBW_TEST_ENVIRONMENT` still pulled `hypothesis-6.167.1.tar.gz` from PyPI - a
+     newer release with no riscv64 wheel anywhere - because pip's resolver picks the
+     highest version satisfying the constraint across *all* indexes and does not prefer
+     a wheel over a same-or-lower-priority sdist. hypothesis 6.167.1 also switched its
+     `[build-system]` to `build-backend = "maturin"`, and building it from sdist prints
+     `Target triple not supported by rustup` before trying (and failing) to auto-install
+     a Rust toolchain - a dead end distinct from gotcha 179/182's cross-compile cases,
+     since this is a *native* riscv64 build machine that rustup simply doesn't recognise
+     as an install target at all.
+     - **Pin the dependency to binary-only, not a version ceiling.** `CIBW_TEST_ENVIRONMENT:
+       PIP_ONLY_BINARY=hypothesis` (gotcha 12: the test-only knob, not `CIBW_ENVIRONMENT`)
+       makes pip stop at the newest version our registry actually has a wheel for,
+       without hand-pinning a version that will silently go stale as the registry adds
+       newer builds.
+     - **hypothesis is a near-universal test dependency** across this repo's ports, so any
+       future port whose test suite pulls it in fresh (rather than relying on a cached
+       resolution) can hit the same wall once PyPI's hypothesis crosses whatever release
+       made the maturin switch - check `pypi.org/pypi/hypothesis/<version>/json` for
+       `requires_dist`/build-backend drift before assuming a version bump is free.
