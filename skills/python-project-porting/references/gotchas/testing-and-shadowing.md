@@ -19,6 +19,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
 - **151** — A test runner that *discovers* work by walking `<testdir>/..` fails silently, not
 - **152** — An sdist's `tests/` directory can be a partial copy — count the files before you
 - **174** — A `<pkg>/` directory at the checkout root is only a shadowing hazard when it holds
+- **218** — Gotcha 25's shadowing condition ("suite is a package") has a second, independent
 
 ---
 
@@ -352,3 +353,37 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
     - Confirm rather than reason about it: `python -c "import <pkg>; print(<pkg>.__file__)"`
       from the directory in question, on any host, in one second — and keep that as the
       test command's first link (gotcha 20) so a regression is loud.
+
+218. **Gotcha 25's shadowing condition ("suite is a package") has a second, independent
+    trigger that survives even when it's false: `python -m pytest`/`python -c` prepend
+    the checkout root to `sys.path[0]` unconditionally; a bare `pytest` console-script
+    invocation does not (the python-crfsuite case).** python-crfsuite's importable
+    package (`pycrfsuite/`, with `__init__.py`) sits at the checkout root exactly like
+    gotcha 25's pymongo setup, but its `tests/` has **no** `__init__.py` — so pytest's
+    own prepend-mode rootdir insertion (gotcha 25's mechanism) only adds `tests/` itself
+    to `sys.path[0]`, never the root, and `import pycrfsuite` inside the test modules is
+    free to resolve to the installed wheel. That protection is real only under upstream's
+    actual `CIBW_TEST_COMMAND: pytest {project}/tests --doctest-modules` (a bare
+    entry-point script, which re-execs as `python <venv>/bin/pytest ...` — Python
+    prepends the *script's own dirname*, not the invoking shell's cwd). Rewriting the
+    same command as `python -m pytest {project}/tests` reintroduces the shadow from a
+    wholly different mechanism: the `-m` flag makes the interpreter prepend `''` (cwd,
+    i.e. the checkout root) to `sys.path` **before pytest ever runs**, independent of
+    whether `tests/` is a package. The result without a compiled extension in the
+    checkout is the same loud `ModuleNotFoundError` gotcha 25 describes for a silently-
+    wrong pass — here it fails outright instead, because `pycrfsuite/_pycrfsuite` is a
+    Cython extension never built in place.
+    - **Don't "clean up" a bare `pytest {project}/tests` into `python -m pytest` when
+      copying upstream's own test-command literally** — the two are not equivalent in
+      the build-from-checkout shape, only in an installed-and-cd'd context. Preserve
+      upstream's exact invocation form, not just its arguments.
+    - **Verify in seconds, no compile needed, on any host**: build a real wheel once,
+      `pip install` it into a venv, then from the checkout root run both
+      `<venv>/bin/pytest <testdir>` (passes, imports the wheel) and
+      `<venv>/bin/python -m pytest <testdir>` (fails if the checkout's package has no
+      in-place extension, silently imports the source otherwise) — the divergence is the
+      proof, and it needs no riscv64/QEMU to reproduce.
+    - Distinct from gotcha 111's `cd {project}/test && python -m pytest` fix, which
+      neutralizes `-m`'s cwd-insertion by changing *what* cwd is rather than avoiding
+      `-m`; both are valid fixes; the cheaper one here is simply not switching to `-m`
+      in the first place when upstream never did.

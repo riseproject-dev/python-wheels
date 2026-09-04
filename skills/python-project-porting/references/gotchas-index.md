@@ -205,6 +205,7 @@ The porting gotchas (200 of them) live in [`references/gotchas/`](gotchas/), spl
 - **151** — A test runner that *discovers* work by walking `<testdir>/..` fails silently, not
 - **152** — An sdist's `tests/` directory can be a partial copy — count the files before you
 - **174** — A `<pkg>/` directory at the checkout root is only a shadowing hazard when it holds
+- **218** — Gotcha 25's shadowing condition ("suite is a package") has a second, independent
 
 ### Testing: pytest config, servers & test selection — [`gotchas/pytest-config-servers-and-selection.md`](gotchas/pytest-config-servers-and-selection.md)
 
