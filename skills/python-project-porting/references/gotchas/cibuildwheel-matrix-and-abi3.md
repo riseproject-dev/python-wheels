@@ -19,6 +19,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **134** — cibuildwheel's default abi3 audit rejects a wheel for exporting its *own*
 - **204** — cibuildwheel 4.2.0 doesn't offer cp313t as a build target on *any* platform —
 - **221** — `quay.io/pypa/musllinux_1_2_riscv64` is a real, working image — every prior port
+- **225** — `CIBW_BEFORE_ALL_LINUX` and `CIBW_BEFORE_BUILD_LINUX` are two different hooks —
+- **227** — A build that touches `PyObject` internals directly (`ob_refcnt`, `ob_type`,
 - **209** — A multi-grammar tree-sitter-`<lang>` repo does not necessarily need a
 - **56** — `py-build-cmake` projects: the free-threaded job dies at *configure* unless
 - **201** — When `package-dir` is a monorepo subdirectory and the package's own build script
@@ -401,3 +403,45 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
      own dependency footprint (`requires_dist`, `CIBW_TEST_REQUIRES`) against the
      registry before assuming musllinux riscv64 needs to be dropped by default; try it
      when nothing pulls in a numpy-shaped blocker.
+
+225. **`CIBW_BEFORE_ALL_LINUX` and `CIBW_BEFORE_BUILD_LINUX` are two different hooks —
+     overriding the one upstream *doesn't* use leaves theirs running too (the uamqp
+     case).** Both env vars replace their matching `[tool.cibuildwheel.linux]` key
+     independently (gotcha 107's cascade, one level more specific); they don't share a
+     slot, so setting `CIBW_BEFORE_ALL_LINUX` while upstream's own pyproject sets
+     `before-build` doesn't touch it at all — cibuildwheel runs **both**, yours first,
+     then theirs. uamqp's `before-build` builds OpenSSL from source for manylinux2014;
+     the riscv64 override installed `openssl-devel` via `before-all` to skip that, but
+     upstream's still-present `before-build` then `yum remove`d it again and tried the
+     source build anyway (failing separately on missing `perl-FindBin`, gotcha 46).
+     Both jobs looked like they ran (the openssl-devel install step's log was right
+     there) which made the real cause — the wrong hook name — easy to miss.
+     - **Read which key upstream's `[tool.cibuildwheel.linux]` table actually sets**
+       before choosing which `CIBW_*_LINUX` var to override; `before-all` runs once per
+       container, `before-build` once per interpreter, and only the matching one
+       replaces upstream's list.
+     - When in doubt, grep the job log for upstream's own command line (here,
+       `install_openssl.sh`) — if it's still present after your override step, you
+       overrode the wrong hook, not the right one with a bug in it.
+
+227. **A build that touches `PyObject` internals directly (`ob_refcnt`, `ob_type`,
+     etc.) instead of through the stable/limited API fails to *compile* under
+     free-threaded Python, and the failure is identical on every architecture — trim
+     the matrix, don't patch around it (the uamqp case).** Several of uamqp's `.pyx`
+     files read `context_pyobj.ob_refcnt == 0` inside a C callback to guess whether the
+     Python-side context object is mid-garbage-collection before touching it. Free-threaded
+     builds replace `PyObject`'s single `ob_refcnt` field with a different
+     layout (per-thread local/shared reference counts), so the field plain doesn't exist
+     and the cp314t build fails at `gcc: error: 'PyObject' {aka 'struct _object'} has no
+     member named 'ob_refcnt'` — a compile error, not a runtime one, so it can't be
+     waved off with `CIBW_TEST_SKIP` the way gotcha 216's coverage gaps can.
+     - **Check whether upstream ships a cp314/cp314t wheel at all before assuming this
+       needs a patch.** uamqp's own PyPI releases stop at cp313 — nobody has hit this
+       upstream because nobody has built it free-threaded yet. Dropping `cp314t` from
+       the matrix (keeping `cp312`/`cp313`/`cp314`, all of which built and passed tests
+       clean) mirrors upstream's own supported set rather than inventing support they
+       don't have.
+     - **This is a real correctness gap, not a riscv64 build quirk** — the same source
+       would fail identically compiling cp314t on x86_64/aarch64. Reaching for the
+       pattern of gotcha 26 (bump the toolchain) or 107/226 (fix `CFLAGS`) doesn't apply;
+       there's no flag that makes a nonexistent struct member exist.

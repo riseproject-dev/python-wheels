@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (200 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -89,6 +89,8 @@ The porting gotchas (200 of them) live in [`references/gotchas/`](gotchas/), spl
 - **216** — An abi3 build's own mandatory floor interpreter (gotcha 96) can itself be the one
 - **217** — Upstream's own `repair-wheel-command` commonly re-runs abi3audit itself via
 - **221** — `quay.io/pypa/musllinux_1_2_riscv64` is a real, working image — every prior port
+- **225** — `CIBW_BEFORE_ALL_LINUX` and `CIBW_BEFORE_BUILD_LINUX` are two different hooks —
+- **227** — A build that touches `PyObject` internals directly (`ob_refcnt`, `ob_type`,
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
@@ -132,6 +134,7 @@ The porting gotchas (200 of them) live in [`references/gotchas/`](gotchas/), spl
 - **138** — Two more manylinux-image facts, in the vein of gotchas 46 and 51.
 - **139** — RISC-V SIMD in an upstream that already supports riscv64: two traps, both invisible
 - **207** — A vendored dependency three submodules deep can declare a `cmake_minimum_required`
+- **226** — GCC 14 turns `-Wincompatible-pointer-types` (and `-Wimplicit-function-declaration`,
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
