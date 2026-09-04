@@ -18,6 +18,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
 - **179** — A pinned *git* dependency that does not build on riscv64: redirect it with a cargo
 - **187** — A `bindings = "bin"` project that ships **no** wheel-level test suite at all (the
 - **224** — `python -m <name>` is not a given for every `bindings = "bin"` wheel — it only
+- **228** — A crate graph far smaller than gotcha 141's polars-runtime/deltalake examples can
+  still SIGABRT rustc with an alloc failure on the 4-core riscv64 runners.
 
 ---
 
@@ -426,3 +428,23 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
     wheel from your own PR's `build_wheel` job (`gh run download <run-id> -n
     <pkg>-<ver>-manylinux_riscv64`) and `unzip -l` it before deciding what the test step
     can assert — cheaper than finding out from four failed matrix legs.
+
+228. **A crate graph far smaller than gotcha 141's polars-runtime/deltalake examples can
+    still SIGABRT rustc with an alloc failure on the 4-core riscv64 runners, and only one
+    matrix leg needs to fail (the tach case).** tach's Cargo.toml pulls in ruff's own
+    `ruff_linter`/`ruff_python_parser`/etc as git dependencies — not a huge graph by that
+    gotcha's standard, and well inside its 360-minute default timeout — but the
+    `cp37-abi3` and `cp314t` matrix legs compile that same graph **concurrently** on
+    (evidently) shared/limited memory, and one leg died mid-`ruff_linter` with `rustc
+    ... (signal: 6, SIGABRT: process abort signal)` while its sibling, compiling the
+    identical dependency tree, finished clean. Rust's default allocator aborts (not
+    `SIGKILL`) on allocation failure, so a SIGABRT during codegen on a modest crate graph
+    is still worth reading as OOM first, especially when a sibling matrix job building
+    the same code succeeded. Fix tried first, before touching `opt-level` or profile
+    (which gotcha 141 already covers for the harder cases): add `CARGO_BUILD_JOBS=2` to
+    `CIBW_ENVIRONMENT_LINUX`, which halves concurrent rustc processes and their peak
+    memory without changing the produced binary's optimization level. The retry (same
+    commit, same matrix, `CARGO_BUILD_JOBS=2` added) built and tested both legs clean, at
+    roughly the same wall-clock cost as the failed attempt — cheap enough to reach for
+    on any multi-leg riscv64 matrix that compiles a nontrivial dependency tree per leg,
+    not just the graphs already known to be enormous.

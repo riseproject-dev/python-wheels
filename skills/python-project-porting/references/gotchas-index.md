@@ -106,6 +106,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **179** — A pinned *git* dependency that does not build on riscv64: redirect it with a cargo
 - **187** — A `bindings = "bin"` project that ships no wheel-level test suite at all (the
 - **224** — `python -m <name>` is not a given for every `bindings = "bin"` wheel — it only
+- **228** — A crate graph far smaller than gotcha 141's polars-runtime/deltalake examples can
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
@@ -215,6 +216,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **152** — An sdist's `tests/` directory can be a partial copy — count the files before you
 - **174** — A `<pkg>/` directory at the checkout root is only a shadowing hazard when it holds
 - **218** — Gotcha 25's shadowing condition ("suite is a package") has a second, independent
+- **229** — A test suite that calls GitPython's `Repo(..., search_parent_directories=True)`
 
 ### Testing: pytest config, servers & test selection — [`gotchas/pytest-config-servers-and-selection.md`](gotchas/pytest-config-servers-and-selection.md)
 

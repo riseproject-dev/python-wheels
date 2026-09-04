@@ -20,6 +20,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
 - **152** — An sdist's `tests/` directory can be a partial copy — count the files before you
 - **174** — A `<pkg>/` directory at the checkout root is only a shadowing hazard when it holds
 - **218** — Gotcha 25's shadowing condition ("suite is a package") has a second, independent
+- **229** — A test suite that calls GitPython's `Repo(..., search_parent_directories=True)`
 
 ---
 
@@ -387,3 +388,29 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
       neutralizes `-m`'s cwd-insertion by changing *what* cwd is rather than avoiding
       `-m`; both are valid fixes; the cheaper one here is simply not switching to `-m`
       in the first place when upstream never did.
+
+229. **A test suite that calls GitPython's `Repo(..., search_parent_directories=True)`
+    needs `.git` staged as a `test-sources` entry, and a project with its own
+    actions/checkout-detached-HEAD shim needs `GITHUB_*` forwarded into
+    `CIBW_TEST_ENVIRONMENT` too — cibuildwheel's test sandbox has neither by default
+    (the tach case).** cibuildwheel's isolated `test_cwd` only contains what
+    `test-sources` explicitly lists (gotcha 36); a suite whose fixtures live under a
+    `.git`-bearing checkout (upstream always runs pytest from the full clone) gets
+    `git.exc.InvalidGitRepositoryError` the moment a test walks up looking for one —
+    add `.git` itself to `CIBW_TEST_SOURCES` alongside the test dir. That's necessary
+    but not sufficient when the project *also* pre-empts the obvious next failure:
+    tach's own `git_ops.py` has an `is_github_actions()` branch specifically to avoid
+    `repo.active_branch.name` (which raises on the detached HEAD `actions/checkout`
+    always leaves), reading `GITHUB_EVENT_NAME`/`GITHUB_REF_NAME`/`GITHUB_HEAD_REF`
+    instead — a real, working accommodation for exactly this CI shape. It doesn't help
+    here because cibuildwheel's containerized test step does not forward the *outer*
+    job's `GITHUB_*` env into the sandbox, so `is_github_actions()` reads false and the
+    code falls through to the path that crashes. Fix: set them explicitly via
+    `CIBW_TEST_ENVIRONMENT`, sourced from the workflow's own GitHub Actions context
+    (not the runner's shell env, which is what's missing) — `GITHUB_ACTIONS=true
+    GITHUB_EVENT_NAME=<github.event_name> GITHUB_REF_NAME=<github.ref_name>
+    GITHUB_HEAD_REF=<github.head_ref>`, interpolated as workflow expressions in the
+    YAML. Each failure mode surfaces separately and in order —
+    the `.git`-staging fix must land and be reverified before the detached-HEAD one
+    becomes visible — so budget two short CI round-trips, not one, for a suite that
+    turns out to depend on real git context.
