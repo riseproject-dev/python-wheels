@@ -1,0 +1,152 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/zizmorcore/zizmor/blob/v1.29.0/.github/workflows/release-pypi.yml
+name: Build zizmor wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'zizmor version to build (git tag without the leading v, e.g. 1.29.0)'
+        required: true
+        default: '1.29.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-zizmor.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.29.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.29.0 there.
+  ZIZMOR_VERSION: ${{ inputs.version || '1.29.0' }}
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheel:
+    needs: [setup]
+    name: Build zizmor ${{ inputs.version || '1.29.0' }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout zizmor v${{ env.ZIZMOR_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: zizmorcore/zizmor
+          ref: v${{ env.ZIZMOR_VERSION }}
+          persist-credentials: false
+
+      # `[tool.maturin] bindings = "bin"`: the wheel is one compiled executable
+      # with no ABI tag, so a single native build covers every interpreter.
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --locked --out dist --manifest-path crates/zizmor/Cargo.toml
+          manylinux: '2_39'
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: zizmor-${{ env.ZIZMOR_VERSION }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test zizmor ${{ inputs.version || '1.29.0' }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    env:
+      # Without this uv would reuse the runner image's system CPython for 3.12
+      # and download a standalone build for the others.
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        # This repo's default interpreter matrix (gotcha in workflow-anatomy.md);
+        # the wheel is interpreter-agnostic (bindings = "bin"), so every
+        # interpreter -- including free-threaded -- exercises the same binary.
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Checkout zizmor v${{ env.ZIZMOR_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: zizmorcore/zizmor
+          ref: v${{ env.ZIZMOR_VERSION }}
+          persist-credentials: false
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: zizmor-${{ env.ZIZMOR_VERSION }}-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . zizmor
+
+      # No wheel-level test suite ships in the sdist (gotcha 187): zizmor's own
+      # crates/zizmor/tests/integration/audit/*.rs are Rust integration tests run
+      # by upstream's own `cargo test`, never packaged. Drive the real audit
+      # engine with upstream's own known-bad fixture (mirroring
+      # tests/integration/audit/artipacked.rs) and a known-clean workflow,
+      # instead of settling for a bare --version check.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          zizmor --version
+          zizmor --help >/dev/null
+          python -m zizmor --version
+
+          set +e
+          out=$(zizmor --offline crates/zizmor/tests/integration/test-data/artipacked.yml 2>&1)
+          rc=$?
+          set -e
+          echo "$out"
+          [ "$rc" -eq 13 ]
+          echo "$out" | grep -q 'warning\[artipacked\]'
+
+          work=$(mktemp -d)
+          cat > "$work/clean.yml" <<'YAML'
+          on:
+            push:
+              branches: [main]
+
+          permissions: {}
+
+          jobs:
+            build:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+                  with:
+                    persist-credentials: false
+          YAML
+          zizmor --offline "$work/clean.yml"
+
+  publish:
+    name: Publish zizmor ${{ inputs.version || '1.29.0' }}
+    needs: [setup, build_wheel, test_wheel]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: zizmor-${{ inputs.version || '1.29.0' }}-manylinux_riscv64
