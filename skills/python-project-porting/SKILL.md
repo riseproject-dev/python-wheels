@@ -162,7 +162,7 @@ Load these on demand — they are one level deep from here.
 
 ### Finding the right gotcha
 
-The 190 gotchas are split into themed files under `references/gotchas/`. **Read the one file
+The 221 gotchas are split into themed files under `references/gotchas/`. **Read the one file
 that matches your current step** rather than loading them all — each file opens with an
 `## In this file` list of its entries. Three ways in:
 

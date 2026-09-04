@@ -16,6 +16,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **138** — Two more manylinux-image facts, in the vein of gotchas 46 and 51.
 - **139** — RISC-V SIMD in an upstream that already supports riscv64: two traps, both invisible
 - **207** — A vendored dependency three submodules deep can declare a `cmake_minimum_required`
+- **226** — GCC 14 turns `-Wincompatible-pointer-types` (and `-Wimplicit-function-declaration`,
 
 ---
 
@@ -266,3 +267,25 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
     - **Confirm exactly which vendored `CMakeLists.txt` needs it by reading the
       "CMake Error at ..." path in the configure log**, not by guessing from the
       top-level project's own declared minimum — it is rarely the direct dependency.
+
+226. **GCC 14 turns `-Wincompatible-pointer-types` (and `-Wimplicit-function-declaration`,
+    `-Wimplicit-int`) from a warning into a hard error by default for C code — a
+    toolchain-version fact, not a riscv64 one, that bites old-style C sources compiled
+    against a newer manylinux image than upstream targets (the uamqp case).** uamqp's
+    Cython-generated `c_uamqp.c` calls into the vendored `azure-uamqp-c` C API with
+    loosely-typed pointers that were always technically wrong but only warned under the
+    GCC upstream's own manylinux2014 image ships. `manylinux_2_39_riscv64` (Rocky 10)
+    carries GCC 14.3.1, so the same code hard-fails there — refines gotcha 26 from "too
+    old to build at all" to "new enough to enforce what an old one let slide". uamqp's
+    own `pyproject.toml` already carries the fix — `[tool.cibuildwheel.linux]
+    environment = {..., CFLAGS="-Wno-error=incompatible-pointer-types
+    -Wunused-function"}` — for exactly this reason, presumably hit on a newer x86_64 CI
+    image at some point.
+    - **A `CIBW_ENVIRONMENT` override that adds `PIP_EXTRA_INDEX_URL` (or anything
+      else) silently drops that CFLAGS too, since `CIBW_ENVIRONMENT` replaces the whole
+      table (gotcha 107)** — read upstream's `environment` entry before overriding and
+      carry forward anything build-relevant, not just the keys your port needed to add.
+    - Confirm it's this exact class before reaching for the flag: the compiler error
+      text names the diagnostic (`error: ... incompatible-pointer-types` in
+      `[-Wincompatible-pointer-types]`), and it appears identically on any sufficiently
+      new GCC/Clang regardless of architecture — nothing riscv64-specific to chase.
