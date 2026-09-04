@@ -1,0 +1,137 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's wheel builder:
+#   https://github.com/mwilliamson/jq.py/blob/1.12.0/.github/workflows/build.yml
+# jq.py vendors jq's own release tarball (deps/jq-<ver>.tar.gz, which itself bundles
+# oniguruma under vendor/) and builds+statically links both via setup.py's own
+# ./configure && make invocation - no CIBW_BEFORE_BUILD is needed, matching upstream.
+name: Build jq wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'jq version to build (git tag, e.g. 1.12.0)'
+        required: true
+        default: '1.12.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-jq.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.12.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  JQ_VERSION: ${{ inputs.version || '1.12.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_sdist:
+    needs: [setup]
+    name: Build jq ${{ inputs.version || '1.12.0' }} sdist
+    runs-on: ubuntu-latest
+    outputs:
+      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
+      package_version: ${{ steps.sdist.outputs.package_version }}
+    steps:
+      - name: Checkout jq.py ${{ env.JQ_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: mwilliamson/jq.py
+          ref: ${{ env.JQ_VERSION }}
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build sdist
+        id: sdist
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          uv pip install build
+          python -m build --sdist --outdir dist
+
+          sdist_name="$(ls dist)"
+          {
+            echo "sdist_name=${sdist_name}"
+            echo "package_version=$(echo "${sdist_name}" | sed -En 's/jq-(.+)\.tar\.gz/\1/p')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ steps.sdist.outputs.sdist_name }}
+          path: dist/${{ steps.sdist.outputs.sdist_name }}
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_sdist]
+    name: Build jq ${{ inputs.version || '1.12.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ needs.build_sdist.outputs.sdist_name }}
+          path: dist/
+
+      - name: Extract sdist and stage vendored licence texts
+        run: |
+          set -euo pipefail
+          mkdir src
+          tar xzf "dist/${{ needs.build_sdist.outputs.sdist_name }}" --strip-components=1 -C src
+
+          # setuptools' default license-files glob (LICEN[CS]E*) picks these up from
+          # the project root; jq statically links both libjq and oniguruma into the
+          # extension, so their (both BSD) licence texts need to ship alongside
+          # jq.py's own LICENSE.
+          jq_tarball="$(ls src/deps/*.tar.gz)"
+          jq_dir="$(basename "${jq_tarball}" .tar.gz)"
+          tar xzf "${jq_tarball}" -O "${jq_dir}/COPYING" > src/LICENSE.jq
+          tar xzf "${jq_tarball}" -O "${jq_dir}/vendor/oniguruma/COPYING" > src/LICENSE.oniguruma
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: src
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: pytest {package}/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: jq-${{ env.JQ_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish jq ${{ inputs.version || '1.12.0' }}
+    needs: [setup, build_sdist, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: jq-${{ needs.build_sdist.outputs.package_version }}-*-manylinux_riscv64
