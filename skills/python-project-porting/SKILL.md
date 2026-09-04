@@ -10,7 +10,7 @@ metadata:
 # Python project porting (riscv64 wheels)
 
 Guidance for adding a new package's riscv64 wheel build to this repo and publishing it to
-`pypi.riseproject.dev`. The 192 hard-won "gotchas" are split by theme under
+`pypi.riseproject.dev`. The 193 hard-won "gotchas" are split by theme under
 [`references/gotchas/`](references/gotchas/) and routed by
 [references/gotchas-index.md](references/gotchas-index.md) — **skim the index before you start,
 then read the themed file for the step you're on.** Many gotchas each cost a full CI cycle

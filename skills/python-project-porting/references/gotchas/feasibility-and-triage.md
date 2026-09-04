@@ -650,3 +650,49 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       project's own `configure` (not just the outer CMake project's) under `docker run
       --platform linux/riscv64 <manylinux image>` finishes in seconds and proves the arch
       is recognized, without attempting the multi-hour compile locally.
+
+214. **Not being Bazel-blocked doesn't mean a build is in scope — count the
+    independently-vendored dependency tree before committing (the ortools case).**
+    jaxlib (PR #526, parked) established one hard-blocker shape: Bazel + riscv64. ortools
+    looked like it might be the same family (a big C++ operations-research suite with a
+    `bazel/` tree) but isn't — its actual PyPI release wheel is built by
+    `tools/release/build_delivery_linux.sh`'s `build_python()`, which is plain
+    `cmake -S. -B... -DBUILD_PYTHON=ON` against upstream's own `CMakeLists.txt`
+    (confirmed against the real release script and `.github/workflows/amd64_linux_cmake_python.yml`,
+    both CMake-only, no Bazel involved). The absence of a Bazel wall doesn't make it
+    in-scope: `BUILD_DEPS=ON` (forced whenever `BUILD_PYTHON` is on) `FetchContent`-builds
+    abseil, protobuf, Eigen3, re2, Boost, SoPlex, SCIP, and the four-library COIN-OR suite
+    (CoinUtils/Osi/Clp/Cgl/Cbc) *and* HiGHS and PDLP and BOP, on top of compiling ortools'
+    own large C++ core (CP-SAT, routing) and generating its SWIG Python bindings — over a
+    dozen independent large C++ projects glued together in one build, most of which
+    (SCIP/SoPlex/Boost-as-a-solver-dep/COIN-OR) have zero riscv64 precedent anywhere in
+    this repo, unlike abseil/protobuf (proven via grpcio-tools/chromadb/ctranslate2) and
+    HiGHS (already `published` standalone as highspy — a small fraction of what ortools
+    would additionally compile). Cross-checking against this repo's own largest build to
+    date — libclang's from-scratch LLVM/Clang compile, ~10h and explicitly logged as "the
+    largest build in this repo so far" — a build that FetchContents *that much additional*
+    unproven C++ on top of a comparably-sized core, each new dependency a plausible source
+    of its own multi-hour fix/rebuild cycle, is a reasonable multi-day-effort read even
+    with zero hard architectural blocker. Parked without opening a worktree: this is the
+    scope call the task brief itself invites ("if it turns out to be ... otherwise a
+    multi-day effort disproportionate to this task's scope, it's fine to park it"), and the
+    research needed to make that call (reading the real release script, diffing it against
+    the Bazel tree, counting `FetchContent`/`CMAKE_DEPENDENT_OPTION` third-party solvers in
+    `CMakeLists.txt`, cross-checking which of them are already proven or still unproven in
+    this repo's own history) is all doable read-only against the upstream repo and this
+    repo's own git history, without a checkout.
+    - **A project can carry both a `bazel/` tree and a working CMake-only release path —
+      check which one the actual PyPI wheel comes from**, not which build system the repo
+      leads with. `tools/release/*.Dockerfile` (or equivalent) is the ground truth; a
+      top-level `BUILD.bazel`/`WORKSPACE.bzlmod` next to a `CMakeLists.txt` is not evidence
+      either way on its own.
+    - **`CMAKE_DEPENDENT_OPTION(BUILD_<dep> ... "NOT BUILD_DEPS" ON)` blocks are a
+      dependency-tree census** — grepping them (or their Bazel-equivalent `deps.bzl`/
+      `MODULE.bazel` counterpart) gives an honest count of what a wrapper build actually
+      FetchContents, before writing a line of workflow YAML.
+    - **Weigh new dependencies against this repo's own track record, not against the
+      package's inherent difficulty in isolation** — a dependency this repo has already
+      built for riscv64 (protobuf, abseil, HiGHS) is de-risked; a same-scale dependency
+      this repo has never touched (SCIP, SoPlex, the COIN-OR suite) carries the full
+      first-timer risk of an unfixed gotcha, and a build with many such unknowns compounds
+      that risk rather than averaging it out.
