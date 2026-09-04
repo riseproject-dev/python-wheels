@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/osqp/osqp-python/blob/v1.1.3/.github/workflows/build_default.yml
+name: Build osqp wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'osqp version to build (git tag without the leading v, e.g. 1.1.3)'
+        required: true
+        default: '1.1.3'
+  pull_request:
+    paths:
+      - '.github/workflows/build-osqp.yml'
+      - 'patches/osqp/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.1.3' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.1.3 there.
+  OSQP_VERSION: ${{ inputs.version || '1.1.3' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # CMakeLists.txt FetchContent-pulls osqp/osqp at this tag to build osqpstatic;
+  # bump alongside it if upstream ever moves the pin.
+  OSQP_C_LIB_TAG: v1.0.0
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build osqp ${{ inputs.version || '1.1.3' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout osqp-python v${{ env.OSQP_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: osqp/osqp-python
+          ref: v${{ env.OSQP_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch osqp-python source
+        run: git apply python-wheels/patches/osqp/${{ env.OSQP_VERSION }}/*.patch
+
+      - name: Stage the vendored osqp C library's NOTICE and AMD licence
+        run: |
+          base="https://raw.githubusercontent.com/osqp/osqp/${{ env.OSQP_C_LIB_TAG }}"
+          curl -fsSL --retry 5 "${base}/NOTICE" -o NOTICE.osqp-c
+          curl -fsSL --retry 5 "${base}/algebra/_common/lin_sys/qdldl/amd/LICENSE" -o LICENSE.amd
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          config-file: cibuildwheel.toml
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # scikit-build-core fetches cmake/ninja from PyPI when missing on PATH,
+          # and pybind11's headers need pip to resolve; both need our registry.
+          # The patch dirties the tag checkout, which would otherwise poison
+          # setuptools_scm's version with a `.dev0+g<sha>` suffix (gotcha 31).
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_OSQP=${{ env.OSQP_VERSION }}
+          # numpy/scipy have riscv64 wheels only on our registry; don't let a
+          # newer public-PyPI release pull pip into a source build.
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,scipy
+          # torch has no riscv64 wheel anywhere; mirror upstream's own
+          # aarch64/free-threaded override that skips the osqp.nn tests.
+          CIBW_BEFORE_TEST: pip install scipy --prefer-binary
+          CIBW_TEST_GROUPS: test-no-nn
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m; f = sorted(str(p).split('licenses/', 1)[1] for p in m.files('osqp') if '.dist-info/licenses/' in str(p)); assert f == ['LICENSE', 'LICENSE.amd', 'NOTICE.osqp-c'], f" &&
+            python -m pytest -s {project}/src/osqp/tests --continue-on-collection-errors --ignore={project}/src/osqp/tests/nn_test.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: osqp-${{ env.OSQP_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish osqp ${{ inputs.version || '1.1.3' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: osqp-${{ inputs.version || '1.1.3' }}-*-manylinux_riscv64
