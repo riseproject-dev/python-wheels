@@ -17,6 +17,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
 - **136** — Upstream builds its wheels in a vcpkg image: replace the image, keep the workflow
 - **142** — cibuildwheel copies the
 - **202** — A monorepo's "regenerate deps from Bazel" helper may already tolerate a missing
+- **219** — GDAL's cmake build produces no `gdal-config` script — a second consumer of the
 
 ---
 
@@ -315,3 +316,37 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
      Verify a script's fallback directly — run it, read the `except` clause — rather than
      assuming a Bazel-adjacent monorepo always needs Bazel bootstrapped for a build step
      that only *regenerates* a file already checked in for the tag you're building.
+
+219. **GDAL's cmake build produces no `gdal-config` script — a second consumer of the
+     gotcha-136 image needs `BUILD_APPS=ON`, not the flags that already worked for the
+     first one (the rasterio case; see `build-rasterio.yml`).** Gotcha 136 replaces
+     upstream's vcpkg image with one that compiles GEOS/PROJ/SpatiaLite/GDAL from source,
+     and pyogrio's version of that image sets `-DBUILD_APPS=OFF` because pyogrio's own
+     build script reads `GDAL_INCLUDE_PATH`/`GDAL_LIBRARY_PATH` env vars directly. rasterio
+     links the same GDAL but has no such env-var path: `setup.py` calls `gdal-config`
+     first, and GDAL's modern cmake build — unlike its old autotools one — never generates
+     that script (confirmed: `gdal-config.in`/`gdal-config` are absent from the v3.12.4
+     tag entirely, and GDAL's own docs say the cmake config-file approach replaced it).
+     `setup.py`'s fallback is the `gdalinfo` binary on `PATH`, which only exists with
+     `BUILD_APPS=ON` — so a source-built GDAL image tuned for one riscv64 consumer is not
+     automatically right for the next one, and the two projects' own build mechanisms (not
+     a version bump) are what decide the flag.
+     - **Reusing the version pins is still worth it even when the image itself must
+       differ.** GEOS/PROJ/SpatiaLite/GDAL version numbers that already proved they
+       compile together on riscv64 (a prior port's merged workflow) de-risk a second image
+       even though `BUILD_APPS` differs and the two Dockerfiles cannot share a GHA cache
+       scope (every `RUN` layer after the first difference invalidates).
+     - **`gdal_data`/`proj_data` need no env var either**, once `gdalinfo` exists:
+       `setup.py`'s `fill_gdal_build_options_using_executable` derives `GDAL_DATA` as
+       `<prefix>/share/gdal` from the binary's own path, and its `PROJ_DATA` default
+       (`/usr/local/share/proj`) matches a plain `CMAKE_INSTALL_PREFIX=/usr/local` build —
+       so `PACKAGE_DATA=1` alone is enough in `CIBW_ENVIRONMENT`, no `GDAL_DATA`/`PROJ_LIB`.
+     - **A raster-format project needs the image's codec `-devel` packages that a
+       vector-format one (pyogrio: OGR only) does not.** GDAL's cmake falls back to an
+       *internal* vendored copy for some optional codecs (PNG, GIF — `gdal_internal_library`
+       in `CheckDependentLibraries.cmake`) but not others (JPEG, WebP, OpenJPEG, zstd, lz4 —
+       `CAN_DISABLE` only, silently dropped with no system lib), so a raster test suite
+       needs `libjpeg-turbo-devel libpng-devel giflib-devel libwebp-devel openjpeg2-devel
+       libzstd-devel lz4-devel json-c-devel` (all present in Rocky 10 appstream/crb on
+       riscv64) added to the image's `dnf install`, or entire driver families silently
+       aren't there to test.

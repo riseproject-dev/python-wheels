@@ -116,6 +116,7 @@ The porting gotchas (200 of them) live in [`references/gotchas/`](gotchas/), spl
 - **136** — Upstream builds its wheels in a vcpkg image: replace the image, keep the workflow
 - **142** — cibuildwheel copies the
 - **202** — A monorepo's "regenerate deps from Bazel" helper may already tolerate a missing
+- **219** — GDAL's cmake build produces no `gdal-config` script — a second consumer of the
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
