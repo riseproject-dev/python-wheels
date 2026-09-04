@@ -19,6 +19,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
 - **172** — An abi3 build compiles the wheel once but rebuilds the *test venv* per
 - **200** — A monorepo sibling ported in a separate PR can pin `install_requires` to its own
 - **210** — A test dependency our registry already carries as a wheel can still fail from
+- **215** — A registry gap for one interpreter can be narrowed to just the one optional
 
 ---
 
@@ -360,3 +361,33 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
        resolution) can hit the same wall once PyPI's hypothesis crosses whatever release
        made the maturin switch - check `pypi.org/pypi/hypothesis/<version>/json` for
        `requires_dist`/build-backend drift before assuming a version bump is free.
+
+215. **A registry gap for one interpreter can be narrowed to just the one optional
+     test-extra it gates, instead of the whole test phase (bounds gotcha 149; the
+     python-calamine/pandas case).** Gotcha 149 skips the entire test phase
+     (`CIBW_TEST_SKIP: "*"`) for a `cp314t` job whose hard runtime dependency has no
+     free-threaded wheel *anywhere*. A softer, commoner shape needs a lighter touch: the
+     dependency is only an optional integration extra (`pandas[excel]>=2.2`) that a handful
+     of tests guard with `@pytest.mark.skipif(not pd, ...)`, and the gap is not upstream's —
+     `pypi.riseproject.dev` simply hasn't built it yet for that one interpreter (pandas ships
+     cp312/cp313/cp314 riscv64 wheels but no cp314t one, while PyPI itself does). Dropping
+     just that entry's `CIBW_TEST_REQUIRES` value, rather than skipping the whole run, keeps
+     every non-pandas test executing and self-skips only the pandas-gated ones:
+     ```yaml
+     matrix:
+       include:
+         - python: cp312
+           pandas: 'pandas[excel]>=2.2'
+         - python: cp314t
+           pandas: ''
+     ...
+         CIBW_TEST_REQUIRES: pytest~=9.0 ${{ matrix.pandas }}
+     ```
+     - Two questions settle which shape applies: does the *package itself* fail to install
+       without the dependency (gotcha 149 — skip everything), or does only some tests import
+       it behind a guard (this one — narrow the extra)? Read the test file for the
+       try/except or skipif before reaching for `CIBW_TEST_SKIP`.
+     - The gap here is registry-only, not upstream's: re-check
+       `pypi.riseproject.dev/simple/<dep>/` before the next version bump — the day our
+       registry ships a cp314t wheel, the matrix field becomes redundant, unlike gotcha
+       149's permanent everywhere-gap.

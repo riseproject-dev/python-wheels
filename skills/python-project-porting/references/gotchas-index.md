@@ -86,6 +86,8 @@ The porting gotchas (200 of them) live in [`references/gotchas/`](gotchas/), spl
 - **201** — When `package-dir` is a monorepo subdirectory and the package's own build script
 - **204** — cibuildwheel 4.2.0 doesn't offer cp313t as a build target on *any* platform —
 - **209** — A multi-grammar tree-sitter-`<lang>` repo does not necessarily need a
+- **216** — An abi3 build's own mandatory floor interpreter (gotcha 96) can itself be the one
+- **217** — Upstream's own `repair-wheel-command` commonly re-runs abi3audit itself via
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
@@ -171,6 +173,7 @@ The porting gotchas (200 of them) live in [`references/gotchas/`](gotchas/), spl
 - **172** — An abi3 build compiles the wheel once but rebuilds the *test venv* per
 - **200** — A monorepo sibling ported in a separate PR can pin `install_requires` to its own
 - **210** — A test dependency our registry already carries as a wheel can still fail from
+- **215** — A registry gap for one interpreter can be narrowed to just the one optional
 
 ### Build-tool drift & pins — [`gotchas/build-tool-drift-and-pins.md`](gotchas/build-tool-drift-and-pins.md)
 
