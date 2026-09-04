@@ -1,0 +1,147 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `validate` job of
+# https://github.com/treeleaves30760/pairmux/blob/v0.5.2/.github/workflows/release.yml
+name: Build pairmux wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pairmux version to build (git tag without the leading v, e.g. 0.5.2)'
+        required: true
+        default: '0.5.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pairmux.yml'
+      - 'patches/pairmux/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.5.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.5.2 there.
+  PAIRMUX_VERSION: ${{ inputs.version || '0.5.2' }}
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheel:
+    needs: [setup]
+    name: Build pairmux ${{ inputs.version || '0.5.2' }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout pairmux v${{ env.PAIRMUX_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: treeleaves30760/pairmux
+          ref: v${{ env.PAIRMUX_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # packaging/pypi/build_wheels.py has no riscv64 entry: see the patch.
+      - name: Patch pairmux source
+        run: |
+          git apply python-wheels/patches/pairmux/${{ env.PAIRMUX_VERSION }}/00*.patch
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # Mirrors .goreleaser.yaml's `pairmux` build: CGO_ENABLED=0 (no cgo, so
+      # it cross-compiles cleanly) and the same ldflags/version stamp.
+      - name: Build the pairmux binary
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=riscv64 go build -trimpath \
+            -ldflags "-s -w -X github.com/treeleaves30760/pairmux/internal/version.Version=${{ env.PAIRMUX_VERSION }}" \
+            -o dist/pairmux ./cmd/pairmux
+
+      - name: Build wheel
+        run: |
+          python3 packaging/pypi/build_wheels.py \
+            --version "$PAIRMUX_VERSION" \
+            --binary dist/pairmux --platform linux_riscv64 \
+            --out-dir dist/wheels --check
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pairmux-${{ env.PAIRMUX_VERSION }}-manylinux_riscv64
+          path: dist/wheels/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test pairmux ${{ inputs.version || '0.5.2' }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 15
+    env:
+      # Without this uv would reuse the runner image's system CPython for 3.12
+      # and download a standalone build for the others.
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        # This repo's default interpreter matrix (gotcha in workflow-anatomy.md);
+        # the wheel carries a single native binary, so every interpreter --
+        # including free-threaded -- exercises the same binary.
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Install tmux
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: pairmux-${{ env.PAIRMUX_VERSION }}-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . pairmux
+
+      # No wheel-level test suite ships (there is no sdist at all, by design
+      # -- see the packaging/pypi/build_wheels.py module docstring). Drive the
+      # real binary through tmux the way the README's "Reproducible
+      # quickstart" does, instead of settling for a bare version check.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          test "$(pairmux version)" = "$PAIRMUX_VERSION"
+
+          pairmux --json new --name demo
+          out=$(pairmux --json run demo "echo hello from pairmux")
+          echo "$out"
+          echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["status"]=="done", d'
+          pairmux --json peek demo | grep -q 'hello from pairmux'
+          pairmux --json kill demo
+
+  publish:
+    name: Publish pairmux ${{ inputs.version || '0.5.2' }}
+    needs: [setup, build_wheel, test_wheel]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pairmux-${{ inputs.version || '0.5.2' }}-manylinux_riscv64
