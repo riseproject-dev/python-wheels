@@ -278,6 +278,7 @@ The porting gotchas (200 of them) live in [`references/gotchas/`](gotchas/), spl
 - **178** — Run gotcha 101's riscv64 `pip download` check inside a *Linux* container, and run
 - **180** — The aarch64 rehearsal defaults to the *wrong* base image — pass
 - **188** — A fat-LTO maturin release profile makes a full QEMU riscv64 build-rehearsal too
+- **223** — For a `bindings = "bin"` CLI's test assertions, `cargo build --release` the tool
 
 ### PR, CI, triggers, publishing & maintainer signals — [`gotchas/pr-ci-and-maintainer.md`](gotchas/pr-ci-and-maintainer.md)
 

@@ -14,6 +14,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
 - **178** — Run gotcha 101's riscv64 `pip download` check inside a *Linux* container, and run
 - **180** — The aarch64 rehearsal defaults to the *wrong* base image — pass
 - **188** — A fat-LTO maturin release profile makes a full QEMU riscv64 build-rehearsal too
+- **223** — For a `bindings = "bin"` CLI's test assertions, `cargo build --release` the tool
 
 ---
 
@@ -182,3 +183,23 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
     fat-LTO profile still finished in under an hour on the shared 4-core runners, well
     inside the timeout, so shipping upstream's own profile unmodified was both correct
     (goal 2: mirror upstream) and affordable.
+
+223. **For a `bindings = "bin"` CLI's test assertions, `cargo build --release` the tool
+    *natively on the dev host* (any arch — the CLI's exit-code/output logic is
+    architecture-independent) instead of guessing exit codes from docs (the zizmor
+    case).** zizmor's own docs describe severity-scaled exit codes ("11-14, informational
+    through high") but not which value maps to which severity. Rather than writing a CI
+    test step with a guessed range check, `cargo build --release --locked --manifest-path
+    crates/zizmor/Cargo.toml` on the arm64/x86_64 dev machine (already has `cargo`/`rustc`
+    installed — this is *using* existing tooling, not installing anything) produced a real
+    `target/release/zizmor` in a few minutes, and running it against upstream's own
+    known-bad fixture (`crates/zizmor/tests/integration/test-data/artipacked.yml`, the
+    same file `tests/integration/audit/artipacked.rs` snapshot-tests) gave the exact exit
+    code (`13`) and output shape to assert on, plus confirmation that a hand-written
+    known-clean workflow really does exit `0`. Do this from a scratch clone under
+    `.git/pw-scratch/<pkg>/` (gotcha 9's validation loop, not a new location) — never from
+    the PR worktree. This only substitutes for the *riscv64* build/CI cycle when the
+    behaviour under test is host-arch-independent (CLI logic, exit codes, stdout shape); it
+    proves nothing about whether the crate graph actually compiles for
+    riscv64gc-unknown-linux-gnu — pair it with gotcha 78's `cargo metadata
+    --filter-platform` check for that.
