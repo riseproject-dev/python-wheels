@@ -1,0 +1,535 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels`/`test_wheels` jobs of
+# https://github.com/rasterio/rasterio/blob/1.5.1/.github/workflows/build-wheels.yaml
+name: Build rasterio wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'rasterio version to build (git tag, e.g. 1.5.1)'
+        required: true
+        default: '1.5.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-rasterio.yml'
+      - 'patches/rasterio/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.5.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  RASTERIO_VERSION: ${{ inputs.version || '1.5.1' }}
+  GDAL_VERSION: '3.12.4'
+  GEOS_VERSION: '3.13.1'
+  PROJ_VERSION: '9.6.2'
+  SPATIALITE_VERSION: '5.1.0'
+  BASEIMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  GDAL_IMAGE: manylinux_2_39_riscv64_gdal_rasterio
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_image:
+    needs: [setup]
+    name: Build the GDAL build image
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 600
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+        with:
+          install: true
+          buildkitd-flags: --debug
+
+      # upstream builds GDAL from source per cibuildwheel invocation (ci/config.sh, a
+      # ~20-dependency source build meant to run once per matrix leg); on riscv64 that
+      # is too expensive to repeat per interpreter, so it is built once here instead,
+      # the same shape build-pyogrio.yml uses for the same underlying GDAL-on-riscv64
+      # problem. Unlike pyogrio's image, BUILD_APPS stays ON: rasterio's setup.py has no
+      # env-var-driven config and instead auto-detects the install via `gdal-config` (not
+      # produced by GDAL's cmake build) or, as a fallback, the `gdalinfo` binary on PATH.
+      - name: Write the GDAL image build context
+        run: |
+          mkdir -p "$RUNNER_TEMP/gdal-ctx"
+          cat > "$RUNNER_TEMP/gdal-ctx/collect-licenses.sh" <<'COLLECT_EOF'
+          #!/bin/bash
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # auditwheel vendors libgdal's whole shared-library closure into the wheel, so
+          # collect the licence of every rpm that closure comes from; the wheel build
+          # stages the result at the project root, where the license-files glob (patched
+          # into pyproject.toml) picks it up.
+          set -euo pipefail
+
+          out=/opt/licenses
+          mkdir -p "${out}"
+
+          mapfile -t libs < <(ldd /usr/local/lib/libgdal.so | tr ' ' '\n' | grep '^/' | sort -u)
+          mapfile -t pkgs < <(rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null \
+              | grep -E '^[A-Za-z0-9._+-]+$' | sort -u \
+              | grep -vE '^(glibc|libgcc|libstdc\+\+|gcc)$')
+
+          for pkg in "${pkgs[@]}"; do
+              mapfile -t files < <(rpm -q --licensefiles "${pkg}")
+
+              # A subpackage may carry no licence of its own (pcre2 leaves it to
+              # pcre2-syntax), so fall back to its siblings from the same source rpm.
+              if [ "${#files[@]}" -eq 0 ]; then
+                  srpm=$(rpm -q --qf '%{SOURCERPM}' "${pkg}")
+                  mapfile -t siblings < <(rpm -qa --qf '%{SOURCERPM} %{NAME}\n' \
+                      | awk -v srpm="${srpm}" '$1 == srpm { print $2 }')
+                  mapfile -t files < <(rpm -q --licensefiles "${siblings[@]}")
+              fi
+
+              # And the image installs rpms with tsflags=nodocs, which drops the licence
+              # of a package that marks it %doc rather than %license.
+              if [ "${#files[@]}" -eq 0 ]; then
+                  dnf -y reinstall --setopt=tsflags= "${pkg}"
+                  mapfile -t files < <(rpm -qd "${pkg}" \
+                      | grep -iE '/(LICEN[CS]E|COPYING|COPYRIGHT)[^/]*$' || true)
+              fi
+
+              for file in "${files[@]}"; do
+                  [ -f "${file}" ] || { echo "missing ${file} from rpm ${pkg}" >&2; exit 1; }
+                  cat "${file}" >> "${out}/LICENSE_${pkg}"
+              done
+
+              # Packages under a licence that needs no notice ship no file at all
+              # (sqlite-libs is public domain); record what the rpm declares instead.
+              if [ ! -s "${out}/LICENSE_${pkg}" ]; then
+                  rpm -q --qf '%{NAME} %{VERSION} is distributed under: %{LICENSE}\nIts package ships no licence file.\n' \
+                      "${pkg}" > "${out}/LICENSE_${pkg}"
+              fi
+          done
+
+          ls -l "${out}"
+          COLLECT_EOF
+          chmod +x "$RUNNER_TEMP/gdal-ctx/collect-licenses.sh"
+          cat > "$RUNNER_TEMP/gdal-ctx/Dockerfile" <<'DOCKER_EOF'
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # manylinux_riscv64 build image for rasterio: GDAL has no riscv64 build another
+          # way, so GEOS/PROJ/SpatiaLite/GDAL are compiled from source here rather than in
+          # cibuildwheel's before-all (upstream's ci/config.sh), which would repeat the
+          # whole ~20-dependency build once per interpreter.
+          ARG BASEIMAGE=quay.io/pypa/manylinux_2_39_riscv64:latest
+          FROM ${BASEIMAGE}
+
+          ARG GEOS_VERSION
+          ARG PROJ_VERSION
+          ARG SPATIALITE_VERSION
+          ARG GDAL_VERSION
+
+          SHELL ["/bin/bash", "-euxo", "pipefail", "-c"]
+
+          ENV PREFIX=/usr/local
+
+          # sqlite (the CLI) builds PROJ's proj.db and glibc-gconv-extra carries the
+          # charset converters GDAL recodes shapefile attributes with. The codec -devel
+          # packages (unlike build-pyogrio.yml's, which needs no raster format support)
+          # are what turns on GDAL's PNG/JPEG/GIF/WebP/JPEG2000 drivers, which rasterio's
+          # own test suite exercises; the rest are GDAL/PROJ/SpatiaLite dependencies.
+          RUN dnf -y install sqlite sqlite-devel libtiff-devel libcurl-devel expat-devel \
+                  libxml2-devel openssl-devel glibc-gconv-extra giflib-devel json-c-devel \
+                  libjpeg-turbo-devel libpng-devel libwebp-devel libzstd-devel lz4-devel \
+                  openjpeg2-devel \
+              && dnf clean all \
+              && echo "${PREFIX}/lib" > /etc/ld.so.conf.d/rasterio-local.conf \
+              && mkdir -p /opt/licenses /src
+
+          RUN cd /src \
+              && curl -sSLo geos.tar.bz2 "https://download.osgeo.org/geos/geos-${GEOS_VERSION}.tar.bz2" \
+              && tar xf geos.tar.bz2 \
+              && cd "geos-${GEOS_VERSION}" \
+              && cp COPYING /opt/licenses/LICENSE_GEOS \
+              && cmake -S . -B build \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+                  -DCMAKE_INSTALL_LIBDIR=lib \
+                  -DBUILD_TESTING=OFF \
+                  -DBUILD_DOCUMENTATION=OFF \
+                  -DBUILD_BENCHMARKS=OFF \
+              && cmake --build build -j"$(nproc)" \
+              && cmake --install build \
+              && ldconfig \
+              && rm -rf /src/*
+
+          RUN cd /src \
+              && curl -sSLo proj.tar.gz "https://download.osgeo.org/proj/proj-${PROJ_VERSION}.tar.gz" \
+              && tar xf proj.tar.gz \
+              && cd "proj-${PROJ_VERSION}" \
+              && cp COPYING /opt/licenses/LICENSE_PROJ \
+              && cmake -S . -B build \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+                  -DCMAKE_INSTALL_LIBDIR=lib \
+                  -DBUILD_TESTING=OFF \
+                  -DBUILD_APPS=OFF \
+                  -DENABLE_CURL=ON \
+                  -DENABLE_TIFF=ON \
+              && cmake --build build -j"$(nproc)" \
+              && cmake --install build \
+              && ldconfig \
+              && rm -rf /src/*
+
+          # GDAL's SQLite driver optionally links SpatiaLite; built with default features
+          # off (freexl/rttopo dropped) to match GDAL's own optional dependency, not a
+          # full GIS toolchain. config.guess/config.sub date from 2009 and know neither
+          # aarch64 nor riscv64, hence automake's.
+          RUN cd /src \
+              && curl -sSLo spatialite.tar.gz "https://www.gaia-gis.it/gaia-sins/libspatialite-sources/libspatialite-${SPATIALITE_VERSION}.tar.gz" \
+              && tar xf spatialite.tar.gz \
+              && cd "libspatialite-${SPATIALITE_VERSION}" \
+              && cp COPYING /opt/licenses/LICENSE_SPATIALITE \
+              && cp /usr/share/automake-*/config.guess /usr/share/automake-*/config.sub . \
+              && ./configure --prefix="${PREFIX}" --libdir="${PREFIX}/lib" \
+                  --disable-static --disable-freexl --disable-rttopo --disable-examples \
+                  --disable-minizip \
+              && make -j"$(nproc)" \
+              && make install \
+              && ldconfig \
+              && rm -rf /src/*
+
+          # BUILD_APPS=ON (unlike build-pyogrio.yml's image): rasterio's setup.py has no
+          # env-var-driven build config and instead runs `gdal-config` (not produced by
+          # GDAL's cmake build) or falls back to the `gdalinfo` binary on PATH to
+          # auto-detect include/library/data directories.
+          RUN cd /src \
+              && curl -sSLo gdal.tar.gz "https://github.com/OSGeo/gdal/releases/download/v${GDAL_VERSION}/gdal-${GDAL_VERSION}.tar.gz" \
+              && tar xf gdal.tar.gz \
+              && cd "gdal-${GDAL_VERSION}" \
+              && cp LICENSE.TXT /opt/licenses/LICENSE_GDAL \
+              && cmake -S . -B build \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+                  -DCMAKE_INSTALL_LIBDIR=lib \
+                  -DBUILD_TESTING=OFF \
+                  -DBUILD_APPS=ON \
+                  -DBUILD_PYTHON_BINDINGS=OFF \
+                  -DBUILD_JAVA_BINDINGS=OFF \
+                  -DBUILD_CSHARP_BINDINGS=OFF \
+              && cmake --build build -j"$(nproc)" \
+              && cmake --install build \
+              && ldconfig \
+              && rm -rf /src/*
+
+          COPY collect-licenses.sh /usr/local/bin/collect-licenses.sh
+          RUN collect-licenses.sh && dnf clean all
+          DOCKER_EOF
+      - name: Build Docker image with GDAL
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: ${{ runner.temp }}/gdal-ctx
+          file: ${{ runner.temp }}/gdal-ctx/Dockerfile
+          platforms: linux/riscv64
+          build-args: |
+            BASEIMAGE=${{ env.BASEIMAGE }}
+            GEOS_VERSION=${{ env.GEOS_VERSION }}
+            PROJ_VERSION=${{ env.PROJ_VERSION }}
+            SPATIALITE_VERSION=${{ env.SPATIALITE_VERSION }}
+            GDAL_VERSION=${{ env.GDAL_VERSION }}
+          push: false
+          cache-from: type=gha,scope=${{ env.GDAL_IMAGE }}-${{ env.GDAL_VERSION }}
+          cache-to: type=gha,mode=max,scope=${{ env.GDAL_IMAGE }}-${{ env.GDAL_VERSION }}
+        env:
+          BUILDKIT_PROGRESS: plain
+
+  build_wheels:
+    name: Build rasterio ${{ inputs.version || '1.5.1' }} ${{ matrix.python }}-manylinux_riscv64
+    needs: [setup, build_image]
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 600
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t", "cp315", "cp315t"]
+
+    steps:
+      - name: Checkout rasterio ${{ env.RASTERIO_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: rasterio/rasterio
+          ref: ${{ env.RASTERIO_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch rasterio source
+        run: git apply python-wheels/patches/rasterio/${{ env.RASTERIO_VERSION }}/*.patch
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+        with:
+          install: true
+          buildkitd-flags: --debug
+
+      - name: Write the GDAL image build context
+        run: |
+          mkdir -p "$RUNNER_TEMP/gdal-ctx"
+          cat > "$RUNNER_TEMP/gdal-ctx/collect-licenses.sh" <<'COLLECT_EOF'
+          #!/bin/bash
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # auditwheel vendors libgdal's whole shared-library closure into the wheel, so
+          # collect the licence of every rpm that closure comes from; the wheel build
+          # stages the result at the project root, where the license-files glob (patched
+          # into pyproject.toml) picks it up.
+          set -euo pipefail
+
+          out=/opt/licenses
+          mkdir -p "${out}"
+
+          mapfile -t libs < <(ldd /usr/local/lib/libgdal.so | tr ' ' '\n' | grep '^/' | sort -u)
+          mapfile -t pkgs < <(rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null \
+              | grep -E '^[A-Za-z0-9._+-]+$' | sort -u \
+              | grep -vE '^(glibc|libgcc|libstdc\+\+|gcc)$')
+
+          for pkg in "${pkgs[@]}"; do
+              mapfile -t files < <(rpm -q --licensefiles "${pkg}")
+
+              # A subpackage may carry no licence of its own (pcre2 leaves it to
+              # pcre2-syntax), so fall back to its siblings from the same source rpm.
+              if [ "${#files[@]}" -eq 0 ]; then
+                  srpm=$(rpm -q --qf '%{SOURCERPM}' "${pkg}")
+                  mapfile -t siblings < <(rpm -qa --qf '%{SOURCERPM} %{NAME}\n' \
+                      | awk -v srpm="${srpm}" '$1 == srpm { print $2 }')
+                  mapfile -t files < <(rpm -q --licensefiles "${siblings[@]}")
+              fi
+
+              # And the image installs rpms with tsflags=nodocs, which drops the licence
+              # of a package that marks it %doc rather than %license.
+              if [ "${#files[@]}" -eq 0 ]; then
+                  dnf -y reinstall --setopt=tsflags= "${pkg}"
+                  mapfile -t files < <(rpm -qd "${pkg}" \
+                      | grep -iE '/(LICEN[CS]E|COPYING|COPYRIGHT)[^/]*$' || true)
+              fi
+
+              for file in "${files[@]}"; do
+                  [ -f "${file}" ] || { echo "missing ${file} from rpm ${pkg}" >&2; exit 1; }
+                  cat "${file}" >> "${out}/LICENSE_${pkg}"
+              done
+
+              # Packages under a licence that needs no notice ship no file at all
+              # (sqlite-libs is public domain); record what the rpm declares instead.
+              if [ ! -s "${out}/LICENSE_${pkg}" ]; then
+                  rpm -q --qf '%{NAME} %{VERSION} is distributed under: %{LICENSE}\nIts package ships no licence file.\n' \
+                      "${pkg}" > "${out}/LICENSE_${pkg}"
+              fi
+          done
+
+          ls -l "${out}"
+          COLLECT_EOF
+          chmod +x "$RUNNER_TEMP/gdal-ctx/collect-licenses.sh"
+          cat > "$RUNNER_TEMP/gdal-ctx/Dockerfile" <<'DOCKER_EOF'
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # manylinux_riscv64 build image for rasterio: GDAL has no riscv64 build another
+          # way, so GEOS/PROJ/SpatiaLite/GDAL are compiled from source here rather than in
+          # cibuildwheel's before-all (upstream's ci/config.sh), which would repeat the
+          # whole ~20-dependency build once per interpreter.
+          ARG BASEIMAGE=quay.io/pypa/manylinux_2_39_riscv64:latest
+          FROM ${BASEIMAGE}
+
+          ARG GEOS_VERSION
+          ARG PROJ_VERSION
+          ARG SPATIALITE_VERSION
+          ARG GDAL_VERSION
+
+          SHELL ["/bin/bash", "-euxo", "pipefail", "-c"]
+
+          ENV PREFIX=/usr/local
+
+          # sqlite (the CLI) builds PROJ's proj.db and glibc-gconv-extra carries the
+          # charset converters GDAL recodes shapefile attributes with. The codec -devel
+          # packages (unlike build-pyogrio.yml's, which needs no raster format support)
+          # are what turns on GDAL's PNG/JPEG/GIF/WebP/JPEG2000 drivers, which rasterio's
+          # own test suite exercises; the rest are GDAL/PROJ/SpatiaLite dependencies.
+          RUN dnf -y install sqlite sqlite-devel libtiff-devel libcurl-devel expat-devel \
+                  libxml2-devel openssl-devel glibc-gconv-extra giflib-devel json-c-devel \
+                  libjpeg-turbo-devel libpng-devel libwebp-devel libzstd-devel lz4-devel \
+                  openjpeg2-devel \
+              && dnf clean all \
+              && echo "${PREFIX}/lib" > /etc/ld.so.conf.d/rasterio-local.conf \
+              && mkdir -p /opt/licenses /src
+
+          RUN cd /src \
+              && curl -sSLo geos.tar.bz2 "https://download.osgeo.org/geos/geos-${GEOS_VERSION}.tar.bz2" \
+              && tar xf geos.tar.bz2 \
+              && cd "geos-${GEOS_VERSION}" \
+              && cp COPYING /opt/licenses/LICENSE_GEOS \
+              && cmake -S . -B build \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+                  -DCMAKE_INSTALL_LIBDIR=lib \
+                  -DBUILD_TESTING=OFF \
+                  -DBUILD_DOCUMENTATION=OFF \
+                  -DBUILD_BENCHMARKS=OFF \
+              && cmake --build build -j"$(nproc)" \
+              && cmake --install build \
+              && ldconfig \
+              && rm -rf /src/*
+
+          RUN cd /src \
+              && curl -sSLo proj.tar.gz "https://download.osgeo.org/proj/proj-${PROJ_VERSION}.tar.gz" \
+              && tar xf proj.tar.gz \
+              && cd "proj-${PROJ_VERSION}" \
+              && cp COPYING /opt/licenses/LICENSE_PROJ \
+              && cmake -S . -B build \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+                  -DCMAKE_INSTALL_LIBDIR=lib \
+                  -DBUILD_TESTING=OFF \
+                  -DBUILD_APPS=OFF \
+                  -DENABLE_CURL=ON \
+                  -DENABLE_TIFF=ON \
+              && cmake --build build -j"$(nproc)" \
+              && cmake --install build \
+              && ldconfig \
+              && rm -rf /src/*
+
+          # GDAL's SQLite driver optionally links SpatiaLite; built with default features
+          # off (freexl/rttopo dropped) to match GDAL's own optional dependency, not a
+          # full GIS toolchain. config.guess/config.sub date from 2009 and know neither
+          # aarch64 nor riscv64, hence automake's.
+          RUN cd /src \
+              && curl -sSLo spatialite.tar.gz "https://www.gaia-gis.it/gaia-sins/libspatialite-sources/libspatialite-${SPATIALITE_VERSION}.tar.gz" \
+              && tar xf spatialite.tar.gz \
+              && cd "libspatialite-${SPATIALITE_VERSION}" \
+              && cp COPYING /opt/licenses/LICENSE_SPATIALITE \
+              && cp /usr/share/automake-*/config.guess /usr/share/automake-*/config.sub . \
+              && ./configure --prefix="${PREFIX}" --libdir="${PREFIX}/lib" \
+                  --disable-static --disable-freexl --disable-rttopo --disable-examples \
+                  --disable-minizip \
+              && make -j"$(nproc)" \
+              && make install \
+              && ldconfig \
+              && rm -rf /src/*
+
+          # BUILD_APPS=ON (unlike build-pyogrio.yml's image): rasterio's setup.py has no
+          # env-var-driven build config and instead runs `gdal-config` (not produced by
+          # GDAL's cmake build) or falls back to the `gdalinfo` binary on PATH to
+          # auto-detect include/library/data directories.
+          RUN cd /src \
+              && curl -sSLo gdal.tar.gz "https://github.com/OSGeo/gdal/releases/download/v${GDAL_VERSION}/gdal-${GDAL_VERSION}.tar.gz" \
+              && tar xf gdal.tar.gz \
+              && cd "gdal-${GDAL_VERSION}" \
+              && cp LICENSE.TXT /opt/licenses/LICENSE_GDAL \
+              && cmake -S . -B build \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+                  -DCMAKE_INSTALL_LIBDIR=lib \
+                  -DBUILD_TESTING=OFF \
+                  -DBUILD_APPS=ON \
+                  -DBUILD_PYTHON_BINDINGS=OFF \
+                  -DBUILD_JAVA_BINDINGS=OFF \
+                  -DBUILD_CSHARP_BINDINGS=OFF \
+              && cmake --build build -j"$(nproc)" \
+              && cmake --install build \
+              && ldconfig \
+              && rm -rf /src/*
+
+          COPY collect-licenses.sh /usr/local/bin/collect-licenses.sh
+          RUN collect-licenses.sh && dnf clean all
+          DOCKER_EOF
+      - name: Load the GDAL build image from the cache
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: ${{ runner.temp }}/gdal-ctx
+          file: ${{ runner.temp }}/gdal-ctx/Dockerfile
+          platforms: linux/riscv64
+          tags: ${{ env.GDAL_IMAGE }}:${{ env.GDAL_VERSION }}
+          build-args: |
+            BASEIMAGE=${{ env.BASEIMAGE }}
+            GEOS_VERSION=${{ env.GEOS_VERSION }}
+            PROJ_VERSION=${{ env.PROJ_VERSION }}
+            SPATIALITE_VERSION=${{ env.SPATIALITE_VERSION }}
+            GDAL_VERSION=${{ env.GDAL_VERSION }}
+          push: false
+          load: true
+          cache-from: type=gha,scope=${{ env.GDAL_IMAGE }}-${{ env.GDAL_VERSION }}
+        env:
+          BUILDKIT_PROGRESS: plain
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.GDAL_IMAGE }}:${{ env.GDAL_VERSION }}
+          # the image's licences for everything auditwheel vendors, staged where the
+          # patched license-files glob picks them up
+          CIBW_BEFORE_BUILD: cp /opt/licenses/LICENSE_* .
+          CIBW_ENVIRONMENT: >-
+            PACKAGE_DATA=1
+            GDAL_VERSION=${{ env.GDAL_VERSION }}
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Paths are relative to cibuildwheel's cwd (the checkout root); staging only
+          # tests/ and pyproject.toml keeps the source rasterio/ tree out of the test
+          # cwd, so the wheel is imported and [tool.pytest.ini_options] still applies.
+          CIBW_TEST_SOURCES: tests pyproject.toml
+          CIBW_TEST_REQUIRES: numpy aiohttp attrs pytest click mock boto3 packaging hypothesis fsspec s3fs requests
+          # Upstream's own test_wheels job (build-wheels.yaml), unmodified.
+          CIBW_TEST_COMMAND: >-
+            rio --version &&
+            rio env --formats &&
+            PROJ_NETWORK=ON python -m pytest -vv tests -m "not gdalbin" -k "not test_ensure_env_decorator_sets_gdal_data_prefix and not test_tiled_dataset_blocksize_guard and not test_untiled_dataset_blocksize and not test_positional_calculation_byindex and not test_transform_geom_polygon and not test_reproject_error_propagation and not test_info_azure_unsigned and not test_decimated_no_use_overview and not test_datasetreader_ctor_url and not test_copyfiles_same_dataset_another_name and not test_python_file_reuse"
+
+      - name: Check the extensions, GDAL data and licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          expected_licenses = {
+              "LICENSE.txt", "AUTHORS.txt",
+              "LICENSE_GDAL", "LICENSE_GEOS", "LICENSE_PROJ", "LICENSE_SPATIALITE",
+          }
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("rasterio/_io.") and n.endswith(".so") for n in names), whl
+              assert any(n.startswith("rasterio.libs/libgdal") for n in names), whl
+              assert "rasterio/proj_data/proj.db" in names, whl
+              assert any(n.startswith("rasterio/gdal_data/") for n in names), whl
+              licenses = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+              assert expected_licenses <= licenses, (whl, sorted(licenses))
+              print(whl, "ok", sorted(licenses))
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rasterio-${{ env.RASTERIO_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish rasterio ${{ inputs.version || '1.5.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: rasterio-${{ inputs.version || '1.5.1' }}-*-manylinux_riscv64
