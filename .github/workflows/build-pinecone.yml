@@ -1,0 +1,128 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build` job of
+# https://github.com/pinecone-io/python-sdk/blob/v9.1.0/.github/workflows/release-rc.yaml
+name: Build pinecone wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pinecone version/tag to build (e.g. 9.1.0)'
+        required: true
+        default: '9.1.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pinecone.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '9.1.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 9.1.0 there.
+  PINECONE_VERSION: ${{ inputs.version || '9.1.0' }}
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_ONLY_BINARY: ':all:'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheel:
+    needs: [setup]
+    name: Build pinecone ${{ inputs.version || '9.1.0' }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout pinecone v${{ env.PINECONE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pinecone-io/python-sdk
+          ref: v${{ env.PINECONE_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --out dist
+          manylinux: '2_39'
+          # Upstream's before-script-linux downloads a pinned protoc release, but its
+          # arch case statement only covers x86_64/aarch64 (protobuf ships no riscv64
+          # release binary); Rocky 10's CRB repo (enabled in the image) has protoc 3.19
+          # instead. PROTOC_INCLUDE points prost-build at its on-disk well-known types,
+          # which that older protoc doesn't carry inside the binary (gotcha 100).
+          before-script-linux: dnf -y --enablerepo=crb install protobuf-compiler protobuf-devel
+          docker-options: -e PROTOC_INCLUDE=/usr/include
+
+      - name: Verify the wheel ships the compiled extension
+        run: |
+          set -euo pipefail
+          python3 - dist/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = [n for n in names if n.endswith(".so")]
+          assert any(n.startswith("pinecone/_grpc") for n in sos), sos
+          print(sys.argv[1], "->", sos)
+          EOF
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel + test deps
+        # ipython is not in [project.optional-dependencies] but is imported directly
+        # by tests/unit/models/**/test_*_display.py's IPython.lib.pretty.pretty tests.
+        run: uv pip install dist/*.whl pytest pytest-asyncio pytest-timeout respx anyio hypothesis ipython
+
+      - name: pytest tests/unit
+        # The checkout's own pinecone/ source tree would otherwise shadow the
+        # installed wheel on sys.path (no compiled pinecone/_grpc there) — gotcha 25.
+        #
+        # test_async_transport_calls_module_level_compute_backoff deselected: its
+        # asyncio.get_event_loop() call raises "There is no current event loop" once
+        # an earlier test in the same session has torn one down — order-dependent on
+        # any arch, reproduces on aarch64 too, not a riscv64 issue.
+        #
+        # test_query_namespaces_bounded_fan_out_under_quota deselected: a real
+        # thread-pool timing test that asserts bounded fan-out under simulated quota
+        # starvation; ~40% flake rate for the whole `tests/unit -v` run on native
+        # aarch64 (passes standalone every time), so a shared riscv64 runner would
+        # flake it often.
+        #
+        # pyproject.toml's `timeout = 5` (pytest-timeout) is sized for upstream's x86
+        # CI; test_retry_after_fuzz.py's hypothesis strategy pays a one-time cost
+        # building its character-interval cache that alone exceeds 5s on the riscv64
+        # runner (gotcha 176) -- raised via `-o` rather than dropping the ini file.
+        run: |
+          set -euo pipefail
+          mv pinecone pinecone-src
+          python -m pytest tests/unit -v -o timeout=60 \
+            --deselect tests/unit/_internal/test_retry_transport.py::test_async_transport_calls_module_level_compute_backoff \
+            --deselect "tests/unit/_internal/test_bulk_upsert_storm.py::test_query_namespaces_bounded_fan_out_under_quota[asyncio]"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pinecone-${{ env.PINECONE_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pinecone ${{ inputs.version || '9.1.0' }}
+    needs: [setup, build_wheel]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pinecone-${{ inputs.version || '9.1.0' }}-*-manylinux_riscv64
