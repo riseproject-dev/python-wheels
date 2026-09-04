@@ -1,0 +1,50 @@
+From 872146c4bced3cb8e45a41d830f5068ca8b1f582 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 3 Sep 2026 22:38:19 +0200
+Subject: [PATCH] tests: allow functional tests to reuse a prebuilt wheel
+
+pytest_sessionstart always runs `uv build --wheel` to produce the wheel the
+venv factories install into their poetry/pdm/uv/pip environments. In a
+cibuildwheel job the interpreter's own wheel has already been built (and
+repaired) once; rebuilding it a second time from scratch to run the
+functional suite roughly doubles an already multi-minute native riscv64
+Rust compile for no functional benefit; the produced wheel is identical.
+
+DEPTRY_PREBUILT_WHEEL lets the caller point at that already-built wheel and
+skip the redundant rebuild; unset, behaviour is unchanged.
+
+Upstream-Status: Inappropriate [avoids a second from-scratch Rust compile inside a cibuildwheel test step; CI-infra only, nothing to fix in the project]
+---
+ tests/functional/conftest.py | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/tests/functional/conftest.py b/tests/functional/conftest.py
+index c2f8034..33dac90 100644
+--- a/tests/functional/conftest.py
++++ b/tests/functional/conftest.py
+@@ -1,6 +1,8 @@
+ from __future__ import annotations
+ 
++import os
+ import shlex
++import shutil
+ import subprocess
+ import sys
+ from pathlib import Path
+@@ -22,6 +24,13 @@ def pytest_sessionstart(session: pytest.Session) -> None:
+ 
+     deptry_wheel_path = Path(DEPTRY_WHEEL_DIRECTORY)
+ 
++    prebuilt_wheel = os.environ.get("DEPTRY_PREBUILT_WHEEL")
++    if prebuilt_wheel:
++        print(f"Reusing prebuilt `deptry` wheel {prebuilt_wheel} for functional tests...")  # noqa: T201
++        deptry_wheel_path.mkdir(parents=True, exist_ok=True)
++        shutil.copy2(prebuilt_wheel, deptry_wheel_path)
++        return None
++
+     print(f"Building `deptry` wheel in {deptry_wheel_path} to use it on functional tests...")  # noqa: T201
+ 
+     try:
+-- 
+2.50.1 (Apple Git-155)
+
