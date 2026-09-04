@@ -22,6 +22,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
 - **144** — A compiled "speedups" package: don't differential-test it against the pure-Python
 - **176** — `log_level` is the third pytest ini key that decides whether a staged suite passes,
 - **177** — Narrowing an upstream test suite because its heavy requirements file has no
+- **212** — An unavailable optional dependency (no riscv64 wheel) doesn't only fail tests
 
 ---
 
@@ -450,3 +451,40 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
       interpreter and on no distro one. Settle it with
       `python -c "import sys; print('_ssl' in sys.builtin_module_names)"` rather than from
       the failure text, which only says an expected entry was missing.
+
+212. **An unavailable optional dependency (no riscv64 wheel) doesn't only fail tests
+    that import it at module scope — grepping for those under-counts (the lancedb
+    case).** lancedb's suite already excluded six files that `import polars`/`import
+    lance` (pylance) unconditionally at module scope, since neither has a riscv64
+    wheel; the wheel still built and every excluded file's absence looked complete.
+    But 12 more tests scattered across four *other, otherwise-passing* files import
+    one of the two lazily inside the test body (`from lance...` a few lines into the
+    function) — those collect fine and only fail at runtime with
+    `ModuleNotFoundError`/`ImportError`, invisible to any static `grep -rl '^import
+    polars'` sweep of the suite.
+    - **The full set only falls out of actually running the suite once** (refines
+      gotcha 109's "static analysis under-counts" from fixture closures to plain
+      imports) — `grep -oE '^FAILED [^ ]+'` on that run's output gave all 12 nodeids
+      directly, no further investigation needed once each traceback's
+      `ModuleNotFoundError: No module named 'lance'`/`'polars'` confirmed the cause.
+    - **Deselect the nodes, not the files** (opposite call from gotcha 109's "prefer
+      whole modules"): here the four files carry far more passing tests than failing
+      ones (e.g. one deselect each out of dozens of tests in `test_query.py`/
+      `test_permutation.py`), so individual `--deselect=<file>::<test>` entries lose
+      nothing, where `--ignore=<file>` would strand every passing test alongside them.
+      Gotcha 109's "drop whole modules" call was the reverse ratio (15 of 21 modules
+      100% server-dependent) — check which side of that ratio a suite falls on before
+      picking the tool.
+    - **Copy the nodeid string verbatim from the FAILED line of the exact
+      `CIBW_TEST_COMMAND` you're patching**, not a hand-typed guess at the path: gotcha
+      14 warns that a path-based `--deselect` silently no-ops when it doesn't match
+      pytest's rootdir-relative nodeid. Since the fix reruns the identical command
+      (same cwd, same `CIBW_TEST_SOURCES` layout), the nodeids the failing run printed
+      are exactly what the rerun will report, with no absolute-vs-relative mismatch to
+      chase.
+    - A 13th failure in the same run, a project-metadata sanity test that reads
+      `Cargo.toml` relative to its own file's path, deselects for an unrelated reason:
+      `CIBW_TEST_SOURCES` stages only `pyproject.toml` and the test tree, so the file
+      it needs was never copied in — a repo-layout gap, not a missing-dependency one,
+      but the same fix (`--deselect`) applies since it verifies source-tree metadata
+      consistency, not anything an installed wheel need prove.
