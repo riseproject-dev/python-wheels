@@ -19,6 +19,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
 - **184** — `[tool.cibuildwheel] enable` is an enum, not a free-form list — a pinned older
 - **211** — `pip install wheel` does not restore `distutils` on Python 3.12+ — only
 - **222** — A dependency's own `build-system.requires` floor can be past the point its
+- **225** — `wheel>=0.44.0` dropped `wheel.bdist_wheel.get_platform` — a hand-rolled
 
 ---
 
@@ -384,3 +385,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
     - File the bug upstream (`Upstream-Status: Issue` + a real link) before patching —
       it is a genuine release defect, not a riscv64 accommodation, so it belongs in the
       commit message as such and gives a future session a fast path to drop the patch.
+
+225. **`wheel>=0.44.0` dropped `wheel.bdist_wheel.get_platform` in favour of
+    setuptools' own bundled `bdist_wheel` — a hand-rolled `setup_ext.py` that imports
+    it directly breaks on latest `wheel` (the libclang case; see
+    `build-libclang.yml`).** Same script, next problem after gotcha 211's distutils
+    fix: once `pip install setuptools wheel` (unpinned) resolves `distutils`, libclang's
+    `setup_ext.py` gets past that import only to fail on the next line, `from
+    wheel.bdist_wheel import get_platform, bdist_wheel`, with
+    `ImportError: cannot import name 'get_platform' from 'wheel.bdist_wheel'`. `wheel`
+    0.44.0 (2024-09) slimmed its vendored `bdist_wheel` down to a deprecation shim ("no
+    longer the canonical location of the `bdist_wheel` command... update to setuptools
+    v70.1+") and removed `get_platform` along with it; only `wheel<0.44.0` still exports
+    the symbol upstream's script imports by name.
+    - **The fix is a version pin, not a source patch**: `pip install -U setuptools
+      "wheel==0.43.0"`. setuptools' own integrated `bdist_wheel` is not a drop-in for
+      code that imports `get_platform` straight from `wheel.bdist_wheel` — the script
+      would need patching to use `sysconfig`/`packaging.tags` instead, so pinning the
+      last `wheel` release that still carries the symbol is the smaller fix.
+    - **Settle it in seconds against the real image, no LLVM rebuild required**: fetch
+      the package's real `setup_ext.py` plus a dummy `native/libclang.so` stand-in into
+      a scratch dir, then `docker run --platform linux/riscv64
+      quay.io/pypa/manylinux_2_39_riscv64 bash -c 'pip install -q -U setuptools wheel &&
+      python3 setup_ext.py bdist_wheel --plat-name=manylinux_2_39_riscv64'` reproduces
+      the `ImportError` identically; swapping in `"wheel==0.43.0"` produces a real
+      `dist/*.whl` — the whole check is independent of the ~10h LLVM/Clang compile that
+      precedes it in CI.
+    - Distinct from gotcha 211: that one is the stdlib dropping `distutils` in Python
+      3.12 (fixed by adding `setuptools` to the install line); this one is `wheel`
+      itself dropping a symbol from a later release (fixed by capping `wheel`'s
+      version) — both land in the same `pip install` line but are independent failures
+      that surface one after the other as each is fixed.

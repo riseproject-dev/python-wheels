@@ -197,6 +197,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **184** — `[tool.cibuildwheel] enable` is an enum, not a free-form list — a pinned older
 - **211** — `pip install wheel` does not restore `distutils` on Python 3.12+ — only
 - **222** — A dependency's own `build-system.requires` floor can be past the point its
+- **225** — `wheel>=0.44.0` dropped `wheel.bdist_wheel.get_platform` — a hand-rolled
 
 ### Testing: test-sources & shadowing — [`gotchas/testing-and-shadowing.md`](gotchas/testing-and-shadowing.md)
 
