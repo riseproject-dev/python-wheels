@@ -18,6 +18,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
 - **135** — A version placeholder that upstream's *release script* stamps is a fourth way to
 - **154** — A PyPI `project_urls` repository link can 404 — search for the live repo before
 - **156** — An upstream that exists only as a PyPI sdist is still an ordinary port — but
+- **213** — Gotcha 103's timestamp-proximity trick can point at the wrong commit when
 
 ---
 
@@ -223,3 +224,18 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
       0.17.14 linked in 38s on an arm64 laptop, which settles the one arch-specific risk
       in such a tree (does every dependency have a riscv64 path?) before any runner time
       is spent.
+
+213. **Gotcha 103's timestamp-proximity trick can point at the wrong commit when
+    upstream batches releases (the lru-dict case).** lru-dict 1.4.1 is on PyPI with no
+    `v1.4.1` tag — but unlike dbt-extractor, the sdist's `upload_time_iso_8601`
+    (2025-11-02) sits **three and a half months** after the commit that actually bumped
+    `pyproject.toml` to `1.4.1` (2025-07-28): upstream tagged `v1.4.0` then `v1.5.0`
+    around it and apparently queued the 1.4.1 upload until a later batch of releases,
+    so "the commit minutes before the upload" would land on unrelated Android/iOS
+    workflow changes instead. **Match the literal version string, not the clock**:
+    `gh api "repos/<o>/<r>/commits?path=pyproject.toml"` (or `setup.py`/`__init__.py`)
+    and diff each candidate's patch for `version = "<ver>"` — the commit whose diff
+    shows `-version = "1.4.0"` / `+version = "1.4.1"` is unambiguous regardless of when
+    it was released. Still finish with gotcha 103's proof step (`gh api
+    repos/<o>/<r>/tarball/<sha>` diffed file-by-file against the PyPI sdist) — a version
+    match alone doesn't rule out later content-only commits.

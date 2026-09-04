@@ -66,6 +66,7 @@ The porting gotchas (199 of them) live in [`references/gotchas/`](gotchas/), spl
 - **135** — A version placeholder that upstream's *release script* stamps is a fourth way to
 - **154** — A PyPI `project_urls` repository link can 404 — search for the live repo before
 - **156** — An upstream that exists only as a PyPI sdist is still an ordinary port — but
+- **213** — Gotcha 103's timestamp-proximity trick can point at the wrong commit when
 
 ### cibuildwheel mechanics, the matrix & abi3 — [`gotchas/cibuildwheel-matrix-and-abi3.md`](gotchas/cibuildwheel-matrix-and-abi3.md)
 
