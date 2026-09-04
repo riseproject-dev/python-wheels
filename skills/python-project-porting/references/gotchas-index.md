@@ -52,6 +52,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **187** — Gotcha 40's numba wall catches more than numba itself — check a candidate
 - **203** — A `py2.py3-none-<platform>` wheel bundling a runtime can be the *opposite* of
 - **214** — Not being Bazel-blocked doesn't mean a build is in scope — count the
+- **230** — "CMake" isn't always a hand-maintained build — a project's own CMakeLists can be a
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
