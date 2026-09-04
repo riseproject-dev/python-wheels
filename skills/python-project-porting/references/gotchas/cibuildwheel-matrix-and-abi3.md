@@ -18,6 +18,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **107** — `CIBW_ENVIRONMENT` *replaces* upstream's `[tool.cibuildwheel] environment` table
 - **134** — cibuildwheel's default abi3 audit rejects a wheel for exporting its *own*
 - **204** — cibuildwheel 4.2.0 doesn't offer cp313t as a build target on *any* platform —
+- **221** — `quay.io/pypa/musllinux_1_2_riscv64` is a real, working image — every prior port
 - **209** — A multi-grammar tree-sitter-`<lang>` repo does not necessarily need a
 - **56** — `py-build-cmake` projects: the free-threaded job dies at *configure* unless
 - **201** — When `package-dir` is a monorepo subdirectory and the package's own build script
@@ -384,3 +385,19 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
        leaves any macOS/Windows repair command upstream might also declare untouched —
        irrelevant to riscv64 but keeps the diff minimal against the pyproject you copied
        from.
+
+221. **`quay.io/pypa/musllinux_1_2_riscv64` is a real, working image — every prior port
+     that mentioned musllinux riscv64 dropped it not because the image is broken, but
+     because a *runtime* dependency (almost always numpy) has no musllinux riscv64
+     wheel on either PyPI or our registry (workflow-anatomy.md's "dropping musllinux is
+     an accepted outcome" is about that gap, not the image itself).** ckzg has zero
+     `requires_dist` and its only test dependency (PyYAML) builds fine from sdist with
+     no libyaml-dev present, so it hit no such wall: a `python: [...] x libc:
+     [manylinux, musllinux]` matrix (`CIBW_BUILD:
+     ${{ matrix.python }}-${{ matrix.libc }}_riscv64`, both
+     `CIBW_MANYLINUX_RISCV64_IMAGE`/`CIBW_MUSLLINUX_RISCV64_IMAGE` set unconditionally)
+     built and tested clean on cp312/cp313/cp314/cp314t for both libcs in one pass —
+     the first confirmed musllinux riscv64 success in this repo. Check the package's
+     own dependency footprint (`requires_dist`, `CIBW_TEST_REQUIRES`) against the
+     registry before assuming musllinux riscv64 needs to be dropped by default; try it
+     when nothing pulls in a numpy-shaped blocker.

@@ -88,6 +88,7 @@ The porting gotchas (200 of them) live in [`references/gotchas/`](gotchas/), spl
 - **209** — A multi-grammar tree-sitter-`<lang>` repo does not necessarily need a
 - **216** — An abi3 build's own mandatory floor interpreter (gotcha 96) can itself be the one
 - **217** — Upstream's own `repair-wheel-command` commonly re-runs abi3audit itself via
+- **221** — `quay.io/pypa/musllinux_1_2_riscv64` is a real, working image — every prior port
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
@@ -145,6 +146,7 @@ The porting gotchas (200 of them) live in [`references/gotchas/`](gotchas/), spl
 - **159** — Bundling shared libraries next to a binary: `patchelf --set-rpath` writes
 - **160** — An architecture `select()` that supplies *source* files and ends in
 - **206** — A C++ ML/inference engine that gates its fast BLAS backend to x86 usually
+- **220** — BLST (Ethereum's vendored elliptic-curve library, pulled in by ckzg/c-kzg-4844
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 

@@ -18,6 +18,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
 - **159** — Bundling shared libraries next to a binary: `patchelf --set-rpath` writes
 - **160** — An architecture `select()` that supplies *source* files and ends in
 - **206** — A C++ ML/inference engine that gates its fast BLAS backend to x86 usually
+- **220** — BLST (Ethereum's vendored elliptic-curve library, pulled in by ckzg/c-kzg-4844
 
 ---
 
@@ -386,3 +387,20 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
       off under Ruy-only int8 GEMM. Same divergence class as gotcha 170, now confirmed in
       ML inference / quantization rather than linear algebra: deselect the specific test
       with a one-line reason, don't chase the difference as a bug.
+
+220. **BLST (Ethereum's vendored elliptic-curve library, pulled in by ckzg/c-kzg-4844
+    and likely other Ethereum-crypto ports) auto-detects an unsupported arch at build
+    time and falls back to real portable C — no patch, no `CIBW_ENVIRONMENT` flag
+    needed.** Same shape as gotcha 206's Ruy fallback, different mechanism: blst's
+    `build.sh` greps the compiler's predefined macros
+    (`echo ${predefs} | grep -E -q 'x86_64|aarch64'`) and appends `-D__BLST_NO_ASM__`
+    for anything else, riscv64 included. That macro (checked in `src/vect.h`) swaps
+    every hand-written assembly primitive for a plain-C equivalent, and
+    `build/assembly.S`'s own arch dispatch (`#elif defined(__BLST_NO_ASM__) || ...`)
+    compiles to nothing on riscv64 — so the object file that lands in `libblst.a`
+    carries zero unresolved arch-specific symbols, unlike gotcha 160's Boost.Context
+    case where an empty `select()` branch links clean and only fails at `dlopen`.
+    Confirmed by building the real 2.1.8 sdist locally (`make -C src blst`) and reading
+    the `-D__BLST_NO_ASM__`-gated code paths; no riscv64-specific configuration was
+    needed in `build-ckzg.yml` beyond mirroring upstream's own
+    `CIBW_BEFORE_BUILD_LINUX: make -C src blst`.
