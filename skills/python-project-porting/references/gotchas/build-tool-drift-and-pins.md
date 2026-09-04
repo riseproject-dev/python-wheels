@@ -18,6 +18,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
 - **175** — One `PIP_BUILD_CONSTRAINT` file covers the project's build tool *and* every
 - **184** — `[tool.cibuildwheel] enable` is an enum, not a free-form list — a pinned older
 - **211** — `pip install wheel` does not restore `distutils` on Python 3.12+ — only
+- **222** — A dependency's own `build-system.requires` floor can be past the point its
 
 ---
 
@@ -345,3 +346,41 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
     - Distinct from gotcha 29 (setuptools *removing* `pkg_resources` in 82.0.0): this is
       the stdlib removing `distutils` in 3.12, and setuptools is the fix here rather than
       the thing that broke.
+
+222. **A dependency's own `build-system.requires` floor can be past the point its
+    own config was deprecated — no version window satisfies both, so
+    `PIP_BUILD_CONSTRAINT` (gotcha 112) cannot fix it; only a source patch can (the
+    sparsediffpy case; see `build-sparsediffpy.yml`).** Gotchas 76/118 fix a build
+    tool that is pinned too *low* by preinstalling/constraining a newer-or-older
+    version — that only works because some version satisfies both the project's floor
+    and whatever makes the build succeed. sparsediffpy 0.3.0's `pyproject.toml` sets
+    `requires = ["scikit-build-core >= 0.10", ...]` but its `[tool.scikit-build]` table
+    still uses `cmake.minimum-version`, a key scikit-build-core **removed outright at
+    0.8** in favour of `cmake.version` — every version satisfying the declared floor
+    (0.10, 0.12, …) is past 0.8, so `pip install --no-binary sparsediffpy sparsediffpy`
+    fails at "Getting requirements to build wheel" with `ERROR: Use cmake.version
+    instead of cmake.minimum-version with scikit-build-core >= 0.8`, on **every**
+    architecture, with no scikit-build-core version left that satisfies both
+    constraints. A `PIP_BUILD_CONSTRAINT` pinning `scikit-build-core<0.8` just trades
+    one hard failure (`ERROR: Use cmake.version ...`) for another
+    (`ResolutionImpossible: ... floor >=0.10 vs constraint <0.8`) — confirmed by testing
+    both directly.
+    - **Reproduces off riscv64** — settle it natively before touching CI:
+      `docker run quay.io/pypa/manylinux_2_39_aarch64 pip install --no-binary
+      sparsediffpy sparsediffpy==0.3.0` fails identically on aarch64/x86, which is the
+      tell that upstream's own released sdist is broken (probably because whatever
+      scikit-build-core was newest when they cut the release still accepted the old
+      key), not that riscv64 lacks a wheel.
+    - **The only fix is patching the dependency's `pyproject.toml`** — rename
+      `cmake.minimum-version = "X"` to `cmake.version = ">=X"` (scikit-build-core reads
+      it the same way, and on 0.10+ falls back to the `CMakeLists.txt`'s own
+      `cmake_minimum_required` if omitted entirely). Since this is a *dependency* of the
+      package being ported (cvxpy pins `sparsediffpy>=0.3.0,<0.4.0`, and 0.3.0 is the
+      only release in that range), not the package itself, this justified porting
+      sparsediffpy as its own small prerequisite wheel — a transitive sdist that cannot
+      build at all is worse than gotcha 30's "no riscv64 wheel yet" and blocks the
+      *consuming* port's published wheel from being installable by real users, not just
+      its CI test phase.
+    - File the bug upstream (`Upstream-Status: Issue` + a real link) before patching —
+      it is a genuine release defect, not a riscv64 accommodation, so it belongs in the
+      commit message as such and gives a future session a fast path to drop the patch.

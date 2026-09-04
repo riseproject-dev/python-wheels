@@ -192,6 +192,7 @@ The porting gotchas (200 of them) live in [`references/gotchas/`](gotchas/), spl
 - **175** — One `PIP_BUILD_CONSTRAINT` file covers the project's build tool *and* every
 - **184** — `[tool.cibuildwheel] enable` is an enum, not a free-form list — a pinned older
 - **211** — `pip install wheel` does not restore `distutils` on Python 3.12+ — only
+- **222** — A dependency's own `build-system.requires` floor can be past the point its
 
 ### Testing: test-sources & shadowing — [`gotchas/testing-and-shadowing.md`](gotchas/testing-and-shadowing.md)
 
