@@ -1,0 +1,213 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+name: Build cchardet wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'cchardet version to build (e.g. 2.1.7)'
+        required: true
+        default: '2.1.7'
+  pull_request:
+    paths:
+      - '.github/workflows/build-cchardet.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.1.7' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  CCHARDET_VERSION: ${{ inputs.version || '2.1.7' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_sdist:
+    needs: [setup]
+    name: Build cchardet ${{ inputs.version || '2.1.7' }} sdist
+    runs-on: ubuntu-latest
+    outputs:
+      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
+      package_version: ${{ steps.sdist.outputs.package_version }}
+    steps:
+      - name: Checkout cChardet ${{ env.CCHARDET_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: PyYoshi/cChardet
+          ref: ${{ env.CCHARDET_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build sdist
+        id: sdist
+        # This tag ships no pyproject.toml: setup.py cythonises _cchardet.pyx
+        # itself whenever Cython is importable, so Cython has to be
+        # preinstalled with isolation off, or the bundled .cpp is whatever a
+        # bare `setuptools`+`wheel` env leaves behind (nothing, in practice).
+        run: |
+          uv pip install cython setuptools wheel build twine
+          python -m build --sdist --no-isolation
+          twine check dist/*
+          sdists=(dist/*.tar.gz)
+          sdist_name="$(basename "${sdists[0]}")"
+          echo "sdist_name=${sdist_name}" >> "$GITHUB_OUTPUT"
+          echo "package_version=$(echo "${sdist_name}" | sed -En 's/cchardet-(.+)\.tar\.gz/\1/p')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cchardet-${{ env.CCHARDET_VERSION }}-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_sdist]
+    name: Build cchardet ${{ inputs.version || '2.1.7' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: cchardet-${{ env.CCHARDET_VERSION }}-sdist
+          path: dist/
+
+      - name: Extract sdist and stage the wheel smoke tests
+        # Upstream's own suite (src/tests/test.py) uses nose, dead on modern
+        # Python; this reproduces its checks with plain pytest assertions
+        # against the same bundled testdata/samples.
+        run: |
+          mkdir pkg
+          tar xzf dist/${{ needs.build_sdist.outputs.sdist_name }} --strip-components=1 -C pkg
+          cat > pkg/riscv64_test_cchardet.py <<'EOF'
+          import glob
+          import os
+
+          import cchardet
+
+          TESTDATA_DIR = "pkg/src/tests/testdata"
+          SAMPLES_DIR = "pkg/src/tests/samples"
+
+          SKIP_LIST = [
+              TESTDATA_DIR + "/ja/utf-16le.txt",
+              TESTDATA_DIR + "/ja/utf-16be.txt",
+              TESTDATA_DIR + "/es/iso-8859-15.txt",
+              TESTDATA_DIR + "/da/iso-8859-1.txt",
+              TESTDATA_DIR + "/he/iso-8859-8.txt",
+          ]
+          SKIP_LIST_DECODE = SKIP_LIST + [
+              TESTDATA_DIR + "/vi/viscii.txt",
+              TESTDATA_DIR + "/zh/euc-tw.txt",
+          ]
+
+
+          def test_ascii():
+              assert cchardet.detect(b"abcdefghijklmnopqrstuvwxyz")["encoding"].lower() == "ascii"
+
+
+          def test_detect():
+              testfiles = glob.glob(TESTDATA_DIR + "/*/*.txt")
+              assert testfiles
+              for testfile in testfiles:
+                  if testfile in SKIP_LIST:
+                      continue
+                  expected = os.path.splitext(os.path.basename(testfile))[0]
+                  with open(testfile, "rb") as f:
+                      result = cchardet.detect(f.read())
+                  assert result["encoding"] is not None, testfile
+                  assert result["encoding"].lower() == expected.lower(), (testfile, result)
+
+
+          def test_detector():
+              detector = cchardet.UniversalDetector()
+              with open(SAMPLES_DIR + "/wikipediaJa_One_Thousand_and_One_Nights_SJIS.txt", "rb") as f:
+                  for line in f:
+                      detector.feed(line)
+                      if detector.done:
+                          break
+              detector.close()
+              assert detector.result["encoding"].lower() == "shift_jis"
+
+
+          def test_github_issue_20():
+              msg = b"\x8f"
+              cchardet.detect(msg)
+              detector = cchardet.UniversalDetector()
+              detector.feed(msg)
+              detector.close()
+
+
+          def test_decode():
+              for testfile in glob.glob(TESTDATA_DIR + "/*/*.txt"):
+                  if testfile in SKIP_LIST_DECODE:
+                      continue
+                  with open(testfile, "rb") as f:
+                      msg = f.read()
+                  msg.decode(cchardet.detect(msg)["encoding"])
+
+
+          def test_utf8_with_bom():
+              assert cchardet.detect(b"\xef\xbb\xbf")["encoding"].lower() == "utf-8-sig"
+
+
+          def test_null_bytes():
+              assert cchardet.detect(b"ABC\x00\x80\x81")["encoding"] is None
+          EOF
+
+      - name: Build and test wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: pkg
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_REQUIRES: pytest
+          # CIBW_TEST_SOURCES is relative to the cwd, not package-dir, hence "pkg/".
+          CIBW_TEST_SOURCES: pkg/riscv64_test_cchardet.py pkg/src/tests/testdata pkg/src/tests/samples
+          CIBW_TEST_COMMAND: python -m pytest pkg/riscv64_test_cchardet.py -v
+
+      - name: Verify the wheel ships the compiled extension
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert any(n.startswith("cchardet/_cchardet") and n.endswith(".so") for n in names), names
+          assert any(n.endswith(".dist-info/licenses/COPYING") for n in names), names
+          print("ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cchardet-${{ needs.build_sdist.outputs.package_version }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cchardet ${{ inputs.version || '2.1.7' }}
+    needs: [setup, build_sdist, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: cchardet-${{ needs.build_sdist.outputs.package_version }}-*-manylinux_riscv64
