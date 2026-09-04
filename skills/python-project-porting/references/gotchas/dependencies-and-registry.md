@@ -20,6 +20,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
 - **200** — A monorepo sibling ported in a separate PR can pin `install_requires` to its own
 - **210** — A test dependency our registry already carries as a wheel can still fail from
 - **215** — A registry gap for one interpreter can be narrowed to just the one optional
+- **232** — Matching upstream's newest interpreter tier can silently trade a fast port for a
 
 ---
 
@@ -391,3 +392,26 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
        `pypi.riseproject.dev/simple/<dep>/` before the next version bump — the day our
        registry ships a cp314t wheel, the matrix field becomes redundant, unlike gotcha
        149's permanent everywhere-gap.
+
+232. **Matching upstream's newest interpreter tier can silently trade a fast port for a
+    from-source build of a heavy dependency — check whether it's a hard blocker or just an
+    unplanned cost (the blosc2 cp315t case).** Gotchas 67/84 cover a registry-only gap that
+    caps the *low* end of the matrix; the newest tier is a different shape: neither
+    `pypi.riseproject.dev` nor public PyPI has published a riscv64 wheel for it *anywhere*
+    yet, for anyone, because the interpreter itself is bleeding-edge (here, CPython 3.15
+    pre-release). python-blosc2 4.11.0 upstream builds three wheels — `cp311-abi3`,
+    `cp314t`, `cp315t` — and numpy (a build **and** runtime requirement) has no riscv64
+    wheel for `cp315`/`cp315t` on either index, checked both ways: `curl -s
+    https://pypi.riseproject.dev/simple/numpy/` and the public
+    `https://pypi.org/pypi/numpy/json`. This is **not** automatically a blocker the way
+    gotcha 40's conda-only dependency is: `build-rasterio.yml`'s `cp315`/`cp315t` legs
+    (PR #912) resolved `numpy==2.5.2` and passed by letting pip build it from sdist inside
+    the container, costing roughly 23 extra minutes over a wheel install (visible as a
+    `numpy` sdist-build gap in the job log timestamps) — riscv64 CI has apparently already
+    absorbed a from-source numpy build once. The choice is then a scope/cost call, not a
+    feasibility one: paying that cost (and the shared-runner time, gotcha 48) to match
+    upstream's exact three-wheel shape, or dropping the newest tier and documenting why, the
+    way this port did (`cp311-abi3` + `cp314t` only, no `cp315t`, one PR-description bullet
+    naming numpy as the reason). Re-check both indexes before the next version bump — the
+    day numpy ships a `cp315` riscv64 wheel anywhere, the dropped tier costs nothing to add
+    back.

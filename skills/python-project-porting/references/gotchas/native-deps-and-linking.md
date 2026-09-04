@@ -19,6 +19,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
 - **160** — An architecture `select()` that supplies *source* files and ends in
 - **206** — A C++ ML/inference engine that gates its fast BLAS backend to x86 usually
 - **220** — BLST (Ethereum's vendored elliptic-curve library, pulled in by ckzg/c-kzg-4844
+- **231** — A vendored C library's own CMake can carry a genuine, tested riscv64 branch —
 
 ---
 
@@ -404,3 +405,26 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
     the `-D__BLST_NO_ASM__`-gated code paths; no riscv64-specific configuration was
     needed in `build-ckzg.yml` beyond mirroring upstream's own
     `CIBW_BEFORE_BUILD_LINUX: make -C src blst`.
+
+231. **A vendored C library's own CMake can carry a genuine, tested riscv64 branch — and a
+    bundled JIT compiler can have a real riscv64 code-generation backend, not just a scalar
+    bailout (the blosc2/miniexpr/minicc case).** Gotcha 220 shows BLST detecting an
+    unsupported arch and silently degrading to portable C. c-blosc2 (fetched by
+    `python-blosc2`'s CMake via `FetchContent`) does the equivalent explicitly: its
+    `CMakeLists.txt` has `elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(riscv32|riscv64|riscv)")`
+    setting every `COMPILER_SUPPORT_{SSE2,AVX2,AVX512,NEON,ALTIVEC}` flag `FALSE` with a
+    `message(STATUS ...)` explaining the generic path will be used — no patch needed, and
+    grepping for that `elseif` chain before assuming a SIMD-heavy C library is a port
+    blocker settles it in seconds. The sharper finding is one level deeper: python-blosc2
+    also bundles `miniexpr`, whose optional expression JIT is a fork of tinycc
+    (`Blosc/minicc`) — and minicc ships real riscv64 backend files
+    (`riscv64-asm.c`/`riscv64-gen.c`/`riscv64-link.c`/`riscv64-tok.h`), so its own
+    `MiniexprOptions.cmake` allow-lists `riscv64` alongside `x86_64|aarch64|arm|i386` as a
+    "native backend available" architecture and *builds the JIT*, rather than falling back
+    to interpretation. Don't assume a JIT is x86/arm-only — `ls`/`grep` the compiler's
+    source tree for an arch-named backend file before writing off a JIT feature as
+    unavailable on riscv64. (The library's *other* SIMD math — SLEEF-accelerated
+    transcendentals — does take the fallback path: `functions-simd.c` gates the
+    vectorized code with `#if defined(__x86_64__) ... #elif defined(__aarch64__)` and
+    falls through to a plain `libm`-calling scalar implementation for every other arch,
+    confirmed by reading the file rather than assuming.)

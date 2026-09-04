@@ -153,6 +153,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **160** — An architecture `select()` that supplies *source* files and ends in
 - **206** — A C++ ML/inference engine that gates its fast BLAS backend to x86 usually
 - **220** — BLST (Ethereum's vendored elliptic-curve library, pulled in by ckzg/c-kzg-4844
+- **231** — A vendored C library's own CMake can carry a genuine, tested riscv64 branch —
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 
@@ -183,6 +184,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **200** — A monorepo sibling ported in a separate PR can pin `install_requires` to its own
 - **210** — A test dependency our registry already carries as a wheel can still fail from
 - **215** — A registry gap for one interpreter can be narrowed to just the one optional
+- **232** — Matching upstream's newest interpreter tier can silently trade a fast port for a
 
 ### Build-tool drift & pins — [`gotchas/build-tool-drift-and-pins.md`](gotchas/build-tool-drift-and-pins.md)
 
