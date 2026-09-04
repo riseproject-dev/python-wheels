@@ -1,0 +1,134 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build` job of
+# https://github.com/Eventual-Inc/Daft/blob/v0.7.24/.github/workflows/build-wheel.yml
+name: Build daft wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'daft version to build (git tag without the leading v, e.g. 0.7.24)'
+        required: true
+        default: '0.7.24'
+  pull_request:
+    paths:
+      - '.github/workflows/build-daft.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.7.24' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.7.24 there.
+  DAFT_VERSION: ${{ inputs.version || '0.7.24' }}
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  # Limit parallel rustc invocations to avoid resource exhaustion on the
+  # riscv64 runner (build-lancedb.yml/build-polars-runtime.yml need the same).
+  CARGO_BUILD_JOBS: 2
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build daft ${{ inputs.version || '0.7.24' }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+
+    steps:
+      - name: Checkout Daft v${{ env.DAFT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Eventual-Inc/Daft
+          ref: v${{ env.DAFT_VERSION }}
+          persist-credentials: false
+
+      # Upstream derives this from `setuptools_scm` and writes it into
+      # Cargo.toml before building (build-wheel.yml's "Patch package version"
+      # step) because their CI also builds untagged/nightly commits. We only
+      # ever build an exact release tag, so the version is already known; the
+      # workspace-wide placeholder is the only place it needs to land.
+      - name: Patch package version
+        run: |
+          awk -v ver="${DAFT_VERSION}" '
+            /^\[workspace\.package\]/ { in_block=1 }
+            /^\[/ && !/^\[workspace\.package\]/ { in_block=0 }
+            in_block && /^version = / { print "version = \"" ver "\""; next }
+            { print }
+          ' Cargo.toml > Cargo.toml.new
+          mv Cargo.toml.new Cargo.toml
+          grep -qx "version = \"${DAFT_VERSION}\"" Cargo.toml
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+
+      # Same OOM guard build-lancedb.yml/build-deltalake.yml need on these
+      # runners for a comparably sized Rust workspace.
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 16
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          # pyo3 carries `abi3-py310` unconditionally in Cargo.toml, so
+          # upstream ships one cp310-abi3 wheel and no free-threaded variant;
+          # build on the floor interpreter the tag claims (gotcha 181).
+          # `rust-toolchain.toml` pins a nightly channel (daft-core and
+          # friends use unstable `#![feature(...)]`); maturin-action picks it
+          # up on its own, same as upstream's job does.
+          args: -i python3.10 --profile release --strip --out dist
+          manylinux: '2_39'
+          before-script-linux: |
+            git config --global --add safe.directory "*"
+            # The dashboard's `build.rs` requires Node/npm for release builds
+            # unless this is set, in which case it embeds an empty asset
+            # bundle instead; avoids needing a riscv64 Node toolchain for a
+            # bundled web dashboard nothing in the test suite exercises.
+            export CI=true
+            export DAFT_DASHBOARD_SKIP_BUILD=1
+        env:
+          DAFT_ANALYTICS_ENABLED: '0'
+
+      - name: Test wheel
+        run: |
+          python3 -m venv /tmp/daft-test-venv
+          source /tmp/daft-test-venv/bin/activate
+          pip install ray==2.58.0 pytest pandas==2.3.3 pytz numpy==2.3.4 pyarrow==25.0.1 dist/*.whl --force-reinstall
+          # `daft/` at the checkout root would otherwise shadow the installed
+          # wheel (same reason upstream's own test-wheels job removes it).
+          rm -rf daft
+          DAFT_ANALYTICS_ENABLED=0 DAFT_RUNNER=native python -m pytest tests/dataframe --durations=50
+          DAFT_ANALYTICS_ENABLED=0 DAFT_RUNNER=ray python -m pytest tests/dataframe --durations=50
+        env:
+          PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+          # Without it pip prefers PyPI's releases, which have no riscv64
+          # wheel for these, and source-builds them in the container.
+          PIP_ONLY_BINARY: numpy,pandas,pyarrow,ray
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: daft-${{ env.DAFT_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish daft ${{ inputs.version || '0.7.24' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: daft-${{ inputs.version || '0.7.24' }}-*-manylinux_riscv64
