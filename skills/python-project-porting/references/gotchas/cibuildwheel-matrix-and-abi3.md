@@ -21,6 +21,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **209** — A multi-grammar tree-sitter-`<lang>` repo does not necessarily need a
 - **56** — `py-build-cmake` projects: the free-threaded job dies at *configure* unless
 - **201** — When `package-dir` is a monorepo subdirectory and the package's own build script
+- **216** — An abi3 build's own mandatory floor interpreter (gotcha 96) can itself be the one
+- **217** — Upstream's own `repair-wheel-command` commonly re-runs abi3audit itself via
 
 ---
 
@@ -338,3 +340,47 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
      own `test_binding.py` already exercises every grammar function it exposes — don't add
      a second build identifier or a second wheel artifact just because a repo advertises
      more than one grammar.
+
+216. **An abi3 build's own mandatory floor interpreter (gotcha 96) can itself be the one
+     identifier our registry can't test — skip only that identifier's test, don't drop it
+     (the timezonefinder case).** timezonefinder's `setup.py` sets `py_limited_api="cp311"`
+     unconditionally, so gotcha 96 says build there. But `h3` and `numpy` — genuine runtime
+     dependencies (`Requires-Dist`, not just build-time) — publish riscv64 wheels starting
+     at cp312 on both PyPI and `pypi.riseproject.dev`; nothing exists for cp311 on either.
+     cibuildwheel always runs `pip install {wheel}` before the test phase (gotcha 122), so
+     that install fails to resolve `h3`/`numpy` under cp311 even though the **build** phase
+     is unaffected (it only needs `cffi`, which the registry does cover at cp311). The
+     wheel that ships is unaffected either way — it is genuinely `cp311-abi3` — only its
+     *test coverage* has a gap.
+     - **Keep cp311 in `CIBW_BUILD`** (it must stay the first/oldest identifier so
+       cibuildwheel compiles there per gotcha 96), list the newer interpreters your
+       registry *does* cover alongside it so `find_compatible_wheel` reuses+retests the
+       same wheel there, and add `CIBW_TEST_SKIP: cp311-*` so only the untestable identifier
+       skips install-and-test — the other entries keep full coverage.
+     - **Distinguish from gotcha 84's matrix trimming.** There, a dependency gap removes
+       whole matrix *entries* because each is independently optional. Here the affected
+       entry is not optional — it is the only one that actually compiles the wheel — so the
+       fix is a test-only skip on that one identifier, never a `CIBW_BUILD` deletion.
+     - Confirm the gap is real per gotcha 30, per interpreter tag, on *both* indexes before
+       reaching for `CIBW_TEST_SKIP` — a registry addition later is a one-line revert, not a
+       reason to guess now.
+
+217. **Upstream's own `repair-wheel-command` commonly re-runs abi3audit itself via
+     pipx/uvx, which the riscv64 image doesn't carry — and it is redundant besides,
+     because cibuildwheel's default `audit-command` already abi3audits every abi3-tagged
+     wheel natively (gotcha 134) once `auditwheel repair` finishes.** Seen twice
+     independently: rustworkx's `[tool.cibuildwheel.linux]` pipes `auditwheel repair`
+     into a pipx-installed abi3audit, timezonefinder's pipes it into
+     `uvx abi3audit --strict --summary {wheel}`. Both tools are typically absent from the
+     manylinux_riscv64 image, so the inherited `repair-wheel-command` fails at the second
+     step even though `auditwheel repair` itself succeeds.
+     - **Override `CIBW_REPAIR_WHEEL_COMMAND_LINUX` to just
+       `auditwheel repair -w {dest_dir} {wheel}`**, dropping the redundant tool
+       invocation, rather than installing pipx/uv into the container to satisfy upstream's
+       version. cibuildwheel's own post-repair audit step still runs unconditionally on
+       every abi3-tagged wheel, so nothing about abi3 conformance checking is actually
+       lost.
+     - Setting `CIBW_REPAIR_WHEEL_COMMAND_LINUX` (not the bare `CIBW_REPAIR_WHEEL_COMMAND`)
+       leaves any macOS/Windows repair command upstream might also declare untouched —
+       irrelevant to riscv64 but keeps the diff minimal against the pyproject you copied
+       from.
