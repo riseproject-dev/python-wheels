@@ -1,0 +1,518 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Fiona ships no wheel-building workflow of its own; its published wheels come from
+# https://github.com/sgillies/fiona-wheels (multibuild-based, `.github/workflows/wheels.yaml`
+# + `build.sh`), which this workflow's build shape is based on. Test coverage is based on the
+# `docker_tests` job of
+# https://github.com/Toblerity/Fiona/blob/1.10.1/.github/workflows/tests.yml
+name: Build fiona wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'fiona version to build (git tag, e.g. 1.10.1)'
+        required: true
+        default: '1.10.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-fiona.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.10.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  FIONA_VERSION: ${{ inputs.version || '1.10.1' }}
+  GDAL_VERSION: '3.12.4'
+  GEOS_VERSION: '3.13.1'
+  PROJ_VERSION: '9.6.2'
+  SPATIALITE_VERSION: '5.1.0'
+  BASEIMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  GDAL_IMAGE: manylinux_2_39_riscv64_gdal_fiona
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_image:
+    needs: [setup]
+    name: Build the GDAL build image
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 600
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+        with:
+          install: true
+          buildkitd-flags: --debug
+
+      # fiona/setup.py detects GDAL purely through `gdal-config` (no env-var fallback for
+      # include/library paths, unlike pyogrio or rasterio's PACKAGE_DATA-driven builds), so
+      # the image only needs to produce a working gdal-config; GDAL's CMake build generates
+      # and installs one unconditionally (cmake/helpers/GdalGenerateConfig.cmake, gated only
+      # on `NOT GDAL_ENABLE_MACOSX_FRAMEWORK`), independent of BUILD_APPS. fiona is OGR-only
+      # (vector), so this reuses build-pyogrio.yml's leaner image shape rather than
+      # build-rasterio.yml's raster-codec-heavy, BUILD_APPS=ON one.
+      - name: Write the GDAL image build context
+        run: |
+          mkdir -p "$RUNNER_TEMP/gdal-ctx"
+          cat > "$RUNNER_TEMP/gdal-ctx/collect-licenses.sh" <<'COLLECT_EOF'
+          #!/bin/bash
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # auditwheel vendors libgdal's whole shared-library closure into the wheel, so
+          # collect the licence of every rpm that closure comes from; the wheel build
+          # stages the result at the project root, where setuptools' default license-file
+          # glob (LICEN[CS]E*) picks it up.
+          set -euo pipefail
+
+          out=/opt/licenses
+          mkdir -p "${out}"
+
+          mapfile -t libs < <(ldd /usr/local/lib/libgdal.so | tr ' ' '\n' | grep '^/' | sort -u)
+          mapfile -t pkgs < <(rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null \
+              | grep -E '^[A-Za-z0-9._+-]+$' | sort -u \
+              | grep -vE '^(glibc|libgcc|libstdc\+\+|gcc)$')
+
+          for pkg in "${pkgs[@]}"; do
+              mapfile -t files < <(rpm -q --licensefiles "${pkg}")
+
+              # A subpackage may carry no licence of its own (pcre2 leaves it to
+              # pcre2-syntax), so fall back to its siblings from the same source rpm.
+              if [ "${#files[@]}" -eq 0 ]; then
+                  srpm=$(rpm -q --qf '%{SOURCERPM}' "${pkg}")
+                  mapfile -t siblings < <(rpm -qa --qf '%{SOURCERPM} %{NAME}\n' \
+                      | awk -v srpm="${srpm}" '$1 == srpm { print $2 }')
+                  mapfile -t files < <(rpm -q --licensefiles "${siblings[@]}")
+              fi
+
+              # And the image installs rpms with tsflags=nodocs, which drops the licence
+              # of a package that marks it %doc rather than %license.
+              if [ "${#files[@]}" -eq 0 ]; then
+                  dnf -y reinstall --setopt=tsflags= "${pkg}"
+                  mapfile -t files < <(rpm -qd "${pkg}" \
+                      | grep -iE '/(LICEN[CS]E|COPYING|COPYRIGHT)[^/]*$' || true)
+              fi
+
+              for file in "${files[@]}"; do
+                  [ -f "${file}" ] || { echo "missing ${file} from rpm ${pkg}" >&2; exit 1; }
+                  cat "${file}" >> "${out}/LICENSE_${pkg}"
+              done
+
+              # Packages under a licence that needs no notice ship no file at all
+              # (sqlite-libs is public domain); record what the rpm declares instead.
+              if [ ! -s "${out}/LICENSE_${pkg}" ]; then
+                  rpm -q --qf '%{NAME} %{VERSION} is distributed under: %{LICENSE}\nIts package ships no licence file.\n' \
+                      "${pkg}" > "${out}/LICENSE_${pkg}"
+              fi
+          done
+
+          ls -l "${out}"
+          COLLECT_EOF
+          chmod +x "$RUNNER_TEMP/gdal-ctx/collect-licenses.sh"
+          cat > "$RUNNER_TEMP/gdal-ctx/Dockerfile" <<'DOCKER_EOF'
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # manylinux_riscv64 build image for fiona, standing in for the vcpkg-based images
+          # sgillies/fiona-wheels builds its Linux wheels with: vcpkg has no riscv64 binary
+          # cache, so GEOS/PROJ/SpatiaLite/GDAL are compiled from source here instead.
+          ARG BASEIMAGE=quay.io/pypa/manylinux_2_39_riscv64:latest
+          FROM ${BASEIMAGE}
+
+          ARG GEOS_VERSION
+          ARG PROJ_VERSION
+          ARG SPATIALITE_VERSION
+          ARG GDAL_VERSION
+
+          SHELL ["/bin/bash", "-euxo", "pipefail", "-c"]
+
+          ENV PREFIX=/usr/local
+
+          # sqlite (the CLI) builds PROJ's proj.db and glibc-gconv-extra carries the
+          # charset converters GDAL recodes shapefile attributes with; the rest are
+          # GDAL/PROJ/SpatiaLite dependencies.
+          RUN dnf -y install sqlite sqlite-devel libtiff-devel libcurl-devel expat-devel \
+                  libxml2-devel openssl-devel glibc-gconv-extra \
+              && dnf clean all \
+              && echo "${PREFIX}/lib" > /etc/ld.so.conf.d/fiona-local.conf \
+              && mkdir -p /opt/licenses /src
+
+          RUN cd /src \
+              && curl -sSLo geos.tar.bz2 "https://download.osgeo.org/geos/geos-${GEOS_VERSION}.tar.bz2" \
+              && tar xf geos.tar.bz2 \
+              && cd "geos-${GEOS_VERSION}" \
+              && cp COPYING /opt/licenses/LICENSE_GEOS \
+              && cmake -S . -B build \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+                  -DCMAKE_INSTALL_LIBDIR=lib \
+                  -DBUILD_TESTING=OFF \
+                  -DBUILD_DOCUMENTATION=OFF \
+                  -DBUILD_BENCHMARKS=OFF \
+              && cmake --build build -j"$(nproc)" \
+              && cmake --install build \
+              && ldconfig \
+              && rm -rf /src/*
+
+          RUN cd /src \
+              && curl -sSLo proj.tar.gz "https://download.osgeo.org/proj/proj-${PROJ_VERSION}.tar.gz" \
+              && tar xf proj.tar.gz \
+              && cd "proj-${PROJ_VERSION}" \
+              && cp COPYING /opt/licenses/LICENSE_PROJ \
+              && cmake -S . -B build \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+                  -DCMAKE_INSTALL_LIBDIR=lib \
+                  -DBUILD_TESTING=OFF \
+                  -DBUILD_APPS=OFF \
+                  -DENABLE_CURL=ON \
+                  -DENABLE_TIFF=ON \
+              && cmake --build build -j"$(nproc)" \
+              && cmake --install build \
+              && ldconfig \
+              && rm -rf /src/*
+
+          # fiona's vcpkg manifest asks for libspatialite with its default features off, so
+          # freexl and rttopo are left out here too. Its config.guess/config.sub date from
+          # 2009 and know neither aarch64 nor riscv64, hence automake's.
+          RUN cd /src \
+              && curl -sSLo spatialite.tar.gz "https://www.gaia-gis.it/gaia-sins/libspatialite-sources/libspatialite-${SPATIALITE_VERSION}.tar.gz" \
+              && tar xf spatialite.tar.gz \
+              && cd "libspatialite-${SPATIALITE_VERSION}" \
+              && cp COPYING /opt/licenses/LICENSE_SPATIALITE \
+              && cp /usr/share/automake-*/config.guess /usr/share/automake-*/config.sub . \
+              && ./configure --prefix="${PREFIX}" --libdir="${PREFIX}/lib" \
+                  --disable-static --disable-freexl --disable-rttopo --disable-examples \
+                  --disable-minizip \
+              && make -j"$(nproc)" \
+              && make install \
+              && ldconfig \
+              && rm -rf /src/*
+
+          RUN cd /src \
+              && curl -sSLo gdal.tar.gz "https://github.com/OSGeo/gdal/releases/download/v${GDAL_VERSION}/gdal-${GDAL_VERSION}.tar.gz" \
+              && tar xf gdal.tar.gz \
+              && cd "gdal-${GDAL_VERSION}" \
+              && cp LICENSE.TXT /opt/licenses/LICENSE_GDAL \
+              && cmake -S . -B build \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+                  -DCMAKE_INSTALL_LIBDIR=lib \
+                  -DBUILD_TESTING=OFF \
+                  -DBUILD_APPS=OFF \
+                  -DBUILD_PYTHON_BINDINGS=OFF \
+                  -DBUILD_JAVA_BINDINGS=OFF \
+                  -DBUILD_CSHARP_BINDINGS=OFF \
+              && cmake --build build -j"$(nproc)" \
+              && cmake --install build \
+              && ldconfig \
+              && rm -rf /src/*
+
+          COPY collect-licenses.sh /usr/local/bin/collect-licenses.sh
+          RUN collect-licenses.sh && dnf clean all
+          DOCKER_EOF
+      - name: Build Docker image with GDAL
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: ${{ runner.temp }}/gdal-ctx
+          file: ${{ runner.temp }}/gdal-ctx/Dockerfile
+          platforms: linux/riscv64
+          build-args: |
+            BASEIMAGE=${{ env.BASEIMAGE }}
+            GEOS_VERSION=${{ env.GEOS_VERSION }}
+            PROJ_VERSION=${{ env.PROJ_VERSION }}
+            SPATIALITE_VERSION=${{ env.SPATIALITE_VERSION }}
+            GDAL_VERSION=${{ env.GDAL_VERSION }}
+          push: false
+          cache-from: type=gha,scope=${{ env.GDAL_IMAGE }}-${{ env.GDAL_VERSION }}
+          cache-to: type=gha,mode=max,scope=${{ env.GDAL_IMAGE }}-${{ env.GDAL_VERSION }}
+        env:
+          BUILDKIT_PROGRESS: plain
+
+  build_wheels:
+    name: Build fiona ${{ inputs.version || '1.10.1' }} ${{ matrix.python }}-manylinux_riscv64
+    needs: [setup, build_image]
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 600
+    strategy:
+      fail-fast: false
+      matrix:
+        # fiona's own build-system.requires pins cython~=3.0.2, whose last 3.0.x release
+        # (3.0.12) publishes no cp314 wheel and adds only "some adaptations" for cp313
+        # compilation; PyPI's own fiona 1.10.1 wheels stop at cp313 for exactly this reason
+        # (gotcha 118: check upstream's own published wheel tags before writing the matrix).
+        python: ["cp312", "cp313"]
+
+    steps:
+      - name: Checkout fiona ${{ env.FIONA_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Toblerity/Fiona
+          ref: ${{ env.FIONA_VERSION }}
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+        with:
+          install: true
+          buildkitd-flags: --debug
+
+      - name: Write the GDAL image build context
+        run: |
+          mkdir -p "$RUNNER_TEMP/gdal-ctx"
+          cat > "$RUNNER_TEMP/gdal-ctx/collect-licenses.sh" <<'COLLECT_EOF'
+          #!/bin/bash
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # auditwheel vendors libgdal's whole shared-library closure into the wheel, so
+          # collect the licence of every rpm that closure comes from; the wheel build
+          # stages the result at the project root, where setuptools' default license-file
+          # glob (LICEN[CS]E*) picks it up.
+          set -euo pipefail
+
+          out=/opt/licenses
+          mkdir -p "${out}"
+
+          mapfile -t libs < <(ldd /usr/local/lib/libgdal.so | tr ' ' '\n' | grep '^/' | sort -u)
+          mapfile -t pkgs < <(rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null \
+              | grep -E '^[A-Za-z0-9._+-]+$' | sort -u \
+              | grep -vE '^(glibc|libgcc|libstdc\+\+|gcc)$')
+
+          for pkg in "${pkgs[@]}"; do
+              mapfile -t files < <(rpm -q --licensefiles "${pkg}")
+
+              # A subpackage may carry no licence of its own (pcre2 leaves it to
+              # pcre2-syntax), so fall back to its siblings from the same source rpm.
+              if [ "${#files[@]}" -eq 0 ]; then
+                  srpm=$(rpm -q --qf '%{SOURCERPM}' "${pkg}")
+                  mapfile -t siblings < <(rpm -qa --qf '%{SOURCERPM} %{NAME}\n' \
+                      | awk -v srpm="${srpm}" '$1 == srpm { print $2 }')
+                  mapfile -t files < <(rpm -q --licensefiles "${siblings[@]}")
+              fi
+
+              # And the image installs rpms with tsflags=nodocs, which drops the licence
+              # of a package that marks it %doc rather than %license.
+              if [ "${#files[@]}" -eq 0 ]; then
+                  dnf -y reinstall --setopt=tsflags= "${pkg}"
+                  mapfile -t files < <(rpm -qd "${pkg}" \
+                      | grep -iE '/(LICEN[CS]E|COPYING|COPYRIGHT)[^/]*$' || true)
+              fi
+
+              for file in "${files[@]}"; do
+                  [ -f "${file}" ] || { echo "missing ${file} from rpm ${pkg}" >&2; exit 1; }
+                  cat "${file}" >> "${out}/LICENSE_${pkg}"
+              done
+
+              # Packages under a licence that needs no notice ship no file at all
+              # (sqlite-libs is public domain); record what the rpm declares instead.
+              if [ ! -s "${out}/LICENSE_${pkg}" ]; then
+                  rpm -q --qf '%{NAME} %{VERSION} is distributed under: %{LICENSE}\nIts package ships no licence file.\n' \
+                      "${pkg}" > "${out}/LICENSE_${pkg}"
+              fi
+          done
+
+          ls -l "${out}"
+          COLLECT_EOF
+          chmod +x "$RUNNER_TEMP/gdal-ctx/collect-licenses.sh"
+          cat > "$RUNNER_TEMP/gdal-ctx/Dockerfile" <<'DOCKER_EOF'
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # manylinux_riscv64 build image for fiona, standing in for the vcpkg-based images
+          # sgillies/fiona-wheels builds its Linux wheels with: vcpkg has no riscv64 binary
+          # cache, so GEOS/PROJ/SpatiaLite/GDAL are compiled from source here instead.
+          ARG BASEIMAGE=quay.io/pypa/manylinux_2_39_riscv64:latest
+          FROM ${BASEIMAGE}
+
+          ARG GEOS_VERSION
+          ARG PROJ_VERSION
+          ARG SPATIALITE_VERSION
+          ARG GDAL_VERSION
+
+          SHELL ["/bin/bash", "-euxo", "pipefail", "-c"]
+
+          ENV PREFIX=/usr/local
+
+          # sqlite (the CLI) builds PROJ's proj.db and glibc-gconv-extra carries the
+          # charset converters GDAL recodes shapefile attributes with; the rest are
+          # GDAL/PROJ/SpatiaLite dependencies.
+          RUN dnf -y install sqlite sqlite-devel libtiff-devel libcurl-devel expat-devel \
+                  libxml2-devel openssl-devel glibc-gconv-extra \
+              && dnf clean all \
+              && echo "${PREFIX}/lib" > /etc/ld.so.conf.d/fiona-local.conf \
+              && mkdir -p /opt/licenses /src
+
+          RUN cd /src \
+              && curl -sSLo geos.tar.bz2 "https://download.osgeo.org/geos/geos-${GEOS_VERSION}.tar.bz2" \
+              && tar xf geos.tar.bz2 \
+              && cd "geos-${GEOS_VERSION}" \
+              && cp COPYING /opt/licenses/LICENSE_GEOS \
+              && cmake -S . -B build \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+                  -DCMAKE_INSTALL_LIBDIR=lib \
+                  -DBUILD_TESTING=OFF \
+                  -DBUILD_DOCUMENTATION=OFF \
+                  -DBUILD_BENCHMARKS=OFF \
+              && cmake --build build -j"$(nproc)" \
+              && cmake --install build \
+              && ldconfig \
+              && rm -rf /src/*
+
+          RUN cd /src \
+              && curl -sSLo proj.tar.gz "https://download.osgeo.org/proj/proj-${PROJ_VERSION}.tar.gz" \
+              && tar xf proj.tar.gz \
+              && cd "proj-${PROJ_VERSION}" \
+              && cp COPYING /opt/licenses/LICENSE_PROJ \
+              && cmake -S . -B build \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+                  -DCMAKE_INSTALL_LIBDIR=lib \
+                  -DBUILD_TESTING=OFF \
+                  -DBUILD_APPS=OFF \
+                  -DENABLE_CURL=ON \
+                  -DENABLE_TIFF=ON \
+              && cmake --build build -j"$(nproc)" \
+              && cmake --install build \
+              && ldconfig \
+              && rm -rf /src/*
+
+          # fiona's vcpkg manifest asks for libspatialite with its default features off, so
+          # freexl and rttopo are left out here too. Its config.guess/config.sub date from
+          # 2009 and know neither aarch64 nor riscv64, hence automake's.
+          RUN cd /src \
+              && curl -sSLo spatialite.tar.gz "https://www.gaia-gis.it/gaia-sins/libspatialite-sources/libspatialite-${SPATIALITE_VERSION}.tar.gz" \
+              && tar xf spatialite.tar.gz \
+              && cd "libspatialite-${SPATIALITE_VERSION}" \
+              && cp COPYING /opt/licenses/LICENSE_SPATIALITE \
+              && cp /usr/share/automake-*/config.guess /usr/share/automake-*/config.sub . \
+              && ./configure --prefix="${PREFIX}" --libdir="${PREFIX}/lib" \
+                  --disable-static --disable-freexl --disable-rttopo --disable-examples \
+                  --disable-minizip \
+              && make -j"$(nproc)" \
+              && make install \
+              && ldconfig \
+              && rm -rf /src/*
+
+          RUN cd /src \
+              && curl -sSLo gdal.tar.gz "https://github.com/OSGeo/gdal/releases/download/v${GDAL_VERSION}/gdal-${GDAL_VERSION}.tar.gz" \
+              && tar xf gdal.tar.gz \
+              && cd "gdal-${GDAL_VERSION}" \
+              && cp LICENSE.TXT /opt/licenses/LICENSE_GDAL \
+              && cmake -S . -B build \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+                  -DCMAKE_INSTALL_LIBDIR=lib \
+                  -DBUILD_TESTING=OFF \
+                  -DBUILD_APPS=OFF \
+                  -DBUILD_PYTHON_BINDINGS=OFF \
+                  -DBUILD_JAVA_BINDINGS=OFF \
+                  -DBUILD_CSHARP_BINDINGS=OFF \
+              && cmake --build build -j"$(nproc)" \
+              && cmake --install build \
+              && ldconfig \
+              && rm -rf /src/*
+
+          COPY collect-licenses.sh /usr/local/bin/collect-licenses.sh
+          RUN collect-licenses.sh && dnf clean all
+          DOCKER_EOF
+      - name: Load the GDAL build image from the cache
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: ${{ runner.temp }}/gdal-ctx
+          file: ${{ runner.temp }}/gdal-ctx/Dockerfile
+          platforms: linux/riscv64
+          tags: ${{ env.GDAL_IMAGE }}:${{ env.GDAL_VERSION }}
+          build-args: |
+            BASEIMAGE=${{ env.BASEIMAGE }}
+            GEOS_VERSION=${{ env.GEOS_VERSION }}
+            PROJ_VERSION=${{ env.PROJ_VERSION }}
+            SPATIALITE_VERSION=${{ env.SPATIALITE_VERSION }}
+            GDAL_VERSION=${{ env.GDAL_VERSION }}
+          push: false
+          load: true
+          cache-from: type=gha,scope=${{ env.GDAL_IMAGE }}-${{ env.GDAL_VERSION }}
+        env:
+          BUILDKIT_PROGRESS: plain
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.GDAL_IMAGE }}:${{ env.GDAL_VERSION }}
+          # the image's licences for everything auditwheel vendors, staged where
+          # setuptools' default license-file glob (LICEN[CS]E*) picks them up
+          CIBW_BEFORE_BUILD: cp /opt/licenses/LICENSE_* .
+          CIBW_ENVIRONMENT: >-
+            PACKAGE_DATA=1
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Paths are relative to cibuildwheel's cwd (the checkout root); staging only
+          # tests/ and pytest.ini keeps the source fiona/ tree out of the test cwd, so the
+          # wheel is imported and [pytest] markers/filterwarnings still apply.
+          CIBW_TEST_SOURCES: tests pytest.ini
+          # Mirrors requirements-dev.txt, upstream's own test dependency set, minus the
+          # build-only entries (cython, setuptools, wheel, coverage).
+          CIBW_TEST_REQUIRES: aiohttp boto3>=1.3.1 fsspec pyparsing pytest~=7.2 pytest-cov~=4.0 pytz==2022.6 requests shapely
+          # Upstream's own docker_tests job (tests.yml) passes -m "not wheel or gdal": with
+          # a source install, that both excludes wheel-only tests (fixture data isn't staged
+          # without PACKAGE_DATA) and, via tests/conftest.py's pytest_collection_modifyitems,
+          # disables the default skip of gdal-marked tests by matching the literal substring
+          # "gdal" in the -m expression. We are testing a real wheel built with PACKAGE_DATA=1,
+          # so the wheel-only tests should pass too; "gdal or not gdal" is a tautology that
+          # runs everything while still tripping that same substring check.
+          CIBW_TEST_COMMAND: >-
+            python -c "import fiona; print(fiona.__version__, fiona.get_gdal_release_name())" &&
+            python -m pytest -v tests -m "gdal or not gdal" -rxXs
+
+      - name: Check the extensions, GDAL data and licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          expected_licenses = {
+              "LICENSE.txt",
+              "LICENSE_GDAL", "LICENSE_GEOS", "LICENSE_PROJ", "LICENSE_SPATIALITE",
+          }
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("fiona/ogrext.") and n.endswith(".so") for n in names), whl
+              assert any(n.startswith("fiona.libs/libgdal") for n in names), whl
+              assert "fiona/proj_data/proj.db" in names, whl
+              assert any(n.startswith("fiona/gdal_data/") for n in names), whl
+              licenses = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+              assert expected_licenses <= licenses, (whl, sorted(licenses))
+              print(whl, "ok", sorted(licenses))
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fiona-${{ env.FIONA_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish fiona ${{ inputs.version || '1.10.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: fiona-${{ inputs.version || '1.10.1' }}-*-manylinux_riscv64
