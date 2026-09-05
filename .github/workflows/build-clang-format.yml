@@ -1,0 +1,75 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/ssciwr/clang-format-wheel/blob/v23.1.0/.github/workflows/release.yml
+name: Build clang-format wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'clang-format version to build (git tag without the leading v, e.g. 23.1.0)'
+        required: true
+        default: '23.1.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-clang-format.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '23.1.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  CLANG_FORMAT_VERSION: ${{ inputs.version || '23.1.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build clang-format ${{ inputs.version || '23.1.0' }} py2.py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440  # clang-format is compiled from the full LLVM release source
+
+    steps:
+      - name: Checkout clang-format-wheel v${{ env.CLANG_FORMAT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ssciwr/clang-format-wheel
+          ref: v${{ env.CLANG_FORMAT_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # wheel.py-api = "py2.py3", so one build serves every interpreter.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Repeats pyproject.toml's own `environment` table: CIBW_ENVIRONMENT replaces
+          # rather than merges with it (gotcha 107).
+          CIBW_ENVIRONMENT: >-
+            CMAKE_GENERATOR=Ninja
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: clang-format-${{ env.CLANG_FORMAT_VERSION }}-py2.py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish clang-format ${{ inputs.version || '23.1.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: clang-format-${{ inputs.version || '23.1.0' }}-*-manylinux_riscv64
