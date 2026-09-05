@@ -19,6 +19,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
 - **154** — A PyPI `project_urls` repository link can 404 — search for the live repo before
 - **156** — An upstream that exists only as a PyPI sdist is still an ordinary port — but
 - **213** — Gotcha 103's timestamp-proximity trick can point at the wrong commit when
+- **242** — A third-party tree-sitter grammar's release tag can omit the generated
 
 ---
 
@@ -239,3 +240,36 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
     it was released. Still finish with gotcha 103's proof step (`gh api
     repos/<o>/<r>/tarball/<sha>` diffed file-by-file against the PyPI sdist) — a version
     match alone doesn't rule out later content-only commits.
+
+242. **A third-party tree-sitter grammar's release tag can omit the generated
+    `src/parser.c` — only the official `tree-sitter/tree-sitter-*` repos commit it
+    at every tag.** tree-sitter-ruby/php/typescript/embedded-template (all
+    `tree-sitter/`-org) ship `parser.c` at their `vX.Y.Z` tags, so their workflows
+    check out the tag and hand it straight to cibuildwheel. `alex-pinkus/tree-sitter-swift`
+    does not: at plain tag `0.7.3`, `src/` holds only `grammar.json`/`node-types.json`/
+    `scanner.c` — `parser.c` appears only on the separate `0.7.3-with-generated-files`
+    tag, and that tag's `pyproject.toml` is stale (`version = "0.0.1"`, wrong
+    `Homepage`), so checking it out instead of the real release is a trap, not a
+    shortcut. Two more things don't transfer from the official-org precedent either:
+    the tag itself has **no `v` prefix** (`ref: 0.7.3`, not `ref: v0.7.3` — check
+    `gh api repos/<owner>/<repo>/tags` rather than assuming), and upstream's own
+    `publish-pypi.yml` (via `tree-sitter/workflows`' reusable `package-pypi.yml`)
+    regenerates the parser on every build with `tree-sitter generate` before
+    packaging — that step, not the tag, is what makes the official repos' committed
+    `parser.c` reproducible.
+    - **The generator has no riscv64 binary.** `tree-sitter/setup-action/cli` downloads
+      a prebuilt `tree-sitter-<os>-<arch>.gz` from the `tree-sitter/tree-sitter`
+      release when the ref is a `v*` tag; the release only ships `linux-arm`/`arm64`/
+      `powerpc64`/`x64`/`x86` (checked against `v0.27.0`) — no `linux-riscv64`, so the
+      action 404s on the riscv64 runner. `tree-sitter generate` is pure codegen with no
+      target-architecture dependence, so run it once in its own job on `ubuntu-latest`
+      (gotcha 4's pattern), then hand the completed checkout to the riscv64 job as a
+      plain tarball — a real PEP 517 sdist doesn't help here since the project's
+      `MANIFEST.in` only adds `src/*.c`/`*.h` and never packages `bindings/python/tests`,
+      so a `python -m build --sdist` (confirmed against the real PyPI sdist) silently
+      drops the test suite `CIBW_TEST_SOURCES` needs.
+    - No Node.js/npm setup is needed for `tree-sitter generate` itself (recent CLI
+      releases embed their own JS runtime), and this project's `package.json` lists
+      `tree-sitter-cli` as its only `tree-sitter-*` dependency, which upstream's own
+      `npm i` gate excludes — so upstream's own workflow does not install npm packages
+      before generating, either.
