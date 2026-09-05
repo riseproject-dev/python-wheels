@@ -1,0 +1,204 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/lancedb/lancedb/blob/v0.37.1/.github/workflows/pypi-publish.yml
+name: Build lancedb wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'lancedb version to build (git tag without the leading v, e.g. 0.37.1)'
+        required: true
+        default: '0.37.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-lancedb.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.37.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.37.1 there.
+  LANCEDB_VERSION: ${{ inputs.version || '0.37.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build lancedb ${{ inputs.version || '0.37.1' }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+
+    steps:
+      # lancedb-python is a member of the lancedb Cargo workspace and builds
+      # against its sibling crates, so the checkout lands at the workspace root.
+      - name: Checkout lancedb v${{ env.LANCEDB_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: lancedb/lancedb
+          ref: v${{ env.LANCEDB_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          sparse-checkout: patches/lancedb
+          persist-credentials: false
+
+      - name: Apply lancedb patches
+        run: git apply -v python-wheels/patches/lancedb/${{ env.LANCEDB_VERSION }}/0001*.patch
+
+      # lance-core's SIMD_SUPPORT static and lance-linalg's f32x8/f32x16/
+      # i32x8/f64x4/f64x8 SIMD types compile only for x86_64/aarch64/
+      # loongarch64 upstream; the 0002 patch adds a portable riscv64 fallback
+      # to this checkout, and Cargo.toml's `[patch.crates-io]` (0001) redirects
+      # both crates here.
+      - name: Checkout lance v10.0.0 and add a riscv64 SIMD fallback
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: lancedb/lance
+          ref: v10.0.0
+          path: lance
+          persist-credentials: false
+
+      - name: Apply lance patches
+        run: cd lance && git apply -v ../python-wheels/patches/lancedb/${{ env.LANCEDB_VERSION }}/0002*.patch
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+
+      # Same OOM guard build-deltalake.yml/build-polars-runtime.yml need on
+      # these runners for a comparably sized Rust workspace.
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 16
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python
+          output-dir: wheelhouse/
+          # pyo3 carries `abi3-py310` unconditionally in python/Cargo.toml, so
+          # upstream ships one cp310-abi3 wheel and no free-threaded variant:
+          # one build, on our minimum interpreter (build-deltalake.yml is the
+          # same shape). musllinux is dropped: rustup.rs ships no riscv64 musl
+          # toolchain. The x86_64-only `lancedb-compat` package variant
+          # (pre-Haswell CPU baseline) and the `fp16kernels` feature
+          # (lance-linalg's build.rs hard-errors compiling its C kernels for
+          # any target_arch other than x86_64/aarch64/loongarch64) have no
+          # riscv64 equivalent, so neither is built here.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # lancedb ships no [tool.cibuildwheel], so the Rust toolchain its
+          # maturin backend needs is installed in-container here. Rocky 10's
+          # CRB repo (enabled in the manylinux image) has protoc; PROTOC_INCLUDE
+          # is needed because it resolves google/protobuf/*.proto from disk
+          # rather than from the binary (same as build-statsig-python-core.yml).
+          CIBW_BEFORE_ALL_LINUX: >-
+            yum install -y protobuf-compiler protobuf-devel &&
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          # .cargo/config.toml's [profile.release] is fat LTO + codegen-units=1,
+          # which this runner cannot afford for a workspace this size (arrow,
+          # datafusion, the aws/gcp/azure/tencent/huggingface object-store
+          # backends, lance-index). Upstream's own `release-with-debug` profile
+          # exists for exactly this tradeoff (thin LTO, codegen-units=16), so
+          # the override matches a shape upstream already ships rather than
+          # inventing one (same reasoning as build-deltalake.yml).
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PROTOC=/usr/bin/protoc
+            PROTOC_INCLUDE=/usr/include
+            CARGO_PROFILE_RELEASE_LTO=thin
+            CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+            CARGO_BUILD_JOBS=2
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Without this pip prefers PyPI's releases, which have no riscv64
+          # wheel for these, and source-builds them in the container.
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,pandas,pyarrow,duckdb,pydantic-core
+          CIBW_TEST_REQUIRES: pytest pytest-asyncio numpy pandas pyarrow duckdb
+          CIBW_TEST_SOURCES: python/pyproject.toml python/python/tests
+          # test_table.py, test_util.py, test_embeddings.py and
+          # test_namespace_integration.py import `polars` and/or `lance`
+          # (pylance) unconditionally at module scope, as do
+          # docs/test_guide_tables.py and docs/test_python.py; neither package
+          # has a riscv64 wheel and both are large enough Rust projects in
+          # their own right that building them from source here is out of
+          # scope, so those six files fail collection and are excluded rather
+          # than left to error. Otherwise mirrors run_tests/action.yml's
+          # non-integration path (`-m "not slow and not s3_test"`, no docker
+          # compose/localstack).
+          #
+          # The 13 deselects below are individual tests (not whole files, since
+          # each file has other tests that do pass) confirmed failing in CI run
+          # 33791589510: 12 import `lance`/`polars` lazily inside the test body
+          # rather than at module scope, so they collect fine but fail at
+          # runtime with the same "no riscv64 wheel" cause as the six ignored
+          # files above. The 13th, test_pyo3_abi_matches_minimum_supported_python,
+          # is a source-tree sanity check that reads python/Cargo.toml relative
+          # to the test file's own path; CIBW_TEST_SOURCES only copies
+          # pyproject.toml and python/tests into the isolated test dir (no
+          # Cargo.toml), so it fails with FileNotFoundError regardless of
+          # platform -- it checks repo metadata consistency, not runtime
+          # behavior, so it has nothing to verify against an installed wheel.
+          # cibuildwheel runs CIBW_TEST_COMMAND from the parent of the copied
+          # CIBW_TEST_SOURCES tree, which has no pyproject.toml of its own --
+          # pytest's rootdir/inifile search only looks upward from the cwd, not
+          # into subdirectories, so it silently finds no config there. Every
+          # --deselect below then fails to match (the FAILED nodeids print
+          # identically either way) and the tests run and fail anyway, as seen
+          # in CI run 33843581031. `cd python` first puts pyproject.toml back
+          # in the search path so --deselect (and the -m marker filter) work.
+          CIBW_TEST_COMMAND: >-
+            cd python &&
+            python -m pytest python/tests -vv --durations=30
+            -m "not slow and not s3_test"
+            --ignore=python/tests/test_table.py
+            --ignore=python/tests/test_util.py
+            --ignore=python/tests/test_embeddings.py
+            --ignore=python/tests/test_namespace_integration.py
+            --ignore=python/tests/docs/test_guide_tables.py
+            --ignore=python/tests/docs/test_python.py
+            --deselect=python/tests/test_db.py::test_create_table_stable_row_ids_via_storage_options
+            --deselect=python/tests/test_db.py::test_create_table_stable_row_ids_via_storage_options_sync
+            --deselect=python/tests/test_db.py::test_create_table_stable_row_ids_table_level_override
+            --deselect=python/tests/test_db.py::test_create_table_stable_row_ids_table_level_override_sync
+            --deselect=python/tests/test_db.py::test_namespace_client_native_storage
+            --deselect=python/tests/test_db.py::test_namespace_client_with_storage_options
+            --deselect=python/tests/test_db.py::test_namespace_client_operations
+            --deselect=python/tests/test_db.py::test_namespace_client_namespace_connection
+            --deselect=python/tests/test_hybrid_query.py::test_hybrid_query_with_stale_fixed_size_binary_prefilter
+            --deselect=python/tests/test_package_metadata.py::test_pyo3_abi_matches_minimum_supported_python
+            --deselect=python/tests/test_permutation.py::test_transform_fn
+            --deselect=python/tests/test_query.py::test_query_to_polars_async
+            --deselect=python/tests/test_query.py::test_blob_v2_with_row_id_bytes_pandas
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lancedb-${{ env.LANCEDB_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish lancedb ${{ inputs.version || '0.37.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: lancedb-${{ inputs.version || '0.37.1' }}-*-manylinux_riscv64
