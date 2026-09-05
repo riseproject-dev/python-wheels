@@ -18,6 +18,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **207** — A vendored dependency three submodules deep can declare a `cmake_minimum_required`
 - **226** — GCC 14 turns `-Wincompatible-pointer-types` (and `-Wimplicit-function-declaration`,
 - **235** — The manylinux image's bundled `/opt/python/cpXY-cpXY` interpreters have
+- **243** — The `manylinux_2_39_riscv64` container's IPv6 loopback binds but can't send:
 
 ---
 
@@ -317,3 +318,17 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       profile) will show the same "works everywhere except `/opt/python`" shape. `python3
       -c "import <mod>"` inside `/opt/python/cpXY-cpXY` is a five-second check before
       assuming a `CIBW_TEST_COMMAND` failure is riscv64-specific.
+
+243. **The `manylinux_2_39_riscv64` container's IPv6 loopback binds but can't send:
+    `socket.socket(AF_INET6).bind(("::1", 0))` succeeds, then any actual traffic on
+    it raises `OSError: [Errno 101] Network is unreachable`.** zeroconf's
+    `has_working_ipv6()` helper only checks the bind (plus that some adapter reports
+    an IPv6 address), so it reports IPv6 as working and every IPv6-gated test runs —
+    all but one pass; the one that actually round-trips a packet over `('::1', ...)`
+    fails, identically on cp312/cp313/cp314/cp314t. A pure bind-and-close probe is
+    not proof that IPv6 loopback is usable inside this container — anything that
+    also sends will find out otherwise. `--deselect` the one node rather than
+    disabling IPv6 testing wholesale (upstream's own `SKIP_IPV6` knob skips far more
+    than this single failure); copy the nodeid verbatim from the `FAILED` line
+    (gotcha 144) and confirm it repeats identically across the whole interpreter
+    matrix before trusting it is not a flake.

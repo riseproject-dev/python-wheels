@@ -144,6 +144,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **207** — A vendored dependency three submodules deep can declare a `cmake_minimum_required`
 - **226** — GCC 14 turns `-Wincompatible-pointer-types` (and `-Wimplicit-function-declaration`,
 - **235** — The manylinux image's bundled `/opt/python/cpXY-cpXY` interpreters have
+- **243** — The `manylinux_2_39_riscv64` container's IPv6 loopback binds but can't send:
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
