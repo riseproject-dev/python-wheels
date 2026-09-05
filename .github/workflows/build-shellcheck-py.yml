@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/ryanrhee/shellcheck-py/blob/v0.11.0.1/.github/workflows/main.yml
+name: Build shellcheck-py wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'shellcheck-py version to build (git tag without leading v, e.g. 0.11.0.1)'
+        required: true
+        default: '0.11.0.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-shellcheck-py.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.11.0.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.11.0.1 there.
+  SHELLCHECK_PY_VERSION: ${{ inputs.version || '0.11.0.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheel:
+    needs: [setup]
+    name: Build shellcheck-py ${{ inputs.version || '0.11.0.1' }} py2.py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout shellcheck-py v${{ env.SHELLCHECK_PY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ryanrhee/shellcheck-py
+          ref: v${{ env.SHELLCHECK_PY_VERSION }}
+          persist-credentials: false
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
+
+      # setup.cfg's `setuptools-download` fetches the shellcheck binary matching
+      # the build host's own platform_machine (riscv64 here), independent of the
+      # forced --plat-name below.
+      - name: Build and test the wheel
+        run: |
+          docker run --rm -v "$(pwd):/work" -w /work "${MANYLINUX_RISCV64_IMAGE}" bash -c '
+            set -euxo pipefail
+            pybin=/opt/python/cp312-cp312/bin
+            "$pybin/pip" install -q -U pip setuptools wheel
+            "$pybin/python3" setup.py bdist_wheel --plat-name=manylinux_2_39_riscv64
+            "$pybin/pip" install -q dist/*.whl
+            "$pybin/shellcheck" --version
+            "$pybin/shellcheck" --help
+          '
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: shellcheck-py-${{ env.SHELLCHECK_PY_VERSION }}-py2.py3-none-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish shellcheck-py ${{ inputs.version || '0.11.0.1' }}
+    needs: [setup, build_wheel]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: shellcheck-py-${{ inputs.version || '0.11.0.1' }}-*-manylinux_riscv64
