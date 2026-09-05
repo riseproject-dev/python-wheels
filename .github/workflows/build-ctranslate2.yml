@@ -1,0 +1,186 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/OpenNMT/CTranslate2/blob/v4.8.1/.github/workflows/ci.yml
+# (build-python-wheels + build-and-test-cpp-arm64's openblas/ruy job) and
+# python/tools/prepare_build_environment_linux.sh's aarch64 branch, which it inlines.
+name: Build ctranslate2 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'ctranslate2 version to build (git tag without leading v, e.g. 4.8.1)'
+        required: true
+        default: '4.8.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-ctranslate2.yml'
+      - 'patches/ctranslate2/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '4.8.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  CTRANSLATE2_VERSION: ${{ inputs.version || '4.8.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build ctranslate2 ${{ inputs.version || '4.8.1' }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    # 180 was cut to within seconds of the wall by a deselect that didn't actually
+    # match (parametrized nodeids need the [..] suffix) and ran all 3 whisper_align
+    # cases for real; raised for headroom now that they're properly excluded. 240 was
+    # also not enough once deselect was fixed for real (gotcha 14): cibuildwheel runs
+    # the full CIBW_TEST_COMMAND once per built/tested interpreter (cp312/cp313/cp314),
+    # each a from-scratch HF Hub model download+conversion+inference pass over
+    # translation/generation/whisper/wav2vec2 models - confirmed on real riscv64 CI
+    # (run 33916551244): cp312's pass took 1h50m (cold HF cache) and cp313's took 53m
+    # (warm cache), for a measured ~4.5h total end-to-end before hitting the 240m wall
+    # mid-cp314. Raised well past that measured total for real margin against a slow
+    # HF Hub or a cold cache - still far below this repo's own budget for comparably
+    # large multi-target builds (torch's own build_wheels job: 1440).
+    timeout-minutes: 480
+
+    steps:
+      - name: Checkout ctranslate2 v${{ env.CTRANSLATE2_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: OpenNMT/CTranslate2
+          ref: v${{ env.CTRANSLATE2_VERSION }}
+          submodules: false
+          persist-credentials: false
+
+      # Only the CPU backend's own deps: cxxopts (BUILD_CLI), cpu_features (x86-only),
+      # googletest (BUILD_TESTS) and thrust/cutlass (CUDA-only) are all unused here, and
+      # thrust/cutlass alone are gigabytes of NVIDIA sources neither `submodules: recursive`
+      # nor `--recurse-submodules` should fetch for a CPU-only riscv64 build.
+      - name: Init submodules
+        run: |
+          git submodule update --init third_party/spdlog third_party/ruy
+          git -C third_party/ruy submodule update --init third_party/cpuinfo
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # Ruy's pinned cpuinfo commit predates cpuinfo recognizing riscv64, so it never
+      # defines _GNU_SOURCE for this arch even though src/api.c calls syscall()
+      # unconditionally on __linux__ - see the patch for the long version.
+      - name: Patch cpuinfo for riscv64
+        run: git apply python-wheels/patches/ctranslate2/${{ env.CTRANSLATE2_VERSION }}/*.patch
+
+      # Upstream's own wheel carries none of these: setup.py's find_packages() only
+      # globs inside python/, so the repo-root LICENSE never reaches dist-info/licenses/.
+      - name: Add ctranslate2's LICENSE to the python package
+        run: cp LICENSE python/
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python
+          output-dir: wheelhouse
+        env:
+          # Mirrors prepare_build_environment_linux.sh's aarch64 branch: no MKL/oneDNN
+          # (x86-only), Ruy as the CPU GEMM backend (its cpuinfo dep degrades to a
+          # portable no-op on an unrecognized CPU_TARGET_PROCESSOR, same as riscv64_generic
+          # OpenBLAS kernels) and OPENMP_RUNTIME=COMP for the image's GNU libgomp.
+          # CMAKE_POLICY_VERSION_MINIMUM=3.5 works around cpuinfo's own clog dependency
+          # declaring `cmake_minimum_required(VERSION 3.5)` with no upper bound, which a
+          # pip-installed CMake 4.x (needed: no riscv64 wheel exists below CMake 4.1)
+          # otherwise refuses outright. ENABLE_CPU_DISPATCH=OFF because src/cpu/cpu_isa.h's
+          # CPU_ISA_DISPATCH macro is only defined for CT2_X86_BUILD/CT2_ARM64_BUILD when
+          # dispatch is on, leaving it undefined - and every call site a hard error - on any
+          # third architecture; disabling it falls through to the single-ISA GENERIC
+          # definition, which is all riscv64 needs since there is nothing to dispatch between.
+          CIBW_BEFORE_ALL_LINUX: |
+            set -ex
+            dnf install -y cmake unzip
+            cmake -S . -B build-release \
+              -D CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+              -D CMAKE_BUILD_TYPE=Release \
+              -D BUILD_CLI=OFF \
+              -D WITH_MKL=OFF \
+              -D OPENMP_RUNTIME=COMP \
+              -D WITH_RUY=ON \
+              -D ENABLE_CPU_DISPATCH=OFF
+            cmake --build build-release -j"$(nproc)" --target install
+            ldconfig
+          CIBW_BEFORE_BUILD: pip install -r python/install_requirements.txt
+          CIBW_BUILD: >-
+            cp312-manylinux_riscv64 cp313-manylinux_riscv64
+            cp314-manylinux_riscv64 cp314t-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            CMAKE_BUILD_PARALLEL_LEVEL=8
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # cp314t is built but not tested: our registry's tokenizers/safetensors are
+          # cp38/cp39-abi3 wheels, which cp314t (no stable ABI for free-threading) can't use.
+          CIBW_TEST_SKIP: cp314t-*
+          CIBW_TEST_REQUIRES: pytest wurlitzer sentencepiece protobuf transformers torch
+          # test-python-wheels' own command minus the legacy fairseq/opennmt converter tests
+          # (separate job upstream, needs torch/tensorflow pins our registry doesn't carry)
+          # and two tests whose output sums small per-token float differences into a result
+          # just outside its assertion tolerance under Ruy's GENERIC scalar kernels (gotcha
+          # 170's numeric-divergence class, not a functional bug; confirmed on real riscv64
+          # CI). Data fetch mirrors prepare_test_environment.sh. --deselect nodeids are
+          # rootdir-relative ("tests/..."), not {project}-prefixed - gotcha 14: pytest
+          # reports nodeids relative to rootdir regardless of the invocation cwd/path, so an
+          # absolute-path deselect silently matches nothing and the "deselected" test still
+          # runs. Confirmed on real riscv64 CI (run 33878204120: the wav2vec2 deselect target
+          # ran and passed, the 3 whisper_align ones ran and failed) after this exact mistake
+          # slipped through local validation on the aarch64 proxy.
+          CIBW_TEST_COMMAND: |
+            mkdir -p {project}/tests/data/models
+            test -d {project}/tests/data/models/transliteration-aren-all || (curl -fsSL https://opennmt-models.s3.amazonaws.com/transliteration-aren-all.tar.gz | tar xz -C {project}/tests/data/models)
+            test -d {project}/tests/data/models/opus-mt-ende || (curl -fsSL -o /tmp/opus.zip https://object.pouta.csc.fi/OPUS-MT-models/en-de/opus-2020-02-26.zip && unzip -q -o /tmp/opus.zip -d {project}/tests/data/models/opus-mt-ende)
+            pytest -v {project}/python/tests --ignore={project}/python/tests/test_fairseq.py --ignore={project}/python/tests/test_opennmt_py.py --ignore={project}/python/tests/test_opennmt_tf.py --deselect "tests/test_transformers.py::TestWav2Vec2::test_transformers_wav2vec2[facebook/wav2vec2-large-robust-ft-swbd-300h-expected_transcriptions0-cpu]" --deselect "tests/test_transformers.py::TestWhisper::test_transformers_whisper_align[test_names0-cpu]" --deselect "tests/test_transformers.py::TestWhisper::test_transformers_whisper_align[test_names1-cpu]" --deselect "tests/test_transformers.py::TestWhisper::test_transformers_whisper_align[test_names2-cpu]"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ctranslate2-${{ env.CTRANSLATE2_VERSION }}-cibw-wheels-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    name: Collect GPL sources (gcc) for ctranslate2 ${{ inputs.version || '4.8.1' }}
+    runs-on: ubuntu-24.04-riscv
+    steps:
+      # auditwheel repair vendors the image's libgomp.so.1 into ctranslate2.libs/
+      # because libctranslate2.so links OPENMP_RUNTIME=COMP's GNU OpenMP runtime.
+      - name: Collect gcc source RPM from manylinux_riscv64
+        uses: riseproject-dev/python-wheels/actions/collect-gpl-sources@main
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ctranslate2-${{ env.CTRANSLATE2_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish ctranslate2 ${{ inputs.version || '4.8.1' }}
+    needs: [setup, build_wheels, gpl_sources]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: ctranslate2-${{ inputs.version || '4.8.1' }}-*-manylinux_riscv64
+      gpl-sources-artifact: ctranslate2-${{ inputs.version || '4.8.1' }}-gpl-sources
+      gpl-sources-description: gcc
