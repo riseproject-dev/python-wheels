@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's wheel builder:
+#   https://github.com/tree-sitter/workflows/blob/main/.github/workflows/package-pypi.yml
+name: Build tree-sitter-swift wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'tree-sitter-swift version to build (git tag, e.g. 0.7.3)'
+        required: true
+        default: '0.7.3'
+  pull_request:
+    paths:
+      - '.github/workflows/build-tree-sitter-swift.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.7.3' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  TREE_SITTER_SWIFT_VERSION: ${{ inputs.version || '0.7.3' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  generate_parser:
+    needs: [setup]
+    # Unlike the other tree-sitter-* ports, alex-pinkus/tree-sitter-swift does not
+    # commit the generated src/parser.c at its release tags (only at the separate
+    # "<version>-with-generated-files" tags, which lag behind and carry a stale
+    # pyproject.toml version). Upstream's own publish-pypi.yml regenerates it via
+    # `tree-sitter generate` before building, so we do the same here, once on x86
+    # (generation is architecture-independent and the CLI has no riscv64 build),
+    # then hand the completed checkout to the riscv64 job as a tarball.
+    name: Generate tree-sitter-swift ${{ inputs.version || '0.7.3' }} parser
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout tree-sitter-swift ${{ env.TREE_SITTER_SWIFT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: alex-pinkus/tree-sitter-swift
+          ref: ${{ env.TREE_SITTER_SWIFT_VERSION }}
+          persist-credentials: false
+
+      - uses: tree-sitter/setup-action/cli@49f8c1f20b60102eae8c033bb7c7f6cd056f6086  # v2
+
+      - name: Regenerate parser
+        run: tree-sitter generate
+        env:
+          TREE_SITTER_ABI_VERSION: 15
+
+      - name: Archive checkout
+        run: tar czf /tmp/tree-sitter-swift.tar.gz --exclude=.git .
+
+      - name: Upload checkout artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tree-sitter-swift-${{ env.TREE_SITTER_SWIFT_VERSION }}-generated
+          path: /tmp/tree-sitter-swift.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, generate_parser]
+    name: Build tree-sitter-swift ${{ inputs.version || '0.7.3' }} cp38-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+
+    steps:
+      - name: Download checkout artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: tree-sitter-swift-${{ env.TREE_SITTER_SWIFT_VERSION }}-generated
+
+      - name: Extract checkout
+        run: |
+          mkdir tree-sitter-swift
+          tar xzf tree-sitter-swift.tar.gz -C tree-sitter-swift
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: tree-sitter-swift
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_EXTRAS: core
+          CIBW_TEST_SOURCES: bindings/python/tests
+          CIBW_TEST_COMMAND: python -m unittest discover -v -s bindings/python/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tree-sitter-swift-${{ env.TREE_SITTER_SWIFT_VERSION }}-cp38-abi3-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish tree-sitter-swift ${{ inputs.version || '0.7.3' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: tree-sitter-swift-${{ inputs.version || '0.7.3' }}-*-manylinux_riscv64
