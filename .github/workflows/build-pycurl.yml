@@ -1,0 +1,216 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `package-wheel` job of
+# https://github.com/pycurl/pycurl/blob/v7.47.0/.github/workflows/cibuildwheel.yml
+name: Build pycurl wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pycurl version to build (e.g. 7.47.0)'
+        required: true
+        default: '7.47.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pycurl.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '7.47.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 7.47.0 there.
+  PYCURL_VERSION: ${{ inputs.version || '7.47.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pycurl ${{ inputs.version || '7.47.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp310", "cp311", "cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout pycurl v${{ env.PYCURL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pycurl/pycurl
+          ref: v${{ env.PYCURL_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pycurl source
+        run: git apply python-wheels/patches/pycurl/${{ env.PYCURL_VERSION }}/00*.patch
+
+      - name: Stage the licence-collection script
+        run: |
+          cat > collect-licenses.sh <<'COLLECT_EOF'
+          #!/bin/bash
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # Stage, at the project root, the licence of every shared library
+          # auditwheel vendors out of the build image alongside libcurl.
+          # setuptools' widened LICENSE.* glob (see the patch) copies them into the wheel.
+          set -euo pipefail
+
+          project="${1:?usage: collect-licenses.sh <project-dir>}"
+
+          # ldd is transitive, so libcurl.so alone covers its whole closure;
+          # ldd does not list the root itself, so resolve that too.
+          mapfile -t libs < <(
+              {
+                  ldd /usr/lib64/libcurl.so | tr ' ' '\n' | grep '^/'
+                  readlink -f /usr/lib64/libcurl.so
+              } | sort -u
+          )
+
+          # `rpm -qf` reports unowned files on stdout, so keep only bare package names.
+          # glibc, the gcc runtime and zlib are on auditwheel's manylinux allowlist and
+          # are never vendored into the wheel.
+          mapfile -t pkgs < <(
+              rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null |
+                  grep -E '^[A-Za-z0-9._+-]+$' | sort -u |
+                  grep -vE '^(glibc|libgcc|libstdc\+\+|gcc|zlib-ng-compat)$'
+          )
+
+          for pkg in "${pkgs[@]}"; do
+              mapfile -t files < <(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
+
+              # Some subpackages leave the licence to a sibling of the same source RPM.
+              if [ -z "${files[0]:-}" ]; then
+                  srpm=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg")
+                  mapfile -t files < <(
+                      rpm -qa --qf '%{SOURCERPM} %{NAME}\n' |
+                          awk -v s="$srpm" '$1 == s { print $2 }' |
+                          xargs -r rpm -q --licensefiles 2>/dev/null | sort -u
+                  )
+              fi
+
+              # Others mark it %doc rather than %license, and the image installs no docs.
+              if [ -z "${files[0]:-}" ]; then
+                  dnf -y --disablerepo=extras reinstall --setopt=tsflags= "$pkg" >/dev/null
+                  mapfile -t files < <(rpm -qd "$pkg" | grep -iE '/(LICEN[CS]E|COPYING|NOTICE)')
+              fi
+
+              for f in "${files[@]}"; do
+                  [ -f "$f" ] || continue
+                  cp "$f" "$project/LICENSE.${pkg}.$(basename "$f")"
+              done
+              compgen -G "$project/LICENSE.$pkg.*" >/dev/null ||
+                  { echo "no licence file found for $pkg" >&2; exit 1; }
+          done
+
+          ls -1 "$project"/LICENSE.* | sed "s|$project/||"
+          COLLECT_EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Replaces upstream's vcpkg before-all: the riscv64 image's own
+          # libcurl-devel (appstream, not EPEL - gotcha 51) is a full build of
+          # curl, so no source build is needed.
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf install -y libcurl-devel &&
+            bash {project}/collect-licenses.sh {project}
+          CIBW_ENVIRONMENT: >-
+            PYCURL_SSL_LIBRARY=openssl
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # paramiko's cryptography/bcrypt deps have no riscv64 wheel below cp312;
+          # fall back to the rest of the dev requirements so its sftp tests, which are
+          # pytest.importorskip'd, skip instead of failing metadata generation.
+          CIBW_BEFORE_TEST_LINUX: >-
+            pip install flake8 -r {package}/requirements-dev.txt ||
+            { grep -v '^paramiko' {package}/requirements-dev.txt > /tmp/requirements-dev.txt &&
+              pip install flake8 -r /tmp/requirements-dev.txt; } &&
+            make -C {package}/tests/fake-curl/libcurl
+          CIBW_TEST_COMMAND: pytest -v -ra {project}/tests
+
+      - name: Verify the wheel ships the compiled extension and licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = sorted(n for n in names if n.endswith(".so"))
+          print("\n".join(sos))
+          assert any("pycurl/_pycurl." in n for n in sos), sos
+
+          lic = sorted(n.split("/")[-1] for n in names if ".dist-info/licenses/" in n and not n.endswith("/"))
+          print("\n".join(lic))
+          expected_pkgs = {
+              "cyrus-sasl-lib", "keyutils-libs", "krb5-libs", "libbrotli", "libcap",
+              "libcbor", "libcom_err", "libcurl", "libevent", "libfido2", "libidn2",
+              "libnghttp2", "libpsl", "libselinux", "libssh", "libunistring",
+              "libxcrypt", "openldap", "openssl-libs", "pcre2", "systemd-libs",
+          }
+          have_pkgs = {f.split(".", 2)[1] for f in lic if f.startswith("LICENSE.")}
+          assert {"COPYING-LGPL", "COPYING-MIT"} <= set(lic), lic
+          assert expected_pkgs <= have_pkgs, expected_pkgs - have_pkgs
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pycurl-${{ env.PYCURL_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    name: Collect GPL sources for pycurl ${{ inputs.version || '7.47.0' }}
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # keyutils-libs/libcap/libidn2/libssh/libunistring/libxcrypt/pcre2/systemd-libs
+      # are the copyleft (GPL/LGPL) libraries auditwheel vendors out of the build
+      # image alongside libcurl; the rest of the closure is permissively licensed.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: >-
+            gcc keyutils-libs libcap libidn2 libssh libunistring libxcrypt
+            pcre2 systemd-libs
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pycurl-${{ env.PYCURL_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish pycurl ${{ inputs.version || '7.47.0' }}
+    needs: [setup, build_wheels, gpl_sources]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pycurl-${{ inputs.version || '7.47.0' }}-*-manylinux_riscv64
+      gpl-sources-artifact: pycurl-${{ inputs.version || '7.47.0' }}-gpl-sources
+      gpl-sources-description: gcc and the copyleft libraries bundled in the wheel
