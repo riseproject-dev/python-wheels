@@ -1,0 +1,189 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build` job of
+# https://github.com/mitmproxy/mitmproxy_rs/blob/v0.12.11/.github/workflows/ci.yml
+name: Build mitmproxy-rs wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'mitmproxy-rs version/tag to build (without the leading v, e.g. 0.12.11)'
+        required: true
+        default: '0.12.11'
+  pull_request:
+    paths:
+      - '.github/workflows/build-mitmproxy-rs.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.12.11' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.12.11 there.
+  MITMPROXY_RS_VERSION: ${{ inputs.version || '0.12.11' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build mitmproxy-rs ${{ inputs.version || '0.12.11' }} cp312-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout mitmproxy_rs v${{ env.MITMPROXY_RS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: mitmproxy/mitmproxy_rs
+          ref: v${{ env.MITMPROXY_RS_VERSION }}
+          persist-credentials: false
+
+      - name: Stage the licence beside mitmproxy-rs's pyproject.toml
+        # maturin globs LICEN[CS]E* relative to the pyproject directory, which
+        # in this monorepo is mitmproxy-rs/ -- so upstream's own non-x86_64
+        # wheels ship no licence text at all (only the x86_64 Linux one does).
+        run: cp LICENSE mitmproxy-rs/
+
+      - name: Stage the riscv64 smoke tests
+        # mitmproxy-rs ships no Python-level test suite of its own -- its
+        # bindings are exercised by the separate mitmproxy/mitmproxy repo.
+        # This exercises the compiled extension's non-privileged surface
+        # directly, mirroring the behaviour asserted by the crate's own
+        # `#[test]`s (hex_dump, msgpack, syntax_highlight, intercept_conf).
+        run: |
+          mkdir -p tests
+          cat > tests/test_riscv64_smoke.py <<'EOF'
+          import types
+
+          import pytest
+
+          import mitmproxy_rs
+          from mitmproxy_rs import certs, contentviews, dns, local, process_info, syntax_highlight, tun, wireguard
+
+
+          def test_extension_is_compiled():
+              assert mitmproxy_rs.mitmproxy_rs.__file__.endswith(".so"), mitmproxy_rs.mitmproxy_rs.__file__
+
+
+          def test_wireguard_keys():
+              private_key = wireguard.genkey()
+              assert len(private_key) == 44
+              public_key = wireguard.pubkey(private_key)
+              assert len(public_key) == 44
+              assert wireguard.pubkey(private_key) == public_key
+              assert wireguard.genkey() != private_key
+
+
+          def test_syntax_highlight():
+              assert "yaml" in syntax_highlight.languages()
+              assert {"name", "number"} <= set(syntax_highlight.tags())
+              assert syntax_highlight.highlight("key: 42", "yaml") == [
+                  ("name", "key"),
+                  ("", ": "),
+                  ("number", "42"),
+              ]
+
+
+          def test_contentviews_hex_dump():
+              meta = types.SimpleNamespace()
+              assert contentviews.hex_dump.prettify(b"abcd", meta) == (
+                  "0000:   61 62 63 64                                          abcd"
+              )
+              assert contentviews.hex_dump.prettify(b"", meta) == ""
+
+
+          def test_local_redirector_describe_spec():
+              assert local.LocalRedirector.describe_spec("") == "Intercept nothing."
+              assert (
+                  local.LocalRedirector.describe_spec("curl")
+                  == 'Include processes matching "curl".'
+              )
+              with pytest.raises(ValueError):
+                  local.LocalRedirector.describe_spec(",")
+
+
+          def test_unavailable_reason_types():
+              assert local.LocalRedirector.unavailable_reason() is None or isinstance(
+                  local.LocalRedirector.unavailable_reason(), str
+              )
+              assert tun.TunInterface.unavailable_reason() is None or isinstance(
+                  tun.TunInterface.unavailable_reason(), str
+              )
+
+
+          def test_certs_are_macos_only():
+              with pytest.raises(NotImplementedError):
+                  certs.add_cert("not a real cert")
+              with pytest.raises(NotImplementedError):
+                  certs.remove_cert()
+
+
+          def test_process_info():
+              assert isinstance(process_info.active_executables(), list)
+
+
+          def test_dns_system_servers():
+              assert isinstance(dns.get_system_dns_servers(), list)
+          EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: mitmproxy-rs
+          output-dir: wheelhouse/
+        env:
+          # pyo3's abi3-py312 feature (set unconditionally in
+          # mitmproxy-rs/Cargo.toml) makes this one wheel; it is built on
+          # cp312, the oldest interpreter its tag claims and our floor, and
+          # re-tested on cp313/cp314 via find_compatible_wheel. musllinux is
+          # dropped: rustup.rs ships no riscv64 musl toolchain. Upstream
+          # publishes no cp314t wheel for this package either.
+          CIBW_BUILD: >-
+            cp312-manylinux_riscv64 cp313-manylinux_riscv64
+            cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # mitmproxy-rs ships no [tool.cibuildwheel], so the Rust toolchain
+          # its maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          # The `docs` feature skips lib.rs's eager `import mitmproxy_linux`
+          # at module init (no riscv64 wheel exists for it); everything but
+          # local.start_local_redirector() works without it, and that
+          # function re-imports mitmproxy_linux itself and raises the same
+          # error at call time.
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            MATURIN_PEP517_ARGS="--features pyo3/extension-module,docs"
+          # mitmproxy_rs unconditionally requires mitmproxy_linux on Linux,
+          # which has no riscv64 wheel or sdist we can build here; skip
+          # dependency resolution for the wheel install and satisfy pytest
+          # separately (gotcha 122).
+          CIBW_TEST_ENVIRONMENT: PIP_NO_DEPS=1
+          CIBW_BEFORE_TEST_LINUX: PIP_NO_DEPS=0 pip install pytest
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: python -m pytest -v tests/test_riscv64_smoke.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mitmproxy-rs-${{ env.MITMPROXY_RS_VERSION }}-cp312-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish mitmproxy-rs ${{ inputs.version || '0.12.11' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: mitmproxy-rs-${{ inputs.version || '0.12.11' }}-*-manylinux_riscv64
