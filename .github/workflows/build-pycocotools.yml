@@ -1,0 +1,147 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/ppwwyyxx/cocoapi/blob/ac87f5077ad6b8864c2dc5e93d14cae62d1db05a/.github/workflows/build.yml
+name: Build pycocotools wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pycocotools version to build (e.g. 2.0.11)'
+        required: true
+        default: '2.0.11'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pycocotools.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.0.11' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 2.0.11 there.
+  PYCOCOTOOLS_VERSION: ${{ inputs.version || '2.0.11' }}
+  # Upstream cuts releases without git tags, so pin the release commit: this is
+  # "bump version" (setup.py version='2.0.11'), whose tree is byte-identical to
+  # the 2.0.11 PyPI sdist. Update it alongside PYCOCOTOOLS_VERSION.
+  PYCOCOTOOLS_REF: ac87f5077ad6b8864c2dc5e93d14cae62d1db05a
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  # One cp312-abi3 wheel: setup.py enables the limited API from cp312 up, so
+  # cibuildwheel builds it once and reuses+tests it on cp313/cp314.
+  build_abi3:
+    needs: [setup]
+    name: Build pycocotools ${{ inputs.version || '2.0.11' }} cp312-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    steps:
+      - name: Checkout cocoapi ${{ env.PYCOCOTOOLS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ppwwyyxx/cocoapi
+          ref: ${{ env.PYCOCOTOOLS_REF }}
+          persist-credentials: false
+
+      # setup.py's Extension lives in PythonAPI/, but license.txt sits at the
+      # repo root, so setuptools' default LICEN[CS]E* glob never finds it and
+      # upstream's own wheels ship no licence (gotcha 86).
+      - name: Stage cocoapi's licence for the wheel
+        run: cp license.txt PythonAPI/LICENSE
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: ./PythonAPI
+        env:
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy is both a build and a runtime requirement, and only our
+          # registry has it for riscv64.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+          CIBW_TEST_COMMAND: python {project}/tests/test_cases.py
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n == "pycocotools/_mask.abi3.so" for n in names), names
+              assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pycocotools-${{ env.PYCOCOTOOLS_VERSION }}-cp312-abi3-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  # Free-threaded wheel: Py_GIL_DISABLED disables the limited API in setup.py,
+  # so this is a per-interpreter build. Only cp314t - cibuildwheel 4.2.0 has no
+  # cp313t identifier on any platform (gotcha 204), matching upstream's own
+  # later decision to drop 3.13t support (PR #35, not in this release).
+  build_freethreaded:
+    needs: [setup]
+    name: Build pycocotools ${{ inputs.version || '2.0.11' }} cp314t-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    steps:
+      - name: Checkout cocoapi ${{ env.PYCOCOTOOLS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ppwwyyxx/cocoapi
+          ref: ${{ env.PYCOCOTOOLS_REF }}
+          persist-credentials: false
+
+      - name: Stage cocoapi's licence for the wheel
+        run: cp license.txt PythonAPI/LICENSE
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: ./PythonAPI
+        env:
+          CIBW_BUILD: cp314t-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+          CIBW_TEST_COMMAND: python {project}/tests/test_cases.py
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("pycocotools/_mask.cpython-314t-") and n.endswith(".so") for n in names), names
+              assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pycocotools-${{ env.PYCOCOTOOLS_VERSION }}-cp314t-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pycocotools ${{ inputs.version || '2.0.11' }}
+    needs: [setup, build_abi3, build_freethreaded]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pycocotools-${{ inputs.version || '2.0.11' }}-*-manylinux_riscv64
