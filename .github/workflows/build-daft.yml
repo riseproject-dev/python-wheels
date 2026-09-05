@@ -104,7 +104,11 @@ jobs:
       - name: Install Python
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
         with:
-          python-version: '3.10'
+          # cp312 is the floor our registry currently publishes riscv64
+          # numpy/pandas/pyarrow builds compatible with daft's own extras
+          # bounds for (the abi3 wheel under test installs fine on any
+          # interpreter >= the cp310 floor it claims).
+          python-version: '3.12'
           activate-environment: true
           enable-cache: false
 
@@ -112,19 +116,23 @@ jobs:
       # support and rejects the wheel as "not a supported wheel on this
       # platform"; uv's resolver knows the tag (same reason
       # build-polars-runtime.yml's "Test wheel" step uses uv too).
+      # Upstream's test-wheels job also runs this suite under `DAFT_RUNNER=ray`;
+      # that pass is dropped here because the only riscv64 ray build published
+      # anywhere is 2.58.0 (cp312/cp313/cp314 only), which exceeds the
+      # `ray[data, client]<2.58.0,>=2.11.0` upper bound daft's own `ray`
+      # extra declares, so there is no ray build daft supports to test with.
       - name: Test wheel
         run: |
-          uv pip install ray==2.58.0 pytest pandas==2.3.3 pytz numpy==2.3.4 pyarrow==25.0.1 dist/*.whl --force-reinstall
+          uv pip install pytest pandas==2.3.3 pytz numpy==2.3.4 pyarrow==25.0.1 dist/*.whl --force-reinstall
           # `daft/` at the checkout root would otherwise shadow the installed
           # wheel (same reason upstream's own test-wheels job removes it).
           rm -rf daft
           DAFT_ANALYTICS_ENABLED=0 DAFT_RUNNER=native python -m pytest tests/dataframe --durations=50
-          DAFT_ANALYTICS_ENABLED=0 DAFT_RUNNER=ray python -m pytest tests/dataframe --durations=50
         env:
           PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
           # Without it pip prefers PyPI's releases, which have no riscv64
           # wheel for these, and source-builds them in the container.
-          PIP_ONLY_BINARY: numpy,pandas,pyarrow,ray
+          PIP_ONLY_BINARY: numpy,pandas,pyarrow
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
