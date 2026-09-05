@@ -20,6 +20,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
 - **224** — `python -m <name>` is not a given for every `bindings = "bin"` wheel — it only
 - **228** — A crate graph far smaller than gotcha 141's polars-runtime/deltalake examples can
   still SIGABRT rustc with an alloc failure on the 4-core riscv64 runners.
+- **237** — A pyo3 `#[pymodule_init]` can eagerly `import` a platform-specific companion
+  package, blocking `import <pkg>` itself, not just one function.
 
 ---
 
@@ -448,3 +450,33 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
     roughly the same wall-clock cost as the failed attempt — cheap enough to reach for
     on any multi-leg riscv64 matrix that compiles a nontrivial dependency tree per leg,
     not just the graphs already known to be enormous.
+
+237. **A pyo3 `#[pymodule_init]` can eagerly `import` a platform-specific companion
+    package, which blocks `import <pkg>` itself — not just one function — and gotcha 122's
+    `PIP_NO_DEPS` only fixes the install, not this (the mitmproxy-rs case).** mitmproxy-rs
+    depends on `mitmproxy_linux` on Linux (no riscv64 wheel), but the failure isn't limited
+    to `Requires-Dist` resolution: `lib.rs`'s `#[pymodule_init]` runs `m.py().import
+    ("mitmproxy_linux")?` unconditionally on Linux "so that missing dependencies are
+    raising immediately," so even a `PIP_NO_DEPS=1` install of the wheel dies at `import
+    mitmproxy_rs` with `ModuleNotFoundError: No module named 'mitmproxy_linux'` — no test
+    ever gets to run. Read the actual function that needs the companion package before
+    concluding the whole port needs a source patch: `start_local_redirector()` re-imports
+    `mitmproxy_linux` itself at call time and raises the identical error, so the eager
+    module-init check is a fail-fast convenience, not the only place the dependency is
+    enforced. The crate already shipped the escape hatch as an opt-in Cargo feature
+    (`docs = []`, gating the init-time import with `not(feature = "docs")` — clearly built
+    for doc generation without the platform binaries) that needed no patch, just restating
+    it alongside upstream's own `[tool.maturin] features` on the CLI (gotcha 155's rule):
+    `MATURIN_PEP517_ARGS="--features pyo3/extension-module,docs"`. Every other exported
+    function keeps working; only the one function that genuinely needs the missing
+    companion package still fails, now at call time instead of at import.
+    - **Two greps settle whether this pattern applies**: `#[pymodule_init]` (or
+      `#[pyo3(init)]`/`fn init` in the pymodule macro) for an eager `py.import(...)`, and a
+      second call site for the same import inside the function that actually uses it — the
+      second one is the tell that the eager check is redundant with a real one, not the
+      only enforcement point.
+    - **Validate the fix outside the riscv64 queue** (gotcha 101): the aarch64 rehearsal
+      reproduced `ModuleNotFoundError` on the first run with only `PIP_NO_DEPS` applied,
+      and a second run with `--features docs` added went green with all 9 smoke tests
+      passing — settled in minutes on a native aarch64 container rather than a riscv64
+      cycle.

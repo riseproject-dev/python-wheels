@@ -109,6 +109,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **187** — A `bindings = "bin"` project that ships no wheel-level test suite at all (the
 - **224** — `python -m <name>` is not a given for every `bindings = "bin"` wheel — it only
 - **228** — A crate graph far smaller than gotcha 141's polars-runtime/deltalake examples can
+- **237** — A pyo3 `#[pymodule_init]` can eagerly `import` a platform-specific companion
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
