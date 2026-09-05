@@ -53,6 +53,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **203** — A `py2.py3-none-<platform>` wheel bundling a runtime can be the *opposite* of
 - **214** — Not being Bazel-blocked doesn't mean a build is in scope — count the
 - **230** — "CMake" isn't always a hand-maintained build — a project's own CMakeLists can be a
+- **236** — An "LLVM-based" port is not automatically libclang-scale — check which CMake target
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

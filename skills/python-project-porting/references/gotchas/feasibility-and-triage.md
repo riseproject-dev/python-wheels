@@ -24,6 +24,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **185** — A sibling distribution can be selected by an upstream *source-transform script*
 - **186** — A sibling package's riscv64 vendor doesn't transfer if it publishes a different
 - **230** — "CMake" isn't always a hand-maintained build — a project's own CMakeLists can be a
+- **236** — An "LLVM-based" port is not automatically libclang-scale — check which CMake target
 
 ---
 
@@ -748,3 +749,25 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       "how many places would need a new architecture" from a guess into a number in one
       call — 350 here, versus ortools' roughly a dozen `FetchContent`s, is the concrete
       scale comparison that justified parking without a build attempt.
+
+236. **An "LLVM-based" port is not automatically libclang-scale — check which CMake target
+    the build actually asks for (the clang-format case; see `build-clang-format.yml`).**
+    libclang (PR #866, gotchas 211/225) set the expectation that "compiles LLVM from
+    source" means a multi-hour build with `-DLLVM_TARGETS_TO_BUILD=RISCV` and
+    `-static-libgcc -static-libstdc++` to make `libclang.so` portable off the container.
+    clang-format-wheel's own `CMakeLists.txt` fetches the identical
+    `llvm-project-<ver>.src.tar.xz` release tarball via `ExternalProject_add` (gotcha 203's
+    "source, not vendored-binary" shape) but builds only `--target clang-format` with
+    `-DLLVM_TARGETS_TO_BUILD=` **empty** — no codegen backend at all, because a formatter
+    needs the frontend (Lex/AST/Format) and none of the target-specific machinery
+    `libclang.so`'s indexing API pulls in. It also passes no static-linking flags, so
+    nothing about the manylinux image's GCC needs the CRB `libstdc++-static` package
+    libclang required. Read the actual `--target`/`CMAKE_ARGS` a wrapper project passes,
+    not just "it downloads llvm-project and runs cmake", before budgeting a port at
+    libclang's scale — the two builds share a download URL and nothing else about their
+    cost.
+    - **The payoff compounds with the matrix collapse.** clang-format-wheel's
+      `pyproject.toml` sets `wheel.py-api = "py2.py3"` (gotcha 113/xgboost's `py3` case,
+      one step further since the tool has no C-extension ABI at all), so cibuildwheel
+      needs `only: cp312-manylinux_riscv64` with no interpreter matrix — one build, not
+      four.
