@@ -1,0 +1,91 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build_wheels` job of
+# https://github.com/python-zeroconf/python-zeroconf/blob/0.151.3/.github/workflows/ci.yml
+name: Build zeroconf wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'zeroconf version to build (git tag, e.g. 0.151.3)'
+        required: true
+        default: '0.151.3'
+  pull_request:
+    paths:
+      - '.github/workflows/build-zeroconf.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.151.3' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  ZEROCONF_VERSION: ${{ inputs.version || '0.151.3' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build zeroconf ${{ inputs.version || '0.151.3' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout zeroconf ${{ env.ZEROCONF_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: python-zeroconf/python-zeroconf
+          ref: ${{ env.ZEROCONF_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream passes REQUIRE_CYTHON as a plain job env var, which never
+          # reaches the Linux build container; build_ext.py otherwise falls back
+          # to a pure-Python wheel under a riscv64 tag.
+          CIBW_ENVIRONMENT: REQUIRE_CYTHON=1
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_REQUIRES: 'pytest>=9.1.1,<10 pytest-asyncio>=1.4.0,<1.5.0 pytest-codspeed>=5.0.3,<6.0.0'
+          CIBW_TEST_COMMAND: >-
+            python -c "from zeroconf import _cache, _dns, _history, _record_update, _listener, _services, _updates;
+            from zeroconf._protocol import incoming, outgoing;
+            from zeroconf._handlers import answers, record_manager, multicast_outgoing_queue, query_handler;
+            from zeroconf._services import browser, info, registry;
+            from zeroconf._utils import ipaddress, time;
+            m = [_cache, _dns, _history, _record_update, _listener, _services, _updates, incoming, outgoing,
+            answers, record_manager, multicast_outgoing_queue, query_handler, browser, info, registry,
+            ipaddress, time];
+            bad = [x.__name__ for x in m if not x.__file__.endswith('.so')];
+            assert not bad, bad" &&
+            python -m pytest tests
+            --deselect tests/services/test_types.py::test_integration_with_listener_ipv6
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: zeroconf-${{ env.ZEROCONF_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish zeroconf ${{ inputs.version || '0.151.3' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: zeroconf-${{ inputs.version || '0.151.3' }}-*-manylinux_riscv64
