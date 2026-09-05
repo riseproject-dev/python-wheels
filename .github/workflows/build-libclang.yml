@@ -1,0 +1,134 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on: https://github.com/sighingnow/libclang/blob/llvm-18.1.1/.github/workflows/libclang-linux-amd64.yml
+name: Build libclang wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'libclang version to build (LLVM release tag without the llvm- prefix, e.g. 18.1.1)'
+        required: true
+        default: '18.1.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-libclang.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '18.1.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  LIBCLANG_VERSION: ${{ inputs.version || '18.1.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build libclang ${{ inputs.version || '18.1.1' }} py2.py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440  # full LLVM/Clang compile from source
+
+    steps:
+      - name: Checkout libclang llvm-${{ env.LIBCLANG_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: sighingnow/libclang
+          ref: llvm-${{ env.LIBCLANG_VERSION }}
+          persist-credentials: false
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
+
+      # libstdc++-static is CRB-only; upstream's cross-compiled aarch64/x86_64 jobs
+      # get it from their apt/manylinux2010 images without asking.
+      - name: Build libclang.so and the wheel
+        run: |
+          docker run --rm -v "$(pwd):/work" -w /work -e LIBCLANG_VERSION "${MANYLINUX_RISCV64_IMAGE}" bash -c '
+            set -euxo pipefail
+            dnf -y --enablerepo=crb install libstdc++-static
+            curl -fsSL -o "llvm-project-${LIBCLANG_VERSION}.src.tar.xz" \
+              "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LIBCLANG_VERSION}/llvm-project-${LIBCLANG_VERSION}.src.tar.xz"
+            tar xf "llvm-project-${LIBCLANG_VERSION}.src.tar.xz"
+            mv "llvm-project-${LIBCLANG_VERSION}.src" "llvm-project-${LIBCLANG_VERSION}"
+            mkdir -p "llvm-project-${LIBCLANG_VERSION}/build"
+            cd "llvm-project-${LIBCLANG_VERSION}/build"
+            cmake ../llvm \
+              -DLLVM_ENABLE_PROJECTS=clang \
+              -DBUILD_SHARED_LIBS=OFF \
+              -DLLVM_ENABLE_ZLIB=OFF \
+              -DLLVM_ENABLE_ZSTD=OFF \
+              -DLLVM_ENABLE_TERMINFO=OFF \
+              -DLLVM_TARGETS_TO_BUILD=RISCV \
+              -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+              -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O2 -g -DNDEBUG -static-libgcc -static-libstdc++"
+            make libclang -j"$(nproc)"
+            strip lib/libclang.so
+            du -csh lib/libclang.so
+            file lib/libclang.so
+            ldd lib/libclang.so
+            nm --dynamic --undefined-only --with-symbol-versions lib/libclang.so
+            cd /work
+            cp "llvm-project-${LIBCLANG_VERSION}/build/lib/libclang.so" native/
+            pybin=/opt/python/cp312-cp312/bin
+            # setup_ext.py does `import distutils`, removed from the stdlib in 3.12;
+            # setuptools (unlike wheel alone) installs the shim that resolves it.
+            # wheel>=0.44.0 dropped wheel.bdist_wheel.get_platform, which setup_ext.py
+            # imports directly; pin to the last version that still exports it.
+            "$pybin/pip" install -q -U setuptools "wheel==0.43.0"
+            "$pybin/python3" setup_ext.py bdist_wheel --plat-name=manylinux_2_39_riscv64
+            "$pybin/pip" install -q dist/*.whl
+            "$pybin/python3" - <<PYEOF
+          import clang.cindex
+          idx = clang.cindex.Index.create()
+          tu = idx.parse("smoke.c", unsaved_files=[("smoke.c", "int add(int a, int b) { return a + b; }")])
+          assert not list(tu.diagnostics), list(tu.diagnostics)
+          funcs = [c.spelling for c in tu.cursor.get_children() if c.kind.name == "FUNCTION_DECL"]
+          assert funcs == ["add"], funcs
+          print("smoke test OK:", funcs)
+          PYEOF
+          '
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: libclang-${{ env.LIBCLANG_VERSION }}-py2.py3-none-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    name: Collect GPL sources (gcc) for libclang ${{ inputs.version || '18.1.1' }}
+    runs-on: ubuntu-24.04-riscv
+    steps:
+      # -static-libgcc/-static-libstdc++ embeds the image's gcc runtime into libclang.so.
+      - name: Collect gcc source RPM from manylinux_riscv64
+        uses: riseproject-dev/python-wheels/actions/collect-gpl-sources@main
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: libclang-${{ env.LIBCLANG_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish libclang ${{ inputs.version || '18.1.1' }}
+    needs: [setup, build_wheels, gpl_sources]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: libclang-${{ inputs.version || '18.1.1' }}-*-manylinux_riscv64
+      gpl-sources-artifact: libclang-${{ inputs.version || '18.1.1' }}-gpl-sources
+      gpl-sources-description: gcc
