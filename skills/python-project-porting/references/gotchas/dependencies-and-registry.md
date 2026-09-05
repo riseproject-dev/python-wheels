@@ -22,6 +22,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
 - **215** — A registry gap for one interpreter can be narrowed to just the one optional
 - **232** — Matching upstream's newest interpreter tier can silently trade a fast port for a
 - **234** — A stock distro `pip` can be too old to *recognize* a riscv64 manylinux wheel at
+- **240** — A registry-hosted wheel that builds and installs cleanly can still be missing an
+  *optional* component another test dependency imports unconditionally.
 
 ---
 
@@ -443,3 +445,36 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       cpXY-cpXY`'s bundled pip is unaffected because it ships current. Grep `pip debug
       --verbose | grep -c manylinux` before trusting any install step that runs outside
       `/opt/python`.
+
+240. **A registry-hosted wheel that builds and installs cleanly can still be missing an
+    *optional* component another test dependency imports unconditionally (the
+    pyiceberg-core/pyarrow case).** `pypi.riseproject.dev` ships a real riscv64 pyarrow
+    wheel, and `pip install pyarrow` succeeds without complaint — but `build-pyarrow.yml`
+    sets `ARROW_S3: "OFF"` for riscv64, so the wheel carries no `pyarrow._s3fs` extension
+    module at all. That's invisible until something imports it: `pyiceberg.io.pyarrow`
+    (a hard dependency of `pyiceberg`, not an extra) does `from pyarrow._s3fs import
+    S3RetryStrategy` at module level, unconditionally, so `import pyiceberg.io.pyarrow`
+    — and anything that transitively imports it — raises `ModuleNotFoundError: No module
+    named 'pyarrow._s3fs'` on riscv64 even though the identical code runs fine wherever
+    pyarrow ships S3 support. This is a different shape than gotcha 84's "wrong version"
+    or gotcha 122's "no wheel at all": the *right* version of the *right* wheel installs,
+    and the gap is a disabled optional feature inside it, so `PIP_ONLY_BINARY` and version
+    pins do nothing to fix it.
+    - **Diagnose by checking the specific submodule, not just the package**: `python -c
+      "import pyarrow._s3fs"` against the installed wheel reproduces the exact error a
+      test file's import chain hits, cheaper than tracing a full pytest collection
+      failure back to its cause.
+    - **Read the *dependent's* import, not just the registry's build flags** — a project's
+      own `build-<dep>.yml` documents *what* is disabled (`grep ARROW_S3
+      .github/workflows/build-pyarrow.yml`), but only the failing test's traceback shows
+      *which* downstream consumer needs it unconditionally. `pyiceberg`'s own optional-
+      dependency story (`pyiceberg[pyarrow]`, `try: import pyarrow`) does not apply here:
+      `pyiceberg.io.pyarrow` is imported by `pyiceberg.catalog` and other core paths
+      whenever pyarrow is present at all, with no feature flag gating the `_s3fs` import
+      specifically.
+    - **The fix is scoping the test suite, not chasing the missing feature.** Rebuilding
+      pyarrow with S3 support for riscv64 is a separate, much larger port question (the
+      AWS C++ SDK's own riscv64 story); dropping the one test file that needs the
+      unconditional import and noting why in the PR (naming the module and the disabled
+      flag) is the same move gotcha 215 makes for a per-interpreter registry gap, applied
+      to a per-feature one instead.

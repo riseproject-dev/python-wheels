@@ -110,6 +110,8 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **224** — `python -m <name>` is not a given for every `bindings = "bin"` wheel — it only
 - **228** — A crate graph far smaller than gotcha 141's polars-runtime/deltalake examples can
 - **237** — A pyo3 `#[pymodule_init]` can eagerly `import` a platform-specific companion
+- **238** — A repo-root `rust-toolchain.toml` pinning nightly for lint-only use can still
+- **239** — A maturin project inside a Cargo workspace can have its `pyproject.toml` at a
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
@@ -190,6 +192,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **215** — A registry gap for one interpreter can be narrowed to just the one optional
 - **232** — Matching upstream's newest interpreter tier can silently trade a fast port for a
 - **234** — A stock distro `pip` can be too old to *recognize* a riscv64 manylinux wheel at
+- **240** — A registry-hosted wheel that builds and installs cleanly can still be missing an
 
 ### Build-tool drift & pins — [`gotchas/build-tool-drift-and-pins.md`](gotchas/build-tool-drift-and-pins.md)
 

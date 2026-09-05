@@ -22,6 +22,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
   still SIGABRT rustc with an alloc failure on the 4-core riscv64 runners.
 - **237** — A pyo3 `#[pymodule_init]` can eagerly `import` a platform-specific companion
   package, blocking `import <pkg>` itself, not just one function.
+- **238** — A repo-root `rust-toolchain.toml` pinning nightly for lint-only use can still
+  hijack a riscv64 build built from the git checkout, not the sdist.
+- **239** — A maturin project inside a Cargo workspace can have its `pyproject.toml` at a
+  different path in the git checkout than in the PyPI sdist.
 
 ---
 
@@ -480,3 +484,63 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       and a second run with `--features docs` added went green with all 9 smoke tests
       passing — settled in minutes on a native aarch64 container rather than a riscv64
       cycle.
+
+238. **A repo-root `rust-toolchain.toml` pinning nightly for lint-only use can still
+    hijack a riscv64 build built from the git checkout, not the sdist (the
+    pyiceberg-core/iceberg-rust case).** rustup resolves the active toolchain by walking
+    up from cwd for a `rust-toolchain(.toml)` file, and that lookup outranks whatever a
+    plain `rustup-init.sh -y` installed as the default. iceberg-rust's own file pins
+    `channel = "nightly-2026-03-05"` for `clippy`/`rustfmt`, with a comment that this
+    "will not affect downstream users" — true for anyone who `pip install`s from the
+    PyPI sdist, which genuinely excludes the file (verified: absent from the extracted
+    tarball). It is not true for a riscv64 port: checking out the git tag is required
+    anyway to reach the workspace's sibling crates (gotcha 239 covers why the checkout's
+    layout also isn't a drop-in for the sdist's), and that checkout puts
+    `rust-toolchain.toml` right at the root maturin's `cargo build` inherits from. The
+    result is cargo trying to provision a **nightly** riscv64 host
+    toolchain for whatever date is pinned, which may take much longer than a stable
+    install or may not exist as a riscv64 host build at all (gotcha 59's channel-manifest
+    check settles which). Fix: `RUSTUP_TOOLCHAIN=stable` in `CIBW_ENVIRONMENT_LINUX` — the
+    env var outranks the toolchain file in rustup's resolution order, so it forces the
+    already-installed stable toolchain (satisfying MSRV) without touching the file.
+    Upstream's own release job dodges the same file more elaborately, with a
+    `setup-builder` composite action that runs `rustup toolchain install <msrv> && rustup
+    override set <msrv>` before ever invoking maturin — same fix, expressed as an
+    override instead of an env var.
+    - **Two greps settle whether a project needs this**: `cat rust-toolchain.toml` (or a
+      `[toolchain]` table in a bare `rust-toolchain`) for a pinned channel, and whether
+      that channel is `nightly-*` — a pinned `stable` or an MSRV-matching channel is
+      harmless to inherit as-is.
+    - **Diagnose it from the log**: `info: syncing channel updates for
+      nightly-<date>-riscv64gc-unknown-linux-gnu` appearing right after `maturin pep517
+      build-wheel` starts (not from the `before_all` rustup-install step, which correctly
+      reports installing `stable`) is the tell — the toolchain file overrode the install
+      the moment cargo ran inside the checkout.
+
+239. **A maturin project inside a Cargo workspace can have its `pyproject.toml` at a
+    different path in the git checkout than in the PyPI sdist — inspecting the sdist to
+    plan `package-dir` gives the wrong answer (the pyiceberg-core/iceberg-rust case).**
+    `maturin sdist` for a workspace member hoists that member's `pyproject.toml` to the
+    **sdist root** and synthesizes a `manifest-path` (pointing back at the crate's
+    `Cargo.toml`) plus a `python-source` that wasn't in the original file, so a locally
+    built or downloaded sdist's `pyproject.toml` sits beside `Cargo.lock`/`Cargo.toml`
+    at the top level. The real git repository has no such file at its root: iceberg-rust's
+    `pyproject.toml` lives at `bindings/python/pyproject.toml`, beside the crate's own
+    `Cargo.toml`, with no `manifest-path` key at all (maturin defaults to the `Cargo.toml`
+    next to `pyproject.toml` when one isn't given) and a `python-source = "python"` that
+    resolves relative to that subdirectory, not the workspace root. Building an sdist
+    (`pip download --no-binary`, or `uv build --wheel` against it) to inspect the layout —
+    gotcha 2's normal move — plans a `package-dir: .` that then fails in CI with
+    `Could not find any of {setup.py, setup.cfg, pyproject.toml} at root of package`
+    against the real checkout, because the workflow checks out the git tag (needed for
+    the workspace's sibling crates), not the sdist.
+    - **Two greps settle which shape applies before writing `package-dir`**: `find . -iname
+      pyproject.toml -maxdepth 3` on a fresh git clone of the tag (not the sdist) to see
+      where it actually lives, and `grep manifest-path` in that file — present means the
+      sdist's synthesized version, absent alongside a `python-source` means the checkout's
+      original, subdirectory-relative one.
+    - **`CIBW_TEST_SOURCES` still resolves against the checkout root** (gotcha 104), not
+      `package-dir`, so staging `bindings/python/tests` and `bindings/python/pyproject.toml`
+      (for `[tool.pytest.ini_options]`) is unaffected by which `package-dir` is correct —
+      only the cibuildwheel `package-dir` value and the `cd bindings/python` a
+      `CIBW_TEST_COMMAND` needs before running pytest depend on it.
