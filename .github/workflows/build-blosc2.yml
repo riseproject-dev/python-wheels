@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/Blosc/python-blosc2/blob/v4.11.0/.github/workflows/cibuildwheels.yml
+name: Build blosc2 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'blosc2 version to build (git tag without leading v, e.g. 4.11.0)'
+        required: true
+        default: '4.11.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-blosc2.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '4.11.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 4.11.0 there.
+  BLOSC2_VERSION: ${{ inputs.version || '4.11.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build blosc2 ${{ inputs.version || '4.11.0' }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # scikit-build-core builds a single cp311-abi3 wheel (pyproject.toml's
+          # wheel.py-api) covering CPython 3.11+; built on cp311, the oldest
+          # interpreter the tag claims, and re-tested on the newer ones. Only
+          # cp314t is built free-threaded: numpy has no riscv64 wheel yet for
+          # cp315/cp315t anywhere (our registry or public PyPI), which upstream's
+          # own cp315t leg would otherwise need building from source.
+          - tag: cp311-abi3
+            build: >-
+              cp311-manylinux_riscv64 cp312-manylinux_riscv64
+              cp313-manylinux_riscv64 cp314-manylinux_riscv64
+            timeout: 360
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+            timeout: 120
+
+    steps:
+      - name: Checkout python-blosc2 v${{ env.BLOSC2_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Blosc/python-blosc2
+          ref: v${{ env.BLOSC2_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy/ndindex/numexpr have riscv64 wheels only on our registry;
+          # msgpack, pydantic, httpx, rich and threadpoolctl already have them
+          # (or a pure py3-none-any wheel) on public PyPI.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests
+          # Mirrors the subset upstream's own CI runs against both the sdist
+          # build and the built abi3 wheel (cibuildwheels.yml's sdist-test and
+          # test_abi3_matrix steps).
+          CIBW_TEST_COMMAND: >-
+            python -m pytest {project}/tests/test_open.py {project}/tests/test_vlmeta.py
+            {project}/tests/ndarray/test_evaluate.py
+          # The extensions declare no Py_mod_gil slot, so cp314t re-enables the
+          # GIL on import and pytest.ini's `filterwarnings = error` (picked up
+          # from {project}) turns that into a collection error (gotcha 127).
+          CIBW_TEST_ENVIRONMENT: PYTHON_GIL=1
+
+      - name: Check wheel contents
+        if: ${{ matrix.tag == 'cp311-abi3' }}
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          path = sys.argv[1]
+          assert "-cp311-abi3-" in path, path
+          names = zipfile.ZipFile(path).namelist()
+          exts = {n.rsplit("/", 1)[1] for n in names if n.endswith(".abi3.so")}
+          assert exts == {"blosc2_ext.abi3.so", "indexing_ext.abi3.so",
+                           "groupby_ext.abi3.so", "utf8_ext.abi3.so"}, exts
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          assert licences == {"LICENSE.txt", "miniexpr/LICENSE", "miniexpr/LICENSE-LIBTCC",
+                               "miniexpr/LICENSE-SLEEF", "miniexpr/LICENSE-TINYEXPR",
+                               "miniexpr/THIRD_PARTY_NOTICES.md"}, licences
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: blosc2-${{ env.BLOSC2_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish blosc2 ${{ inputs.version || '4.11.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: blosc2-${{ inputs.version || '4.11.0' }}-*-manylinux_riscv64
