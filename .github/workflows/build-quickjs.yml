@@ -1,0 +1,154 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-linux` job of
+# https://github.com/PetterS/quickjs/blob/1.19.4/.github/workflows/main.yml
+name: Build quickjs wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'quickjs version to build (git tag, e.g. 1.19.4)'
+        required: true
+        default: '1.19.4'
+  pull_request:
+    paths:
+      - '.github/workflows/build-quickjs.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.19.4' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  QUICKJS_VERSION: ${{ inputs.version || '1.19.4' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_sdist:
+    needs: [setup]
+    # The checkout's pyproject.toml declares [build-system] requires = ["poetry"]
+    # (used only for the dev environment) with no build-backend; a PEP 517
+    # frontend run against the checkout installs the whole poetry dependency
+    # tree, including cryptography, which has no riscv64 wheel and needs Rust to
+    # build from source. Upstream's own MANIFEST.in excludes pyproject.toml and
+    # poetry.lock from the released sdist for exactly this reason, so build the
+    # sdist once here (arch-independent, gotcha 4) with plain `setup.py sdist`
+    # (bypasses pyproject.toml entirely) and feed that to cibuildwheel below.
+    name: Build quickjs ${{ inputs.version || '1.19.4' }} sdist
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
+    steps:
+      - name: Checkout quickjs ${{ env.QUICKJS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: PetterS/quickjs
+          ref: ${{ env.QUICKJS_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build sdist
+        id: sdist
+        run: |
+          uv pip install setuptools
+          python setup.py sdist
+          sdists=(dist/*.tar.gz)
+          echo "sdist_name=$(basename "${sdists[0]}")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: quickjs-${{ env.QUICKJS_VERSION }}-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+      # test_quickjs.py isn't part of the sdist (upstream keeps it out of
+      # MANIFEST.in too); ship it separately so build_wheels can stage it via
+      # CIBW_TEST_SOURCES without re-cloning the checkout on every matrix leg.
+      - name: Upload test file artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: quickjs-${{ env.QUICKJS_VERSION }}-test
+          path: test_quickjs.py
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_sdist]
+    name: Build quickjs ${{ inputs.version || '1.19.4' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        libc: [manylinux, musllinux]
+
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: quickjs-${{ env.QUICKJS_VERSION }}-sdist
+          path: dist/
+
+      - name: Download test file
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: quickjs-${{ env.QUICKJS_VERSION }}-test
+          path: .
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}
+          output-dir: wheelhouse/
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_SOURCES: test_quickjs.py
+          CIBW_TEST_COMMAND: >-
+            python -c "import _quickjs; assert _quickjs.__file__.endswith('.so'), _quickjs.__file__" &&
+            python -m unittest test_quickjs -v
+
+      - name: Check the extension and license made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("_quickjs") and n.endswith(".so") for n in names), names
+              assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: quickjs-${{ env.QUICKJS_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish quickjs ${{ inputs.version || '1.19.4' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: quickjs-${{ inputs.version || '1.19.4' }}-*riscv64
