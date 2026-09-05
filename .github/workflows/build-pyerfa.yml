@@ -1,0 +1,105 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the wheel job of
+# https://github.com/liberfa/pyerfa/blob/v2.0.1.5/.github/workflows/ci_workflows.yml,
+# which calls OpenAstronomy/github-actions-workflows' publish.yml.
+name: Build pyerfa wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pyerfa version to build (git tag without leading v, e.g. 2.0.1.5)'
+        required: true
+        default: '2.0.1.5'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pyerfa.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.0.1.5' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 2.0.1.5 there.
+  PYERFA_VERSION: ${{ inputs.version || '2.0.1.5' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pyerfa ${{ inputs.version || '2.0.1.5' }} cp39-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout pyerfa v${{ env.PYERFA_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: liberfa/pyerfa
+          ref: v${{ env.PYERFA_VERSION }}
+          submodules: true  # liberfa/erfa (the vendored ERFA C library) is a submodule
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # setup.py's bdist_wheel_abi3 always tags the wheel cp39-abi3
+          # regardless of the interpreter that builds it (gotcha 34); numpy
+          # (a build and runtime requirement) has no riscv64 wheel for
+          # cp39/cp310 on our registry, so cp311 is the oldest we can build
+          # on. cibuildwheel builds there once and reuses+retests it on
+          # cp312-cp314 via find_compatible_wheel.
+          CIBW_BUILD: >-
+            cp311-manylinux_riscv64 cp312-manylinux_riscv64
+            cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_ARCHS: riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy is a build and a runtime requirement, and only our registry
+          # has it for riscv64; only-binary keeps a newer PyPI release from
+          # winning the resolution and then compiling from sdist.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PYERFA=${{ env.PYERFA_VERSION }}
+          CIBW_TEST_EXTRAS: test
+          CIBW_TEST_COMMAND: pytest --pyargs erfa
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          path = sys.argv[1]
+          assert "-cp39-abi3-" in path, path
+          names = zipfile.ZipFile(path).namelist()
+          exts = [n for n in names if n.endswith(".abi3.so")]
+          assert exts == ["erfa/ufunc.abi3.so"], exts
+          licences = [n for n in names if n.endswith(".dist-info/LICENSE.rst")]
+          assert licences, names
+          EOF
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyerfa-${{ env.PYERFA_VERSION }}-cp39-abi3-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyerfa ${{ inputs.version || '2.0.1.5' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pyerfa-${{ inputs.version || '2.0.1.5' }}-*-manylinux_riscv64
