@@ -248,6 +248,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **176** — `log_level` is the third pytest ini key that decides whether a staged suite passes,
 - **177** — Narrowing an upstream test suite because its heavy requirements file has no
 - **212** — An unavailable optional dependency (no riscv64 wheel) doesn't only fail tests
+- **241** — A dry run against upstream's *released* wheel (gotcha 52) settles whether a
 
 ### Test failures, flakes & arch-specific bugs — [`gotchas/test-failures-and-flakes.md`](gotchas/test-failures-and-flakes.md)
 

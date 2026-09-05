@@ -23,6 +23,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
 - **176** — `log_level` is the third pytest ini key that decides whether a staged suite passes,
 - **177** — Narrowing an upstream test suite because its heavy requirements file has no
 - **212** — An unavailable optional dependency (no riscv64 wheel) doesn't only fail tests
+- **241** — A dry run against upstream's *released* wheel (gotcha 52) settles whether a
 
 ---
 
@@ -488,3 +489,20 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
       it needs was never copied in — a repo-layout gap, not a missing-dependency one,
       but the same fix (`--deselect`) applies since it verifies source-tree metadata
       consistency, not anything an installed wheel need prove.
+
+241. **A dry run against upstream's *released* wheel (gotcha 52) settles whether a
+    networked test suite needs real network access before burning a riscv64 cycle
+    scoping it down.** zeroconf's suite opens real UDP sockets and joins multicast
+    groups by default (`Zeroconf(interfaces=["127.0.0.1"])`, `InterfaceChoice.Default`),
+    which looks exactly like the kind of suite gotcha 109 says to scope down for a
+    network-restricted container. `pip install zeroconf==<ver>` into a venv, `cp -a`
+    the checkout's `tests/` tree over it, and running the exact upstream test command
+    settled it in under a minute: 516 passed, 3 skipped, one failure. That failure
+    (`test_default_interface_warns_when_ipv6_requested`) traced to the *dry-run host's*
+    own unusual IPv6 setup — a laptop with VPN tunnels and several physical adapters —
+    not a network restriction; the suite already self-gates on real requirements
+    (`skipif(not has_working_ipv6())`). A minimal container's loopback-only network is
+    a **better** match for the suite's assumptions than a laptop's messy real one —
+    run the whole thing unscoped and let the actual CI job's failures, if any, drive
+    further narrowing instead of preemptively deselecting "probably needs network"
+    tests.
