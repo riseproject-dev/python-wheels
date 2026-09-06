@@ -18,6 +18,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
 - **55** — A `cffi_modules` project is a normal port, and cffi itself is registry-only on
 - **280** — When there's no require-extension knob to force (gotcha 91's shape), check
 - **292** — Gotcha 81's "diff the wheel `size` field" test can pass on a real per-arch binary
+- **295** — A require-extension knob that reaches the container correctly (gotcha 129's
 
 ---
 
@@ -339,3 +340,29 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
       a silently-degraded one. Grep the custom build step for its failure path before
       reaching for gotcha 20's forcing pattern — some projects already refuse to produce a
       placebo wheel, and forcing a knob that doesn't exist would be pure divergence.
+
+295. **A require-extension knob that reaches the container correctly (gotcha 129's
+    problem, solved) can still not gate anything, because the project's own `build_ext`
+    subclass swallows the real compile failure somewhere the knob never checks (the
+    fnv-hash-fast case; see `build-fnv-hash-fast.yml`).** fnv-hash-fast's `build_ext.py`
+    has two separate try/excepts: the outer one wraps `setup_kwargs.update(dict(ext_modules=...))`
+    and re-raises when `REQUIRE_EXTENSION` is set — but that dict construction cannot
+    fail. The actual compile happens later, inside a custom `BuildExt.build_extensions()`
+    override that wraps `super().build_extensions()` in a bare `except Exception: pass`
+    with **no reference to the env var at all**. Verified by deliberately breaking
+    `_fnv_impl.c` and building with `REQUIRE_EXTENSION=1` set correctly via
+    `CIBW_ENVIRONMENT`: the compiler prints its two errors to the log, and `pip`/`uv`
+    still report "Successfully built ... .whl" (exit 0) with no `.so` inside — the
+    "require" knob never fires because the code path it guards was never the one that
+    can fail.
+    - **Reading the knob's plumbing is not enough — trace what it actually wraps.**
+      Gotcha 129 fixed the *delivery* problem (job `env:` vs `CIBW_ENVIRONMENT`); this is
+      the case where delivery is correct and the knob is still a no-op because it
+      instruments the wrong function. Grep the custom `build_ext` for a second,
+      unconditional `except` around the real `build_extensions()`/`run()` call before
+      trusting that setting the documented env var is sufficient.
+    - **The fix is unconditional, not upstream-specific**: keep asserting the `.so`
+      directly in `CIBW_TEST_COMMAND`
+      (`python -c "import <pkg>.<ext> as m; assert m.__file__.endswith('.so'), m.__file__"`)
+      regardless of whether a require-knob exists or claims to be set — it is the only
+      check in the pipeline gotcha 129/295 cannot both defeat at once.

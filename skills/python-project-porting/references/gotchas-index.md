@@ -215,6 +215,7 @@ The porting gotchas (286 of them) live in [`references/gotchas/`](gotchas/), spl
 - **55** — A `cffi_modules` project is a normal port, and cffi itself is registry-only on *(reused number — this theme)*
 - **280** — When there's no require-extension knob to force (gotcha 91's shape), check
 - **292** — Gotcha 81's "diff the wheel `size` field" test can pass on a real per-arch binary
+- **295** — A require-extension knob that reaches the container correctly (gotcha 129's
 
 ### Dependencies & the registry — [`gotchas/dependencies-and-registry.md`](gotchas/dependencies-and-registry.md)
 
