@@ -1,0 +1,117 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# PyQt5-sip has no public source repository or CI: Riverbank Computing publishes only the
+# PyPI sdist, so it is fetched directly (gotcha 156/275). No cp314t: upstream ships no
+# free-threaded wheel and this module manages CPython object lifetimes by hand.
+name: Build pyqt5-sip wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'PyQt5-sip version to build (e.g. 12.19.0)'
+        required: true
+        default: '12.19.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pyqt5-sip.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '12.19.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYQT5_SIP_VERSION: ${{ inputs.version || '12.19.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pyqt5-sip ${{ inputs.version || '12.19.0' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp310", "cp311", "cp312", "cp313", "cp314"]
+        libc: [manylinux, musllinux]
+
+    steps:
+      - name: Fetch PyQt5-sip ${{ env.PYQT5_SIP_VERSION }} sdist
+        run: |
+          url="$(curl -sSfL "https://pypi.org/pypi/PyQt5-sip/${PYQT5_SIP_VERSION}/json" \
+            | python3 -c 'import json,sys; print(next(u["url"] for u in json.load(sys.stdin)["urls"] if u["packagetype"] == "sdist"))')"
+          curl -sSfL -o sdist.tar.gz "$url"
+          tar xzf sdist.tar.gz
+          test -f "pyqt5_sip-${PYQT5_SIP_VERSION}/pyproject.toml"
+
+      - name: Stage smoke tests
+        run: |
+          mkdir -p tests
+          cat > tests/test_sip.py <<'PYTEST'
+          """Smoke tests for the riscv64 PyQt5-sip wheel.
+
+          Upstream ships no test suite: this is a runtime support module
+          consumed by PyQt5's generated bindings, not a standalone library.
+          These exercise the compiled sip extension's public API directly.
+          """
+
+          from PyQt5 import sip
+
+
+          def test_extension_module_is_compiled():
+              assert sip.__file__.endswith(".so"), sip.__file__
+
+
+          def test_sip_version_is_reported():
+              assert isinstance(sip.SIP_VERSION, int)
+              assert isinstance(sip.SIP_VERSION_STR, str)
+
+
+          def test_voidptr_wraps_a_buffer():
+              buf = bytearray(b"riscv64")
+              vp = sip.voidptr(buf)
+              assert vp.getsize() == len(buf)
+              assert bytes(vp.asstring(len(buf))) == bytes(buf)
+
+
+          def test_wrappertype_is_a_metaclass():
+              assert issubclass(sip.wrappertype, type)
+          PYTEST
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          package-dir: pyqt5_sip-${{ env.PYQT5_SIP_VERSION }}
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: python -m pytest -v tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyqt5-sip-${{ env.PYQT5_SIP_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyqt5-sip ${{ inputs.version || '12.19.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pyqt5-sip-${{ inputs.version || '12.19.0' }}-*riscv64
