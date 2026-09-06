@@ -25,6 +25,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **186** — A sibling package's riscv64 vendor doesn't transfer if it publishes a different
 - **230** — "CMake" isn't always a hand-maintained build — a project's own CMakeLists can be a
 - **236** — An "LLVM-based" port is not automatically libclang-scale — check which CMake target
+- **246** — A `pyO3`/uniffi "binding" package can vendor a closed-source Rust core as a git-committed
 
 ---
 
@@ -771,3 +772,41 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       one step further since the tool has no C-extension ABI at all), so cibuildwheel
       needs `only: cp312-manylinux_riscv64` with no interpreter matrix — one build, not
       four.
+
+246. **A `pyO3`/uniffi "binding" package can vendor a closed-source Rust core as a git-committed
+    binary blob, not a build-time download — the onepassword-sdk case.** Gotcha 157's
+    claude-agent-sdk fetches its closed-source payload at build time via an installer script,
+    so the platform table is readable from that script's own `case` statement or a release
+    manifest. `onepassword-sdk` 0.4.1 is the same closed-source-vendor shape one layer
+    earlier: there is no Rust source, no `Cargo.toml`, and no fetch step anywhere in
+    `1Password/onepassword-sdk-python` — `setup.py`'s `get_shared_library_data_to_include()`
+    just points `package_data` at `src/onepassword/lib/{x86_64,aarch64}/libop_uniffi_core.{so,dylib}`,
+    ~20 MB binaries checked directly into the repo as ordinary git blobs (confirmed via
+    `gh api .../contents/... --jq '{size,encoding}'` — real file, not an LFS pointer). The
+    `op_uniffi_core` Rust crate that produces them is 1Password's proprietary cross-SDK core
+    (shared with their Go/JS SDKs); it is not published in any public 1Password repo
+    (`gh search repos`/`search/code` for `op_uniffi_core` across the org: zero hits), so
+    gotcha 77's escape hatch — build the vendored dependency from source yourself — does not
+    exist, same as gotcha 157. Only x86_64 and aarch64 directories exist under `lib/`; PyPI's
+    10 published wheels confirm the same two Linux arches
+    (`manylinux_2_32_{x86_64,aarch64}` × cp39-cp313, plus macOS/Windows) with no riscv64 and
+    no `py3-none-any` fallback. `not-feasible`/`parked`, no worktree pushed.
+    - **The sdist is not a working fallback here, unlike claude-agent-sdk's.** `pip install`
+      on an unsupported arch does not degrade to "installs fine, fails at call time"
+      (claude-agent-sdk) — `get_shared_library_data_to_include()` keys off
+      `platform.machine().lower()`, and `riscv64` matches neither its `x86_64/amd64` nor
+      `aarch64/arm64` branches, so `include_path` stays bare `"lib"` and `package_data` names
+      a file (`lib/libop_uniffi_core.so`) that only ever exists under `lib/x86_64/` or
+      `lib/aarch64/`. The `bdist_wheel` override (`root_is_pure = False`,
+      `plat_name = get_platform()...`) still tags the result as a real platform wheel even
+      though the build silently packaged zero bytes of native code — installable, importable
+      up to the point `op_uniffi_core.py`'s `ctypes`/ffi loader tries to open a `.so` that was
+      never included, then a hard failure on every call. Confirm this shape by reading the
+      `package_data` computation next to the actual `lib/<arch>/` directory listing, not by
+      trusting that "there's a sdist" means riscv64 has a source-build path.
+    - **Three independent, cheap confirms, same pattern as gotcha 157's "three tables":** the
+      `lib/` subdirectory listing (`x86_64`, `aarch64`, nothing else) via `gh api
+      .../contents/src/onepassword/lib`; PyPI's per-release wheel filename list
+      (`manylinux_2_32_{x86_64,aarch64}` only, `pip.pypi.org/pypi/<pkg>/json`); and the
+      absence of any `op_uniffi_core`/"core" repo in the vendor's GitHub org via `gh repo
+      list`/`gh search repos`/`gh api search/code`. All three agree with no download needed.
