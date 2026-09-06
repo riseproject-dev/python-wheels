@@ -167,6 +167,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **257** — `CMAKE_POLICY_VERSION_MINIMUM` also works as an environment variable, not just a
 - **267** — A vendored C++ library's own architecture-dispatch macro (not a SIMD gate,
 - **271** — `AVIF_CODEC_AOM_DECODE=OFF` and `-DCONFIG_AV1_HIGHBITDEPTH=0` are a normal
+- **272** — A riscv64 project's own `getauxval(AT_HWCAP)` runtime dispatch can still
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 

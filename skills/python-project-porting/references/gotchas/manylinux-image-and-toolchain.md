@@ -24,6 +24,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **250** — A vendored C library's strict-aliasing UB can miscompile *silently* under a
 - **267** — A vendored C++ library's own architecture-dispatch macro (not a SIMD gate,
 - **271** — `AVIF_CODEC_AOM_DECODE=OFF` and `-DCONFIG_AV1_HIGHBITDEPTH=0` are a normal
+- **272** — A riscv64 project's own `getauxval(AT_HWCAP)` runtime dispatch can still
 
 ---
 
@@ -468,3 +469,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       ...` / `cmake --build ...` pair — pip-installing `ninja` first, since the image has
       none — reproduces the failure verbatim and then confirms the fix actually links
       `libavif.so`, not just that configure succeeds.
+
+272. **A riscv64 project's own `getauxval(AT_HWCAP)` runtime dispatch can still SIGILL,
+    because the "is this instruction safe" probe is itself one of the instructions being
+    probed for (the zlib-ng case; see `build-zlib-ng.yml`).** Unlike gotcha 139's
+    "compiled with RVV, no runtime check at all" failure, zlib-ng's
+    `riscv_check_features()` does gate its RVV-accelerated deflate/inflate paths on
+    `getauxval(AT_HWCAP) & ISA_V_HWCAP` first — a textbook-correct guard. But once that
+    passes, it *also* runs an inline `vsetvli`/`csrr` asm probe to double-check vector
+    length and tail/mask-agnostic mode before trusting the kernel's HWCAP report. On this
+    repo's `ubuntu-24.04-riscv` runner hardware, HWCAP reports V present, and the very
+    first `vsetvli` that probe executes raises `Fatal Python error: Illegal instruction`
+    — crashing every process that imports the extension, before a single deflate/inflate
+    call. (Confirmed at `zng_deflateInit2`, reached at Python import time via
+    `zlib.compressobj()` in the test module.)
+    - **QEMU cannot reproduce or falsify this** — same caveat as gotcha 139's closing
+      line. TCG implements `vsetvli` correctly, so a `docker run --platform linux/riscv64`
+      rehearsal of the *unpatched* wheel passes its entire test suite locally with no
+      SIGILL. A local rehearsal here can only prove a patch doesn't break the (RVV-free)
+      code path, never that it fixes the crash — only a real run on the self-hosted
+      riscv64 runner settles that.
+    - **The fix is the project's own `--without-rvv` configure flag, not a CMake flag,
+      even though the vendored tree ships a CMakeLists.txt** — that CMake path is
+      Windows-only; the Linux build (`setup.py`) drives zlib-ng's autoconf-style
+      `./configure && make` directly and exposes no environment-variable hook for extra
+      configure args, so the flag has to be added by patching `setup.py` itself, guarded
+      on `platform.machine() in ("riscv64", "riscv32")` so other platforms are unaffected.
+    - Distinct from gotcha 139 (no runtime check at all) and gotcha 71 (a *build-time*
+      compiler-flag probe mismatch, not a runtime SIGILL): this is a runtime check that
+      is present and correctly gated on HWCAP, and still unsafe, because confirming an
+      instruction's availability by executing that same instruction assumes the one
+      fact being tested.
