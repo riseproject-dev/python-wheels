@@ -54,8 +54,8 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **214** — Not being Bazel-blocked doesn't mean a build is in scope — count the
 - **230** — "CMake" isn't always a hand-maintained build — a project's own CMakeLists can be a
 - **236** — An "LLVM-based" port is not automatically libclang-scale — check which CMake target
-- **249** — Gotcha 40/187's `Requires-Dist` check can pass clean while a *build-time-only*
 - **246** — A `pyO3`/uniffi "binding" package can vendor a closed-source Rust core as a git-committed
+- **248** — An "inactive"/deprecated package's own PyPI ceiling can be a real ABI wall, not
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

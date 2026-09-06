@@ -25,8 +25,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **186** — A sibling package's riscv64 vendor doesn't transfer if it publishes a different
 - **230** — "CMake" isn't always a hand-maintained build — a project's own CMakeLists can be a
 - **236** — An "LLVM-based" port is not automatically libclang-scale — check which CMake target
-- **249** — Gotcha 40/187's `Requires-Dist` check can pass clean while a *build-time-only*
 - **246** — A `pyO3`/uniffi "binding" package can vendor a closed-source Rust core as a git-committed
+- **248** — An "inactive"/deprecated package's own PyPI ceiling can be a real ABI wall, not
 
 ---
 
@@ -812,32 +812,35 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       absence of any `op_uniffi_core`/"core" repo in the vendor's GitHub org via `gh repo
       list`/`gh search repos`/`gh api search/code`. All three agree with no download needed.
 
-249. **Gotcha 40/187's `Requires-Dist` check can pass clean while a *build-time-only*
-     dependency, invisible to that check, is the real wall — and that dependency can
-     itself need a from-scratch native port (the torch-c-dlpack-ext case).**
-     `torch-c-dlpack-ext`'s only `Requires-Dist` is `torch`, which pypi.riseproject.dev
-     already serves for riscv64 (cp312-cp314t) — the check gotcha 40 prescribes says
-     "go ahead." But the package ships no `.so` in its sdist; its custom PEP 517 backend
-     (`build_backend.py`, `backend-path = ["."]`) only returns a static `Requires-Dist`
-     and instead adds `apache-tvm-ffi>=0.1.1` *dynamically*, from
-     `get_requires_for_build_wheel()`, only when a prebuilt library isn't already
-     sitting in the tree — a requirement that never appears in PyPI JSON, wheel
-     METADATA, or `pyproject.toml`'s `[project.dependencies]`, only in code that runs
-     during resolution. Building requires running
-     `python -m tvm_ffi.utils._build_optional_torch_c_dlpack`, and merely importing
-     that module is enough to sink the port: `tvm_ffi/__init__.py` unconditionally
-     ctypes-loads its own compiled native core (`libinfo.load_lib_ctypes`) at package
-     import time, with no lazy path. `apache-tvm-ffi` has zero riscv64 wheels anywhere
-     (not PyPI, not our registry) and its native core is an independent ~10k-line
-     CMake/C++ project (vendored `3rdparty/dlpack`, optional libbacktrace) that has
-     never targeted riscv64 — porting *it* first would be a whole separate package port,
-     out of scope for whatever package merely happens to build against it.
-     - **A dynamic `get_requires_for_build_wheel()`/`get_requires_for_build_sdist()` in a
-       custom `build-backend` is exactly the kind of requirement gotcha 40's static
-       `info.requires_dist` read cannot see.** Read `build_backend.py` (or equivalent)
-       before trusting a clean `Requires-Dist` — a package whose only declared runtime
-       dependency is already portable can still be built by a tool that is not.
-     - **A build tool failing to *import* is a harder stop than one failing to *compile*
-       against your target's headers** — no amount of patching the package under port
-       helps if the tool it shells out to 500-errors before running a single build step
-       because its own native core has no riscv64 artifact to load.
+248. **An "inactive"/deprecated package's own PyPI ceiling can be a real ABI wall, not
+    stale trove classifiers — verify by building, don't infer from staleness alone (the
+    typed-ast case).** `typed-ast` carries `Development Status :: 7 - Inactive` and tells
+    installers "no longer maintained... use the standard library `ast` module instead" for
+    Python 3.8+; its last release (1.5.5, Dec 2023) ships wheels only for
+    cp36-cp311 — never cp312+. That alone reads like gotcha 41's "staleness" caution,
+    not proof of a hard wall, so it was checked by actually building: `pip download
+    typed-ast==1.5.5 --no-binary :all:` then `pip wheel <sdist> --no-deps
+    --no-build-isolation` against cp312/cp313/cp314 locally (no container needed —
+    this is a pure C-extension compile, arch-independent). It **built and imported
+    cleanly, unmodified, on cp312** — the classifiers understate what actually compiles.
+    But cp313 and cp314 both hard-fail: `ast27/Include/compile.h:12: error: unknown
+    type name 'PyFutureFeatures'`. CPython 3.13 renamed that public struct to
+    `_PyFutureFeatures` and moved it from `cpython/compile.h` into
+    `internal/pycore_symtable.h` (confirmed by grepping both interpreters' own
+    installed headers) — a permanent upstream CPython internal-API removal, not a
+    local toolchain quirk. Since typed-ast vendors its own complete tokenizer/parser/ast
+    tree (it doesn't touch CPython's compiled-AST internals at all, just the stable
+    object C-API) it tracks CPython's headers further than the classifiers admit, but
+    still not past 3.12 — and this repo's default interpreter matrix is
+    cp312/cp313/cp314/cp314t (gotcha in workflow-anatomy.md), so at most 1 of 4 target
+    ABIs would build. `parked`, no worktree pushed (one was opened per this task's
+    instructions, then removed after the verdict — nothing to commit).
+    - **A vendored-parser fork can outlive its stated Python ceiling by exactly the
+      versions where the CPython C-API it happens to touch stayed stable** — don't
+      read "only ships wheels through cp3N" as "won't compile past cp3N" without a
+      build attempt; the two can diverge in either direction.
+    - **A local `pip wheel --no-build-isolation` against several interpreter
+      minors (via `uv python install` or equivalent, no container) is the cheapest way
+      to find the exact minor where a C extension's assumptions about CPython's public
+      headers break**, and it's portable across host arches — the failure is a header
+      compile error, unrelated to riscv64 itself.
