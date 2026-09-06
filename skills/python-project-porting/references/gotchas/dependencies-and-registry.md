@@ -26,6 +26,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
   *optional* component another test dependency imports unconditionally.
 - **244** — `uv pip install` only honors `UV_*` env vars, never the `PIP_*` names — a step
   written with `PIP_EXTRA_INDEX_URL`/`PIP_ONLY_BINARY` silently no-ops and source-builds.
+- **291** — A `CIBW_TEST_REQUIRES` package with no riscv64 wheel of its own can still need
+  `PIP_ONLY_BINARY` for packages you never named, because *its* runtime deps are the ones
+  that break (the moyopy/pymatgen case).
 
 ---
 
@@ -517,3 +520,35 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       install`, as build-daft.yml's and build-polars-runtime.yml's "Test wheel" steps do)
       and reuses the `PIP_*` names out of habit from the cibuildwheel case elsewhere in
       the same file.
+
+291. **A `CIBW_TEST_REQUIRES` package with no riscv64 wheel of its own can still need
+    `PIP_ONLY_BINARY` for packages you never named, because *its* runtime deps are the ones
+    that break (the moyopy/pymatgen case).** Gotchas 67/84 cover the mechanism —
+    `PIP_EXTRA_INDEX_URL` alone lets pip pick the highest version across *both* indexes, and
+    if PyPI's latest release of a heavy scientific package is newer than what our registry
+    hosts, pip takes PyPI's sdist-only release over our older riscv64 wheel — but both frame
+    it as a *build-time* dependency capping the matrix per interpreter. moyopy's
+    `CIBW_TEST_REQUIRES: pytest numpy pymatgen ase>=3.23` hits the same mechanism from a
+    different angle: pymatgen itself has no riscv64 wheel anywhere (confirmed sdist-only,
+    correctly so — gotcha 125 says that alone isn't a blocker) and installs fine from
+    source, but its own `install_requires` pulls in scipy, and transitively numpy and
+    pandas, plus orjson from a sibling dependency (bibtexparser) — none of which were named
+    in `CIBW_TEST_REQUIRES` at all. Our registry has riscv64 wheels for all four across
+    every interpreter this port builds, but with only `PIP_EXTRA_INDEX_URL` set, pip
+    resolved PyPI's newer `scipy==1.15.3`, `numpy==2.2.6`, and `pandas==2.3.3` sdists
+    instead (each one higher than our registry's ceiling for at least one interpreter) and
+    tried to compile them one after another — numpy took ~16 minutes and happened to
+    succeed, but scipy's meson build failed outright with `Dependency "OpenBLAS" not found
+    (tried pkg-config and cmake)`, since the manylinux image carries no OpenBLAS.
+    - **The failing package's name is not in your `CIBW_TEST_REQUIRES` line — read the pip
+      log for `Collecting <dep> (from <other-dep>)` to find what's actually being resolved
+      before assuming the listed package is the problem.** The traceback here named scipy;
+      the workflow only lists pymatgen.
+    - **List every transitive heavy scientific dependency in `PIP_ONLY_BINARY`, not just the
+      one you added to test-requires.** `PIP_ONLY_BINARY=numpy,scipy,pandas,orjson` (in
+      `CIBW_ENVIRONMENT_LINUX`, both phases per gotcha 12 — there is no build-time
+      dependency here to starve) makes pip pick the highest version that has a riscv64
+      wheel per package, which is our registry's, for every interpreter in the matrix.
+      Find the full set by watching which `Collecting <dep>` lines download a `.tar.gz`
+      instead of a `.whl` in a dry run, then check each one against the registry
+      (gotcha 30) before naming it.
