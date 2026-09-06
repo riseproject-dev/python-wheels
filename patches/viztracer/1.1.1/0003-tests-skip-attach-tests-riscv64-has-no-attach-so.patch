@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 6 Sep 2026 00:00:00 +0000
+Subject: [PATCH] tests: skip attach tests riscv64 has no attach .so for
+
+Upstream-Status: Inappropriate [riscv64 has no prebuilt attach_riscv64.so; there is no source to build one from]
+
+viztracer ships prebuilt cross-process "attach to a running interpreter"
+shared libraries under src/viztracer/attach_process/ (attach_linux_amd64.so,
+attach_linux_x86.so, attach_x86_64.dylib, ...) vendored from a third-party
+project (see attach_process/LICENSE); there is no C/C++ source for them in
+this repository and no build step compiles them - setup.py's package_data
+only lists whichever prebuilt file matches platform.machine(). There is no
+riscv64 entry at all, so add_code_to_python_process.py's
+run_python_code_linux() always raises "Could not find .so for attach to
+process." on this architecture. This is a real, upstream, no-source-available
+gap, not something a build/test patch here can fix.
+
+tests/test_remote.py's own `attach_unavailable` skip guard only excludes
+win32 and some macOS/Python combinations, so it never anticipated "Linux
+but no attach binary for this CPU architecture" and these tests run and
+fail on riscv64:
+
+  FAIL: test_basic (tests.test_remote.TestAttachSanity.test_basic)
+  FAIL: test_attach (tests.test_remote.TestRemote.test_attach)
+  FAIL: test_attach_installed (tests.test_remote.TestRemote.test_attach_installed)
+  FAIL: test_uninstall (tests.test_remote.TestRemote.test_uninstall)
+
+test_remote.py's own test_install and test_attach_script are unaffected -
+both drive viztracer's in-process attach API (SIGUSR-based install/
+viztracer.attach.start_attach), not the cross-process .so injection path.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ tests/test_remote.py | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/tests/test_remote.py b/tests/test_remote.py
+index bbeb27c..f78db47 100644
+--- a/tests/test_remote.py
++++ b/tests/test_remote.py
+@@ -39,6 +39,7 @@ class TestRemote(CmdlineTmpl):
+         self.assertFileExists("remote.json")
+         os.remove("remote.json")
+
++    @unittest.skip("riscv64: no attach_riscv64.so shipped, see build-viztracer.yml")
+     def test_attach_installed(self):
+         file_to_attach = textwrap.dedent("""
+             from viztracer import VizTracer
+@@ -57,6 +58,7 @@ class TestRemote(CmdlineTmpl):
+         self.attach_check(file_to_attach, attach_cmd, output_file)
+         self.attach_check(file_to_attach, attach_installed_cmd, output_file, use_installed=True)
+
++    @unittest.skip("riscv64: no attach_riscv64.so shipped, see build-viztracer.yml")
+     def test_attach(self):
+         file_to_attach = textwrap.dedent("""
+             import time
+@@ -142,6 +144,7 @@ class TestRemote(CmdlineTmpl):
+         p_attach_invalid.wait()
+         self.assertTrue(p_attach_invalid.returncode != 0)
+
++    @unittest.skip("riscv64: no attach_riscv64.so shipped, see build-viztracer.yml")
+     def test_uninstall(self):
+         file_to_attach = textwrap.dedent("""
+             import time
+@@ -228,6 +231,7 @@ class TestRemoteFail(CmdlineTmpl):
+
+ @unittest.skipIf(attach_unavailable, "Does not support this platform")
+ class TestAttachSanity(CmdlineTmpl):
++    @unittest.skip("riscv64: no attach_riscv64.so shipped, see build-viztracer.yml")
+     def test_basic(self):
+         file_to_attach = textwrap.dedent("""
+             import time
