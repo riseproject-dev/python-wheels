@@ -1,0 +1,92 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/amueller/word_cloud/blob/1.9.6/.github/workflows/build_and_publish.yml
+name: Build wordcloud wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'wordcloud version to build (git tag, e.g. 1.9.6)'
+        required: true
+        default: '1.9.6'
+  pull_request:
+    paths:
+      - '.github/workflows/build-wordcloud.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.9.6' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.9.6 there.
+  WORDCLOUD_VERSION: ${{ inputs.version || '1.9.6' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build wordcloud ${{ inputs.version || '1.9.6' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # numpy/pillow/matplotlib (build+runtime deps) top out at cp313 on our
+        # registry, and matplotlib ships no cp39 riscv64 wheel (gotchas 67/84).
+        python:
+          - "cp310"
+          - "cp311"
+          - "cp312"
+          - "cp313"
+
+    steps:
+      - name: Checkout wordcloud ${{ env.WORDCLOUD_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: amueller/word_cloud
+          ref: ${{ env.WORDCLOUD_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy is a build and runtime requirement; pillow/matplotlib (and its
+          # contourpy/kiwisolver deps) are runtime-only. Only our registry has
+          # riscv64 wheels for any of them, so only-binary keeps pip from
+          # resolving a newer PyPI sdist-only release and compiling it instead.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,pillow,matplotlib,contourpy,kiwisolver
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_WORDCLOUD=${{ env.WORDCLOUD_VERSION }}
+          CIBW_TEST_REQUIRES: pytest
+          # setup.cfg's [tool:pytest] addopts is coverage-only (--cov ...); drop it
+          # rather than pull in pytest-cov (gotcha 176).
+          CIBW_TEST_COMMAND: pytest {project}/test -o addopts=
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: wordcloud-${{ env.WORDCLOUD_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish wordcloud ${{ inputs.version || '1.9.6' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: wordcloud-${{ inputs.version || '1.9.6' }}-*-manylinux_riscv64
