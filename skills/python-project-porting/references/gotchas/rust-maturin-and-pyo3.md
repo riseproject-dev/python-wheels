@@ -26,6 +26,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
   hijack a riscv64 build built from the git checkout, not the sdist.
 - **239** — A maturin project inside a Cargo workspace can have its `pyproject.toml` at a
   different path in the git checkout than in the PyPI sdist.
+- **259** — A maturin `bindings = "bin"` project can declare two `[[bin]]` targets where
+  the second execs the first over `$PATH`, not a sibling path.
 
 ---
 
@@ -544,3 +546,28 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       (for `[tool.pytest.ini_options]`) is unaffected by which `package-dir` is correct —
       only the cibuildwheel `package-dir` value and the `cd bindings/python` a
       `CIBW_TEST_COMMAND` needs before running pytest depend on it.
+
+259. **A maturin `bindings = "bin"` project can declare two `[[bin]]` targets where the
+    second execs the first over `$PATH`, not a sibling path — testing it standalone gives
+    a misleading `No such file or directory` (the ast-grep-cli case).** ast-grep-cli's
+    `crates/cli/Cargo.toml` builds both `ast-grep` and `sg`; maturin packages both into
+    `<dist>.data/scripts/`, same as gotcha 117 describes for one binary. But `sg`
+    (`crates/cli/src/bin/alias.rs`) is a thin Unix launcher: its `main()` prints a
+    deprecation notice, then `Command::new("ast-grep").spawn()`s — resolved through the
+    process's `$PATH`, never through `std::env::current_exe()`'s own directory. Running
+    the extracted binary directly (`target/release/sg --version`, or unzipping the wheel
+    and invoking the script in isolation) fails with a plain `No such file or directory`
+    that reads like a broken build, not a test-ordering issue. It works as soon as both
+    console scripts are installed together (`pip install`/`uv pip install` put them in the
+    same venv `bin` dir, already on `PATH`), so write the CI test step against the
+    installed wheel, never against a bare extracted binary. `grep -n 'Command::new'
+    crates/cli/src/bin/*.rs` confirms the relationship before assuming a second `[[bin]]`
+    is a second self-contained executable.
+    - **Also settles which maturin invocation shape a project needs.** ast-grep-cli's
+      `pyproject.toml` lives at the workspace **root** with `[tool.maturin] manifest-path =
+      "crates/cli/Cargo.toml"`, so `maturin build` from the checkout root needs no
+      `--manifest-path` argument — maturin reads it from the pyproject table. Contrast
+      zizmor (gotcha 117's precedent), whose `pyproject.toml` is colocated with the crate
+      under `crates/zizmor/`, so the *workflow* passes `--manifest-path
+      crates/zizmor/Cargo.toml` explicitly. `grep -A3 '\[tool.maturin\]' pyproject.toml`
+      settles which shape a new port is in before copying either workflow verbatim.

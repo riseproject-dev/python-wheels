@@ -120,6 +120,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **237** — A pyo3 `#[pymodule_init]` can eagerly `import` a platform-specific companion
 - **238** — A repo-root `rust-toolchain.toml` pinning nightly for lint-only use can still
 - **239** — A maturin project inside a Cargo workspace can have its `pyproject.toml` at a
+- **259** — A maturin `bindings = "bin"` project can declare two `[[bin]]` targets where
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
