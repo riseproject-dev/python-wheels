@@ -30,6 +30,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/build-rerun-sdk.yml'
+      - 'patches/rerun-sdk/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.version || '0.37.1' }}-${{ github.head_ref || github.run_id }}
@@ -70,6 +71,29 @@ jobs:
           repository: rerun-io/rerun
           ref: ${{ env.RERUN_SDK_VERSION }}
           persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # lance-core 9.0.0's SIMD-tier detection (a build-dependency of
+      # re_datafusion via lance) has cfg arms for aarch64/x86_64/loongarch64
+      # with no catch-all, so the closure that selects a tier evaluates to
+      # `()` instead of `SimdSupport` on riscv64 (CLAUDE.md gotcha 287).
+      # There is no compatible bugfix release to `cargo update` to, so a
+      # riscv64-fixed copy is vendored here (the crates.io tarball, already
+      # free of the workspace-inherited fields the git checkout carries) and
+      # wired in via `[patch.crates-io]`.
+      - name: Vendor a riscv64-fixed lance-core
+        run: |
+          curl -fsSL -o lance-core.tar.gz https://crates.io/api/v1/crates/lance-core/9.0.0/download
+          mkdir lance-core-9.0.0-riscv64
+          tar xzf lance-core.tar.gz -C lance-core-9.0.0-riscv64 --strip-components=1
+          rm lance-core.tar.gz
+          patch -p1 -d lance-core-9.0.0-riscv64 < python-wheels/patches/rerun-sdk/${{ env.RERUN_SDK_VERSION }}/0001-lance-core-riscv64-simd-fallback.patch
+          git apply python-wheels/patches/rerun-sdk/${{ env.RERUN_SDK_VERSION }}/0002-cargo-patch-lance-core-for-riscv64.patch
 
       # This workspace links ~760 crates (datafusion, lance, tonic, hdf5-pure,
       # ...) concurrently; same OOM guard build-deltalake.yml/
