@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/SamuraiT/mecab-python3/blob/v1.0.12/.github/workflows/manylinux.yml
+name: Build mecab-python3 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'mecab-python3 version to build (git tag without leading v, e.g. 1.0.12)'
+        required: true
+        default: '1.0.12'
+  pull_request:
+    paths:
+      - '.github/workflows/build-mecab-python3.yml'
+      - 'patches/mecab-python3/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.0.12' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.0.12 there.
+  MECAB_PYTHON3_VERSION: ${{ inputs.version || '1.0.12' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build mecab-python3 ${{ inputs.version || '1.0.12' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Upstream builds no cp314t Linux wheel yet (only macOS); the extension
+        # declares no free-threading support either way, so cp314t just re-enables
+        # the GIL on import (CLAUDE.md gotcha 127) rather than failing.
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout mecab-python3 ${{ env.MECAB_PYTHON3_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: SamuraiT/mecab-python3
+          ref: v${{ env.MECAB_PYTHON3_VERSION }}
+          fetch-depth: 0  # setuptools_scm derives the version from the tag
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch mecab-python3 source
+        run: git apply python-wheels/patches/mecab-python3/${{ env.MECAB_PYTHON3_VERSION }}/*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # mecab-python3's sdist carries no MeCab C++ sources -- setup.py always
+          # links a system libmecab via mecab-config. Build it from the canonical,
+          # actively-maintained taku910/mecab (their own sdist job uses this repo
+          # too; the manylinux wheel job's polm/mecab fork hasn't been pushed since
+          # 2021). Its config.guess/config.sub predate riscv64 (and even aarch64,
+          # per upstream's own aarch64 workaround), so swap in automake's copy.
+          CIBW_BEFORE_ALL_LINUX: |
+            set -eux
+            git clone --depth=1 https://github.com/taku910/mecab.git /tmp/mecab
+            cd /tmp/mecab/mecab
+            cp /usr/share/automake-*/config.guess /usr/share/automake-*/config.sub .
+            ./configure --enable-utf8-only
+            make -j"$(nproc)"
+            make install
+            ldconfig
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Mirrors upstream's test-manylinux.yml: install unidic-lite (a small
+          # pure-Python dictionary package) so the suite exercises real tokenization
+          # instead of skipping on "No dictionaries found".
+          CIBW_TEST_REQUIRES: pytest unidic-lite
+          CIBW_TEST_SOURCES: test
+          CIBW_TEST_COMMAND: pytest test
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mecab-python3-${{ env.MECAB_PYTHON3_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish mecab-python3 ${{ inputs.version || '1.0.12' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: mecab-python3-${{ inputs.version || '1.0.12' }}-*-manylinux_riscv64
