@@ -107,6 +107,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **247** — A folded `>-` scalar's `python -c "` on its own line puts a leading space
 - **251** — When `package-dir` is a `.tar.gz`, cibuildwheel extracts it to a temp dir and
 - **262** — Gotcha 201's vendoring step is only needed when the sibling sources are
+- **270** — Gotcha 134's "leaked `Py`-prefixed symbol" failure has a real fix, not just
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 

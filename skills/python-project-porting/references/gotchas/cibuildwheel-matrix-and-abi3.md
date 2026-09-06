@@ -30,6 +30,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **217** — Upstream's own `repair-wheel-command` commonly re-runs abi3audit itself via
 - **251** — When `package-dir` is a `.tar.gz`, cibuildwheel extracts it to a temp dir and
 - **262** — Gotcha 201's vendoring step is only needed when the sibling sources are
+- **270** — Gotcha 134's "leaked `Py`-prefixed symbol" failure has a real fix, not just
 
 ---
 
@@ -554,3 +555,32 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
      case you're in: `git status --ignored` (or just `ls`) the sibling path the build
      script reaches for.** Present and tracked → nothing to do; absent or gitignored
      → gotcha 201's pre-build `run:` step is what's missing.
+
+270. **Gotcha 134's "leaked `Py`-prefixed symbol" failure has a real fix, not just
+     `CIBW_AUDIT_COMMAND: ''`, when the flagged names are internal helpers used only
+     within their own translation unit (the libsass case; see `build-libsass.yml`).**
+     libsass-python's `_sass.c` defines `PySass_make_enum_dict()` and
+     `PySass_init_module()` at file scope with no `static` keyword, so they get
+     external linkage and land in the `.abi3.so`'s ELF `.dynsym` with `GLOBAL`
+     binding; abi3audit's by-name check (gotcha 134) flags both as `not ABI3` because
+     neither is on the stable-ABI symbol list, even though only `PyInit__sass` is
+     ever meant to be an entry point. Unlike awscrt's 17 API-shaped names woven
+     through the project (where disabling the audit was the honest call), both
+     libsass symbols are called exclusively from the same file that defines them
+     (`grep -rn PySass_make_enum_dict\|PySass_init_module` across the checkout turns
+     up only `_sass.c`) — textbook internal linkage that upstream simply never
+     declared. A one-line patch (`PyObject* PySass_make_enum_dict()` →
+     `static PyObject* PySass_make_enum_dict()`, same for `PySass_init_module`)
+     removes both from `.dynsym` entirely: `nm -D _sass.abi3.so | grep PySass` finds
+     them before the patch and finds nothing after, and `abi3audit --strict` goes
+     from 2 violations to 0 on the same build. **Before reaching for `static`, confirm
+     every call site is in-file** — a symbol referenced from another translation unit
+     in the same extension needs `__attribute__((visibility("hidden")))` or a linker
+     version script instead, since `static` there would break the build; a symbol
+     genuinely needed across many files (awscrt's shape) is when disabling the audit
+     is the more honest fix. Verifying the fix does not need riscv64 or even the
+     manylinux image: an ordinary Linux container with `build-essential` reproduces
+     the identical ELF-level symptom (gcc plain-C linkage, the actual path this
+     project's `setup.py` takes on Linux — the Darwin/BSD branch of the same file
+     forces the C++ compiler and mangles both names, which hides the leak entirely
+     and makes macOS a false-negative host for this specific check).
