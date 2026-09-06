@@ -1,0 +1,91 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build at this tag:
+#   https://github.com/capstone-engine/capstone/blob/5.0.9/.github/workflows/python-publish-release.yml
+name: Build capstone wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'capstone version/tag to build (e.g. 5.0.9)'
+        required: true
+        default: '5.0.9'
+  pull_request:
+    paths:
+      - '.github/workflows/build-capstone.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '5.0.9' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  CAPSTONE_VERSION: ${{ inputs.version || '5.0.9' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build capstone ${{ inputs.version || '5.0.9' }} py3-none-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        libc: [manylinux, musllinux]
+
+    steps:
+      - name: Checkout capstone ${{ env.CAPSTONE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: capstone-engine/capstone
+          ref: ${{ env.CAPSTONE_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: bindings/python
+          output-dir: wheelhouse/
+          # setup.py ships no ext_modules (the C library is loaded via ctypes), so
+          # setuptools tags the wheel py3-none and one build serves every interpreter.
+          only: cp312-${{ matrix.libc }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_SOURCES: bindings/python/tests
+          CIBW_TEST_COMMAND: python bindings/python/tests/test_all.py
+
+      - name: Check the wheel carries libcapstone
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith("capstone/lib/libcapstone.so") for n in names), whl
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: capstone-${{ env.CAPSTONE_VERSION }}-py3-none-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish capstone ${{ inputs.version || '5.0.9' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: capstone-${{ inputs.version || '5.0.9' }}-*riscv64
