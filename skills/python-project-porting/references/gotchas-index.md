@@ -141,6 +141,11 @@ The porting gotchas (294 of them) live in [`references/gotchas/`](gotchas/), spl
 - **287** — A repo-root `.cargo/config.toml` can unconditionally point `PYO3_CONFIG_FILE`
   at a file only a task-runner's activation hook generates, breaking every cargo
   invocation outside that task runner.
+- **300** — A crates.io dependency with no riscv64-compatible release can be patched via
+  `[patch.crates-io]` at a vendored, fixed copy — but a git checkout of its monorepo
+  nested inside the referencing workspace's own directory tree confuses cargo's
+  workspace-boundary detection; the crate's own crates.io tarball (already flattened,
+  no `[workspace]`) sidesteps it.
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 

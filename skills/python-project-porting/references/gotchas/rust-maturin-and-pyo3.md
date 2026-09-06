@@ -35,6 +35,11 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
 - **287** — A repo-root `.cargo/config.toml` can unconditionally point `PYO3_CONFIG_FILE`
   at a file only a task-runner's activation hook generates, breaking every cargo
   invocation outside that task runner.
+- **300** — A crates.io dependency with no riscv64-compatible release can be patched via
+  `[patch.crates-io]` at a vendored, fixed copy — but a git checkout of its monorepo
+  nested inside the referencing workspace's own directory tree confuses cargo's
+  workspace-boundary detection; the crate's own crates.io tarball (already flattened,
+  no `[workspace]`) sidesteps it.
 
 ---
 
@@ -676,3 +681,73 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       port's environment — that one picks a toolchain, this one aborts the build outright
       with a missing-file error, and the fix is authoring the missing file, not overriding
       an env var.
+
+300. **A crates.io dependency with no riscv64-compatible release can be patched via
+    `[patch.crates-io]` at a vendored, fixed copy — but a git checkout of its monorepo
+    nested inside the referencing workspace's own directory tree confuses cargo's
+    workspace-boundary detection; the crate's own crates.io tarball (already flattened, no
+    `[workspace]`) sidesteps it (the rerun-sdk/lance-core case; see
+    `build-rerun-sdk.yml`).** `lance-core` 9.0.0's SIMD-tier-detection closure has
+    `#[cfg(target_arch = "...")]` arms for aarch64/x86_64/loongarch64 with no catch-all
+    (gotcha 78's second signature), so it evaluates to `()` instead of the declared return
+    type on riscv64 — `error[E0308]: mismatched types`. No later 9.0.x release fixes it
+    (checked 9.0.1), and forking the crate publicly is off the table (this session's
+    policy against opening external repos), so the fix is a `[patch.crates-io]` pointing
+    at a locally vendored, riscv64-fixed copy, materialized by the workflow itself
+    (gotcha 179's pattern, extended from git dependencies to registry ones):
+    ```yaml
+    - run: |
+        curl -fsSL -o lance-core.tar.gz https://crates.io/api/v1/crates/lance-core/9.0.0/download
+        mkdir lance-core-9.0.0-riscv64
+        tar xzf lance-core.tar.gz -C lance-core-9.0.0-riscv64 --strip-components=1
+        patch -p1 -d lance-core-9.0.0-riscv64 < python-wheels/patches/<pkg>/<version>/0001-....patch
+        git apply python-wheels/patches/<pkg>/<version>/0002-cargo-patch-....patch  # adds [patch.crates-io]
+    ```
+    - **The first attempt vendored the crate from its real git monorepo instead
+      (`git clone lancedb/lance`, sparse-checkout the one member crate) and hit a wall
+      gotcha 179 doesn't warn about**: `cargo metadata --locked` from the *referencing*
+      workspace's root failed with `error inheriting 'keywords' from workspace root
+      manifest's 'workspace.package.keywords'` / `'workspace.package.keywords' was not
+      defined` — even though the vendored crate's own monorepo root plainly defines
+      `keywords` in `[workspace.package]`, and running `cargo metadata` *directly inside*
+      that vendored checkout resolves it correctly. The vendored monorepo's `[workspace]`
+      is a real one (its own `members` list includes the crate), but placing it as a
+      subdirectory *inside* the outer (referencing) workspace's own directory tree makes
+      cargo attribute the inner package's workspace-inherited fields to the **outer**
+      workspace's `[workspace.package]` instead of the inner one's — cargo does not
+      genuinely nest workspaces, and a `[workspace]` table found only by directory descent
+      from a `[patch]` path is not treated as authoritative the way it is for a direct
+      invocation. This reproduced identically across two cargo versions (1.96.0, 1.97.0),
+      so it is not a version-specific bug to wait out.
+    - **The fix is to avoid the nested `[workspace]` entirely, not to route around it.**
+      A crate's crates.io-published `Cargo.toml` is not the same file as the one in its
+      git repo: `cargo package`/`cargo publish` "normalizes" it, rewriting every
+      `field.workspace = true` (both `[package]` fields and every dependency) to a literal
+      value and every intra-monorepo path dependency to a pinned registry version (the
+      tarball's own header comment says as much: "Cargo will automatically 'normalize'
+      Cargo.toml files ... and also rewrite path dependencies to registry dependencies").
+      The result has no `[workspace]` table anywhere, so vendoring the crate from its
+      **crates.io tarball** instead of its git repo sidesteps the nested-workspace
+      confusion completely — `cargo metadata --locked` from the outer workspace resolves
+      it immediately once the source is the tarball's flattened manifest, no `exclude`
+      entry or workspace restructuring needed on either side.
+    - **Diff the tarball against the git tag first to keep the patch minimal and
+      git-`apply`-able elsewhere.** `pip download`'s `--no-binary` equivalent for crates is
+      `curl .../api/v1/crates/<name>/<version>/download | tar xz`; diffing that against a
+      `git clone --filter=blob:none` of the same tag at the one file that matters
+      (`diff lance-core-tarball/src/utils/cpu.rs lance-core-git/rust/lance-core/src/utils/cpu.rs`)
+      showed the two are byte-identical apart from the normalized manifest, so the same
+      unified diff applies cleanly to either source — generate it against the git tag
+      (cleaner paths, matches how the crate's own repo is laid out for anyone checking the
+      patch against upstream) and apply it to the tarball extraction with `patch -p1`
+      (there is no `.git` in a tarball extraction for `git apply` to use).
+    - **Regenerate the `Cargo.lock` delta by hand, not with `cargo update`.** Running
+      `cargo update -p <crate> --precise <version>` after adding the `[patch]` re-resolves
+      the *entire* graph against the current registry index snapshot, not just the patched
+      package — on this workspace it silently downgraded a dozen unrelated crates
+      (`windows-sys`, `itertools`, `unicode-width`, ...) to whatever the index considered
+      minimal-but-compatible that day, none of which upstream ever pinned. The actual delta
+      a `[patch]` needs is mechanical and tiny: delete the `source =` and `checksum =`
+      lines from the patched package's `[[package]]` block (a path dependency has neither),
+      leave every other line untouched, and confirm with `cargo metadata --locked` (exit 0,
+      no re-resolution) rather than trusting the edit by eye.
