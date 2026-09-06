@@ -1,0 +1,96 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build at this tag:
+#   https://github.com/apache/arrow-adbc/blob/apache-arrow-adbc-24/.github/workflows/packaging.yml
+name: Build adbc-driver-manager wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'adbc-driver-manager version to build (PyPI version, e.g. 1.12.0)'
+        required: true
+        default: '1.12.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-adbc-driver-manager.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.12.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.12.0 there.
+  ADBC_VERSION: ${{ inputs.version || '1.12.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build adbc-driver-manager ${{ inputs.version || '1.12.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      # The monorepo has no tag that literally embeds the PyPI version (releases are
+      # tagged with a sequential counter, e.g. this version is "apache-arrow-adbc-24"),
+      # but the Go module release tag (go/adbc/v<version>) always points at the same
+      # commit and does embed it, so it doubles as a version->ref lookup.
+      - name: Checkout apache/arrow-adbc v${{ env.ADBC_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: apache/arrow-adbc
+          ref: go/adbc/v${{ env.ADBC_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python/adbc_driver_manager
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # pandas/pyarrow riscv64 wheels only exist on our own registry.
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_EXTRAS: dbapi
+          CIBW_TEST_REQUIRES: pytest>=9
+          CIBW_TEST_SOURCES: python/adbc_driver_manager/tests python/adbc_driver_manager/pyproject.toml
+          # Mirrors upstream's own python_util.sh test_packages(): the driver_manager
+          # wheel ships no actual drivers, so its "sqlite"-marked tests (which dynamically
+          # load adbc_driver_sqlite) can't run here; "duckdb" isn't used by this
+          # component's own tests but upstream excludes it too, so match that.
+          CIBW_TEST_COMMAND: >-
+            python -m pytest python/adbc_driver_manager/tests
+            -k "not sqlite and not duckdb"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: adbc-driver-manager-${{ env.ADBC_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish adbc-driver-manager ${{ inputs.version || '1.12.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: adbc-driver-manager-${{ inputs.version || '1.12.0' }}-*-manylinux_riscv64
