@@ -23,6 +23,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **205** — A follow-up commit that fixes a broken `Upstream-Status:` line does not clear
 - **282** — A matplotlib `image_comparison` test failing only on riscv64 is a font-rendering
 - **283** — A `cp314t`-only `PicklingError` from a `multiprocessing.Process(target=<local
+- **286** — A vendored-ARPACK eigensolver test failing only on musllinux, not manylinux, can
 
 ---
 
@@ -510,3 +511,32 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       test that already requests `get_context("fork")` explicitly (unaffected by the
       default) or whose target is a module-level function/bound method (pickles fine
       under any start method).
+
+286. **A vendored-ARPACK eigensolver test failing only on musllinux, not manylinux, can
+    be upstream's own known random-starting-vector convergence flake, not a riscv64 bug
+    (the igraph case).** `test_atlas.py::GraphAtlasTests::testHubScore` failed on
+    `cp39-abi3-musllinux_riscv64` only (manylinux, identical tree, passed) with
+    `igraph._igraph.InternalError: Error at src/linalg/arpack.c:1025: No shifts could be
+    applied during a cycle of the Implicitly restarted Arnoldi iteration` for one specific
+    atlas graph. igraph's own maintainers have already triaged this exact test/error on
+    other platforms: `igraph/python-igraph#379` is the identical `testHubScore` ARPACK
+    error on Nix/Python 3.9 (x86_64, glibc), and the maintainer's own diagnosis is that
+    ARPACK seeds hub/authority-score calculations with a small random starting vector it
+    gives callers no way to control, so convergence failure is an inherent, non-deterministic
+    property of the algorithm that "depends heavily on whether you are using an external or
+    a vendored ARPACK library" — not a platform bug; `igraph/python-igraph#728` reports the
+    same error recurring on Debian/amd64, and `igraph/igraph#1469` shows the same ARPACK
+    convergence class (`igraph_eigenvector_centrality`) failing on a *third* non-x86
+    architecture (mips64el) via Debian's build. None of the three reports name musl or
+    Alpine specifically, but together they establish the failure mode is a libc/arch-
+    independent numerical fragility in the vendored solver, not something to chase as a
+    riscv64 regression.
+    - **Confirm musllinux-only, not riscv64-wide**, before treating it as acceptable to
+      deselect: read both legs' logs (`gh api .../actions/jobs/<id>/logs`) and check the
+      identical tree passes on manylinux — a failure on *both* libcs would instead point at
+      something riscv64-specific in codegen or in the vendored ARPACK/BLAS build, which is
+      not this case.
+    - **Fix with a per-libc `--deselect` in `CIBW_TEST_COMMAND`**, gated on
+      `matrix.libc == 'musllinux'` the same way the extras selector already is, not a
+      blanket deselect that would also drop manylinux's coverage of the same test (it
+      passes there and should stay tested).
