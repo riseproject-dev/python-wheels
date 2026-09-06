@@ -12,18 +12,23 @@ sending SIGTERM (tests/cmdline_tmpl.py's `template()`, string-`wait`
 branch): a plain `while True: line = p.stdout.readline()` loop with no
 timeout at all.
 
-On riscv64 this readline loop never returns. get_system_ts()/get_system_ns()
-in src/viztracer/modules/quicktime.h use __rdtsc() on x86 (a single
+On riscv64 this readline loop never returns: this exact test hung
+identically across all four interpreters (cp312/cp313/cp314/cp314t) until
+GitHub's own 60-minute job timeout killed it, producing zero output after
+"test_trace_self start".
+
+A likely contributing mechanism: get_system_ts()/get_system_ns() in
+src/viztracer/modules/quicktime.h use __rdtsc() on x86 (a single
 non-syscall instruction) but fall back to clock_gettime(CLOCK_MONOTONIC)
-everywhere else, including riscv64. --trace_self hooks every single
-Python-level call in the interpreter's own startup (import machinery,
-argparse, socketserver, json, ...) and calls get_ts() on each one, so the
-per-call cost of a clock_gettime() syscall -- far higher on riscv64 than
-the vDSO-accelerated path x86/aarch64 CI runners get -- compounds across
-the whole self-traced startup. The child process is still making forward
-progress, just far too slowly to ever reach the "Press Ctrl+C to quit"
-print within any practical CI timeout, so the test's unbounded wait hangs
-rather than fails.
+everywhere else, including riscv64, and --trace_self hooks every
+Python-level call. A bounded self-trace smoke test (`viztracer --trace_self
+-c "print(1)"`) still completes in ~1s on this runner, so self-tracing
+alone is not universally catastrophic here -- something specific to
+self-tracing `vizviewer --server_only`'s heavier import graph (argparse,
+socketserver, http.server, ...) and/or its long-running server loop is
+what never reaches the "Press Ctrl+C to quit" print. Regardless of the
+exact mechanism, the test's own wait has no timeout, so any slowdown here
+becomes a permanent hang instead of a failure.
 
 Signed-off-by: Ludovic Henry <git@ludovic.dev>
 ---
