@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (286 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (291 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -277,6 +277,7 @@ The porting gotchas (286 of them) live in [`references/gotchas/`](gotchas/), spl
 - **218** — Gotcha 25's shadowing condition ("suite is a package") has a second, independent
 - **229** — A test suite that calls GitPython's `Repo(..., search_parent_directories=True)`
 - **253** — A ctypes/dlopen GUI-toolkit wrapper with no upstream pytest suite at all still has
+- **296** — Upstream test fixtures checked in via git-lfs can't assume the self-hosted
 
 ### Testing: pytest config, servers & test selection — [`gotchas/pytest-config-servers-and-selection.md`](gotchas/pytest-config-servers-and-selection.md)
 

@@ -22,6 +22,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
 - **218** — Gotcha 25's shadowing condition ("suite is a package") has a second, independent
 - **229** — A test suite that calls GitPython's `Repo(..., search_parent_directories=True)`
 - **253** — A ctypes/dlopen GUI-toolkit wrapper with no upstream pytest suite at all still has
+- **296** — Upstream test fixtures checked in via git-lfs can't assume the self-hosted
 
 ---
 
@@ -436,3 +437,24 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
       documents a non-fatal failure mode for headless environments — check the wrapped
       library's own init-failure contract before assuming a display is required to test
       anything.
+
+296. **Upstream test fixtures checked in via git-lfs can't assume the self-hosted
+    riscv64 runner has a git-lfs client (the zipfile-deflate64 case; see
+    `build-zipfile-deflate64.yml`).** Upstream's own CI checks out with
+    `actions/checkout`'s `lfs: true`, which shells out to `git lfs pull` — that needs
+    the `git-lfs` binary installed on the runner doing the checkout, and unlike the
+    manylinux *container* image (gotcha 39's `gpgsm` case), nothing establishes what's
+    on the **host** runner, and installing software there isn't an option (no
+    brew/apt/dnf on the self-hosted box). Rather than gamble a CI cycle on `lfs: true`
+    working, fetch the real blobs directly from GitHub's public media CDN in a `run:`
+    step after checkout, keyed off each LFS pointer file's own path:
+    ```
+    for f in tests/data/*; do
+      curl -sSfL "https://media.githubusercontent.com/media/<owner>/<repo>/v${VERSION}/$f" -o "$f"
+    done
+    ```
+    This needs no git-lfs client at all and works for any public repo/ref/path,
+    pointer file or not (it silently overwrites a pointer with the real blob).
+    Verify locally with a single `curl` before wiring it into the workflow — the
+    pointer file's `size:` line is the real blob's byte count, so diffing `ls -l`
+    against it confirms the fetch, not just a 200 status.
