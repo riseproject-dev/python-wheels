@@ -25,6 +25,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **267** — A vendored C++ library's own architecture-dispatch macro (not a SIMD gate,
 - **271** — `AVIF_CODEC_AOM_DECODE=OFF` and `-DCONFIG_AV1_HIGHBITDEPTH=0` are a normal
 - **272** — A riscv64 project's own `getauxval(AT_HWCAP)` runtime dispatch can still
+- **289** — A CMake `ExternalProject_Add` patch step can shell out to `wget`, which the
+  manylinux image doesn't ship (only `curl`) — and a parallel `make -j` build hides it.
 - **279** — Gotcha 272's zlib-ng `vsetvli` SIGILL recurs whenever a *second*, independent
 - **288** — Rocky/AlmaLinux 10 dropped the classic SDL2-devel package entirely, on every
 
@@ -565,3 +567,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       builds this exact dependency graph. Verify the final vendored set with
       `auditwheel show`/`unzip -l` before trusting a project's own bundled licence
       folder is complete for *your* build.
+
+289. **A CMake `ExternalProject_Add` patch step can shell out to `wget`, which the
+    manylinux image doesn't ship (only `curl`) — and a parallel `make -j` build hides
+    the real failure point behind unrelated targets that keep building for tens of
+    minutes (the casadi/metis-external case; see `build-casadi.yml`).** CasADi's
+    top-level build vendors METIS via `ExternalProject_Add(metis-external ...)`, whose
+    patch step invokes upstream's own patch-fetch script — which calls `wget`, not
+    `curl`, to download a patch file. `quay.io/pypa/manylinux_2_39_riscv64` has no
+    `wget` binary, so the step fails immediately (`Utility wget not found in your
+    PATH`) at only ~2% into the build. But `cmake --build build -j "$(nproc)"` is a
+    parallel `make`, and `metis-external` is just one of many external-project/library
+    targets scheduled concurrently with casadi's own core — `gmake` keeps building
+    everything else (including "Built target casadi" itself) and only reports the
+    overall failure once every *other* scheduled job finishes, tens of minutes later.
+    - **`gh run view --log-failed` truncates to the tail of the log and shows only the
+      late, unrelated-looking failure summary near the end** (e.g. "43% ... Error 2");
+      it does not show the real error 20+ minutes earlier. Pull the full raw job log —
+      `gh api repos/<owner>/<repo>/actions/jobs/<job-id>/logs --allow-escape-sequences`
+      — and search near the *start* of the build output, not the end, for a build that
+      fails "late" despite a fast, early root cause.
+    - **The fix is a one-line system-package install**, not a build-flag change: add
+      `wget` alongside the image's other missing packages in the same `dnf install`
+      (or `apk add` on a musllinux leg, guarded by `matrix.libc` where one exists) —
+      no need to disable the ExternalProject or switch fetch tools.
+    - Don't confuse this with an *unrelated* real fix already in place on the same
+      workflow: casadi separately had to switch its CMake generator from Ninja to Unix
+      Makefiles because its `ExternalProject_Add` calls don't declare `BYPRODUCTS`,
+      which Ninja's stricter build-graph check rejects. That fix stays — this gotcha's
+      `wget` failure is a second, independent blocker that only surfaces once the
+      generator issue is already resolved and the build reaches the external-project
+      patch step at all.
