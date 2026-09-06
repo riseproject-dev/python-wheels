@@ -69,10 +69,20 @@ jobs:
           # parent, and free-threaded CPython's extra runtime threads make that
           # race the fixed sleep, so these intermittently see
           # ConnectionRefusedError. The GIL builds (cp312/cp313/cp314) run them
-          # unmodified.
+          # unmodified. One of the ignored files
+          # (test_all_protocols_binary_field.py) is the only one that calls
+          # multiprocessing.set_start_method('fork') at import time; on the
+          # other interpreters that side effect makes 'fork' the process-wide
+          # default for the whole pytest session. Skipping that file on
+          # cp314t leaves CPython 3.14's own new default, 'forkserver', in
+          # effect, which (unlike 'fork') pickles the Process target instead
+          # of just inheriting it via COW — so test_apache_json.py::test_client
+          # then fails to pickle its locally-defined run_server()/Handler
+          # (gotcha 282). Deselect just those two parametrized cases on
+          # cp314t; the test file's other, non-multiprocessing tests still run.
           CIBW_TEST_COMMAND: >-
             cd {project}/tests && pytest -v --ignore=test_aio_http.py
-            ${{ matrix.python == 'cp314t' && '--ignore=test_buffered_transport.py --ignore=test_all_protocols_binary_field.py --ignore=test_multiplexed.py --ignore=test_oneway.py --ignore=test_http.py --ignore=test_out_of_order_fields.py --ignore=test_rpc.py --ignore=test_protocol_cybinary.py --ignore=test_tracking.py' || '' }}
+            ${{ matrix.python == 'cp314t' && '--ignore=test_buffered_transport.py --ignore=test_all_protocols_binary_field.py --ignore=test_multiplexed.py --ignore=test_oneway.py --ignore=test_http.py --ignore=test_out_of_order_fields.py --ignore=test_rpc.py --ignore=test_protocol_cybinary.py --ignore=test_tracking.py --deselect "test_apache_json.py::test_client[server_func0]" --deselect "test_apache_json.py::test_client[server_func1]"' || '' }}
 
       - name: Check the C extensions made it into the wheel
         run: |
