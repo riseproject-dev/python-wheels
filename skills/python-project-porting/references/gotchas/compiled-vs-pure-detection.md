@@ -19,6 +19,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
 - **280** — When there's no require-extension knob to force (gotcha 91's shape), check
 - **292** — Gotcha 81's "diff the wheel `size` field" test can pass on a real per-arch binary
 - **295** — A require-extension knob that reaches the container correctly (gotcha 129's
+- **308** — A maturin shim whose star-import name collides with the compiled submodule's
 
 ---
 
@@ -366,3 +367,27 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
       (`python -c "import <pkg>.<ext> as m; assert m.__file__.endswith('.so'), m.__file__"`)
       regardless of whether a require-knob exists or claims to be set — it is the only
       check in the pipeline gotcha 129/295 cannot both defeat at once.
+
+308. **A maturin shim whose star-import name collides with the compiled submodule's own
+    name silently rebinds the attribute you'd naturally probe (the murmurhash2 case; see
+    `build-murmurhash2.yml`).** Gotcha 56 covers a shim under a *different* name than the
+    real extension (`_pybind_state` vs `onnxruntime_pybind11_state`); this is the sharper
+    case where the names are the **same**. maturin's generated `murmurhash2/__init__.py`
+    is `from .murmurhash2 import *`, and the compiled `#[pymodule] fn murmurhash2` exports
+    a function *also* named `murmurhash2` (`#[pyo3(name = "murmurhash2")]`) — so the star
+    import overwrites the package's `murmurhash2` attribute (which, immediately after
+    `import murmurhash2`, pointed at the submodule) with the function. `import murmurhash2;
+    murmurhash2.murmurhash2.__file__` therefore resolves to a
+    `builtin_function_or_method`, not the submodule, and dies with `AttributeError:
+    'builtin_function_or_method' object has no attribute '__file__'` — a wheel that
+    installs and runs fine failing a correct-looking probe.
+    - **Go through `sys.modules` instead of the package attribute** — the submodule is
+      still registered under its dotted name regardless of what the star-import did to the
+      attribute: `python -c "import murmurhash2, sys; assert
+      sys.modules['murmurhash2.murmurhash2'].__file__.endswith('.so')"`. This is the
+      general fix whenever a compiled module's own name matches one of the symbols it
+      exports, not just for this crate.
+    - **`unzip -l` on the published wheel would have shown this shape up front** (gotcha
+      9/56's standing advice) — `murmurhash2/__init__.py` +
+      `murmurhash2/murmurhash2.abi3.so` next to each other names both the shim and the
+      real extension before a single CI cycle is spent on the wrong probe.
