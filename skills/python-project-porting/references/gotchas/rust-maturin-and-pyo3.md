@@ -40,6 +40,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
   nested inside the referencing workspace's own directory tree confuses cargo's
   workspace-boundary detection; the crate's own crates.io tarball (already flattened,
   no `[workspace]`) sidesteps it.
+- **306** — A pyo3 release that predates a newer CPython by years does not necessarily
+  fail to build against it — `pyo3-build-config` only floors the supported version, it
+  has no ceiling.
 
 ---
 
@@ -757,3 +760,30 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       add `-A "<anything descriptive>"` and it succeeds. Cheap to catch locally before
       relying on this pattern in a `run:` step at all (this cost one full CI queue-and-fail
       cycle on the runner to notice).
+
+306. **A pyo3 release that predates a newer CPython by years does not necessarily fail to
+    build against it — pyo3-build-config only floors the supported version, it has no
+    ceiling (the murmurhash2 case; see `build-murmurhash2.yml`).** murmurhash2-py's
+    released v0.2.10 tag pins `pyo3 = "0.15.1"` (`abi3-py36`), a release whose own
+    `ABI3_MAX_MINOR` constant tops out at Python 3.9 and whose changelog never mentions
+    anything past 3.10 — reasoning from that alone suggests the crate can't compile
+    against a cp312+ interpreter at all. It does: `pyo3-build-config`'s only
+    interpreter-version check is `assert!(self.version >= MINIMUM_SUPPORTED_VERSION)`
+    (3.6), with no matching upper bound, and it happily emits
+    `cargo:rustc-cfg=Py_3_{6..N}` for any newer minor — an unrecognized cfg is just
+    unused, not an error. Confirmed by building the actual checkout locally
+    (`cargo build --release` with `PYO3_PYTHON` pointed at a 3.12 interpreter) before
+    writing any YAML: it compiled clean and the resulting extension imported and ran
+    correctly under 3.12.
+    - **Verify empirically, not from the crate's changelog or a version-support constant
+      grepped out of its source** — a constant like `ABI3_MAX_MINOR` caps which
+      `abi3-pyNN` *feature* values exist, not which interpreter the crate can be compiled
+      against; those are two different checks and only the second one matters here
+      (gotcha 96 covers which interpreter to pick once building is known to work).
+    - **The same old pyo3 release can still be a real, unrelated blocker for
+      free-threading**: a version old enough to predate PEP 703 entirely has no
+      `Py_GIL_DISABLED` handling at all, so cp314t is not just untested but
+      architecturally unsupported — drop it from the matrix outright (same outcome as
+      gotcha 11's litellm case, but for a version-age reason rather than a deliberate
+      upstream choice) rather than assuming the abi3 build's success implies the
+      free-threaded one would also compile.

@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (294 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (295 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -147,6 +147,9 @@ The porting gotchas (294 of them) live in [`references/gotchas/`](gotchas/), spl
   nested inside the referencing workspace's own directory tree confuses cargo's
   workspace-boundary detection; the crate's own crates.io tarball (already flattened,
   no `[workspace]`) sidesteps it.
+- **306** — A pyo3 release that predates a newer CPython by years does not necessarily
+  fail to build against it — `pyo3-build-config` only floors the supported version, it
+  has no ceiling.
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
