@@ -95,10 +95,10 @@ jobs:
           # toolchain its maturin backend needs is installed in-container here.
           CIBW_BEFORE_ALL_LINUX: >-
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          # numpy/scipy/pandas/orjson/spglib are pymatgen-core's own runtime
-          # deps, and matplotlib (also pymatgen-core, dragging in contourpy/
-          # kiwisolver/pillow) is one too -- none of these nine has a riscv64
-          # wheel on public PyPI's newest release, but all do on our
+          # numpy/scipy/pandas/orjson are pymatgen-core's own runtime deps,
+          # and matplotlib (also pymatgen-core, dragging in contourpy/
+          # kiwisolver/pillow) is one too -- none of these eight has a
+          # riscv64 wheel on public PyPI's newest release, but all do on our
           # registry; pymatgen and ase are otherwise pure-Python
           # (py3-none-any) and resolve from public PyPI either way. Without
           # PIP_ONLY_BINARY, pip picks the highest version across both indexes
@@ -106,11 +106,24 @@ jobs:
           # our registry's build to PyPI's newer sdist-only release and
           # compiles it from source -- scipy needs OpenBLAS headers the
           # container lacks, pillow needs libjpeg headers it also lacks, and
-          # so on (dependencies-and-registry.md gotcha 67/84/291).
+          # so on (dependencies-and-registry.md gotcha 67/84/291). spglib
+          # (also pymatgen-core) is deliberately left OUT of this list: our
+          # registry only carries cp312+ spglib wheels (build-spglib.yml's
+          # own matrix), so forcing it wheel-only starves cp310/cp311 of any
+          # candidate at all and sends pip's resolver backtracking through
+          # every pymatgen release ever published looking for one old enough
+          # to not depend on spglib -- eventually reaching one (4.4.11) whose
+          # numpy-distutils-era setup.py hard-crashes under modern numpy
+          # (gotcha 291's addendum below). Leaving spglib unpinned lets pip
+          # take our registry's wheel where one exists (cp312+, same version
+          # as PyPI's so the wheel still wins the tie) and fall back to
+          # building the sdist where it doesn't (cp310/cp311) -- spglib's
+          # sdist has no riscv64-specific build step upstream doesn't already
+          # exercise for other architectures.
           CIBW_ENVIRONMENT_LINUX: >-
             PATH="$PATH:$HOME/.cargo/bin"
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            PIP_ONLY_BINARY=numpy,scipy,pandas,orjson,pillow,matplotlib,contourpy,kiwisolver,spglib
+            PIP_ONLY_BINARY=numpy,scipy,pandas,orjson,pillow,matplotlib,contourpy,kiwisolver
           # Mirrors upstream's own `py-test` (moyopy[testing,interface] + pytest
           # -v moyopy/python/tests); prek (also in the testing extra) is a
           # pre-commit lint runner the suite itself never imports, so it's

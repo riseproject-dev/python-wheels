@@ -568,3 +568,42 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       matplotlib dep, also registry-only) is deliberately absent from all of them because
       its native extension is optional and its `setup.py` falls back to pure Python on a
       failed compile instead of failing the install.
+    - **Adding a package to `PIP_ONLY_BINARY` assumes our *own* registry covers every
+      interpreter in the matrix — verify that per-package, not just per-registry-vs-PyPI.**
+      The `spglib` entry above was wrong: `build-spglib.yml`'s own matrix only builds
+      `cp312`/`cp313`/`cp314`/`cp314t` (mirroring upstream's *wheel-building* CI, which is
+      narrower than upstream's `requires-python>=3.9` and its own published cp39-cp314
+      wheels for every other platform), so `pypi.riseproject.dev` carries no cp310/cp311
+      `spglib` wheel at all. Forcing `spglib` wheel-only starved every cp310/cp311 test venv
+      of *any* candidate — not "wrong version", *zero* versions — and pip's resolver
+      responded by backtracking through pymatgen's entire release history (fetching and
+      running `Preparing metadata` on some 200+ `pymatgen` sdists, from `2025.10.7` down
+      through the pre-CalVer `4.x` series) hunting for a release old enough to not declare
+      `spglib` as a dependency at all, burning the full 85-minute job timeout. It very
+      nearly found one — metadata generation succeeded all the way down to `4.4.12` — before
+      hard-crashing on `4.4.11`'s ancient `numpy.distutils`-era `setup.py`
+      (`AttributeError: 'dict' object has no attribute '__NUMPY_SETUP__'`, a
+      `__builtins__`-is-a-dict-under-`exec()` bug in that release's `finalize_options`,
+      unrelated to which numpy version pip resolved). That crash is a red herring: the
+      *real* bug is upstream of it — pip should never have been trying `pymatgen==4.4.11`
+      in the first place, and pinning `pymatgen` to an exact recent version would only have
+      made the resolver fail *faster*, not fixed the install.
+      - **The fix is dropping `spglib` from `PIP_ONLY_BINARY` entirely, not narrowing the
+        matrix or pinning pymatgen.** Unlike `numpy`/`scipy`/`pandas`/`orjson`/`pillow`/
+        `matplotlib`/`contourpy`/`kiwisolver`, `spglib`'s newest release on our registry
+        (`2.7.0`) is not behind PyPI's (also `2.7.0`) — there is no version-skew risk *today*
+        — so leaving it unpinned lets pip prefer our wheel where one exists (cp312+, same
+        version wins the wheel-over-sdist tie) and fall back to building the sdist where it
+        doesn't (cp310/cp311), rather than being blocked outright. Confirm an sdist fallback
+        is actually safe before relying on it: `spglib`'s only build-time tool dependencies
+        (`cmake`, `ninja`, both via PyPI's `cmake`/`ninja` wrapper packages) publish
+        `py3-none-*` wheels on our registry — interpreter-agnostic — and `build-spglib.yml`
+        itself builds spglib with no `CIBW_BEFORE_BUILD` at all, so the same toolchain an
+        sdist build would invoke is already proven to work on this manylinux_riscv64 image;
+        the only reason our own port doesn't build cp310/cp311 *wheels* for it is that
+        nobody has asked yet, not a real incompatibility.
+      - **A permanently-narrower matrix on our own `build-<dep>.yml` is itself worth
+        grepping for before trusting "our registry has it".** `pypi.riseproject.dev/simple/
+        <dep>/` (gotcha 30) shows what's *published*, which is downstream of whatever
+        matrix that dependency's own port workflow builds — check the workflow, not just
+        the index, when a dependency is itself one of this repo's ports.
