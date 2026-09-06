@@ -57,6 +57,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **246** — A `pyO3`/uniffi "binding" package can vendor a closed-source Rust core as a git-committed
 - **248** — An "inactive"/deprecated package's own PyPI ceiling can be a real ABI wall, not
 - **249** — Gotcha 40/187's `Requires-Dist` check can pass clean while a *build-time-only*
+- **263** — A PyPI wheel with no sdist and a closed-binary redistribution licence can still be
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

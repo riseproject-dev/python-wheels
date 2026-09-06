@@ -874,3 +874,49 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
        against your target's headers** — no amount of patching the package under port
        helps if the tool it shells out to 500-errors before running a single build step
        because its own native core has no riscv64 artifact to load.
+
+263. **A PyPI wheel with no sdist and a closed-binary redistribution licence can still be
+     portable, when the code inside it is an Apache/BSD/MIT project the vendor merely
+     repackages — check the upstream *project's* licence and buildability, not the
+     wheel's (the tbb case).** PyPI's `tbb` ships one wheel
+     (`tbb-2023.1.0-py2.py3-none-manylinux_2_28_x86_64.whl`), no sdist, under the "Intel
+     Simplified Software License" — "provided in binary form only... No reverse
+     engineering... or modification" — which reads like a hard stop (gotcha 157's
+     closed-vendored-runtime shape). It is not: the wheel is Intel's own prebuilt
+     Apache-2.0 oneTBB (`github.com/uxlfoundation/oneTBB`, tag `v2023.1.0` matches the
+     PyPI version exactly), and that EULA governs *Intel's binary*, not a rebuild from
+     the public source. Building oneTBB from source and shipping the result under
+     oneTBB's own Apache-2.0 licence (its `LICENSE.txt`) sidesteps the closed licence
+     entirely — the same reasoning Debian's `onetbb` source package relies on.
+     - **An external distro's build farm is admissible feasibility evidence, and settles
+       an ISA-intrinsics worry (gotcha 41/231) faster than reading source.**
+       `madison.php?package=onetbb` showed `onetbb 2023.1.0-3` in Debian sid, and
+       `buildd.debian.org/status/package.php?p=onetbb&a=riscv64` showed it `Installed` —
+       proof the exact upstream version builds and works on real riscv64 hardware,
+       before touching CMakeLists. oneTBB's own portability holes are real but narrow:
+       `include/oneapi/tbb/detail/_machine.h` gates `_mm_pause`/RTM to
+       `__TBB_x86_64||__TBB_x86_32` with a generic `yield()` fallback, and
+       `src/tbbmalloc/frontend.cpp`'s `highestBitPos` gates its x86 `bsr`/ARM `clz` asm
+       the same way, falling through to a portable lookup table — confirmed by actually
+       building it (`cmake --build`, no flags) under `docker run --platform
+       linux/riscv64 quay.io/pypa/manylinux_2_39_riscv64` via QEMU, which compiled clean
+       to a working `libtbb.so`/`libtbbmalloc.so` with no source changes.
+     - **A dependency-detection library that degrades to "skip" rather than "fail" when
+       its dependency is absent lets you narrow scope safely.** oneTBB's
+       `src/tbbbind/CMakeLists.txt` does `if (NOT TARGET ${REQUIRED_HWLOC_TARGET})
+       ... return()` per hwloc variant — no `hwloc-devel` in the container means
+       `libtbbbind*.so` (NUMA-topology binding) is silently not built, not a failed
+       configure. Building it anyway would add a dynamic `libhwloc.so` dependency
+       outside manylinux's baseline (Intel's own wheel avoids this by statically
+       linking three separate hwloc versions into three `libtbbbind_*.so` variants) —
+       dropping the optional feature is the manylinux-safe choice over chasing parity.
+     - **`GNUInstallDirs`-based CMake defaults `CMAKE_INSTALL_LIBDIR` to `lib64` on an
+       RPM-family image** (the Rocky-Linux-based manylinux images), silently moving
+       `cmake --install`'s output out from under a hardcoded `install/lib/` collection
+       step — pass `-DCMAKE_INSTALL_LIBDIR=lib` explicitly when the packaging step
+       assumes one path.
+     - **To reproduce a `SONAME`-versioned library's flat `libfoo.so`/`libfoo.so.N`/
+       `libfoo.so.N.M` trio as independent files inside a wheel (`cp` symlinks don't
+       survive zip/cross-OS extraction the way upstream's own wheel ships them), use
+       `cp -L` to dereference each name onto its real content** rather than copying the
+       CMake-installed symlink chain as-is.
