@@ -497,9 +497,16 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       *CPython 3.14's new forkserver default* is what breaks a sibling test, it isn't a
       genuine `cp314t` compatibility bug in the library worth reporting upstream.
     - **Fix scope**: `--deselect` just the parametrized cases whose target is a local
-      closure, using the exact nodeid pytest's own `FAILED`/`--collect-only` output
-      reports (e.g. `test_apache_json.py::test_client[server_func0]`) — a path-qualified
-      nodeid silently no-ops when it doesn't match pytest's rootdir-relative form. Leave
-      alone any test that already requests `get_context("fork")` explicitly (unaffected
-      by the default) or whose target is a module-level function/bound method (pickles
-      fine under any start method).
+      closure — but get the nodeid from `--collect-only -q`, not from the `-v` live
+      progress line or the `FAILED ...` short summary. Both of those print a path
+      relative to the invocation *cwd*, while `--deselect` (like `--collect-only`)
+      matches the nodeid relative to pytest's **rootdir** — which is a *parent* of
+      `{project}/tests` whenever the project ships a `setup.py`/`pyproject.toml`
+      up there (thriftpy2 does), so the real nodeid is
+      `tests/test_apache_json.py::test_client[server_func0]`, not the bare
+      `test_apache_json.py::test_client[server_func0]` the `-v` output showed. A
+      `--deselect` built from the wrong one silently no-ops — the run still reports
+      the deselected count as 0 and the test still executes and fails. Leave alone any
+      test that already requests `get_context("fork")` explicitly (unaffected by the
+      default) or whose target is a module-level function/bound method (pickles fine
+      under any start method).
