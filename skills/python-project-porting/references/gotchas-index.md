@@ -316,6 +316,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **283** — A `cp314t`-only `PicklingError` from a `multiprocessing.Process(target=<local
 - **285** — A heap-corruption abort in a vendored C++ library's concurrent stress test can
 - **286** — A vendored-ARPACK eigensolver test failing only on musllinux, not manylinux, can
+- **290** — A `NameError` in an e2e test for a name the package genuinely exports is a
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 

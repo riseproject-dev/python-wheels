@@ -512,6 +512,61 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       default) or whose target is a module-level function/bound method (pickles fine
       under any start method).
 
+285. **A heap-corruption abort in a vendored C++ library's concurrent stress test can
+    resist every reproduction attempt except the plain CI run — gdb/ptrace's own timing
+    perturbation can hide the race that trips it (the chroma-hnswlib case).**
+    `bindings_test_stress_mt_replace` (100 iterations of `add_items(..., replace_deleted=True)`
+    fanned across 50 real OS threads via a raw `std::thread` pool, not GIL-serialized) died
+    with `malloc(): mismatching next->prev_size (unsorted)` / SIGABRT, identically on both
+    `cp314` and `cp314t`, 2 runs out of 2 (runs 34024763240 and 34025375096) — `cp312`/`cp313`
+    on the same tree passed every time. That split alone is not gotcha 33's feature-gate
+    signature: gotcha 60 already establishes that a use-after-free/heap-corruption bug is a
+    *lottery* over which interpreter's allocator layout happens to reuse the clobbered bytes,
+    so "only the newest interpreters die" is evidence *for* real corruption, not a `cp314`-only
+    code path.
+    - **Upstream never exercises the failing configuration at all.** `chroma-core/hnswlib`'s
+      `test.yml` matrix is `python-version: ["3.7", "3.8", "3.9", "3.10"]` on
+      `ubuntu-latest`/`windows-latest` only — no 3.11+, no free-threaded build, no non-x86
+      architecture. Neither `nmslib/hnswlib` (the upstream this forked from) nor
+      `chroma-core/hnswlib`'s issue trackers have any report of this test flaking anywhere,
+      which is consistent with nobody having run it under conditions that reach the race.
+    - **gotcha 115's gdb-loop technique can fail to reproduce a real race, not just a
+      toolchain bug.** Two rounds of the throwaway-commit probe both came back clean: round 1
+      ran the one failing test in isolation, fresh process, 5 attempts × 2 interpreters — no
+      repro. Round 2 (suspecting gotcha 60's "corruption committed earlier, detected later")
+      ran the *entire* `bindings_test*.py` sequence (matching the real failure's shape) under
+      `gdb -batch -ex run -ex "thread apply all bt 30"`, 2 attempts × 2 interpreters — still no
+      repro, despite the un-instrumented sequence failing 2/2 times before. `ptrace` overhead
+      changes thread scheduling enough that a narrow interleaving-dependent race can vanish
+      under the very tool meant to catch it — a real "no repro under the debugger" heisenbug,
+      distinct from gotcha 115/167's "reproduces cleanly, just needed the right tool."
+    - **Reading the code narrows the suspect but doesn't prove it without hardware access.**
+      `HierarchicalNSW::addPoint(..., replace_deleted=true)` pops a free slot from
+      `deleted_elements` under `deleted_elements_lock`, then calls `setExternalLabel`,
+      mutates `label_lookup_`, `unmarkDeletedInternal`, and `updatePoint` on that slot with
+      **no lock held across the sequence** — the code's own comment says "we assume that
+      there are no concurrent operations on deleted element," i.e. upstream knows this path
+      leans on an assumption rather than a proof. Whether riscv64's weaker memory ordering is
+      what turns that assumption false (vs. it always being false and x86/TSO usually hiding
+      it) could not be confirmed without a native backtrace, which two rounds of
+      instrumentation failed to capture.
+    - **The sanctioned fallback, not a source patch, when a stress test can't be
+      instrumented into reproducing.** Given (a) upstream never validates this
+      configuration, (b) the test is explicitly named/shaped as a concurrency stress test
+      (50 threads over a 1000-2000 element index — deliberately adversarial, not a
+      correctness regression test), and (c) no working native backtrace could be obtained
+      after a reasonable diagnostic budget, patching the vendored C++ concurrency logic
+      blind was judged too risky to land unverified. Deselect just that one test file from
+      `CIBW_TEST_COMMAND` (`unittest discover` has no `--deselect`; delete the file from the
+      staged `tests/python/` copy before `discover` runs, matching gotcha 25/168's
+      shortest-diagnostic-window discipline — leave everything else covered) and document why
+      with a comment naming the run IDs and the mechanism, instead of loosening the test
+      pattern or dropping test coverage more broadly.
+    - **Reset every diagnostic commit before the PR is finalized.** Both throwaway probes
+      (narrowed matrix, `CIBW_BEFORE_TEST_LINUX: dnf -y install gdb`, `CFLAGS=-g CXXFLAGS=-g`,
+      gdb-wrapped `CIBW_TEST_COMMAND`) were `git reset --hard` off the branch tip and
+      force-pushed per gotcha 115, so the merged history carries only the real fix.
+
 286. **A vendored-ARPACK eigensolver test failing only on musllinux, not manylinux, can
     be upstream's own known random-starting-vector convergence flake, not a riscv64 bug
     (the igraph case).** `test_atlas.py::GraphAtlasTests::testHubScore` failed on
@@ -540,3 +595,37 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       `matrix.libc == 'musllinux'` the same way the extras selector already is, not a
       blanket deselect that would also drop manylinux's coverage of the same test (it
       passes there and should stay tested).
+
+290. **A `NameError` in an e2e test for a name the package genuinely exports is a
+    broken test file at that pinned tag, not an arch or extension-export problem (the
+    html-to-markdown case).** `test_options_preprocessing_{aggressive,minimal}` failed
+    with `NameError: name 'PreprocessingPreset' is not defined` on riscv64, 2 of 283
+    tests, identically deterministic (not flaky). Reading `packages/python/html_to_markdown/__init__.py`
+    at `v3.12.0` showed `PreprocessingPreset` re-exported from the compiled extension in
+    both the `from ._html_to_markdown import (...)` block and `__all__` — the built
+    wheel genuinely provides it — while `e2e/python/tests/test_options.py`'s own
+    top-level `from html_to_markdown import (...)` line simply omits it, even though two
+    tests further down use it. Diffing the tagged test file against upstream's `main`
+    confirmed the import list there already includes `PreprocessingPreset`: the bug was
+    fixed after `v3.12.0` was cut, just not yet in a tagged release. A failure this
+    narrow (one name, two tests, everything else in the module green) that traces to a
+    plain unimported symbol is a strong prior for "test file bug at this tag," worth
+    checking against upstream's default branch before assuming a build or export defect.
+    - **Confirm both halves before treating it as a test bug**: grep the test file's
+      import list for the missing name (absent) *and* the package's `__init__.py`/`__all__`
+      for the same name (present) — only the *combination* proves it's the test, not the
+      export, that's wrong. If the extension itself didn't export the name, the fix would
+      be a real compatibility issue to raise upstream, not a test deselect.
+    - **Fix with `-k "not <name>"` per test, not a path-based `--deselect`** (gotcha
+      14/283): a plain name-based `-k` sidesteps the rootdir-relative-nodeid trap
+      entirely, which matters here too since `CIBW_TEST_SOURCES` stages
+      `e2e/python/{conftest.py,pyproject.toml,tests}` and the staged `pyproject.toml`'s
+      own `[tool.pytest.ini_options]` puts pytest's rootdir one level away from the
+      `e2e/python/tests` path the `-v`/`FAILED` output displays.
+    - **Deselect in the workflow, don't patch the test file.** The test file is
+      upstream's own generated e2e suite (`# This file is auto-generated by alef — DO
+      NOT EDIT`) and the bug is already fixed on `main`; patching
+      `patches/<pkg>/<version>/` to hand-fix a file upstream has already corrected
+      would just be reverted by the next version bump. A `CIBW_TEST_COMMAND` comment
+      citing the exact `NameError` and noting upstream's fix is unreleased documents the
+      divergence for whoever reviews or re-triggers the workflow later.
