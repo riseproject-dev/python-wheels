@@ -163,6 +163,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **250** — A vendored C library's strict-aliasing UB can miscompile *silently* under a
 - **252** — Rocky 10 (the riscv64 manylinux image's base) names the Wayland client
 - **257** — `CMAKE_POLICY_VERSION_MINIMUM` also works as an environment variable, not just a
+- **267** — A vendored C++ library's own architecture-dispatch macro (not a SIMD gate,
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 

@@ -22,6 +22,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **243** — The `manylinux_2_39_riscv64` container's IPv6 loopback binds but can't send:
 - **252** — Rocky 10 (the riscv64 manylinux image's base) names the Wayland client
 - **250** — A vendored C library's strict-aliasing UB can miscompile *silently* under a
+- **267** — A vendored C++ library's own architecture-dispatch macro (not a SIMD gate,
 
 ---
 
@@ -399,3 +400,37 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       `CMAKE_POLICY_VERSION_MINIMUM=3.5` exported and confirm configure proceeds — no
       container or cross-compile needed, since the error is a CMake-version fact, not an
       architecture one.
+
+267. **A vendored C++ library's own architecture-dispatch macro (not a SIMD gate, gotcha
+    71's case) can have no riscv64 branch at all, and its harmless catch-all `#warning`
+    still kills the build under `-Werror` (the awslambdaric case).** aws-lambda-cpp
+    vendors `backward-cpp` for enhanced crash stack traces; its signal handler picks the
+    faulting instruction pointer out of `ucontext_t` with an `#if defined(__aarch64__)
+    ... #elif defined(__arm__) ...` chain that has no riscv64 arm at all, so it falls into
+    the `#else` branch: a bare `#warning` plus a now-unused `ucontext_t*` local. Neither
+    is a real defect — the fallback just leaves the address unset, so the crash handler
+    still fires and unwinds, only without pinpointing the instruction — but the vendoring
+    project's own `-Wall -Wextra -Werror` (set unconditionally in its `CMakeLists.txt`,
+    not gated by build type) turns both into hard compile errors before the extension
+    that actually matters is ever reached.
+    - **Fix at the point the port controls, not inside the vendored source.** The
+      library's C++ sources ship inside a tarball vendored *inside the package's own git
+      tree* (`deps/aws-lambda-cpp-0.2.6.tar.gz`), not as plain files — patching its
+      `CMakeLists.txt` or `backward.h` textually means unpacking, patching and re-packing
+      a binary blob, which `git apply` cannot do. The package's own build script that
+      invokes `cmake` (`scripts/preinstall.sh`, a plain text file in the checkout) is the
+      patchable surface: append `-Wno-error=cpp -Wno-error=unused-variable` to the
+      `-DCMAKE_CXX_FLAGS` it already passes. Order relative to the target's own
+      `-Werror` (added later, via `target_compile_options`) does not matter — GCC treats
+      a named `-Wno-error=<diag>` as more specific than the blanket `-Werror` regardless
+      of which comes first on the effective command line.
+    - **Confirm it's this class before reaching for the flag**: the diagnostic name is
+      right there in the error (`[-Werror=cpp]` for the `#warning`, `[-Werror=unused-
+      variable]` for the dead local) — same read as gotcha 226, different toolchain
+      trigger (an unrecognized target architecture, not a newer GCC's stricter C
+      defaults).
+    - **Verify locally before burning a riscv64 CI cycle**: `docker run --rm --platform
+      linux/riscv64 quay.io/pypa/manylinux_2_39_riscv64 sh -c '<vendored cmake
+      invocation>'` reproduces the exact error via QEMU in under a minute once the
+      library's own build dependencies are unpacked, and confirms the `-Wno-error=`
+      fix turns the same two lines into warnings without touching anything else.
