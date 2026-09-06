@@ -75,6 +75,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **213** — Gotcha 103's timestamp-proximity trick can point at the wrong commit when
 - **242** — A third-party tree-sitter grammar's release tag can omit the generated
 - **254** — A build-from-checkout can pick up a maintainer-only dev/coverage cflags
+- **258** — A hardcoded download URL in a project's own build script can 403 automated
 
 ### cibuildwheel mechanics, the matrix & abi3 — [`gotchas/cibuildwheel-matrix-and-abi3.md`](gotchas/cibuildwheel-matrix-and-abi3.md)
 
@@ -155,6 +156,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **243** — The `manylinux_2_39_riscv64` container's IPv6 loopback binds but can't send:
 - **250** — A vendored C library's strict-aliasing UB can miscompile *silently* under a
 - **252** — Rocky 10 (the riscv64 manylinux image's base) names the Wayland client
+- **257** — `CMAKE_POLICY_VERSION_MINIMUM` also works as an environment variable, not just a
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
@@ -223,6 +225,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **211** — `pip install wheel` does not restore `distutils` on Python 3.12+ — only
 - **222** — A dependency's own `build-system.requires` floor can be past the point its
 - **225** — `wheel>=0.44.0` dropped `wheel.bdist_wheel.get_platform` — a hand-rolled
+- **256** — setuptools 81 dropped the `dry_run` keyword from its vendored
 
 ### Testing: test-sources & shadowing — [`gotchas/testing-and-shadowing.md`](gotchas/testing-and-shadowing.md)
 

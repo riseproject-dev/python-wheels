@@ -18,6 +18,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **207** — A vendored dependency three submodules deep can declare a `cmake_minimum_required`
 - **226** — GCC 14 turns `-Wincompatible-pointer-types` (and `-Wimplicit-function-declaration`,
 - **235** — The manylinux image's bundled `/opt/python/cpXY-cpXY` interpreters have
+- **257** — `CMAKE_POLICY_VERSION_MINIMUM` also works as an environment variable, not just a
 - **243** — The `manylinux_2_39_riscv64` container's IPv6 loopback binds but can't send:
 - **252** — Rocky 10 (the riscv64 manylinux image's base) names the Wayland client
 - **250** — A vendored C library's strict-aliasing UB can miscompile *silently* under a
@@ -373,3 +374,28 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       under a virtual provide): here the literal name genuinely does not exist under
       any provide, and the fix is the *correct* package name, not a Rocky-vs-AlmaLinux
       quirk in how `rpm -q` reports success.
+
+257. **`CMAKE_POLICY_VERSION_MINIMUM` also works as an environment variable, not just a
+    `-D` cache flag — the fix when the failing `cmake` invocation is inside a script
+    that isn't ours to add flags to (refines gotcha 207; the freetype-py case, see
+    `build-freetype-py.yml`).** Gotcha 207's fix (`-DCMAKE_POLICY_VERSION_MINIMUM=3.5`
+    on the configure line) assumes the port controls that line — true for a
+    `CIBW_BEFORE_ALL_LINUX` we write ourselves, false when a project's own `setup.py`
+    shells out to a fixed `cmake ...` command string, as freetype-py's
+    `setup-build-freetype.py` does to build the FreeType (`cmake_minimum_required(VERSION
+    3.0)`) and HarfBuzz it bundles. There is no argument to inject without patching the
+    script. CMake reads `CMAKE_POLICY_VERSION_MINIMUM` from the process environment with
+    the same effect as the cache variable, so setting it in `CIBW_ENVIRONMENT` (which
+    `subprocess.run(..., shell=True)` inherits by default, with no explicit `env=`
+    needed) reaches every `cmake` invocation the script makes, however many, without
+    touching its source.
+    - **Same value, same reasoning as gotcha 207**: pick the CMake-4 floor (`3.5`) rather
+      than matching the project's own declared minimum exactly — it is a no-op for
+      anything already at or above 3.5 and unblocks whichever vendored piece is below it,
+      including ones three directory levels down that a top-level patch would miss.
+    - **Confirm locally before spending a riscv64 CI cycle**: reproduce the bare
+      `CMake Error ... Compatibility with CMake < 3.5 has been removed` on any host with a
+      CMake ≥4 (`brew`/`apt` current versions qualify), then re-run with
+      `CMAKE_POLICY_VERSION_MINIMUM=3.5` exported and confirm configure proceeds — no
+      container or cross-compile needed, since the error is a CMake-version fact, not an
+      architecture one.

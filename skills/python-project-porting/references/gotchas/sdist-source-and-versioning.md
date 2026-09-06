@@ -20,6 +20,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
 - **156** — An upstream that exists only as a PyPI sdist is still an ordinary port — but
 - **213** — Gotcha 103's timestamp-proximity trick can point at the wrong commit when
 - **242** — A third-party tree-sitter grammar's release tag can omit the generated
+- **258** — A hardcoded download URL in a project's own build script can 403 automated
 - **254** — A build-from-checkout can pick up a maintainer-only dev/coverage cflags
 
 ---
@@ -296,3 +297,36 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
     -pedantic -Werror -Wdeclaration-after-statement -c rjsmin.c -I
     $(python3.14t -c 'import sysconfig; print(sysconfig.get_path("include"))')`
     fails identically; building from `python -m build --sdist`'s output does not.
+
+258. **A hardcoded download URL in a project's own build script can 403 automated
+    clients — confirm from more than one network before blaming a transient outage or
+    riscv64, then swap to another official channel with byte-identical content, not
+    just any host that happens to answer (the freetype-py case; see
+    `build-freetype-py.yml`).** freetype-py's `setup-build-freetype.py` downloads the
+    FreeType tarball it bundles from a single hardcoded `FREETYPE_HOST`
+    (`mirrors.sarata.com`, one of the GNU project's many `non-gnu` mirrors). That mirror
+    returns a Cloudflare-fronted `HTTP 403 Forbidden` to a plain `urllib`/`curl` request
+    with no cookie or JS challenge solved — reproduced identically from two unrelated
+    networks, immediately and deterministically (not a `502`/`504` gateway hiccup, which
+    reads as transient overload instead of a deliberate block). GitHub Actions runner
+    IP ranges are exactly the kind of datacenter ASN such bot-management rules target,
+    so there is no reason to expect the block clears inside CI just because it isn't
+    riscv64-specific.
+    - **A `sha256` already in the script is the fastest way to prove a replacement
+      mirror is safe**: `setup-build-freetype.py` carries `FREETYPE_SHA256` for exactly
+      this kind of verification. SourceForge's direct-file endpoint for the same release
+      (`.../files/freetype2/<ver>/<file>/download`) hashed identically — confirmed with
+      the project's own `urllib.request.urlopen()` call, not just `curl`, since a
+      redirect chain or TLS quirk can behave differently between clients.
+    - **Don't assume every alternative "official" mirror is reachable either** — GNU's
+      own `ftpmirror.gnu.org` redirector 502'd repeatedly in the same session that
+      SourceForge answered cleanly on the first try; test the actual replacement before
+      committing to it rather than picking whichever name sounds most canonical.
+    - **The patch is the narrowest edit that fixes the URL, not a rewrite of the
+      download logic** — SourceForge's path shape doesn't fit the script's
+      `HOST + TARBALL` string concatenation, so the fix touches `FREETYPE_HOST` and
+      appends the one extra `"/download"` suffix `FREETYPE_URL` needs, leaving
+      `FREETYPE_SHA256` and everything else untouched. Tag it `Upstream-Status: To
+      upstream` when the real fix (pointing upstream's own script at a better mirror)
+      is something only they can land — this repo's policy against filing on other
+      repos means the patch has to be carried, not submitted, in that case.

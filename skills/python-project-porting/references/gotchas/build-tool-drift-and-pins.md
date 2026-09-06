@@ -20,6 +20,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
 - **211** — `pip install wheel` does not restore `distutils` on Python 3.12+ — only
 - **222** — A dependency's own `build-system.requires` floor can be past the point its
 - **225** — `wheel>=0.44.0` dropped `wheel.bdist_wheel.get_platform` — a hand-rolled
+- **256** — setuptools 81 dropped the `dry_run` keyword from its vendored
 
 ---
 
@@ -416,3 +417,35 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
       itself dropping a symbol from a later release (fixed by capping `wheel`'s
       version) — both land in the same `pip install` line but are independent failures
       that surface one after the other as each is fixed.
+
+256. **setuptools 81 dropped the `dry_run` keyword from its vendored
+    `distutils.dir_util.mkpath()`/`distutils.file_util.copy_file()` — legacy `setup.py`
+    code written against the real stdlib distutils passes it positionally-by-name and
+    breaks outright (the freetype-py case; see `build-freetype-py.yml`).**
+    freetype-py's `setup.py` drives a hand-rolled `build_ext` that stages a compiled
+    shared library with `distutils.dir_util.mkpath(dest, verbose=self.verbose,
+    dry_run=self.dry_run)` and `distutils.file_util.copy_file(src, dst,
+    verbose=self.verbose, dry_run=self.dry_run)` — signatures the real
+    `distutils.dir_util`/`file_util` carried for decades. setuptools 81.0.0 rewrote both
+    functions and silently dropped `dry_run` (along with other legacy parameters) from
+    the vendored copy that `import distutils` resolves to on Python 3.12+, so an
+    unpinned build fails late, deep in `build_ext`, with `TypeError: copy_file() got an
+    unexpected keyword argument 'dry_run'` — after the actual native compile (FreeType
+    and HarfBuzz via CMake, in this case) has already succeeded.
+    - **Settle the boundary in one line, no build required**: `pip install
+      "setuptools==X"` into a venv, then `python3 -c "import inspect,
+      distutils.file_util; print('dry_run' in
+      inspect.signature(distutils.file_util.copy_file).parameters)"` — `True` through
+      80.9.0, `False` from 81.0.0 on. Bisecting this way found the break in under a
+      minute, no compile needed — the same shape as gotcha 29's `pkg_resources` removal
+      and gotcha 99's `-shared` drop, just a different function and a different version.
+    - **Fix is the gotcha 23/29 shape**: `pip install "setuptools<81" wheel
+      "setuptools_scm[toml]"` (whatever `build-system.requires` lists) plus
+      `CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"` so the pin actually
+      takes — an unpinned isolated env re-resolves to latest regardless of what is
+      preinstalled. `setuptools<81` still satisfies a floor as low as `>=42`.
+    - Distinct from gotcha 211 (distutils *missing entirely*, fixed by installing
+      setuptools at all) and gotcha 99 (`-shared` dropped from the C++ linker default):
+      this is a *signature* change in two of the most commonly hand-called distutils
+      helpers, so any `setup.py` written before mid-2025 against the old stdlib
+      distutils API is a candidate, not just projects that compile C++ extensions.
