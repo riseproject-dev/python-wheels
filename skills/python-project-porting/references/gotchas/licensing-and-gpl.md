@@ -23,6 +23,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
 - **162** — A sibling build repo pins every source by URL and SHA-256, which makes the GPL/LGPL
 - **165** — Three ways gotcha 137's licence sweep silently under-collects, and one image fact that
 - **255** — A project's own build hook that hand-parses a *build-time* dependency's dist-info
+- **301** — Gotcha 146's licence auto-glob only fires for a `pyproject.toml` with a `[project]`
 
 ---
 
@@ -481,3 +482,31 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
       users need not install cffi — yet the bug hits every build, because the scan runs
       against the *build environment's* installed cffi, not against coincurve's own
       runtime metadata.
+
+301. **Gotcha 146's licence auto-glob only fires for a `pyproject.toml` with a `[project]`
+    table; a maturin crate whose metadata comes straight from Cargo.toml needs an
+    explicit `license-file` key instead (the minify-html-python case; see
+    `build-minify-html.yml`).** maturin's `metadata.rs` has two separate code paths: one
+    for a PEP 621 `[project]` table, which falls back to globbing `LICEN[CS]E*` /
+    `COPYING*` / `NOTICE*` / `AUTHORS*` next to `pyproject.toml` when `license-files` is
+    absent (gotcha 146); a second, entirely different one for a bare
+    `[build-system] build-backend = "maturin"` with **no** `[project]` table at all, which
+    reads metadata straight from `cargo_metadata` and does no directory scanning
+    whatsoever — it bundles a licence file only when Cargo's own `[package] license-file
+    = "..."` key names one. minify-html-python's `pyproject.toml` is the second shape
+    (`[build-system]`/`[tool.maturin]` only), and its Cargo.toml has `license = "MIT"`
+    (an SPDX expression) but no `license-file`, so copying a `LICENSE` next to
+    `pyproject.toml` alone — gotcha 146's fix — changed nothing: the built wheel's
+    `dist-info/` still had no licence file, confirmed by installing it and asserting
+    `importlib.metadata.files()` in `CIBW_TEST_COMMAND`.
+    - **The fix is a second `Cargo.toml` edit, not a different file location.** Copy the
+      licence into the crate directory as before, then add `license-file = "LICENSE"`
+      to `[package]` alongside the existing `license = "..."` key — Cargo happily
+      accepts both set at once (only `cargo publish`, which this crate disables via
+      `publish = false`, would ever complain), and `cargo metadata` immediately reports
+      it: `"license":"MIT","license_file":"LICENSE"`. Verify locally with `cargo
+      metadata --manifest-path <crate>/Cargo.toml --no-deps` before spending a riscv64
+      cycle on it — this needs no maturin install, just the `cargo` already on the host.
+    - **Tell the two shapes apart from `pyproject.toml` alone**: a `[project]` table
+      (even a minimal one with just `name`/`dynamic`) means gotcha 146 applies; only
+      `[build-system]` and `[tool.maturin]` means this one does.

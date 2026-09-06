@@ -350,6 +350,7 @@ The porting gotchas (294 of them) live in [`references/gotchas/`](gotchas/), spl
 - **162** — A sibling build repo pins every source by URL and SHA-256, which makes the GPL/LGPL
 - **165** — Three ways gotcha 137's licence sweep silently under-collects, and one image fact that
 - **255** — A project's own build hook that hand-parses a *build-time* dependency's dist-info
+- **301** — Gotcha 146's licence auto-glob only fires for a `pyproject.toml` with a `[project]`
 
 ### Local validation & the aarch64/QEMU rehearsal — [`gotchas/local-validation-and-rehearsal.md`](gotchas/local-validation-and-rehearsal.md)
 
