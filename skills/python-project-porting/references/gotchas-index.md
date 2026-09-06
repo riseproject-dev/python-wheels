@@ -309,7 +309,6 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **205** — A follow-up commit that fixes a broken `Upstream-Status:` line does not clear
 - **282** — A matplotlib `image_comparison` test failing only on riscv64 is a font-rendering
 - **283** — A `cp314t`-only `PicklingError` from a `multiprocessing.Process(target=<local
-- **285** — A `NameError` in an e2e test for a name the package genuinely exports is a
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
