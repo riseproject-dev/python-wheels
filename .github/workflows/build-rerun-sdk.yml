@@ -1,0 +1,171 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `linux-x64` leg of upstream's own wheel pipeline:
+# https://github.com/rerun-io/rerun/blob/0.37.1/.github/workflows/reusable_build_and_upload_wheels.yml
+# (MODE=pr: `--no-default-features --features perf_telemetry,extension-module`,
+# i.e. the crate's own default features -- no --features flags needed).
+#
+# Scope: this builds only the `rerun_bindings` Python SDK extension (rerun_py/),
+# not the `rerun-cli` native viewer. Upstream's published wheel also bundles a
+# prebuilt `rerun-cli` binary (a full wgpu/egui desktop+web viewer, built by a
+# separate ~16-core job that itself needs a wasm/JS toolchain for the bundled
+# web viewer) at rerun_sdk/rerun_cli/rerun; building that from source is out of
+# scope here. rerun_py's own build.rs fails without it unless
+# RERUN_ALLOW_MISSING_BIN is set (see below), and upstream's own
+# `[tool.maturin] include` comment already documents that a missing binary is
+# "not a packaging failure" -- `import rerun` and all logging/recording/gRPC
+# APIs work; only `rerun.spawn()`/`serve()` and the `rerun` console script
+# (which shell out to the bundled binary) raise a clear error instead of
+# launching a viewer.
+name: Build rerun-sdk wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'rerun-sdk version to build (git tag, e.g. 0.37.1)'
+        required: true
+        default: '0.37.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-rerun-sdk.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.37.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.37.1 there.
+  RERUN_SDK_VERSION: ${{ inputs.version || '0.37.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    # pyo3 carries `abi3-py310` unconditionally in rerun_py/Cargo.toml, so
+    # upstream ships one cp310-abi3 wheel. Our registry has no riscv64 pyarrow
+    # (a hard runtime dependency) for cp310/cp311, so the build floor here is
+    # cp312 instead -- the wheel is still tagged cp310-abi3 by the pyo3
+    # feature regardless of which interpreter compiles it (CLAUDE.md gotcha
+    # 96), it is simply never tested below cp312.
+    name: Build rerun-sdk ${{ inputs.version || '0.37.1' }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+
+    steps:
+      # rerun_py is a member of the rerun Cargo workspace (~760 crates on
+      # riscv64: datafusion, lance, tonic/tokio, hdf5-pure, ...) and builds
+      # against its sibling crates, so the checkout root has to be the
+      # workspace root, not rerun_py itself.
+      - name: Checkout rerun ${{ env.RERUN_SDK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: rerun-io/rerun
+          ref: ${{ env.RERUN_SDK_VERSION }}
+          persist-credentials: false
+
+      # This workspace links ~760 crates (datafusion, lance, tonic, hdf5-pure,
+      # ...) concurrently; same OOM guard build-deltalake.yml/
+      # build-polars-runtime.yml need for a comparably sized Rust build.
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 10
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: rerun_py
+          output-dir: wheelhouse/
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          # cp310/cp311 are dropped: our registry has no riscv64 pyarrow
+          # there (see the floor note above); cibuildwheel builds once on
+          # cp312 and re-tests the same abi3 wheel on cp313/cp314.
+          # Upstream ships no free-threaded wheel, so cp314t is not added.
+        env:
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # rerun_py ships no [tool.cibuildwheel]; the Rust toolchain its
+          # maturin backend needs is installed in-container here. lance (a
+          # build-dependency of re_datafusion) needs protoc at build time to
+          # compile its manifest .proto files -- upstream's own before-build
+          # pulls a wheel-packaged protoc, which has no riscv64 build; Rocky
+          # 10's CRB repo (enabled in the image) has one (CLAUDE.md gotcha
+          # 100).
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
+            yum install -y protobuf-compiler protobuf-devel
+          # maturin's own PEP 517 backend must be on the build venv's PATH
+          # since --no-build-isolation (below) skips installing
+          # build-system.requires.
+          CIBW_BEFORE_BUILD_LINUX: pip install "maturin>=1.8.1"
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PROTOC_INCLUDE=/usr/include
+            RERUN_ALLOW_MISSING_BIN=1
+            CARGO_BUILD_JOBS=2
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # rerun_py/build.rs sets RERUN_BUILDING_WHEEL and refuses to build
+          # inside pip's isolated build venv (its own PYO3_CONFIG_FILE
+          # caching guard treats the temp venv path as untrustworthy); a
+          # plain PEP 517 build with isolation therefore aborts before cargo
+          # even runs. --no-build-isolation runs maturin in the same venv
+          # cibuildwheel already prepared, which sidesteps the check.
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          # Without this pip prefers PyPI's newer numpy/pillow/pandas/torch,
+          # none of which have riscv64 wheels, and falls back to slow source
+          # builds in the container (CLAUDE.md gotcha 12).
+          CIBW_TEST_ENVIRONMENT_LINUX: PIP_ONLY_BINARY=numpy,pillow,pandas,torch,pyarrow
+          # Subset of upstream's `tests` extra (pyproject.toml
+          # [project.optional-dependencies]) that has riscv64 wheels
+          # somewhere: av, torchvision, datafusion (the PyPI package) and
+          # polars publish none, so the handful of test files that need them
+          # are ignored below instead. opencv-python is on our registry as a
+          # cp37-abi3 wheel, forward-compatible with cp312+.
+          CIBW_TEST_REQUIRES: >-
+            pytest opencv-python>4.6 torch>=2.5 pandas>=2
+            syrupy==5.0.0 inline-snapshot==0.31.1 semver>=3.0,<3.1 tomli==2.0.1
+          # test-sources resolves against the checkout root, not package-dir.
+          CIBW_TEST_SOURCES: rerun_py/tests rerun_py/pyproject.toml
+          # e2e_redap_tests needs the "server" Cargo feature (not built, see
+          # the scope note above) to start its local catalog server.
+          # api_sandbox mixes in drafts of a future, unreleased API. Both are
+          # upstream-labelled sandboxes/integration suites, not the SDK's
+          # regression tests. test_headless_viewer.py spawns the (unbuilt)
+          # rerun-cli binary; the video/datafusion-dependent files need the
+          # packages dropped from CIBW_TEST_REQUIRES above.
+          CIBW_TEST_COMMAND: >-
+            cd rerun_py &&
+            python -c "import rerun_bindings as m; assert m.__file__.endswith('.so'), m.__file__" &&
+            python -m pytest tests -v
+            --ignore=tests/e2e_redap_tests
+            --ignore=tests/api_sandbox
+            --ignore=tests/integration/test_headless_viewer.py
+            --ignore=tests/integration/test_dataloader_video_codecs.py
+            --ignore=tests/integration/test_chunk_store_reader.py
+            --ignore=tests/unit/test_dataloader_decoder_helpers.py
+            --ignore=tests/unit/test_datafusion_utils.py
+            --ignore=tests/unit/test_viewer_client.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rerun-sdk-${{ env.RERUN_SDK_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish rerun-sdk ${{ inputs.version || '0.37.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: rerun-sdk-${{ inputs.version || '0.37.1' }}-*-manylinux_riscv64
