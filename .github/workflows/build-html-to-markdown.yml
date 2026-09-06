@@ -1,0 +1,106 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `python-wheels` job of
+# https://github.com/xberg-io/html-to-markdown/blob/v3.12.0/.github/workflows/publish.yaml
+name: Build html-to-markdown wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'html-to-markdown version to build (git tag without the leading v, e.g. 3.12.0)'
+        required: true
+        default: '3.12.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-html-to-markdown.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '3.12.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 3.12.0 there.
+  HTML_TO_MARKDOWN_VERSION: ${{ inputs.version || '3.12.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build html-to-markdown ${{ inputs.version || '3.12.0' }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    steps:
+      - name: Checkout html-to-markdown v${{ env.HTML_TO_MARKDOWN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: xberg-io/html-to-markdown
+          ref: v${{ env.HTML_TO_MARKDOWN_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: packages/python
+          output-dir: wheelhouse/
+        env:
+          # abi3-py310 is baked unconditionally into packages/python/pyproject.toml's
+          # [tool.maturin] features, so one wheel serves every interpreter below;
+          # there is no free-threaded build (pyo3 abi3 can't target Py_GIL_DISABLED,
+          # and upstream itself ships no cp314t wheel).
+          CIBW_BUILD: >-
+            cp310-manylinux_riscv64 cp311-manylinux_riscv64
+            cp312-manylinux_riscv64 cp313-manylinux_riscv64
+            cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # html-to-markdown ships no [tool.cibuildwheel]; the Rust toolchain its
+          # maturin backend needs is installed in-container here, same as upstream's
+          # own cibw-before-build-linux (publish.yaml's python-wheels job).
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+          # Mirrors scripts/prepare_wheel.py, which upstream's own before-build also
+          # runs: it cargo-builds the standalone CLI binary and bundles it into
+          # html_to_markdown/bin and the wheel's .data/scripts before maturin builds
+          # the extension module.
+          CIBW_BEFORE_BUILD_LINUX: >-
+            pip install maturin uv &&
+            python scripts/prepare_wheel.py
+          CIBW_TEST_REQUIRES: pytest pytest-asyncio pytest-timeout
+          CIBW_TEST_SOURCES: >-
+            e2e/python/conftest.py e2e/python/pyproject.toml e2e/python/tests
+          # test_options_preprocessing_{aggressive,minimal} raise
+          # NameError: name 'PreprocessingPreset' is not defined at v3.12.0: the
+          # test module's import line omits PreprocessingPreset even though it's
+          # used later in the file and is exported by html_to_markdown.__init__;
+          # upstream's main branch already carries the fixed import, just not yet
+          # in a tagged release. Fails identically on every architecture.
+          CIBW_TEST_COMMAND: >-
+            python -c "import html_to_markdown._html_to_markdown as m;
+            assert m.__file__.endswith('.so'), m.__file__" &&
+            python -m pytest -v e2e/python/tests
+            -k "not test_options_preprocessing_aggressive and not test_options_preprocessing_minimal"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: html-to-markdown-${{ env.HTML_TO_MARKDOWN_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish html-to-markdown ${{ inputs.version || '3.12.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: html-to-markdown-${{ inputs.version || '3.12.0' }}-*-manylinux_riscv64
