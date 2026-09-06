@@ -20,6 +20,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
 - **156** — An upstream that exists only as a PyPI sdist is still an ordinary port — but
 - **213** — Gotcha 103's timestamp-proximity trick can point at the wrong commit when
 - **242** — A third-party tree-sitter grammar's release tag can omit the generated
+- **254** — A build-from-checkout can pick up a maintainer-only dev/coverage cflags
 
 ---
 
@@ -273,3 +274,25 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
       `tree-sitter-cli` as its only `tree-sitter-*` dependency, which upstream's own
       `npm i` gate excludes — so upstream's own workflow does not install npm packages
       before generating, either.
+
+254. **A build-from-checkout can pick up a maintainer-only dev/coverage cflags
+    file the real sdist never ships (the rjsmin case; see `build-rjsmin.yml`).**
+    rjsmin's `setup.py` appends the contents of `debug.unix.cflags` to
+    `extra_compile_args` whenever the `CFLAGS` env var is unset — a convenience for
+    the maintainer's own `tox`/gcov workflow, gating `-Wall -Wdeclaration-after-statement
+    -Werror -pedantic -std=c99` plus `-ftest-coverage -fprofile-arcs`. `MANIFEST.in`
+    never lists the file, so it is absent from the real PyPI sdist and from any sdist
+    built with `python -m build --sdist` — but checking out the git tag directly for
+    cibuildwheel (this repo's usual build-from-checkout shape, gotcha 1's opposite
+    case) puts it right back at the project root, where `setup.py` finds it
+    unconditionally. The pedantic `-Werror` set turns a warning in CPython 3.14's own
+    free-threaded `refcount.h` (mixed declaration-and-code) into a hard
+    `CompileError` — cp312/cp313/cp314 build fine, only cp314t fails, and the failure
+    is entirely upstream's header plus upstream's own dev flags, nothing riscv64-specific.
+    Fix: build the sdist yourself first (gotcha 1's playbook step) even for a project
+    with no packaging quirks — `tar tzf` the result and confirm the dev-only file is
+    gone before wiring it into `cibuildwheel`'s `package-dir`. Reproduces on any
+    x86/aarch64 host with a cp314t interpreter: `git clone` the tag, `gcc -std=c99
+    -pedantic -Werror -Wdeclaration-after-statement -c rjsmin.c -I
+    $(python3.14t -c 'import sysconfig; print(sysconfig.get_path("include"))')`
+    fails identically; building from `python -m build --sdist`'s output does not.
