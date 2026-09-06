@@ -25,6 +25,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **267** — A vendored C++ library's own architecture-dispatch macro (not a SIMD gate,
 - **271** — `AVIF_CODEC_AOM_DECODE=OFF` and `-DCONFIG_AV1_HIGHBITDEPTH=0` are a normal
 - **272** — A riscv64 project's own `getauxval(AT_HWCAP)` runtime dispatch can still
+- **279** — Gotcha 272's zlib-ng `vsetvli` SIGILL recurs whenever a *second*, independent
+- **288** — Rocky/AlmaLinux 10 dropped the classic SDL2-devel package entirely, on every
 
 ---
 
@@ -500,3 +502,66 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       is present and correctly gated on HWCAP, and still unsafe, because confirming an
       instruction's availability by executing that same instruction assumes the one
       fact being tested.
+
+279. **Gotcha 272's zlib-ng `vsetvli` SIGILL recurs whenever a *second*, independent
+    port vendors the same library — and this repo's own queue notes from a QEMU-only
+    rehearsal are not evidence it is fixed (gemmi's `FETCH_ZLIB_NG=ON` CMake
+    `FetchContent`, vs. zlib-ng's own autoconf `setup.py` build; see
+    `build-gemmi.yml`).** gemmi's `CMakeLists.txt` fetches the same zlib-ng project via
+    `FetchContent`/`add_subdirectory` rather than the autoconf `./configure && make`
+    path gotcha 272 patched, and hits the identical failure on the identical
+    `ubuntu-24.04-riscv` hardware: the wheel builds, installs, and runs cleanly right
+    up until the first test that touches real deflate/inflate (`test_align.py`'s
+    `test_assign_best_sequences`, reading a gzip-compressed `.pdb.gz`), which dies with
+    `Illegal instruction (core dumped)`. Before landing on RVV, disabling project-wide
+    LTO first (a nearby, unrelated `CMakeLists.txt` comment about LTO corrupting
+    zlib-ng specifically) reproduced the identical crash unchanged, ruling that out
+    fast rather than assuming it was the fix because it touched the same subsystem.
+    - **A QEMU-validated port is not evidence the same library is safe elsewhere** —
+      gotcha 272 already establishes that QEMU's `vsetvli` never reproduces this SIGILL
+      (TCG implements it correctly; only the real runner hardware doesn't), so an
+      *other* port's "verified under QEMU, N passed" note is not proof this build shape
+      avoids the crash — it proves only that nobody ran it on real riscv64 hardware yet.
+      Treat such a note as untested for this purpose, not as a green light.
+    - **The CMake embedding is the one place this is cheaper than gotcha 272's fix**:
+      the vendored `CMakeLists.txt` already exposes a normal `option(WITH_RVV ...)`,
+      so `-DWITH_RVV=OFF` in `SKBUILD_CMAKE_ARGS` falls back to zlib-ng's portable C
+      kernels with a one-line `CIBW_ENVIRONMENT` change — no `setup.py` patch, no
+      `platform.machine()` guard, because the CMake path (Windows-only for zlib-ng's
+      *own* build) is the one gemmi actually drives.
+
+288. **Rocky/AlmaLinux 10 dropped the classic SDL2-devel package entirely, on every
+    arch — not a riscv64 gap (the pygame case; see `build-pygame.yml`).** `dnf list
+    SDL2-devel` finds nothing: SDL2 now ships only as `sdl2-compat`, a runtime-only
+    shim (`libSDL2-2.0.so.0`) implemented on top of SDL3, with no headers, no
+    unversioned `libSDL2.so`, and no `sdl2.pc`. `SDL3-devel` exists instead
+    (`appstream`/`crb`), but a project whose build genuinely needs SDL2 (`sdl2-config`,
+    `pkg-config sdl2`) has to build it from source regardless of target arch — this
+    is a base-image fact, not gotcha 51's EPEL-on-riscv64 gap. It cascades: EPEL's
+    prebuilt `SDL2_image-devel`/`SDL2_mixer-devel`/`SDL2_ttf-devel` all declare
+    `Requires: pkgconfig(sdl2) >= 2.0.9`, so `dnf install SDL2_image-devel` fails
+    outright with "nothing provides pkgconfig(sdl2)" even where EPEL is enabled —
+    those three have to be built from source too, not just SDL2 itself. Their own
+    from-source builds are unaffected: `./configure --enable-png --disable-png-shared
+    ...` etc. happily link the ordinary `libpng-devel`/`libjpeg-turbo-devel`/
+    `libwebp-devel`/`libtiff-devel`/`mpg123-devel`/`flac-devel`/`libvorbis-devel`/
+    `opus-devel` packages Rocky 10 still ships normally — only the SDL-family
+    packages themselves are gone.
+    - **`portmidi-devel`, `libmodplug-devel` and `fluidsynth-devel` are EPEL-only**
+      (gotcha 51), so on riscv64 (no EPEL) portmidi has to be built from source
+      (a plain `cmake . && make && make install`) and SDL2_mixer's mod/fluidsynth-midi
+      backends have to be dropped (`--disable-music-mod-modplug
+      --disable-music-midi-fluidsynth`) rather than built — a reasonable trim when the
+      port's own test suite already excludes music-playback tests.
+    - **A from-source SDL2 stack's full licence closure is bigger than the upstream
+      project's own `docs/licenses/` folder** (gotcha 137's warning generalizes past
+      auditwheel-vendored *distro* libraries): pygame's own reference licences cover
+      SDL2/SDL2_image/SDL2_mixer/portmidi/freetype/libpng/libjpeg/etc., but building
+      SDL2_ttf pulls in its bundled `external/harfbuzz` (MIT, its own `COPYING`, no
+      riscv64 harfbuzz-devel to link instead) as a *separate* vendored `.so`, and
+      `libtiff-devel`/`libwebp-devel` transitively pull in `liblerc` (Apache-2.0),
+      `libzstd`, `jbigkit-libs` (GPL-2.0-or-later) and `brotli` — none of which
+      upstream's own docs folder ships a licence text for, because upstream never
+      builds this exact dependency graph. Verify the final vendored set with
+      `auditwheel show`/`unzip -l` before trusting a project's own bundled licence
+      folder is complete for *your* build.

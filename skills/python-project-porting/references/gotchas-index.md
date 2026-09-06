@@ -178,6 +178,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **271** — `AVIF_CODEC_AOM_DECODE=OFF` and `-DCONFIG_AV1_HIGHBITDEPTH=0` are a normal
 - **272** — A riscv64 project's own `getauxval(AT_HWCAP)` runtime dispatch can still
 - **279** — Gotcha 272's zlib-ng `vsetvli` SIGILL recurs whenever a *second*, independent
+- **288** — Rocky/AlmaLinux 10 dropped the classic SDL2-devel package entirely, on every
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
