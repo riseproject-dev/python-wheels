@@ -1,0 +1,110 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/tuxu/python-samplerate/blob/v0.2.4/.github/workflows/pythonpackage.yml
+name: Build samplerate wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'samplerate version to build (git tag without leading v, e.g. 0.2.4)'
+        required: true
+        default: '0.2.4'
+  pull_request:
+    paths:
+      - '.github/workflows/build-samplerate.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.2.4' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.2.4 there.
+  SAMPLERATE_VERSION: ${{ inputs.version || '0.2.4' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # external/CMakeLists.txt FetchContent-pulls these two at build time and
+  # statically links them in; bump alongside SAMPLERATE_VERSION if upstream
+  # ever moves the pins.
+  PYBIND11_SHA: f5fbe867d2d26e4a0a9177a51f6e568868ad3dc8
+  LIBSAMPLERATE_SHA: c96f5e3de9c4488f4e6c97f59f5245f22fda22f7
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build samplerate ${{ inputs.version || '0.2.4' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Mirrors upstream's own CIBW_BUILD (a per-interpreter .so, not abi3);
+        # musllinux is dropped because upstream's own CI skips it too.
+        python: ["cp39", "cp310", "cp311", "cp312", "cp313", "cp314"]
+
+    steps:
+      - name: Checkout samplerate v${{ env.SAMPLERATE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: tuxu/python-samplerate
+          ref: v${{ env.SAMPLERATE_VERSION }}
+          # setuptools-scm derives the version from the tag; needs full history.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # pybind11 (header-only, templates compiled into the .so) and libsamplerate
+      # (statically linked) are fetched from source by CMake FetchContent;
+      # upstream's own wheel ships neither licence, so stage them at the root for
+      # setuptools' default LICEN[CS]E* glob to pick up (gotcha 32/44).
+      - name: Stage the vendored pybind11 and libsamplerate licences
+        run: |
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/pybind/pybind11/${{ env.PYBIND11_SHA }}/LICENSE" -o LICENSE.pybind11
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/libsndfile/libsamplerate/${{ env.LIBSAMPLERATE_SHA }}/COPYING" -o LICENSE.libsamplerate
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # numpy has no riscv64 wheel on public PyPI; keep pip on our registry's copy.
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy
+          CIBW_TEST_REQUIRES: pytest numpy
+          CIBW_TEST_COMMAND: pytest {project}/tests
+
+      - name: Check the extension and the licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("samplerate.") and n.endswith(".so") for n in names), whl
+              licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                          if ".dist-info/licenses/" in n and not n.endswith("/")}
+              assert licences == {"LICENSE.rst", "LICENSE.pybind11", "LICENSE.libsamplerate"}, licences
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: samplerate-${{ env.SAMPLERATE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish samplerate ${{ inputs.version || '0.2.4' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: samplerate-${{ inputs.version || '0.2.4' }}-*-manylinux_riscv64
