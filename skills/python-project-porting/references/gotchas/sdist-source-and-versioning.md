@@ -25,6 +25,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
 - **261** — A package can require its own compiled extension, plus a large downloaded
 - **265** — A project's own version-detection script can read `GITHUB_REF` directly,
 - **268** — A vendored C-core git submodule can have its own `git describe`-based
+- **274** — A build-from-checkout package can tag releases in a format the version
 
 ---
 
@@ -407,3 +408,32 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
       version files** — a project vendoring a CMake C core via git submodule has
       almost certainly already solved "how do I make `git describe` work in CI" for
       itself, and the fix is usually visible directly in their checkout step.
+
+274. **A build-from-checkout package can tag releases in a format the version
+    input doesn't match, and GitHub Actions expressions have no string-replace or
+    split function to bridge the two (the netifaces case).** netifaces (archived
+    upstream, still builds cleanly with a modern setuptools/distutils shim) tags
+    releases `release_0_11_0`, not `0.11.0` or `v0.11.0` — unlike the plain-prefix
+    case (`ref: v${{ env.PKG_VERSION }}`, as `build-yappi.yml`/`build-pyinstaller.yml`
+    do), the dots themselves need to become underscores. GitHub Actions expression
+    syntax only offers `contains`/`startsWith`/`endsWith`/`format`/`join` — no
+    `replace()` or `split()` — so this can't be done inline in the `ref:` field the
+    way gotcha 3's sdist-filename derivation is done in a `run:` step.
+    - **Fix: a `run:` step before `actions/checkout` that does the substitution in
+      bash and exports it via `GITHUB_ENV`**, since no earlier workflow in this repo
+      needed a computed value before its very first step:
+      ```yaml
+      - name: Determine upstream git tag
+        run: echo "PKG_TAG=release_${PKG_VERSION//./_}" >> "$GITHUB_ENV"
+      - name: Checkout pkg ${{ env.PKG_TAG }}
+        uses: actions/checkout@...
+        with: { repository: owner/pkg, ref: ${{ env.PKG_TAG }} }
+      ```
+      Bash's `${VAR//./_}` is safe here because `.` has no special meaning in
+      `${var//pattern/string}` glob-style matching — it matches only a literal dot.
+    - **Distinct from gotcha 3**: that one derives the *version* from a *built
+      sdist's filename* (sdist→bdist shape, version flows tag→sdist→version).
+      This one derives the *tag* from the *version input* (build-from-checkout
+      shape, no sdist stage exists to read a filename from) — the dependency
+      direction is reversed, and the fix has to live before the checkout instead
+      of after a build step.

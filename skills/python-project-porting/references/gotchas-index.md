@@ -81,6 +81,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **261** — A package can require its own compiled extension, plus a large downloaded
 - **265** — A project's own version-detection script can read `GITHUB_REF` directly,
 - **268** — A vendored C-core git submodule can have its own `git describe`-based
+- **274** — A build-from-checkout package can tag releases in a format the version
 
 ### cibuildwheel mechanics, the matrix & abi3 — [`gotchas/cibuildwheel-matrix-and-abi3.md`](gotchas/cibuildwheel-matrix-and-abi3.md)
 
