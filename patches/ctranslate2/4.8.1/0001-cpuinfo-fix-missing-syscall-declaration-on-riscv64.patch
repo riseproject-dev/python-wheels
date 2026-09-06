@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 3 Sep 2026 21:30:00 +0200
+Subject: [PATCH] cpuinfo: define _GNU_SOURCE unconditionally so syscall() is
+ declared on riscv64
+
+cpuinfo's CMakeLists.txt only adds -D_GNU_SOURCE=1 to this target when
+CPUINFO_SUPPORTED_PLATFORM is set, and the pinned commit (082deffc, from
+before cpuinfo recognized riscv64 at all) leaves that flag off for any
+CMAKE_SYSTEM_PROCESSOR it doesn't match by name. This file's
+cpuinfo_get_current_processor() still unconditionally calls syscall() on any
+__linux__ build regardless of that flag, so on riscv64 glibc's unistd.h hides
+the declaration and GCC 14 errors out with an implicit-declaration error
+before a single ctranslate2 object file compiles.
+
+cpuinfo commit 4e5be9e1c6c5895bc5105a92d587bc9df8d2522b ("Add limited support
+for RISC-V initialization", 2023-11-14) already fixes this indirectly
+upstream, by adding riscv(32|64) to the CMakeLists.txt processor regex that
+gates CPUINFO_SUPPORTED_PLATFORM and therefore the same _GNU_SOURCE define
+this patch adds directly. ctranslate2 pins Ruy's own submodule commit of
+cpuinfo from before that fix, so it has to be applied here rather than
+picked up by a version bump.
+
+Upstream-Status: Backport [https://github.com/pytorch/cpuinfo/commit/4e5be9e1c6c5895bc5105a92d587bc9df8d2522b]
+---
+ third_party/ruy/third_party/cpuinfo/src/api.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/third_party/ruy/third_party/cpuinfo/src/api.c b/third_party/ruy/third_party/cpuinfo/src/api.c
+index f91b421..8231a66 100644
+--- a/third_party/ruy/third_party/cpuinfo/src/api.c
++++ b/third_party/ruy/third_party/cpuinfo/src/api.c
+@@ -1,3 +1,12 @@
++/*
++ * cpuinfo's CMakeLists.txt only defines _GNU_SOURCE when
++ * CPUINFO_SUPPORTED_PLATFORM is set, which this pinned commit never does for
++ * riscv64 (added to the recognized-processor list only in later cpuinfo
++ * releases). Without it, glibc's <unistd.h> hides the syscall() prototype this
++ * file still calls unconditionally on __linux__.
++ */
++#define _GNU_SOURCE 1
++
+ #include <stdbool.h>
+ #include <stddef.h>
+ 
