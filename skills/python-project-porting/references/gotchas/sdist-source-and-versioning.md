@@ -24,6 +24,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
 - **254** — A build-from-checkout can pick up a maintainer-only dev/coverage cflags
 - **261** — A package can require its own compiled extension, plus a large downloaded
 - **265** — A project's own version-detection script can read `GITHUB_REF` directly,
+- **268** — A vendored C-core git submodule can have its own `git describe`-based
 
 ---
 
@@ -384,3 +385,25 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
       wheel filename or `dist-info/METADATA` after a local `pip wheel` (playbook step
       2) rather than assuming a successful build proves the version came through
       correctly.
+
+268. **A vendored C-core git submodule can have its own `git describe`-based
+    version detection, independent of the outer package's version (the igraph
+    case).** python-igraph vendors the igraph C library as a `vendor/source/igraph`
+    submodule; its `CMakeLists.txt` (`etc/cmake/version.cmake`) only trusts an
+    `IGRAPH_VERSION` file (present in release tarballs, absent from a git checkout)
+    or falls back to `find_package(Git)` + `git_describe()`. `actions/checkout`'s
+    default `fetch-depth: 1` also caps the *submodule* clone depth (the action passes
+    the same `--depth` to `git submodule update`), so the C core has no tags reachable
+    and cmake's `configure` step dies with `Cannot find out the version number of
+    this package; IGRAPH_VERSION is missing.` — a plain `git describe`/setuptools_scm
+    failure (gotcha 3) doesn't apply here because it isn't the outer repo's version at
+    stake, it's a nested submodule's own CMake build erroring out entirely.
+    - **`fetch-depth: 0` on the outer `actions/checkout` step fixes it**, exactly as
+      upstream's own `build.yml` does (`actions/checkout@v5` with `fetch-depth: 0` and
+      `submodules: true`) — `fetch-depth: 0` means "all history for all branches and
+      tags" and is threaded through to the submodule clone too, so `git describe`
+      inside the submodule has tags to find.
+    - **Check upstream's own CI for this exact pattern before guessing at env vars or
+      version files** — a project vendoring a CMake C core via git submodule has
+      almost certainly already solved "how do I make `git describe` work in CI" for
+      itself, and the fix is usually visible directly in their checkout step.
