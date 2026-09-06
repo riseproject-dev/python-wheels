@@ -31,6 +31,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **251** — When `package-dir` is a `.tar.gz`, cibuildwheel extracts it to a temp dir and
 - **262** — Gotcha 201's vendoring step is only needed when the sibling sources are
 - **270** — Gotcha 134's "leaked `Py`-prefixed symbol" failure has a real fix, not just
+- **281** — Gotcha 251 recurs even when the port's own notes cite gotcha 104 — a
 
 ---
 
@@ -584,3 +585,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
      project's `setup.py` takes on Linux — the Darwin/BSD branch of the same file
      forces the C++ compiler and mangles both names, which hides the leak entirely
      and makes macOS a false-negative host for this specific check).
+
+281. **Gotcha 251 recurs even when the port's own notes cite gotcha 104 — a
+     `build_sdist` job's tarball artifact, downloaded and handed straight to
+     `package-dir` in the `build_wheels` job, is still a `.tar.gz` (the biotite
+     case; see `build-biotite.yml`).** biotite's sdist->bdist split follows gotcha
+     104's shape correctly — `build_wheels` checks the tag out at the workspace root
+     so `CIBW_TEST_SOURCES: tests benchmarks pyproject.toml` has something to stage —
+     but `package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}` still points
+     straight at the downloaded `.tar.gz`, not a directory. The build phase never
+     notices (gotcha 251's "both work identically for the build step"); the wheel
+     compiles and installs fine on all three interpreters, and the job dies 40-50
+     minutes later, deep in "Testing wheel", with `cibuildwheel: Test source tests
+     does not exist.` — the same message and the same `chdir`-into-the-extracted-
+     sdist root cause as the quickjs case gotcha 251 already documents, just reached
+     through a different workflow shape (an artifact download standing in for
+     quickjs's local tarball). **Citing gotcha 104 for the re-checkout half of the
+     fix is not enough — a `package-dir` ending in a downloaded sdist filename needs
+     a second look through gotcha 251's lens specifically**, because 104 explains why
+     the checkout-at-root trick works at all and says nothing about what `package-dir`
+     itself must be shaped like. Fix is identical to 251's: add a step that extracts
+     the tarball (`tar zxf "dist/${sdist_name}" -C dist`) and change `package-dir` to
+     the resulting `dist/<pkg>-<version>` directory, matching `build-lightgbm.yml`.
+     - **The two failure sites look the same on the surface (`Test source <path> does
+       not exist`) but the fix differs by why the path is missing** — gotcha 251's
+       root shape is "nothing was ever staged into the wrong place" (`Path.cwd()` is a
+       temp dir with nothing beside it); a partially-correct port like this one instead
+       staged the tests fine at the *real* workspace root and still fails, because
+       cibuildwheel's own `chdir` (not the workflow) moved `Path.cwd()` out from under
+       them. Don't stop debugging at "did the checkout step run" — confirm which
+       directory `copy_test_sources` actually resolved against before concluding the
+       staging step itself is broken.

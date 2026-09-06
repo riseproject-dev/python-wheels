@@ -112,6 +112,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **251** — When `package-dir` is a `.tar.gz`, cibuildwheel extracts it to a temp dir and
 - **262** — Gotcha 201's vendoring step is only needed when the sibling sources are
 - **270** — Gotcha 134's "leaked `Py`-prefixed symbol" failure has a real fix, not just
+- **281** — Gotcha 251 recurs even when the port's own notes cite gotcha 104 — a
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
@@ -172,6 +173,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **267** — A vendored C++ library's own architecture-dispatch macro (not a SIMD gate,
 - **271** — `AVIF_CODEC_AOM_DECODE=OFF` and `-DCONFIG_AV1_HIGHBITDEPTH=0` are a normal
 - **272** — A riscv64 project's own `getauxval(AT_HWCAP)` runtime dispatch can still
+- **279** — Gotcha 272's zlib-ng `vsetvli` SIGILL recurs whenever a *second*, independent
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
@@ -189,6 +191,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **206** — A C++ ML/inference engine that gates its fast BLAS backend to x86 usually
 - **220** — BLST (Ethereum's vendored elliptic-curve library, pulled in by ckzg/c-kzg-4844
 - **231** — A vendored C library's own CMake can carry a genuine, tested riscv64 branch —
+- **278** — A vendored, direct-copy (not submodule) header can be missing riscv64 from its
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 
@@ -243,6 +246,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **225** — `wheel>=0.44.0` dropped `wheel.bdist_wheel.get_platform` — a hand-rolled
 - **256** — setuptools 81 dropped the `dry_run` keyword from its vendored
 - **269** — A project's own `build-system.requires` floor can be looser than what its
+- **277** — A CMake-backed `pyproject.toml` build dependency with no upper bound can still be
 
 ### Testing: test-sources & shadowing — [`gotchas/testing-and-shadowing.md`](gotchas/testing-and-shadowing.md)
 

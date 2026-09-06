@@ -383,6 +383,12 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
       published sdist as the CI build input (see the playbook's step 3) still applies;
       pay the cost once on `ubuntu-latest` rather than diverge from how the artifact is
       actually produced.
+    - **Pruning `tests/`/`benchmarks/` from the sdist (this entry) and re-checking the
+      tag out for `CIBW_TEST_SOURCES` (gotcha 104) is only half the fix** — the
+      `build_wheels` job's `package-dir` also has to point at a directory, not the
+      downloaded `.tar.gz` this job's sibling artifact produces, or `CIBW_TEST_SOURCES`
+      resolves against cibuildwheel's own temp extraction instead of the checkout
+      (gotcha 251/281 — this exact port hit it).
 
 265. **A project's own version-detection script can read `GITHUB_REF` directly, not
     through `setuptools_scm` — reproduce the env var, not just the checkout (the
