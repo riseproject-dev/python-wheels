@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build_wheels` job of
+# https://github.com/bluetooth-devices/fnv-hash-fast/blob/v2.0.3/.github/workflows/ci.yml
+name: Build fnv-hash-fast wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'fnv-hash-fast version to build (git tag without leading v, e.g. 2.0.3)'
+        required: true
+        default: '2.0.3'
+  pull_request:
+    paths:
+      - '.github/workflows/build-fnv-hash-fast.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.0.3' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  FNV_HASH_FAST_VERSION: ${{ inputs.version || '2.0.3' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build fnv-hash-fast ${{ inputs.version || '2.0.3' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout fnv-hash-fast v${{ env.FNV_HASH_FAST_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: bluetooth-devices/fnv-hash-fast
+          ref: v${{ env.FNV_HASH_FAST_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: REQUIRE_EXTENSION=1
+          CIBW_TEST_REQUIRES: pytest
+          # build_ext.py's build_extensions() swallows every compile error
+          # unconditionally, so REQUIRE_EXTENSION never actually fails the
+          # build; assert the .so directly instead of trusting the wheel.
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: >-
+            python -c "import fnv_hash_fast._fnv_impl as m; assert m.__file__.endswith('.so'), m.__file__" &&
+            python -m pytest tests --ignore=tests/benchmarks
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fnv-hash-fast-${{ env.FNV_HASH_FAST_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish fnv-hash-fast ${{ inputs.version || '2.0.3' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: fnv-hash-fast-${{ inputs.version || '2.0.3' }}-*-manylinux_riscv64
