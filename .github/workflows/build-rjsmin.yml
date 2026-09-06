@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# rjsmin has no upstream CI workflow (no .github/workflows in ndparker/rjsmin);
+# this build follows setup.py's own C-extension-with-pure-fallback shape.
+name: Build rjsmin wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'rjsmin version/tag to build (e.g. 1.2.5)'
+        required: true
+        default: '1.2.5'
+  pull_request:
+    paths:
+      - '.github/workflows/build-rjsmin.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.2.5' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  RJSMIN_VERSION: ${{ inputs.version || '1.2.5' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_sdist:
+    needs: [setup]
+    # The sdist is architecture-independent, so build it once on x86 instead of
+    # a scarce riscv runner. It also excludes debug.unix.cflags, a
+    # coverage/-Werror dev-build flag file that MANIFEST.in doesn't ship in the
+    # sdist; checking out the git tag directly for cibuildwheel (as the first
+    # version of this workflow did) picks that file up and fails cp314t with
+    # "ISO C90 forbids mixed declarations and code" from CPython's own
+    # free-threaded refcount.h.
+    name: Build rjsmin ${{ inputs.version || '1.2.5' }} sdist
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
+    steps:
+      - name: Checkout rjsmin ${{ env.RJSMIN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ndparker/rjsmin
+          ref: ${{ env.RJSMIN_VERSION }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build sdist
+        id: sdist
+        run: |
+          uv pip install build
+          python -m build --sdist
+          sdists=(dist/*.tar.gz)
+          echo "sdist_name=$(basename "${sdists[0]}")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rjsmin-${{ env.RJSMIN_VERSION }}-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_sdist]
+    name: Build rjsmin ${{ inputs.version || '1.2.5' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: rjsmin-${{ env.RJSMIN_VERSION }}-sdist
+          path: dist/
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # setup.py silently falls back to a pure-Python wheel if the C
+          # extension fails to build; this is its own knob to make that fatal.
+          CIBW_ENVIRONMENT: SETUP_CEXT_REQUIRED=1
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: >-
+            python -c "import _rjsmin as m; assert m.__file__.endswith('.so'), m.__file__" &&
+            python -m pytest tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rjsmin-${{ env.RJSMIN_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish rjsmin ${{ inputs.version || '1.2.5' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: rjsmin-${{ inputs.version || '1.2.5' }}-*-manylinux_riscv64
