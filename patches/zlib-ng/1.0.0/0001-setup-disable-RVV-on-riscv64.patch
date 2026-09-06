@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 6 Sep 2026 14:10:34 +0200
+Subject: [PATCH] setup: disable RVV on riscv64
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+zlib-ng's riscv_check_features() runtime-detects the V extension via
+getauxval(AT_HWCAP), and when it believes V is present it executes an
+inline vsetvli/csrr probe to confirm vector length and tail/mask-agnostic
+support before turning on the RVV-accelerated deflate/inflate paths
+(adler32_rvv, chunkset_rvv, compare256_rvv, slide_hash_rvv).
+
+On the riscv64 CI hardware this repo builds wheels on, that vsetvli probe
+itself raises SIGILL (Illegal instruction) — the very first RVV
+instruction zlib-ng's own feature check executes crashes the process,
+before any deflate/inflate call is made. Every test that imports
+zlib_ng (test_zlib_compliance.py, test_gzip_compliance.py,
+test_gzip_ng.py) segfaults the same way at zng_deflateInit2.
+
+setup.py's Linux build path drives zlib-ng's autoconf-style ./configure
+script directly (not CMake — that path is Windows-only) and exposes no
+environment-variable hook to pass extra configure flags, so the only way
+to reach configure's own --without-rvv switch is to have setup.py add it
+itself. Guard it on platform.machine() so non-riscv builds (and riscv
+hardware where this is eventually fixed/verified) are unaffected.
+
+This falls back zlib-ng to its portable C RVV-free code paths, still
+much faster than not shipping zlib-ng-accelerated zlib/gzip at all.
+
+Upstream-Status: Inappropriate [riscv64 CI-hardware-only RVV runtime-detection SIGILL; not a defect in this project]
+---
+ setup.py | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/setup.py b/setup.py
+index f58cbf8..d9d3109 100644
+--- a/setup.py
++++ b/setup.py
+@@ -7,6 +7,7 @@
+
+ import functools
+ import os
++import platform
+ import shutil
+ import subprocess
+ import sys
+@@ -108,7 +109,12 @@ def build_zlib_ng():
+         make_program = "gmake" if shutil.which("gmake") else "make"
+         subprocess.run([make_program, "libz-ng.a"], **run_args)
+     elif sys.platform == "linux":
+-        subprocess.run([os.path.join(build_dir, "configure")], **run_args)
++        configure_args = [os.path.join(build_dir, "configure")]
++        if platform.machine() in ("riscv64", "riscv32"):
++            # riscv_check_features()'s vsetvli runtime probe SIGILLs on
++            # this hardware; disable RVV rather than crash every caller.
++            configure_args.append("--without-rvv")
++        subprocess.run(configure_args, **run_args)
+         subprocess.run(["make", "libz-ng.a", "-j", str(cpu_count)], **run_args)
+     else:
+         subprocess.run(["cmake", build_dir], **run_args)
+--
+2.50.1 (Apple Git-155)
+
