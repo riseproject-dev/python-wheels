@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `wheels` job of
+# https://github.com/veelion/python-farmhash/blob/master/build_wheels.sh
+name: Build pyfarmhash wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pyfarmhash version to build (e.g. 0.5.1)'
+        required: true
+        default: '0.5.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pyfarmhash.yml'
+      - 'patches/pyfarmhash/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.5.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYFARMHASH_VERSION: ${{ inputs.version || '0.5.1' }}
+  # Upstream cuts releases without git tags and never commits its version
+  # bumps: master's setup.py has been stuck at VERSION = (0, 4, 0) since
+  # 954c61f3 (2024-05-02) while PyPI has since shipped 0.5.0 and 0.5.1 sdists
+  # whose sources are otherwise byte-identical to this commit's tree. Update
+  # alongside PYFARMHASH_VERSION and the patch under patches/pyfarmhash/.
+  PYFARMHASH_REF: c83451a9df025ef6ab438e7ffe1b37684f7cfec2
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pyfarmhash ${{ inputs.version || '0.5.1' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        libc: [manylinux, musllinux]
+
+    steps:
+      - name: Checkout pyfarmhash ${{ env.PYFARMHASH_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: veelion/python-farmhash
+          ref: ${{ env.PYFARMHASH_REF }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pyfarmhash source
+        run: git apply python-wheels/patches/pyfarmhash/${{ env.PYFARMHASH_VERSION }}/*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # Upstream ships no test suite at all; exercise every bound
+          # function against known-good outputs instead of an import-only
+          # smoke test.
+          CIBW_TEST_COMMAND: >-
+            python -c "import farmhash;
+            assert farmhash.__file__.endswith('.so'), farmhash.__file__;
+            assert farmhash.hash32('abc') == 795041479;
+            assert farmhash.hash32withseed('abc', 12345) == 2710790815;
+            assert farmhash.hash64('abc') == 2640714258260161385;
+            assert farmhash.hash64(b'abc') == 2640714258260161385;
+            assert farmhash.hash64withseed('abc', 12345) == 13914286602242141520;
+            assert farmhash.hash128('abc') == (4143508125394299908, 11566915719555882565);
+            assert farmhash.hash128withseed('abc', 1234, 0) == (13364216625615136468, 11320522948082609695);
+            assert farmhash.fingerprint32('abc') == 795041479;
+            assert farmhash.fingerprint64('abc') == 2640714258260161385;
+            assert farmhash.fingerprint128('abc') == (4143508125394299908, 11566915719555882565);
+            print('pyfarmhash OK')"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyfarmhash-${{ env.PYFARMHASH_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyfarmhash ${{ inputs.version || '0.5.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pyfarmhash-${{ inputs.version || '0.5.1' }}-*riscv64
