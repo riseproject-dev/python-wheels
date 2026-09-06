@@ -17,6 +17,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
 - **129** — Copying upstream's require-extension env var verbatim ships a degraded wheel —
 - **55** — A `cffi_modules` project is a normal port, and cffi itself is registry-only on
 - **280** — When there's no require-extension knob to force (gotcha 91's shape), check
+- **292** — Gotcha 81's "diff the wheel `size` field" test can pass on a real per-arch binary
 
 ---
 
@@ -311,3 +312,30 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
       auto-include glob skips it — the same failure mode as gotcha 25's geventhttpclient
       case). Building from the checked-out git tag rather than the PyPI sdist sidesteps
       it entirely, and is one more reason to prefer that shape by default.
+
+292. **Gotcha 81's "diff the wheel `size` field" test can pass on a real per-arch binary
+    when that binary is small next to the identical Python payload around it — diff the
+    actual file, not the archive (the plotext case; see `build-plotext.yml`).** plotext's
+    `setup.py` compiles one C++ file (`plotext/_kernel/cpp/kernel.cpp`) into
+    `kernel.so`, loaded by `ctypes` (gotcha 33's shape) and tagged `py3-none-<platform>`
+    by a `bdist_wheel.get_tag()` override — gotcha 81's xgboost pattern exactly. But
+    where xgboost's per-platform wheels range 2.4-57 MB (the size diff *is* the whole
+    tell), plotext's two Linux wheels are 472858 and 473957 bytes — an ~1 KB gap, well
+    inside what zip recompresses the ~200 identical `.py`/doc/data files to. The actual
+    `kernel.so` inside differs by **37 KB** (aarch64 440816 vs x86_64 403352) and is a
+    genuinely different ELF per arch (confirmed with `file`/`md5`), but the whole-wheel
+    `size` field hides it because the compiled payload is a small fraction of the
+    wheel's weight.
+    - **Extract and diff the suspected binary itself**, not the wheel around it, whenever
+      the compiled payload is not the dominant weight: `unzip -p <whl-a> <path> | md5sum`
+      vs the same for `<whl-b>` (or `file` on each, extracted) settles it in two commands
+      and needs no size-table reasoning at all. Do this by default once gotcha 33/55/116's
+      "loaded by ctypes/cffi, not imported" shape is confirmed — the size heuristic is a
+      shortcut for when the binary dominates, not a substitute for checking it does.
+    - **A build that hard-fails instead of degrading needs no `REQUIRE_*` knob (contrast
+      gotchas 20/91).** `build_cpp.py`'s `compile_kernel()` has no `optional=True`/try-except
+      path at all: a missing compiler or a failed `g++` call raises `SystemExit` straight
+      out of the `build_py` step, which fails the wheel build outright rather than shipping
+      a silently-degraded one. Grep the custom build step for its failure path before
+      reaching for gotcha 20's forcing pattern — some projects already refuse to produce a
+      placebo wheel, and forcing a knob that doesn't exist would be pure divergence.
