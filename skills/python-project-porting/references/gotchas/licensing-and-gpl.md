@@ -22,6 +22,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
 - **161** — A vendored prebuilt stack can be GPL while every library in it reports LGPL — read
 - **162** — A sibling build repo pins every source by URL and SHA-256, which makes the GPL/LGPL
 - **165** — Three ways gotcha 137's licence sweep silently under-collects, and one image fact that
+- **255** — A project's own build hook that hand-parses a *build-time* dependency's dist-info
 
 ---
 
@@ -452,3 +453,31 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
       `before-all` and it lands in `dist-info/licenses/`. `{project}` is substituted in
       `before-all` (`platforms/linux.py` calls `prepare_command(..., project=..., package=...)`),
       so the collector can be a script checked out beside the workflow.
+
+255. **A project's own build hook that hand-parses a *build-time* dependency's dist-info
+    for its LICENSE can be broken outright by that dependency adopting PEP 639's
+    `licenses/` subdirectory — a hard build failure, not the missing-license gap gotchas
+    44/123 describe (the coincurve case; see `build-coincurve.yml`).** coincurve's
+    `hatch_build.py` bundles cffi's compiled `_cffi_backend` extension straight into the
+    wheel (so cffi is not a runtime dependency) and copies cffi's own LICENSE alongside
+    it, locating it with `f.parent.name.endswith(".dist-info")` — true only when LICENSE
+    sits directly in the dist-info root. cffi >=2.0.0 (like every project that adopted
+    `license-files`) ships it one level deeper as `<dist>.dist-info/licenses/LICENSE`, so
+    `f.parent.name` is `"licenses"`, the scan finds zero files, and the build raises
+    `RuntimeError: Expected exactly one LICENSE file in cffi distribution, got 0` for any
+    build resolving a current cffi — reproduced identically against upstream's own
+    official x86_64 wheel, so it is not riscv64-specific, and already open upstream
+    (ofek/coincurve#187, #223).
+    - **Search the exact error text in upstream's issue tracker before patching blind.**
+      `gh api "search/issues?q=repo:<owner>/<repo>+is:issue+<key phrase>"` found this
+      already reported and already fixed on master (`get_cffi_distribution_license_files()`,
+      PR #188 — checks `f.parts[0]` instead, the dist-info directory itself, matching
+      both layouts) — merged, but not in any tagged release. That makes the patch a
+      straight backport (`git format-patch` off the PR's diff) instead of a guess, and
+      settles the `Upstream-Status` tag: `Submitted`, not `Backport` — no *release* carries
+      the fix yet, so it still needs carrying until one does.
+    - **A build-time-only dependency is not exempt.** coincurve declares no runtime
+      dependency on cffi at all — the whole point of bundling `_cffi_backend.so` is that
+      users need not install cffi — yet the bug hits every build, because the scan runs
+      against the *build environment's* installed cffi, not against coincurve's own
+      runtime metadata.
