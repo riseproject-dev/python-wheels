@@ -166,6 +166,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **252** — Rocky 10 (the riscv64 manylinux image's base) names the Wayland client
 - **257** — `CMAKE_POLICY_VERSION_MINIMUM` also works as an environment variable, not just a
 - **267** — A vendored C++ library's own architecture-dispatch macro (not a SIMD gate,
+- **271** — `AVIF_CODEC_AOM_DECODE=OFF` and `-DCONFIG_AV1_HIGHBITDEPTH=0` are a normal
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 

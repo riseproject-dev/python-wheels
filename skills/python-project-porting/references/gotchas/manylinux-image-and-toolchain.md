@@ -23,6 +23,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **252** — Rocky 10 (the riscv64 manylinux image's base) names the Wayland client
 - **250** — A vendored C library's strict-aliasing UB can miscompile *silently* under a
 - **267** — A vendored C++ library's own architecture-dispatch macro (not a SIMD gate,
+- **271** — `AVIF_CODEC_AOM_DECODE=OFF` and `-DCONFIG_AV1_HIGHBITDEPTH=0` are a normal
 
 ---
 
@@ -434,3 +435,36 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       invocation>'` reproduces the exact error via QEMU in under a minute once the
       library's own build dependencies are unpacked, and confirms the `-Wno-error=`
       fix turns the same two lines into warnings without touching anything else.
+
+271. **`AVIF_CODEC_AOM_DECODE=OFF` and `-DCONFIG_AV1_HIGHBITDEPTH=0` are a normal libavif
+    combination (upstream's own `wheelbuild/config.sh` passes both); on riscv64 it hits a
+    real, still-unfixed bug in libaom's CMake, not a config mistake (the
+    pillow-avif-plugin case).** libavif vendors libaom via `FetchContent` at a pinned tag
+    (`v3.14.1` for libavif 1.4.2), and a `-D` flag on the *outer* libavif cmake invocation
+    becomes a normal cache variable that libaom's own `set_aom_config_var`/
+    `set_aom_option_var` macros (`cmake/util.cmake`) explicitly refuse to override —
+    that's how `CONFIG_AV1_HIGHBITDEPTH=0` from the command line actually reaches aom.
+    But `av1/av1.cmake`'s `AOM_AV1_COMMON_INTRIN_RVV` list unconditionally includes
+    `highbd_convolve_rvv.c`, `highbd_compound_convolve_rvv.c` and
+    `highbd_wiener_convolve_rvv.c` — unlike the equivalent x86 lists a few lines down,
+    which wrap their highbd-only files in `if(CONFIG_AV1_HIGHBITDEPTH)`. With
+    highbitdepth off, `av1_rtcd_defs.pl` never declares `av1_highbd_convolve_{x,y,2d}_sr`
+    or their `_c` fallbacks, so the RVV file's calls to `av1_highbd_convolve_y_sr_c` etc.
+    become undeclared-function errors (`-Wimplicit-function-declaration` promoted to
+    `-Werror` by aom's own flags). Confirmed against both the pinned `v3.14.1` tag and
+    current aom `main` (still present as of 2026-09) — this is not a stale-version issue
+    a bump would fix.
+    - **Fix: add `-DENABLE_RVV=0` to the same outer cmake invocation.** `ENABLE_RVV`
+      (`cmake/aom_config_defaults.cmake`) is a plain `option()`-backed cache var subject
+      to the same command-line-wins rule, and `cmake/cpu.cmake` gates *all* of aom's RVV
+      object-library creation on it (`if(ENABLE_RVV) ... else() ... --disable-rvv`) — so
+      it removes the broken translation unit instead of papering over one symbol, and
+      the RTCD generator stops emitting `_rvv` dispatch entries entirely. aom is encoder-
+      only here (`AVIF_CODEC_AOM_DECODE=OFF`), so the cost is slower (portable-C) AV1
+      encode, not a functional loss; same trade as gotcha 71's `PNG_RISCV_RVV=off`.
+    - **Verify before spending a CI cycle**: this is a from-source C dependency build
+      (gotcha 15's territory), so a `docker run --rm --platform linux/riscv64
+      quay.io/pypa/manylinux_2_39_riscv64` QEMU rehearsal of the *exact* `cmake -S ... -B
+      ...` / `cmake --build ...` pair — pip-installing `ninja` first, since the image has
+      none — reproduces the failure verbatim and then confirms the fix actually links
+      `libavif.so`, not just that configure succeeds.
