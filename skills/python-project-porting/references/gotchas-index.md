@@ -61,6 +61,7 @@ The porting gotchas (294 of them) live in [`references/gotchas/`](gotchas/), spl
 - **273** — A pinned transitive crate can lack riscv64 support outright, and `cargo check
 - **276** — A hand-written-SIMD C library that looks x86/aarch64-only can still have a
 - **284** — A package whose C/C++ extension calls CUDA/HIP/cuFile is not automatically
+- **303** — A "Python 2 only" classifier is a stop sign the project's own `setup.py` may
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

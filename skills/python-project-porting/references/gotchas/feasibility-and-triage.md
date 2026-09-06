@@ -30,6 +30,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **273** — A pinned transitive crate can lack riscv64 support outright, and `cargo check
 - **276** — A hand-written-SIMD C library that looks x86/aarch64-only can still have a
 - **284** — A package whose C/C++ extension calls CUDA/HIP/cuFile is not automatically
+- **303** — A "Python 2 only" classifier is a stop sign the project's own `setup.py` may
 
 ---
 
@@ -1026,3 +1027,41 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
        this one catches the opposite mistake — assuming CUDA symbols anywhere in
        a `.cpp`/`.h` file make the *build itself* GPU-blocked, when the runtime
        merely offers to accelerate on a GPU if one happens to be present.
+
+303. **A "Python 2 only" classifier is a stop sign the project's own `setup.py` may
+    already act on — check what it installs for the interpreters actually in scope
+    before reading anything else (the subprocess32 case).** subprocess32's PyPI
+    metadata is unambiguous before any download: `Programming Language :: Python ::
+    2 :: Only`, classifiers list only 2.6/2.7, and the only Linux wheel is
+    `subprocess32-3.5.4-cp27-cp27mu-manylinux2014_x86_64.whl` plus an sdist —
+    nothing this repo's cp312/cp313/cp314/cp314t matrix could ever install as a real
+    build. Reading the sdist confirms *why* there is nothing to build, not just that
+    PyPI never published it: `setup.py`'s `main()` branches on
+    `sys.version_info[0] == 2` — only there does it declare the
+    `_posixsubprocess32` `Extension` and wire up the `./configure`-driven
+    `build_ext`. The `else` branch (every Python 3) installs zero extensions and
+    instead packages `python3_redirect/__init__.py`, whose entire body is
+    `sys.modules['subprocess32'] = subprocess` — a compatibility stub so code
+    importing `subprocess32` under Python 3 transparently gets the stdlib module.
+    `python_requires='>=2.6, !=3.0.*, !=3.1.*, !=3.2.*, <4'` looks like real 3.x
+    support; it only buys the redirect shim.
+    - **The redirect shim closes the riscv64 "gap" before a workflow could open
+      one.** `pip install subprocess32` on riscv64 today already builds this sdist
+      in under a second (pure Python, no compiler, `Root-Is-Purelib: true` on
+      Python 3) and produces a working `subprocess32` that *is* the interpreter's
+      own `subprocess`. Publishing a `manylinux_riscv64` wheel for cp312+ would
+      ship exactly that redirect under an arch tag — zero arch-specific content, on
+      a version of Python the C extension never targets. This is gotcha 24/27's
+      "nothing is compiled" shape, but for a *specific, known-in-advance
+      interpreter range* rather than inferred from a wheel's ABI tag — the
+      classifier and `setup.py` branch tell you before you'd even need to check
+      `unzip -l` or `WHEEL`.
+    - **The classifier is the cheapest of the two checks, not a substitute for
+      it.** `Programming Language :: Python :: 2 :: Only` on
+      `pypi.org/pypi/<pkg>/json` settles feasibility against a `cp312+`-only repo
+      in one HTTP read; reading `setup.py`'s version branch is the confirmation
+      that the reason isn't merely "upstream hasn't gotten around to a 3.x wheel"
+      but "there is no 3.x extension to build, by design, forever." Report
+      `not-feasible`/`parked` — the redirect module is genuinely correct behavior
+      to preserve, not a bug to patch around by forcing the C extension to build
+      under Python 3.
