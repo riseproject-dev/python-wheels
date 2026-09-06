@@ -1065,3 +1065,24 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       `not-feasible`/`parked` — the redirect module is genuinely correct behavior
       to preserve, not a bug to patch around by forcing the C extension to build
       under Python 3.
+
+310. **A package's algorithmic pedigree does not describe its current toolchain —
+    check the actual sdist/repo tree before assuming a compiler is needed (the
+    quadprog case).** quadprog's docstring and README still credit "the
+    Goldfarb/Idnani dual algorithm", the same numerically-stable QP method whose
+    reference implementation is classic Fortran, and older forks of this package
+    did indeed f2c-translate that Fortran and wrap it with Cython — a real reason
+    to expect `gfortran` on the build image. `tar tzf quadprog-0.1.13.tar.gz` (or
+    the `quadprog/quadprog` GitHub tree at the release tag) tells a different,
+    current story: the package ships hand-ported `linear-algebra.c`,
+    `qr-update.c` and `solve.QP.c` next to a plain `quadprog.pyx` that takes typed
+    memoryviews (`double[:, :] G`) with no `cimport numpy`/`np.import_array()` —
+    so the build needs only a C compiler and Cython, nothing numpy-C-API-shaped
+    and no Fortran toolchain at all.
+    - **The tell is absence, not presence.** Grepping the extracted sdist (or the
+      GitHub tree) for `*.f`/`*.f90`/`*.pyf` and finding none is the whole check —
+      cheaper than reasoning from the algorithm's academic history or from what a
+      same-named package once needed. Do this before reaching for gfortran
+      precedent (`build-scs.yml`'s OpenBLAS `gpl_sources` job): a pure-C/Cython
+      port needs neither the compiler nor the `libgfortran` GPL-sources job that
+      comes with linking a Fortran-built BLAS.
