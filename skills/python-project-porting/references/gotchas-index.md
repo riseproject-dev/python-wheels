@@ -94,6 +94,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **221** — `quay.io/pypa/musllinux_1_2_riscv64` is a real, working image — every prior port
 - **225** — `CIBW_BEFORE_ALL_LINUX` and `CIBW_BEFORE_BUILD_LINUX` are two different hooks —
 - **227** — A build that touches `PyObject` internals directly (`ob_refcnt`, `ob_type`,
+- **245** — `actions/checkout` must run before `actions/download-artifact` in the same
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
@@ -195,6 +196,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **232** — Matching upstream's newest interpreter tier can silently trade a fast port for a
 - **234** — A stock distro `pip` can be too old to *recognize* a riscv64 manylinux wheel at
 - **240** — A registry-hosted wheel that builds and installs cleanly can still be missing an
+- **244** — `uv pip install` only honors `UV_*` env vars, never the `PIP_*` names — a step
 
 ### Build-tool drift & pins — [`gotchas/build-tool-drift-and-pins.md`](gotchas/build-tool-drift-and-pins.md)
 

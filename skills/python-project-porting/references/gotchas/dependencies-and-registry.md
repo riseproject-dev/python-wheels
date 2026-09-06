@@ -24,6 +24,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
 - **234** — A stock distro `pip` can be too old to *recognize* a riscv64 manylinux wheel at
 - **240** — A registry-hosted wheel that builds and installs cleanly can still be missing an
   *optional* component another test dependency imports unconditionally.
+- **244** — `uv pip install` only honors `UV_*` env vars, never the `PIP_*` names — a step
+  written with `PIP_EXTRA_INDEX_URL`/`PIP_ONLY_BINARY` silently no-ops and source-builds.
 
 ---
 
@@ -478,3 +480,40 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       unconditional import and noting why in the PR (naming the module and the disabled
       flag) is the same move gotcha 215 makes for a per-interpreter registry gap, applied
       to a per-feature one instead.
+
+244. **`uv pip install` only honors `UV_*` env vars, never the `PIP_*` names — a step
+    written with `PIP_EXTRA_INDEX_URL`/`PIP_ONLY_BINARY` silently no-ops and source-builds
+    (the daft port).** A "Test wheel" step ran `uv pip install pandas==2.3.3 numpy==2.3.4
+    pyarrow==25.0.1 dist/*.whl` with `PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/
+    simple/` and `PIP_ONLY_BINARY: numpy,pandas,pyarrow` set as step `env:` — the same
+    variable names gotcha 30 and friends use everywhere else in this repo, because most
+    other test steps run inside cibuildwheel's `CIBW_TEST_ENVIRONMENT`, which shells out to
+    plain `pip` and does read them. `uv`'s pip-compatible subcommand does not: it reads
+    `UV_EXTRA_INDEX_URL`, `UV_INDEX_STRATEGY`, and `UV_ONLY_BINARY` instead (`uv help pip
+    install` lists the `[env: UV_…]` name for every pip-shaped flag). With the `PIP_*` names
+    unrecognized, uv silently fell back to its defaults — default index only (public PyPI,
+    no riscv64 wheels), no only-binary restriction — resolved `pyarrow==25.0.1` against
+    PyPI's sdist, and source-built it. pyarrow's sdist needs the real Apache Arrow C++
+    library and its CMake config (`FindArrow.cmake`/`ArrowConfig.cmake`) to configure at
+    all, which the manylinux image doesn't carry, so the failure surfaced ~6.5 hours later
+    as `CMake Error … Could not find a package configuration file provided by "Arrow"` —
+    a red herring that looks like a missing native C++ dependency of the package under
+    test, when the actual break is a silently-ignored env var one step earlier. The
+    registry already had the exact riscv64 wheel needed
+    (`pyarrow-25.0.1-cp312-cp312-manylinux_2_39_riscv64.whl`); it was simply never
+    consulted.
+    - **The fix is renaming the three vars, not touching indexes or CMake.** Swap to
+      `UV_EXTRA_INDEX_URL` / `UV_ONLY_BINARY`, and add `UV_INDEX_STRATEGY:
+      unsafe-best-match` alongside them — uv's default `first-index` strategy stops at
+      the first index that lists the package *name* at all (here, PyPI, which lists
+      pyarrow but not a riscv64 build of it) and never reaches a second index for a
+      platform-specific wheel, the same reasoning build-matplotlib.yml's and
+      build-onnx.yml's `env:` blocks already document for their own `uv pip install`/
+      `uv pip download` steps.
+    - **Any bare `uv pip install`/`uv pip download` step is a signal to check this** —
+      not just ones added fresh. cibuildwheel-driven steps (`CIBW_TEST_ENVIRONMENT`,
+      `CIBW_ENVIRONMENT`) are unaffected since those still shell out to `pip`; the risk is
+      specifically a workflow step that invokes `uv` directly (`setup-uv` + `uv pip
+      install`, as build-daft.yml's and build-polars-runtime.yml's "Test wheel" steps do)
+      and reuses the `PIP_*` names out of habit from the cibuildwheel case elsewhere in
+      the same file.
