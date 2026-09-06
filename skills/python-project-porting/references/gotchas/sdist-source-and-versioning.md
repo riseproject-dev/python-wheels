@@ -21,6 +21,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
 - **213** — Gotcha 103's timestamp-proximity trick can point at the wrong commit when
 - **242** — A third-party tree-sitter grammar's release tag can omit the generated
 - **258** — A hardcoded download URL in a project's own build script can 403 automated
+- **293** — The newest git tag is not necessarily the version to port — check whether
 - **254** — A build-from-checkout can pick up a maintainer-only dev/coverage cflags
 - **261** — A package can require its own compiled extension, plus a large downloaded
 - **265** — A project's own version-detection script can read `GITHUB_REF` directly,
@@ -460,3 +461,31 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
       shape, no sdist stage exists to read a filename from) — the dependency
       direction is reversed, and the fix has to live before the checkout instead
       of after a build step.
+
+293. **The newest git tag is not necessarily the version to port — check whether
+    upstream's own CI actually built and published it (the tree-sitter-markdown
+    case).** tree-sitter-markdown's repo tags v0.5.1, v0.5.2, v0.5.3, but PyPI only
+    has 0.5.1: the repo is mid-migration (default branch literally named
+    `split_parser`) to split its two grammars (`markdown`, `markdown_inline`) into
+    separate packages, and the root `setup.py` at v0.5.2/v0.5.3 only compiles one
+    grammar's `src/parser.c` even though `binding.c` still needs symbols from both —
+    a checkout of either tag fails to build a working wheel.
+    - **The tell was in the PyPI JSON, not the repo**: `curl -s
+      https://pypi.org/pypi/<pkg>/json | jq '.info.version, (.releases|keys)'` showed
+      `0.5.1` as latest with no 0.5.2/0.5.3 releases at all, despite both tags
+      existing upstream.
+    - **Confirmed, not just inferred, via upstream's own Actions history**:
+      `gh api repos/<owner>/<repo>/actions/workflows/publish.yml/runs` showed the
+      v0.5.1 tag's run succeeded end-to-end (pypi build + publish jobs green); the
+      v0.5.2 and v0.5.3 runs both show the pypi wheel-build job failing and the
+      publish step skipped. Diffing `setup.py` at each tag (`gh api
+      "repos/<owner>/<repo>/contents/setup.py?ref=vX.Y.Z"`) confirmed why: v0.5.1's
+      `Extension.sources` lists both grammars' `src/parser.c`/`scanner.c` with
+      `include_dirs=["tree-sitter-markdown/src"]`; v0.5.2/v0.5.3 replaced it with a
+      single-grammar template (`sources=["src/parser.c"]`, no top-level `src/` in
+      the checkout at all) left over from an in-progress repo split.
+    - **Don't trust the GitHub-rendered default branch's files either** — its
+      `setup.py`/`pyproject.toml` reflect the in-progress migration, not any
+      released tag; always fetch file contents pinned `?ref=<tag>` (or `git show
+      <tag>:<path>`), never the bare default-branch path, when a repo's own CI
+      history suggests something is mid-flight.
