@@ -102,23 +102,25 @@ jobs:
           CIBW_BEFORE_ALL_LINUX: >-
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
             yum install -y protobuf-compiler protobuf-devel
-          # maturin's own PEP 517 backend must be on the build venv's PATH
-          # since --no-build-isolation (below) skips installing
-          # build-system.requires.
-          CIBW_BEFORE_BUILD_LINUX: pip install "maturin>=1.8.1"
+          # The repo's own .cargo/config.toml unconditionally points
+          # PYO3_CONFIG_FILE at rerun_py/pyo3-build.cfg for every cargo
+          # invocation, expecting a pixi activation hook to have generated it
+          # first; outside pixi it must be written by hand (upstream's own
+          # fallback: `python scripts/generate_pyo3_config.py`). abi3 pins the
+          # `version` field to 3.10 regardless of the interpreter that writes
+          # it, so which one runs this does not matter.
+          CIBW_BEFORE_BUILD_LINUX: |
+            python -c "
+            import sys; sys.path.insert(0, 'rerun_pixi_env/src')
+            from pathlib import Path
+            from rerun_pixi_env.pyo3_config import generate_config_file
+            generate_config_file(Path('rerun_py/pyo3-build.cfg'))"
           CIBW_ENVIRONMENT_LINUX: >-
             PATH="$PATH:$HOME/.cargo/bin"
             PROTOC_INCLUDE=/usr/include
             RERUN_ALLOW_MISSING_BIN=1
             CARGO_BUILD_JOBS=2
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # rerun_py/build.rs sets RERUN_BUILDING_WHEEL and refuses to build
-          # inside pip's isolated build venv (its own PYO3_CONFIG_FILE
-          # caching guard treats the temp venv path as untrustworthy); a
-          # plain PEP 517 build with isolation therefore aborts before cargo
-          # even runs. --no-build-isolation runs maturin in the same venv
-          # cibuildwheel already prepared, which sidesteps the check.
-          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
           # Without this pip prefers PyPI's newer numpy/pillow/pandas/torch,
           # none of which have riscv64 wheels, and falls back to slow source
           # builds in the container (CLAUDE.md gotcha 12).
