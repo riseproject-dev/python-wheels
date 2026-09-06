@@ -32,6 +32,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **262** — Gotcha 201's vendoring step is only needed when the sibling sources are
 - **270** — Gotcha 134's "leaked `Py`-prefixed symbol" failure has a real fix, not just
 - **281** — Gotcha 251 recurs even when the port's own notes cite gotcha 104 — a
+- **313** — A dynamic abi3 floor (`setup.py` tags whichever interpreter builds it) lets you
 
 ---
 
@@ -616,3 +617,33 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
        them. Don't stop debugging at "did the checkout step run" — confirm which
        directory `copy_test_sources` actually resolved against before concluding the
        staging step itself is broken.
+
+313. **When `setup.py` computes `py_limited_api` from the *building* interpreter itself
+     (not a fixed constant), gotcha 96's "build on the oldest claimed interpreter" risk
+     does not apply — the tag always matches whichever interpreter you choose, so pick
+     your own floor freely (the onigurumacffi case).** Gotchas 34/96 cover a project that
+     hardcodes one abi3 floor in `setup.py` (`py_limited_api='cp37'`) or via Cargo/pyproject
+     — build on the OLDEST interpreter the fixed tag claims, or older callers get a broken
+     wheel (gotcha 96). onigurumacffi's `bdist_wheel` override instead does
+     `self.py_limited_api = f'cp3{sys.version_info[1]}'`: whatever CPython runs the build
+     becomes the tag (`cp312-abi3` if built under 3.12, `cp313-abi3` if built under 3.13),
+     same shape as brotlicffi's `cp39-abi3`. There is no "upstream's floor" to discover or
+     respect here — since the tag is self-consistent by construction, any interpreter you
+     build with produces a wheel that is honest about its own floor. Treat it exactly like
+     gotcha 11's fixed-floor collapse: put `CIBW_BUILD` entries for the repo's *own* minimum
+     interpreter (`cp312`) first plus the newer ones (`cp313`, `cp314`), and cibuildwheel
+     builds once on `cp312` and reuses+retests that wheel via `find_compatible_wheel` — do
+     not build separately on `cp313`/`cp314`, which would just produce redundant
+     `cp313-abi3`/`cp314-abi3` wheels. Free-threaded builds need their own job regardless:
+     the override is commonly guarded with `sysconfig.get_config_var('Py_GIL_DISABLED')`,
+     so `cp314t` silently falls back to a plain per-interpreter wheel outside the collapse.
+     - **A cffi/setuptools project vendoring a C library with no source in the checkout at
+       all** (unlike gotcha 32/53's statically-linked case) **can often skip
+       `autogen.sh`/autoreconf entirely by fetching the upstream project's official GitHub
+       *Release* tarball instead of a git clone or tag archive** — a `make dist` release
+       tarball (oniguruma's `onig-<ver>.tar.gz`, distinct from GitHub's auto-generated
+       `archive/vX.Y.Z.tar.gz`) ships a pre-generated `./configure`, so
+       `CIBW_BEFORE_ALL_LINUX` only needs `curl` + `sha256sum -c` + `./configure && make
+       install` — no libtool/autoconf version questions (contrast build-cffi.yml's libffi
+       step, which clones a tag archive and needs `autogen.sh`). Confirm before writing the
+       step: `tar tzf <tarball> | grep -x '<dir>/configure'`.

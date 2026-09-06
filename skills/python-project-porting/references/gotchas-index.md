@@ -119,6 +119,7 @@ The porting gotchas (302 of them) live in [`references/gotchas/`](gotchas/), spl
 - **262** — Gotcha 201's vendoring step is only needed when the sibling sources are
 - **270** — Gotcha 134's "leaked `Py`-prefixed symbol" failure has a real fix, not just
 - **281** — Gotcha 251 recurs even when the port's own notes cite gotcha 104 — a
+- **313** — A dynamic abi3 floor (`setup.py` tags whichever interpreter builds it) lets you
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
