@@ -85,6 +85,9 @@ jobs:
 
           wheel=$("$PY" misc/create_wheel_local.py "$CASADI_VERSION" 312 linux 64 manylinux_2_39-riscv64 /tmp/install --abi3)
           mv "$wheel" /output/
+
+          "$PY" -m pip install -q abi3audit
+          "$PY" -m abi3audit --strict --report "/output/$wheel"
           ls -la /output
           CASADI_BUILD_EOF
 
@@ -103,13 +106,16 @@ jobs:
           #!/usr/bin/env bash
           set -euxo pipefail
 
-          PY=/opt/python/cp312-cp312/bin/python
-          "$PY" -m pip install --extra-index-url https://pypi.riseproject.dev/simple/ \
-            --only-binary=numpy,scipy,pandas numpy scipy pandas looseversion
-          "$PY" -m pip install /output/casadi-*.whl
+          # abi3: same wheel installs on every interpreter its tag claims (upstream's own
+          # test-python job reuses one build across cp311/cp313/cp314 the same way).
+          for tag in cp312-cp312 cp313-cp313 cp314-cp314; do
+            PY="/opt/python/$tag/bin/python"
+            "$PY" -m pip install --extra-index-url https://pypi.riseproject.dev/simple/ \
+              --only-binary=numpy,scipy,pandas numpy scipy pandas looseversion
+            "$PY" -m pip install /output/casadi-*.whl
 
-          cd /casadi/test/python
-          "$PY" alltests.py
+            (cd /casadi/test/python && "$PY" alltests.py)
+          done
           CASADI_TEST_EOF
 
   publish:
