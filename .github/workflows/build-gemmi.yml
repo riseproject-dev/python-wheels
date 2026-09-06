@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build_wheels` job of
+# https://github.com/project-gemmi/gemmi/blob/v0.7.5/.github/workflows/wheels2.yml
+name: Build gemmi wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'gemmi version/tag to build (git tag without leading v, e.g. 0.7.5)'
+        required: true
+        default: '0.7.5'
+  pull_request:
+    paths:
+      - '.github/workflows/build-gemmi.yml'
+      - 'patches/gemmi/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.7.5' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  GEMMI_VERSION: ${{ inputs.version || '0.7.5' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build gemmi ${{ inputs.version || '0.7.5' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        libc: [manylinux, musllinux]
+
+    steps:
+      - name: Checkout gemmi v${{ env.GEMMI_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: project-gemmi/gemmi
+          ref: v${{ env.GEMMI_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # stb_sprintf.h has no riscv64 entry in its 64-bit-pointer-arch allowlist.
+      - name: Patch gemmi source
+        run: git apply python-wheels/patches/gemmi/${{ env.GEMMI_VERSION }}/00*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # find_package(nanobind 2.4.0) in CMakeLists.txt rejects nanobind 3.x as
+          # incompatible; pyproject.toml's build-system.requires has no upper bound.
+          CIBW_BEFORE_ALL: echo 'nanobind<3' > /nanobind-constraint.txt
+          # The fetched zlib-ng's RVV chunkset/inflate kernels SIGILL on the first
+          # gzipped file gemmi reads; fall back to its portable C implementation.
+          CIBW_ENVIRONMENT: >-
+            SKBUILD_CMAKE_ARGS='-DBUILD_GEMMI_PROGRAM=OFF;-DINSTALL_DEV_FILES=OFF;-DBUILD_SHARED_LIBS=OFF;-DFETCH_ZLIB_NG=ON;-DWITH_RVV=OFF'
+            PIP_CONSTRAINT=/nanobind-constraint.txt
+            PIP_BUILD_CONSTRAINT=/nanobind-constraint.txt
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          path = sys.argv[1]
+          names = zipfile.ZipFile(path).namelist()
+          exts = [n for n in names if n.endswith(".so")]
+          assert exts and all("gemmi_ext" in n for n in exts), exts
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          assert licences == {"LICENSE.txt"}, licences
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: gemmi-${{ env.GEMMI_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish gemmi ${{ inputs.version || '0.7.5' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: gemmi-${{ inputs.version || '0.7.5' }}-*riscv64
