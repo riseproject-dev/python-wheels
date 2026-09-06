@@ -1,0 +1,160 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/laz-rs/laz-rs-python/blob/0.8.2/.github/workflows/build.yml
+name: Build lazrs wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'lazrs version to build (git tag, e.g. 0.8.2)'
+        required: true
+        default: '0.8.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-lazrs.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.8.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.8.2 there.
+  LAZRS_VERSION: ${{ inputs.version || '0.8.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  python_sdist:
+    needs: [setup]
+    runs-on: ubuntu-latest
+    outputs:
+      sdist_artifact_name: ${{ steps.build_sdist.outputs.sdist_artifact_name }}
+      package_version: ${{ steps.build_sdist.outputs.package_version }}
+    steps:
+      - name: Checkout lazrs ${{ env.LAZRS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: laz-rs/laz-rs-python
+          ref: ${{ env.LAZRS_VERSION }}
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build sdist
+        id: build_sdist
+        run: |
+          set -euo pipefail
+          rm -rf dist
+
+          uv pip install 'maturin>=1.0,<2.0' build
+          python -m build --sdist --outdir dist
+
+          sdist_name="$(ls dist)"
+          {
+            echo "sdist_artifact_name=${sdist_name}"
+            echo "package_version=$(echo "${sdist_name}" | sed -En 's/lazrs-(.+)\.tar\.gz/\1/p')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ steps.build_sdist.outputs.sdist_artifact_name }}
+          path: dist/${{ steps.build_sdist.outputs.sdist_artifact_name }}
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, python_sdist]
+    name: Build lazrs ${{ inputs.version || '0.8.2' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # lazrs is a PyO3 extension built per-interpreter (not abi3 - upstream
+        # ships cp3x-cp3x wheels), so every Python version needs its own build.
+        # Upstream doesn't build cp314t yet, so skip it for now.
+        python: ["cp312", "cp313", "cp314"]
+
+    steps:
+      - name: Fetch sdist artifact
+        id: fetch_sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ needs.python_sdist.outputs.sdist_artifact_name }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build and test wheel
+        env:
+          CIBW_ARCHS: riscv64
+          # Only manylinux: rustup.rs ships no riscv64 musl host toolchain, so
+          # musllinux can't build (same reason build-fastuuid.yml skips it).
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # lazrs ships no [tool.cibuildwheel], so the Rust toolchain its
+          # maturin backend needs is installed in-container here and put on
+          # PATH for the build.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$PATH:$HOME/.cargo/bin"'
+          # Upstream ships no test suite at all - its noxfile.py only imports
+          # the built module. Exercise the extension for real instead: build a
+          # point-format-0 LazVlr, round-trip compress/decompress through it,
+          # and assert the data comes back unchanged.
+          CIBW_TEST_COMMAND: >-
+            python -c "
+            import io, lazrs;
+            vlr = lazrs.LazVlr.new_for_compression(0, 0);
+            n = vlr.item_size() * 100;
+            points = bytes(i % 256 for i in range(n));
+            dest = io.BytesIO();
+            c = lazrs.LasZipCompressor(dest, vlr);
+            c.compress_many(points);
+            c.done();
+            compressed = dest.getvalue();
+            assert len(compressed) > 0, compressed;
+            d = lazrs.LasZipDecompressor(io.BytesIO(compressed), vlr.record_data());
+            out = bytearray(n);
+            d.decompress_many(out);
+            assert bytes(out) == points, 'round trip mismatch'
+            "
+        run: |
+          set -euo pipefail
+          mkdir lazrs
+          tar zxf "${{ steps.fetch_sdist.outputs.download-path }}/${{ needs.python_sdist.outputs.sdist_artifact_name }}" \
+            --strip-components=1 -C lazrs
+          uv pip install --upgrade cibuildwheel
+          python -m cibuildwheel --output-dir wheelhouse ./lazrs
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lazrs-${{ env.LAZRS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish lazrs ${{ inputs.version || '0.8.2' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: lazrs-${{ inputs.version || '0.8.2' }}-*-manylinux_riscv64
