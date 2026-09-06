@@ -1,0 +1,92 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 6 Sep 2026 16:13:57 +0200
+Subject: [PATCH] Give internal PyLong/PyUnicode helpers non-exported linkage
+
+Upstream-Status: To upstream [not yet submitted; upstream's own CI does not run abi3audit so this leak is invisible to them]
+
+PyLong_AsInt_OutArg() and PyLong_to_integer_t() in convert.c are
+declared with default (extern) visibility but are only ever called
+from within convert.c itself; PyUnicode_CopyAsString() and
+PyUnicode_IsEqualToUTF8String() in pyhelpers.c are declared in the
+shared pyhelpers.h and called across several translation units, so
+they need internal-to-the-library linkage rather than none at all.
+
+Because the extension is built with Py_LIMITED_API (setup.py sets
+py_limited_api=True), abi3audit --strict flags all four as non-abi3
+symbols leaking from _igraph.abi3.so: their names collide with real
+(non-limited-API) CPython C-API symbols, so a wheel claiming forward
+ABI compatibility must not export them. Only PyInit__igraph needs to
+be visible from the shared object. Mark the two convert.c-only
+helpers static, and give the two pyhelpers.c ones hidden visibility
+via __attribute__((visibility("hidden"))) since they are still
+called from other translation units within the extension.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ src/_igraph/convert.c   | 4 ++--
+ src/_igraph/pyhelpers.c | 2 ++
+ src/_igraph/pyhelpers.h | 2 ++
+ 3 files changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/src/_igraph/convert.c b/src/_igraph/convert.c
+index a36d055..795b1f7 100644
+--- a/src/_igraph/convert.c
++++ b/src/_igraph/convert.c
+@@ -52,7 +52,7 @@
+  *
+  * Returns -1 if there was an error, 0 otherwise.
+  */
+-int PyLong_AsInt_OutArg(PyObject* obj, int* result) {
++static int PyLong_AsInt_OutArg(PyObject* obj, int* result) {
+   long dummy = PyLong_AsLong(obj);
+   if (dummy < INT_MIN) {
+     PyErr_SetString(PyExc_OverflowError, "long integer too small for conversion to C int");
+@@ -962,7 +962,7 @@ int igraphmodule_PyObject_to_igraph_t(PyObject *o, igraph_t **result) {
+  * \param v the result is stored here
+  * \return 0 if everything was OK, 1 otherwise
+  */
+-int PyLong_to_integer_t(PyObject* obj, igraph_int_t* v) {
++static int PyLong_to_integer_t(PyObject* obj, igraph_int_t* v) {
+   if (IGRAPH_INTEGER_SIZE == 64) {
+     /* here the assumption is that sizeof(long long) == 64 bits; anyhow, this
+      * is the widest integer type that we can convert a PyLong to so we cannot
+diff --git a/src/_igraph/pyhelpers.c b/src/_igraph/pyhelpers.c
+index 6f0afaf..aab8833 100644
+--- a/src/_igraph/pyhelpers.c
++++ b/src/_igraph/pyhelpers.c
+@@ -166,6 +166,7 @@ PyObject* igraphmodule_PyRange_create(Py_ssize_t start, Py_ssize_t stop, Py_ssiz
+   return result;
+ }
+ 
++__attribute__((visibility("hidden")))
+ char* PyUnicode_CopyAsString(PyObject* string) {
+   PyObject* bytes;
+   char* result;
+@@ -196,6 +197,7 @@ char* PyUnicode_CopyAsString(PyObject* string) {
+   return result;
+ }
+ 
++__attribute__((visibility("hidden")))
+ int PyUnicode_IsEqualToUTF8String(PyObject* py_string,
+ 		const char* c_string) {
+ 	PyObject* c_string_conv;
+diff --git a/src/_igraph/pyhelpers.h b/src/_igraph/pyhelpers.h
+index 68d63d0..c40e43f 100644
+--- a/src/_igraph/pyhelpers.h
++++ b/src/_igraph/pyhelpers.h
+@@ -34,12 +34,14 @@ PyObject* igraphmodule_PyList_NewFill(Py_ssize_t len, PyObject* item);
+ PyObject* igraphmodule_PyList_Zeroes(Py_ssize_t len);
+ char* igraphmodule_PyObject_ConvertToCString(PyObject* string);
+ PyObject* igraphmodule_PyRange_create(Py_ssize_t start, Py_ssize_t stop, Py_ssize_t step);
++__attribute__((visibility("hidden")))
+ int PyUnicode_IsEqualToUTF8String(PyObject* py_string, const char* c_string);
+ long igraphmodule_Py_HashPointer(void *p);
+ 
+ #define PyBaseString_Check(o) (PyUnicode_Check(o) || PyBytes_Check(o))
+ #define PyUnicode_IsEqualToASCIIString(uni, string) \
+         (PyUnicode_CompareWithASCIIString(uni, string) == 0)
++__attribute__((visibility("hidden")))
+ char* PyUnicode_CopyAsString(PyObject* string);
+ 
+ #define PY_IGRAPH_ASSERT_AT_BUILD_TIME(condition) \
