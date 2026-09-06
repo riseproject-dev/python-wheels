@@ -330,6 +330,7 @@ The porting gotchas (294 of them) live in [`references/gotchas/`](gotchas/), spl
 - **286** — A vendored-ARPACK eigensolver test failing only on musllinux, not manylinux, can
 - **290** — A `NameError` in an e2e test for a name the package genuinely exports is a
 - **297** — A test harness's own unbounded `readline()`-until-marker wait turns any slow or
+- **304** — A hardcoded exact-equality assertion on a neural-network/matmul-heavy
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 

@@ -25,6 +25,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **283** — A `cp314t`-only `PicklingError` from a `multiprocessing.Process(target=<local
 - **286** — A vendored-ARPACK eigensolver test failing only on musllinux, not manylinux, can
 - **297** — A test harness's own unbounded `readline()`-until-marker wait turns any slow or
+- **304** — A hardcoded exact-equality assertion on a neural-network/matmul-heavy
 
 ---
 
@@ -672,3 +673,43 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       "example/json")`, and `CIBW_TEST_SOURCES: tests` never staged that sibling
       directory. Add the extra path to `CIBW_TEST_SOURCES` (gotcha 36) rather than
       deselecting — this one is a genuine test-staging gap, not a platform limitation.
+
+304. **A hardcoded exact-equality assertion on a neural-network/matmul-heavy
+    computation failing only on riscv64, at the last couple of ULP, is an
+    architecture float-rounding difference, not a bug (the correctionlib/lwtnn
+    case).** `test_lwtnn_example` calls `corr.evaluate(...)`, which runs an Eigen-based
+    dense-matrix feed-forward network (`lwt::LightweightNeuralNetwork::compute`,
+    vendored from the `lwtnn` submodule — "for sanity we use Eigen" per its own
+    header), then asserts `sf == 0.95186825355646787` — a Python `==` on a `double`,
+    not `pytest.approx`. On riscv64 it evaluates to `0.9518682535564676` (relative
+    difference ~3e-16, i.e. within a few ULP of a `double`): vectorized matmul/FMA
+    instruction selection and accumulation order differ across architectures, and a
+    multi-layer network chains enough floating-point ops for that to surface in the
+    last significant digit. This is architecture-generic, not riscv64-specific:
+    upstream hit the *identical* failure on `manylinux_aarch64` first
+    (`cms-nanoAOD/correctionlib#348`, "we see small floating point rounding
+    discrepancies in lwtnn on this platform") and responded by skipping this
+    package's *entire* test suite on aarch64 via `test-skip`.
+    - **Confirm the mechanism before treating it as cosmetic**: check that the
+      assertion is exact-equality (`==`, not `approx`/`isclose`) on a value produced
+      by dense linear algebra or another SIMD/FMA-sensitive code path, and that the
+      difference is at the ULP level (a handful of units in the last place), not a
+      difference in a leading digit — the latter would be a real bug.
+    - **Fix scope: deselect just the one test**, not the whole suite the way upstream
+      did for aarch64 — unlike aarch64 (fully covered by upstream's own CI), riscv64
+      has no other CI leg exercising this package's tests, so blanket-skipping would
+      drop coverage upstream never had a copy of. `--deselect
+      {package}/tests/test_lwtnn.py::test_lwtnn_example` in `CIBW_TEST_COMMAND`, with
+      a comment citing the exact asserted vs. observed values, keeps
+      `test_validate_lwtnn`/`test_lwtnn_bad_opaque` (same file) and the rest of the
+      suite covered.
+    - **Do not patch the test's assertion to `pytest.approx`** — that file is
+      upstream's, and patching it here would be a larger, harder-to-justify
+      divergence (patching-and-licensing.md) than a one-line `CIBW_TEST_COMMAND`
+      deselect for a difference upstream has already publicly acknowledged.
+    - **Distinct from gotcha 170** (an eigensolver returning a different *dtype*,
+      `complex128` vs `float64`, which breaks a *downstream* cast far from the call
+      site) and **gotcha 282** (a pixel-diff `ImageComparisonFailure` from font
+      rendering) — same family of "arch-specific numeric divergence is not
+      necessarily a bug," different failure shape (here, the value itself is off by
+      a few ULP, and the failure is directly at the assertion).
