@@ -1,0 +1,82 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build-wheels` job of
+# https://github.com/MagicStack/immutables/blob/v0.21/.github/workflows/release.yml
+name: Build immutables wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'immutables version/tag to build (e.g. 0.21)'
+        required: true
+        default: '0.21'
+  pull_request:
+    paths:
+      - '.github/workflows/build-immutables.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.21' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  IMMUTABLES_VERSION: ${{ inputs.version || '0.21' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build immutables ${{ inputs.version || '0.21' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        libc: [manylinux, musllinux]
+
+    steps:
+      - name: Checkout immutables v${{ env.IMMUTABLES_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: MagicStack/immutables
+          ref: v${{ env.IMMUTABLES_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # Upstream's own "test" extra pins mypy~=1.4, which has no riscv64 wheel
+          # anywhere; the suite doesn't need it since IMMU_SKIP_MYPY_TESTS skips it.
+          CIBW_TEST_EXTRAS: ''
+          CIBW_ENVIRONMENT: IMMU_SKIP_MYPY_TESTS=1
+          CIBW_TEST_COMMAND: >-
+            python -c "from immutables._map import Map as m; assert m.__module__ == 'immutables._map'" &&
+            python {project}/tests/__init__.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: immutables-${{ env.IMMUTABLES_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish immutables ${{ inputs.version || '0.21' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: immutables-${{ inputs.version || '0.21' }}-*riscv64
