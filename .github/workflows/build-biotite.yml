@@ -1,0 +1,176 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's CI:
+#   https://github.com/biotite-dev/biotite/blob/v1.7.1/.github/workflows/test_and_deploy.yml
+name: Build biotite wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'biotite version to build (git tag without leading v, e.g. 1.7.1)'
+        required: true
+        default: '1.7.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-biotite.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.7.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  BIOTITE_VERSION: ${{ inputs.version || '1.7.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  # Arch-independent: the CCD and Cargo license bundle upstream's own build-internal
+  # job produces (gotcha 4). MANIFEST.in prunes tests/benchmarks/doc from the sdist,
+  # so the riscv64 job re-checks out the tag for those (gotcha 104); the sdist is
+  # extracted to a directory before being passed as package-dir (gotcha 251).
+  build_sdist:
+    needs: [setup]
+    name: Build biotite ${{ inputs.version || '1.7.1' }} sdist
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
+      package_version: ${{ steps.sdist.outputs.package_version }}
+    steps:
+      - name: Checkout biotite v${{ env.BIOTITE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: biotite-dev/biotite
+          ref: v${{ env.BIOTITE_VERSION }}
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install Rust
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # Reproduces `pixi run build-sdist`: an editable install compiles the Cython/Rust
+      # extensions so `python -m biotite.setup_ccd` (imports biotite.structure.io.pdbx)
+      # can run, then the CCD and licence bundle land where MANIFEST.in expects them.
+      - name: Build the Chemical Component Dictionary and bundle Rust licences
+        run: |
+          set -euo pipefail
+          uv pip install -e .
+          python -m biotite.setup_ccd
+          cargo install cargo-bundle-licenses
+          cargo bundle-licenses --format yaml --output THIRDPARTY.yml
+
+      - name: Build sdist
+        id: sdist
+        run: |
+          set -euo pipefail
+          uv pip install build
+          python -m build --sdist --outdir dist
+
+          sdist_name="$(ls dist)"
+          {
+            echo "sdist_name=${sdist_name}"
+            echo "package_version=$(echo "${sdist_name}" | sed -En 's/biotite-(.+)\.tar\.gz/\1/p')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ steps.sdist.outputs.sdist_name }}
+          path: dist/${{ steps.sdist.outputs.sdist_name }}
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_sdist]
+    name: Build biotite ${{ inputs.version || '1.7.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Matches upstream's own CIBW_BUILD: no free-threaded wheels are published.
+        python: ["cp312", "cp313", "cp314"]
+    steps:
+      # tests/ and benchmarks/ ship in the repository, not the sdist (MANIFEST.in
+      # prunes both); check the tag out at the workspace root so CIBW_TEST_SOURCES
+      # can stage them (gotcha 104).
+      - name: Checkout biotite v${{ env.BIOTITE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: biotite-dev/biotite
+          ref: v${{ env.BIOTITE_VERSION }}
+          persist-credentials: false
+
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ needs.build_sdist.outputs.sdist_name }}
+          path: dist/
+
+      # A .tar.gz package-dir makes cibuildwheel extract it and chdir the whole build
+      # into that temp dir, so CIBW_TEST_SOURCES (resolved against cwd) can no longer
+      # see tests/ checked out at the workspace root (gotcha 251); extract it ourselves
+      # and point package-dir at the resulting directory instead.
+      - name: Extract sdist
+        run: tar zxf "dist/${{ needs.build_sdist.outputs.sdist_name }}" -C dist
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: dist/biotite-${{ needs.build_sdist.outputs.package_version }}
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_DEPENDENCY_VERSIONS: pinned
+          # No Rust in the manylinux image; install it and put cargo on PATH. biotraj
+          # (a runtime dependency) has no riscv64 wheel either and compiles from its
+          # own small, self-contained Cython/C sdist (gotcha 125).
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_EXTRAS: test
+          # pyproject.toml carries the ini options (python_files/testpaths) that make
+          # `benchmark_*.py` collectible; stage it alongside the two source trees.
+          CIBW_TEST_SOURCES: tests benchmarks pyproject.toml
+          CIBW_TEST_COMMAND: >-
+            pytest . --durations=50
+            --ignore=tests/sequence/align/test_statistics.py
+            --ignore=tests/application
+            --ignore=tests/interface
+            --ignore=tests/database
+            --ignore=tests/test_doctest.py
+            --ignore=tests/test_modname.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: biotite-${{ env.BIOTITE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish biotite ${{ inputs.version || '1.7.1' }}
+    needs: [setup, build_sdist, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: biotite-${{ needs.build_sdist.outputs.package_version }}-*-manylinux_riscv64
