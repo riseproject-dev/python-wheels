@@ -181,6 +181,7 @@ The porting gotchas (286 of them) live in [`references/gotchas/`](gotchas/), spl
 - **279** — Gotcha 272's zlib-ng `vsetvli` SIGILL recurs whenever a *second*, independent
 - **288** — Rocky/AlmaLinux 10 dropped the classic SDL2-devel package entirely, on every
 - **289** — A CMake `ExternalProject_Add` patch step can shell out to `wget`, which the
+- **294** — An upstream CMakeLists' own `-fPIC` allowlist can name only `x86_64`/`aarch64`,
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 

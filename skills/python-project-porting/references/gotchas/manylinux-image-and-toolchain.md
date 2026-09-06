@@ -27,6 +27,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **272** — A riscv64 project's own `getauxval(AT_HWCAP)` runtime dispatch can still
 - **289** — A CMake `ExternalProject_Add` patch step can shell out to `wget`, which the
   manylinux image doesn't ship (only `curl`) — and a parallel `make -j` build hides it.
+- **294** — An upstream CMakeLists' own `-fPIC` allowlist can name only `x86_64`/`aarch64`,
+  leaving riscv64 to link non-PIC objects into a shared library.
 - **279** — Gotcha 272's zlib-ng `vsetvli` SIGILL recurs whenever a *second*, independent
 - **288** — Rocky/AlmaLinux 10 dropped the classic SDL2-devel package entirely, on every
 
@@ -598,3 +600,41 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       `wget` failure is a second, independent blocker that only surfaces once the
       generator issue is already resolved and the build reaches the external-project
       patch step at all.
+
+294. **An upstream CMakeLists' own `-fPIC` allowlist can name only `x86_64`/`aarch64`,
+    leaving riscv64 to link non-PIC objects into a shared library — which riscv64's `ld`
+    rejects outright, unlike some other architectures (the casadi/casadi-sundials case;
+    see `build-casadi.yml`).** CasADi's top-level `CMakeLists.txt` has a `-fPIC` section
+    guarded by `if("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "x86_64" OR
+    "${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "aarch64")` before appending `-fPIC` to
+    `CMAKE_C_FLAGS`/`CMAKE_CXX_FLAGS`/`CMAKE_Fortran_FLAGS` — riscv64 falls through with
+    no `-fPIC` at all. Its vendored `casadi-sundials` static library (a plain
+    `add_subdirectory`, not an `ExternalProject_Add`) then compiles without it, and
+    linking it into `libcasadi_sundials_common.so`/`libcasadi_rootfinder_kinsol.so` fails
+    with `relocation R_RISCV_JAL against 'KINProcessError' which may bind externally can
+    not be used when making a shared object; recompile with -fPIC`. The build gets much
+    further than gotcha 289's `wget` failure (~49 minutes vs. ~2%) before dying here,
+    because everything upstream builds via `ExternalProject_Add` with its own autotools/
+    libtool sub-build (IPOPT, MUMPS, METIS) already defaults to PIC objects for its own
+    shared-library targets independently of the top-level flags — only a plain in-tree
+    CMake static-library target inherits the arch-gated flags, and only riscv64 is
+    excluded from them.
+    - **Fix from the workflow, not a source patch: pass
+      `-DCMAKE_POSITION_INDEPENDENT_CODE=ON`** on the outer `cmake -B...` configure
+      line. This CMake variable initializes the `POSITION_INDEPENDENT_CODE` target
+      property on every target in the project (static libraries included), independent
+      of whatever the project's own hand-written `CMAKE_*_FLAGS` logic does — it adds
+      `-fPIC`, it does not need to replace or conflict with an existing arch check.
+      Confirmed no upstream `CMakeLists.txt` override of this variable exists for the
+      main build (only inside a few unrelated `ExternalProject_Add(... CMAKE_ARGS
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON ...)` calls for *other* sub-dependencies,
+      which don't touch the outer project's own variable).
+    - **The error text names the exact riscv64 relocation type** (`R_RISCV_JAL`) and is
+      unambiguous once you see it — but `gh run view --log-failed`/a truncated tail can
+      still land you mid-build output rather than at the true `ld` error; grep the full
+      raw log (gotcha 289) for `recompile with -fPIC` rather than trusting where the
+      log happens to end.
+    - **Don't assume this is riscv64-specific to relocations in general** — `x86_64`/
+      `aarch64` tolerate certain non-PIC-into-.so link patterns that riscv64's linker
+      does not for this particular relocation kind, which is exactly why an
+      arch-allowlist written against only those two targets silently breaks on a third.
