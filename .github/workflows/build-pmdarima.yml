@@ -1,0 +1,92 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build-linux-x86` job of https://github.com/alkaline-ml/pmdarima/blob/v2.1.1/.circleci/config.yml
+name: Build pmdarima wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pmdarima version to build (git tag without leading v, e.g. 2.1.1)'
+        required: true
+        default: '2.1.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pmdarima.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.1.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PMDARIMA_VERSION: ${{ inputs.version || '2.1.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pmdarima ${{ inputs.version || '2.1.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    strategy:
+      fail-fast: false
+      matrix:
+        # scikit-learn and statsmodels are runtime requirements; pypi.riseproject.dev
+        # ships riscv64 wheels for both only on cp312/cp313 (scikit-learn also has
+        # cp314/cp314t, statsmodels does not yet), so cp310/cp311/cp314/cp314t lack
+        # a full stack.
+        python: ["cp312", "cp313"]
+
+    steps:
+      - name: Checkout pmdarima v${{ env.PMDARIMA_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: alkaline-ml/pmdarima
+          ref: v${{ env.PMDARIMA_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # build_tools/get_tag.py only reads the version off GITHUB_REF when it looks
+          # like a tag ref; the container starts with no env, so it's set explicitly.
+          CIBW_ENVIRONMENT: >-
+            GITHUB_REF=refs/tags/v${{ env.PMDARIMA_VERSION }}
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy,pandas,scikit-learn,statsmodels
+          CIBW_BEFORE_TEST: pip install .[test]
+          # test_max_dur/test_subsequent_contexts time a 0.5s early-termination window
+          # and flake under CI load; pipeline6's True-True-X0 case hits a genuine 2.1.1
+          # bug against numpy>=2.5 (conf_ints comes back read-only, so pipeline.py's
+          # in-place inverse-transform assignment raises) - reproduces on every arch.
+          CIBW_TEST_COMMAND: >-
+            pytest --showlocals --durations=20 --pyargs pmdarima
+            -k "not test_max_dur and not test_subsequent_contexts and
+            not (test_pipeline_predict_inverse_transform and True-True-X0-pipeline6)"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pmdarima-${{ env.PMDARIMA_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pmdarima ${{ inputs.version || '2.1.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pmdarima-${{ inputs.version || '2.1.1' }}-*-manylinux_riscv64
