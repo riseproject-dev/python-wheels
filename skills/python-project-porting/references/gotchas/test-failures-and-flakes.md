@@ -24,6 +24,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **282** — A matplotlib `image_comparison` test failing only on riscv64 is a font-rendering
 - **283** — A `cp314t`-only `PicklingError` from a `multiprocessing.Process(target=<local
 - **286** — A vendored-ARPACK eigensolver test failing only on musllinux, not manylinux, can
+- **297** — A test harness's own unbounded `readline()`-until-marker wait turns any slow or
 
 ---
 
@@ -629,3 +630,45 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       would just be reverted by the next version bump. A `CIBW_TEST_COMMAND` comment
       citing the exact `NameError` and noting upstream's fix is unreleased documents the
       divergence for whoever reviews or re-triggers the workflow later.
+
+297. **A test harness's own unbounded `readline()`-until-marker wait turns any slow or
+    crashed child process into a permanent CI-timeout hang instead of a fast failure —
+    and when the underlying blocker is a vendored per-arch binary with no riscv64
+    variant and no source, the fix is deselecting the test, not building the binary
+    (the viztracer case; see `build-viztracer.yml` and `patches/viztracer/1.1.1/`).**
+    viztracer's own test helpers wait for a child process to print a specific line with
+    a plain `while True: line = pipe.readline(); if marker in line: break` — no
+    timeout, and no handling for the pipe hitting EOF. Two different tests hung
+    identically (zero output, killed only by GitHub's 60-minute job timeout) for two
+    unrelated reasons: `test_trace_self` self-traces `vizviewer`'s heavier
+    argparse/socketserver import graph and never reaches the print in practical time
+    (a bounded `timeout 120 viztracer --trace_self -c "print(1)"` smoke test completed
+    in ~1s, ruling out "self-tracing is always this slow" and narrowing it to the
+    heavier scenario); `test_use_external_processor` shells out to Perfetto's
+    `trace_processor` launcher, whose prebuilt-binary manifest lists only x86_64/aarch64
+    machines, so it raises and exits immediately on riscv64 — but `readline()` on an
+    already-closed pipe returns `""` forever instead of raising, turning the child's
+    fast crash into a silent, permanent busy-loop in the *parent* test process.
+    - **Isolate "slow" from "stuck" with a bounded smoke test before deselecting**,
+      cheap enough to run inside the real `CIBW_TEST_COMMAND` on the same PR: wrap the
+      suspect command in `timeout N` and echo start/exit/end timestamps ahead of the
+      real test run. A clean, fast exit narrows the cause; a `124` (timeout) exit
+      confirms it hangs rather than merely running long, without burning the job's
+      whole timeout budget to find out.
+    - **A vendored per-arch prebuilt with no source and no riscv64 entry (gotcha 157's
+      `vendored-binary` pattern, here scoped to one optional feature rather than the
+      whole package) is not something a build patch can fix** — grep the vendoring
+      directory for a source file matching the missing binary's name before concluding
+      this; its absence (only prebuilt blobs, e.g. `attach_linux_amd64.so` with no
+      `attach_linux_amd64.c`) confirms there is nothing to compile for riscv64 either.
+      Skip only the specific tests that exercise that one feature (`@unittest.skip` on
+      the exact methods) — sibling tests exercising the same module's other, non-vendored
+      code paths (viztracer's `test_install`/`test_attach_script` use an in-process
+      SIGUSR/API mechanism, not the vendored `.so`) are unaffected and stay covered.
+    - **A hang can mask an unrelated, real, fixable bug further down the same file** —
+      after deselecting the hang, `test_combine` failed for a completely different
+      reason (`ValueError: .../example/json/multithread.json does not exist`): the test
+      reaches outside `tests/` via `os.path.join(os.path.dirname(__file__), "../",
+      "example/json")`, and `CIBW_TEST_SOURCES: tests` never staged that sibling
+      directory. Add the extra path to `CIBW_TEST_SOURCES` (gotcha 36) rather than
+      deselecting — this one is a genuine test-staging gap, not a platform limitation.
