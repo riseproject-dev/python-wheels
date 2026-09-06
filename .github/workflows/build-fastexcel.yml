@@ -1,0 +1,96 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `check-wheel-build`/`check-wheel-build-musllinux` jobs of
+# https://github.com/ToucanToco/fastexcel/blob/v0.21.0/.github/workflows/CI.yml
+name: Build fastexcel wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'fastexcel version to build (git tag, e.g. 0.21.0)'
+        required: true
+        default: '0.21.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-fastexcel.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.21.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.21.0 there.
+  FASTEXCEL_VERSION: ${{ inputs.version || '0.21.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build fastexcel ${{ inputs.version || '0.21.0' }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    steps:
+      - name: Checkout fastexcel v${{ env.FASTEXCEL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ToucanToco/fastexcel
+          ref: v${{ env.FASTEXCEL_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # abi3-py310 (Cargo.toml) collapses cp310-cp313 into one build+reuse
+          # (gotcha 11/96); cp314t is a genuine separate build since pyo3 disables
+          # abi3 under Py_GIL_DISABLED. musllinux is dropped: rustup.rs ships no
+          # riscv64 musl toolchain.
+          CIBW_BUILD: >-
+            cp310-manylinux_riscv64 cp311-manylinux_riscv64 cp312-manylinux_riscv64
+            cp313-manylinux_riscv64 cp314t-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # fastexcel ships no [tool.cibuildwheel], so the Rust toolchain its
+          # maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=pandas,pyarrow,numpy,polars-runtime-32
+          # pyarrow has no riscv64 wheel below cp312 and pandas has none for
+          # cp314t on our registry yet, and both are needed transitively by
+          # every test module's shared tests/utils.py; skip those identifiers.
+          CIBW_TEST_SKIP: cp310-* cp311-* cp314t-*
+          CIBW_TEST_REQUIRES: >-
+            pytest>=7.1.3 pandas>=1.4.4 pyarrow>=8.0.0 polars>=1
+            openpyxl>=3.1.2,<4 xlrd>=2.0.1,<3
+          CIBW_TEST_SOURCES: python/tests tests/fixtures pyproject.toml
+          CIBW_TEST_COMMAND: >-
+            python -c "import fastexcel._fastexcel as m;
+            assert m.__file__.endswith('.so'), m.__file__" &&
+            python -m pytest -v python/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fastexcel-${{ env.FASTEXCEL_VERSION }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish fastexcel ${{ inputs.version || '0.21.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: fastexcel-${{ inputs.version || '0.21.0' }}-manylinux_riscv64
