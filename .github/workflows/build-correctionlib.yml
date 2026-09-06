@@ -1,0 +1,147 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on upstream's own wheel build setup:
+#   https://github.com/cms-nanoAOD/correctionlib/blob/v2.9.0/.github/workflows/wheels.yml
+name: Build correctionlib wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'correctionlib version to build (git tag without leading v, e.g. 2.9.0)'
+        required: true
+        default: '2.9.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-correctionlib.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.9.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 2.9.0 there.
+  CORRECTIONLIB_VERSION: ${{ inputs.version || '2.9.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_sdist:
+    needs: [setup]
+    # The sdist is architecture-independent: it just packages the source tree
+    # and the vendored submodules (pybind11, rapidjson, cpp-peglib, pcg-cpp,
+    # xxhash, lwtnn) plus a setuptools-scm-derived version.py. Build it once on
+    # x86 instead of burning a scarce riscv runner (CLAUDE.md gotcha 4).
+    name: Build correctionlib ${{ inputs.version || '2.9.0' }} sdist
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
+    steps:
+      - name: Checkout correctionlib v${{ env.CORRECTIONLIB_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: cms-nanoAOD/correctionlib
+          ref: v${{ env.CORRECTIONLIB_VERSION }}
+          submodules: recursive
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build sdist
+        id: sdist
+        run: |
+          uv pip install build twine
+          python -m build --sdist
+          twine check dist/*
+          sdists=(dist/*.tar.gz)
+          echo "sdist_name=$(basename "${sdists[0]}")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: correctionlib-${{ env.CORRECTIONLIB_VERSION }}-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_sdist]
+    name: Build correctionlib ${{ inputs.version || '2.9.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        include:
+          # pydantic (a hard runtime dependency) needs pandas+scipy's peer
+          # pydantic-core, which does publish a riscv64 cp314t wheel on PyPI -
+          # but pandas and scipy themselves (hard `test` dependency-group
+          # entries) publish no cp314t wheel for any platform yet, so the test
+          # env can't be installed. Build the wheel, skip only its tests.
+          - python: "cp314t"
+            test_skip: "*"
+
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: correctionlib-${{ env.CORRECTIONLIB_VERSION }}-sdist
+          path: dist/
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-*
+          CIBW_ARCHS: riscv64
+          # numpy (a hard runtime dependency) ships no musllinux riscv64 wheel
+          # anywhere, so musllinux is dropped (workflow-anatomy.md: an accepted
+          # outcome).
+          CIBW_SKIP: '*-musllinux_*'
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
+          # Mirror upstream's test-groups = ["test"] minus awkward/dask-awkward:
+          # both need awkward-cpp, which has no riscv64 wheel published yet
+          # (still in flight as its own port). Drop the two test files that
+          # hard-import awkward at module scope so collection doesn't fail.
+          CIBW_TEST_REQUIRES: >-
+            pandas uproot>=4.0.4 requests scipy "pytest>=6.0" pytest-run-parallel
+            pytest-benchmark
+          CIBW_TEST_COMMAND: >-
+            pytest {package}/tests
+            --ignore {package}/tests/test_highlevel.py
+            --ignore {package}/tests/test_issue296.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: correctionlib-${{ env.CORRECTIONLIB_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish correctionlib ${{ inputs.version || '2.9.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: correctionlib-${{ inputs.version || '2.9.0' }}-*-manylinux_riscv64
