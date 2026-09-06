@@ -21,6 +21,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **221** — `quay.io/pypa/musllinux_1_2_riscv64` is a real, working image — every prior port
 - **225** — `CIBW_BEFORE_ALL_LINUX` and `CIBW_BEFORE_BUILD_LINUX` are two different hooks —
 - **227** — A build that touches `PyObject` internals directly (`ob_refcnt`, `ob_type`,
+- **245** — `actions/checkout` must run before `actions/download-artifact` in the same
 - **247** — A folded `>-` scalar's `python -c "` on its own line puts a leading space
 - **209** — A multi-grammar tree-sitter-`<lang>` repo does not necessarily need a
 - **56** — `py-build-cmake` projects: the free-threaded job dies at *configure* unless
@@ -446,6 +447,27 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
        would fail identically compiling cp314t on x86_64/aarch64. Reaching for the
        pattern of gotcha 26 (bump the toolchain) or 107/226 (fix `CFLAGS`) doesn't apply;
        there's no flag that makes a nonexistent struct member exist.
+
+245. **In a matrix job that downloads a sdist artifact and separately checks out
+     something else (e.g. a test file `pull_request` excludes from the sdist),
+     `actions/checkout` must run *before* `actions/download-artifact` — its default
+     `clean: true` runs `git clean -ffdx` on the whole `$GITHUB_WORKSPACE`, not just
+     repo-tracked paths, and deletes anything already sitting there (the quickjs
+     case).** A `build_wheels` job downloaded `quickjs-<ver>-sdist` into `dist/`, then
+     ran `actions/checkout` with `sparse-checkout: test_quickjs.py` to fetch a test file
+     that upstream's own `MANIFEST.in` excludes from the sdist. The download-artifact
+     log showed `Artifact download completed successfully`; the very next step's log
+     showed `Deleting the contents of '/home/runner/work/<repo>/<repo>'` — checkout's
+     clean step doesn't know or care that `dist/quickjs-*.tar.gz` came from a different
+     action, so it wiped it. Every downstream job then died at
+     `cibuildwheel`'s `TarFile.open(package_dir)` with `FileNotFoundError`, while the
+     consumer's own log showed nothing wrong beyond the missing file — the real cause
+     was one step earlier, in the same job, not in the sdist-producing job at all.
+     Fix is pure step reordering: checkout (which starts from an empty workspace on a
+     matrix runner and cleans nothing that matters) first, artifact download second.
+     The download-artifact action's own settings echo, `digest-mismatch: error`, is
+     just a config default logged on every run — it is not evidence of what actually
+     failed and shouldn't be chased as a lead.
 
 247. **A folded `>-` scalar's `python -c "` on its own line puts a leading space inside
      the script — cp3.9-3.13 reject it with `IndentationError`, but cp3.14+ silently
