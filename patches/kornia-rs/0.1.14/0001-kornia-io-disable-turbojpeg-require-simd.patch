@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 6 Sep 2026 00:00:00 +0000
+Subject: [PATCH] kornia-io: drop turbojpeg's require-simd default feature
+
+kornia-io's optional `turbojpeg` feature (on by default via kornia-py)
+pulls in turbojpeg-sys, which vendors libjpeg-turbo and builds it with
+cmake. turbojpeg-sys's own default features include `require-simd`,
+which passes `-DREQUIRE_SIMD=ON` to that cmake build.
+
+libjpeg-turbo's simd/CMakeLists.txt only ships SIMD kernels for
+x86/x86-64, Arm, MIPS and PowerPC; every other CPU_TYPE (riscv64
+included) falls through to:
+
+    simd_fail("SIMD extensions not available for this CPU (...)")
+
+and simd_fail() is a hard `message(FATAL_ERROR ...)` when REQUIRE_SIMD
+is ON, aborting the cmake configure step. The option's own help text
+says the *default* (REQUIRE_SIMD=OFF) is "to fall back to a non-SIMD
+build" with just a warning - riscv64 has no SIMD kernels to build
+either way, so this only changes a fatal error into a warning plus a
+scalar (non-SIMD) libjpeg-turbo build.
+
+Dropping default-features and re-listing `cmake`/`pkg-config` (the two
+turbojpeg default features we still want) is a no-op on every currently
+supported target: x86/x86-64/Arm/PowerPC all have SIMD kernels bundled,
+so simd_fail() is never reached there regardless of REQUIRE_SIMD.
+
+Upstream-Status: To upstream [not filed upstream from this porting session, which does not open issues/PRs on repos other than riseproject-dev/python-wheels; genuinely worth upstreaming since it only relaxes a fatal error into upstream's own documented non-SIMD fallback]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/crates/kornia-io/Cargo.toml b/crates/kornia-io/Cargo.toml
+index d33edec..8be3f0c 100644
+--- a/crates/kornia-io/Cargo.toml
++++ b/crates/kornia-io/Cargo.toml
+@@ -41,7 +41,7 @@ png = "0.18"
+ thiserror = { workspace = true }
+ tiff = "0.10"
+ # for fast jpeg encoding/decoding
+-turbojpeg = { version = "1.2", optional = true }
++turbojpeg = { version = "1.2", optional = true, default-features = false, features = ["cmake", "pkg-config"] }
+ zune-jpeg = "0.5"
+
+ [dev-dependencies]
