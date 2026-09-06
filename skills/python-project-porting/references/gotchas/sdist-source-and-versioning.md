@@ -232,6 +232,23 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
       in such a tree (does every dependency have a riscv64 path?) before any runner time
       is spent.
 
+275. **A live, legitimate `project_urls` repo link is not proof it holds the released
+    sdist's source — it can belong to a same-family sibling project instead (the
+    PyQt6-sip case).** Distinct from gotcha 154 (link is dead) and gotcha 156 (no
+    repository exists at all): PyQt6-sip 13.12.0's PyPI metadata points at
+    `github.com/Python-SIP/sip`, a real, actively-maintained repo by the same author —
+    but that repo is the `sip` build-tool/code-generator (PyPI package `sip`, versioned
+    independently at 6.x) and its tree has no `sip_core.c`/`sip_voidptr.c`, the actual
+    C sources of the `PyQt6.sip` runtime module PyPI ships. The two projects share a
+    maintainer and a name prefix, which is exactly what makes the link look right.
+    Confirm before trusting it: `tar tzf` the PyPI sdist and check whether the linked
+    repo's tree (`gh api repos/<o>/<r>/contents/`) contains the files the sdist actually
+    ships, not just a plausible-sounding path. When it doesn't and no other repo search
+    (gotcha 43/154's `gh api search/repositories`) turns one up either, treat it as
+    gotcha 156's no-public-repository case — fetch the sdist directly and say so in the
+    workflow header and queue notes, so a reviewer doesn't waste time on the dead-end
+    link.
+
 213. **Gotcha 103's timestamp-proximity trick can point at the wrong commit when
     upstream batches releases (the lru-dict case).** lru-dict 1.4.1 is on PyPI with no
     `v1.4.1` tag — but unlike dbt-extractor, the sdist's `upload_time_iso_8601`
