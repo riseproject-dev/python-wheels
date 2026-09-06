@@ -21,6 +21,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **221** — `quay.io/pypa/musllinux_1_2_riscv64` is a real, working image — every prior port
 - **225** — `CIBW_BEFORE_ALL_LINUX` and `CIBW_BEFORE_BUILD_LINUX` are two different hooks —
 - **227** — A build that touches `PyObject` internals directly (`ob_refcnt`, `ob_type`,
+- **247** — A folded `>-` scalar's `python -c "` on its own line puts a leading space
 - **209** — A multi-grammar tree-sitter-`<lang>` repo does not necessarily need a
 - **56** — `py-build-cmake` projects: the free-threaded job dies at *configure* unless
 - **201** — When `package-dir` is a monorepo subdirectory and the package's own build script
@@ -445,3 +446,38 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
        would fail identically compiling cp314t on x86_64/aarch64. Reaching for the
        pattern of gotcha 26 (bump the toolchain) or 107/226 (fix `CFLAGS`) doesn't apply;
        there's no flag that makes a nonexistent struct member exist.
+
+247. **A folded `>-` scalar's `python -c "` on its own line puts a leading space inside
+     the script — cp3.9-3.13 reject it with `IndentationError`, but cp3.14+ silently
+     tolerates it, so the *same* broken YAML looks fine on one matrix leg and fails on
+     another (the ua-parser-rs case).** Unlike gotcha 93 (a *deeper*-indented
+     continuation line keeping its literal `\n`), this bites when every line sits at the
+     *same* indent, which is exactly what folds correctly per the YAML spec:
+     ```yaml
+     CIBW_TEST_COMMAND: >-
+       python -c "
+       import foo;
+       assert foo.__file__.endswith('.so')" &&
+       python -m pytest
+     ```
+     folds the newline after the opening `"` into a single space, so the resolved
+     command is `python -c " import foo; assert ...` — a lone leading space before the
+     first statement. `python -c " import sys"` raises `IndentationError: unexpected
+     indent` on 3.9 through 3.13 (verified on both), because `-c` source isn't
+     dedented before tokenizing. CPython 3.14's tokenizer no longer treats that leading
+     space as significant, so the identical string runs to completion there — a
+     cp310-abi3 leg (tested down to its floor interpreter, gotcha 96) died on a syntax
+     error while the cp314t leg ran the actual test body and hit a *different*,
+     legitimate assertion failure, making the two failures look unrelated when they
+     shared one root cause. Fix: keep the first statement on the same source line as the
+     opening quote (`python -c "import foo;` — no line break before `import`); every
+     later `;`-joined statement can still start its own line, since folding a newline
+     *between* two already-`;`-terminated statements is harmless.
+     - **Resolve the YAML and read the string back, not the source** — gotcha 93's
+       `yaml.safe_load(...)['env']['CIBW_TEST_COMMAND']` check catches this too; a
+       `repr()` of the resolved value shows the stray leading space directly (`'python
+       -c "import foo...'` vs the broken `'python -c " import foo...'`).
+     - **A syntax error on the older interpreter and a clean run to a real assertion on
+       cp314t in the same matrix is the tell** — don't debug them as two unrelated
+       failures (one YAML/syntax, one logic) when the log for the younger interpreter's
+       job still shows the identical malformed one-liner.

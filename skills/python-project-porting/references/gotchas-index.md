@@ -97,6 +97,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **225** — `CIBW_BEFORE_ALL_LINUX` and `CIBW_BEFORE_BUILD_LINUX` are two different hooks —
 - **227** — A build that touches `PyObject` internals directly (`ob_refcnt`, `ob_type`,
 - **245** — `actions/checkout` must run before `actions/download-artifact` in the same
+- **247** — A folded `>-` scalar's `python -c "` on its own line puts a leading space
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
