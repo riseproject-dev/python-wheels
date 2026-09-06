@@ -751,3 +751,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       lines from the patched package's `[[package]]` block (a path dependency has neither),
       leave every other line untouched, and confirm with `cargo metadata --locked` (exit 0,
       no re-resolution) rather than trusting the edit by eye.
+    - **crates.io's download endpoint 403s a plain `curl` with no `User-Agent`** —
+      `curl -fsSL https://crates.io/api/v1/crates/<name>/<version>/download` fails with
+      `curl: (22) The requested URL returned error: 403` both locally and from the runner;
+      add `-A "<anything descriptive>"` and it succeeds. Cheap to catch locally before
+      relying on this pattern in a `run:` step at all (this cost one full CI queue-and-fail
+      cycle on the runner to notice).
