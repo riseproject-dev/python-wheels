@@ -270,6 +270,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **177** — Narrowing an upstream test suite because its heavy requirements file has no
 - **212** — An unavailable optional dependency (no riscv64 wheel) doesn't only fail tests
 - **241** — A dry run against upstream's *released* wheel (gotcha 52) settles whether a
+- **264** — Gotcha 94's "is the service packaged for riscv64" check needs a pin, not just a
 
 ### Test failures, flakes & arch-specific bugs — [`gotchas/test-failures-and-flakes.md`](gotchas/test-failures-and-flakes.md)
 

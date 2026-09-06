@@ -24,6 +24,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
 - **177** — Narrowing an upstream test suite because its heavy requirements file has no
 - **212** — An unavailable optional dependency (no riscv64 wheel) doesn't only fail tests
 - **241** — A dry run against upstream's *released* wheel (gotcha 52) settles whether a
+- **264** — Gotcha 94's "is the service packaged for riscv64" check needs a pin, not just a
 
 ---
 
@@ -506,3 +507,26 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
     run the whole thing unscoped and let the actual CI job's failures, if any, drive
     further narrowing instead of preemptively deselecting "probably needs network"
     tests.
+
+264. **Gotcha 94's "is the service packaged for riscv64" check needs a pin, not just a
+    binary that runs (the asynch case).** asynch (an async ClickHouse driver) has every
+    test gated behind a session-scoped, autouse `conftest.py` fixture that opens a real
+    `Connection` — gotcha 92's staging trick drops the fixture, but only by dropping every
+    test with it, so the real question is whether a server can be stood up at all.
+    ClickHouse publishes no riscv64 Docker image (checked via the Docker Hub API's
+    `images[].architecture`) and no riscv64 build under its versioned tarball/rpm host
+    (`packages.clickhouse.com/tgz/stable/clickhouse-common-static-<version>-riscv64.tgz`
+    404s for every released version) — but its own install script
+    (`docs/_includes/install/universal.sh`) resolves `ARCH=riscv64` to a real, runnable
+    static binary at `https://builds.clickhouse.com/master/riscv64/clickhouse` (`curl -sI`
+    returns `200`, 150MB). That binary is tempting but the wrong foundation: it is a
+    continuous build off `master` with no equivalent at any tagged version (every
+    `<version>/riscv64/` path 403s), so a workflow pinned to it silently tracks
+    ClickHouse's tip rather than a fixed release, and would go from green to red the day an
+    unrelated upstream change lands — the opposite of what a pin buys pyodbc's
+    distro-packaged `postgresql-server` in gotcha 94. Treat "there's a binary that runs" and
+    "there's a version we can pin" as separate questions; only the second clears the
+    `before-test` bar. Falling back to gotcha 92's narrowing (stage only the module that
+    needs no fixture — here `tests/test_compiled.py`, which just imports each compiled
+    module and asserts it resolved to a `.so`) is the correct outcome, not a shortcut taken
+    in place of the real fix.
