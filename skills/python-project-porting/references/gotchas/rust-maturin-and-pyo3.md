@@ -43,6 +43,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
 - **306** — A pyo3 release that predates a newer CPython by years does not necessarily
   fail to build against it — `pyo3-build-config` only floors the supported version, it
   has no ceiling.
+- **312** — A maturin `bindings = "bin"` project's published sdist can carry a
+  `pyproject.toml` that exists nowhere in the git checkout at all, not even in a
+  subdirectory — building the tag directly silently ships the wheel under the Cargo
+  crate's name instead of the real distribution name.
 
 ---
 
@@ -787,3 +791,40 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       gotcha 11's litellm case, but for a version-age reason rather than a deliberate
       upstream choice) rather than assuming the abi3 build's success implies the
       free-threaded one would also compile.
+
+312. **A maturin `bindings = "bin"` project's published sdist can carry a `pyproject.toml`
+    that exists nowhere in the git checkout at all, not even in a subdirectory — building
+    the tag directly silently ships the wheel under the Cargo crate's name instead of the
+    real distribution name (the taplo case; see `build-taplo.yml`).** Gotcha 239 covers a
+    maturin sdist hoisting `pyproject.toml` to its root when the git checkout has one at a
+    *different* path (a workspace member's subdirectory). taplo is a step further: its
+    GitHub repo's own CI (`ci.yaml`/`releases.yaml`) has no PyPI wheel job at all, and
+    `find . -iname pyproject.toml` across a fresh clone of `release-taplo-cli-0.9.3`
+    returns nothing anywhere in the tree — the file is synthesized by whatever out-of-repo
+    process the maintainer runs to cut the PyPI release, and only the downloaded sdist
+    (`pip download taplo==0.9.3 --no-binary :all:`) has one, at its root, declaring
+    `[project] name = "taplo"` and `[tool.maturin] manifest-path =
+    "crates/taplo-cli/Cargo.toml"`. Building the git tag with `maturin build
+    --manifest-path crates/taplo-cli/Cargo.toml` and no `pyproject.toml` anywhere on the
+    ancestor walk falls back to `Cargo.toml`'s own package name, so the wheel comes out
+    `taplo_cli-0.9.3-py3-none-manylinux_2_39_riscv64.whl` — it builds and installs fine,
+    so nothing fails until the *test* job's `uv pip install --no-index --find-links . taplo`
+    reports `taplo was not found in the provided package locations`, not a build error.
+    - **Two checks settle it before writing the workflow**: `find . -iname pyproject.toml`
+      on a fresh clone of the tag (gotcha 239's check, but read for "nothing at all" as a
+      distinct outcome from "present at a different path"), and diffing the checked-out
+      `Cargo.toml`'s `[package] name` against the actual PyPI project name — a mismatch
+      here (`taplo-cli` vs `taplo`) is the tell.
+    - **Fix: recreate the release's own `pyproject.toml` verbatim via a `run:` heredoc at
+      the checkout root**, right before the `maturin-action` step — this is missing
+      packaging metadata the job needs, not a source defect, so gotcha 7's sanctioned
+      "write it at run time" mechanism applies, not a `patches/` entry. Source the exact
+      content from the real sdist (gotcha 2's inspection step), not a hand-written guess.
+    - **Verified against maturin's own resolver, not assumed**: `project_layout.rs`'s
+      `resolve_manifest_paths` walks `path.ancestors()` from the `--manifest-path` CLI
+      argument's directory upward, checking each level for `pyproject.toml`, and the walk
+      continues up to and including the Cargo *workspace* root before stopping (it only
+      breaks once a candidate directory is no longer inside the workspace root's parent).
+      A file written at the checkout root (the workspace root here) is therefore found even
+      though it sits several directories above the crate `--manifest-path` names — no
+      `--manifest-path` change needed alongside it.

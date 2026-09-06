@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (301 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (302 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -152,6 +152,10 @@ The porting gotchas (301 of them) live in [`references/gotchas/`](gotchas/), spl
 - **306** — A pyo3 release that predates a newer CPython by years does not necessarily
   fail to build against it — `pyo3-build-config` only floors the supported version, it
   has no ceiling.
+- **312** — A maturin `bindings = "bin"` project's published sdist can carry a
+  `pyproject.toml` that exists nowhere in the git checkout at all, not even in a
+  subdirectory — building the tag directly silently ships the wheel under the Cargo
+  crate's name instead of the real distribution name.
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
