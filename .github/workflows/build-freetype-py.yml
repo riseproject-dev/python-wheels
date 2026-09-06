@@ -1,0 +1,121 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on: https://github.com/rougier/freetype-py/blob/v2.5.1/.github/workflows/ci.yml (build)
+name: Build freetype-py wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'freetype-py version to build (git tag without the leading v, e.g. 2.5.1)'
+        required: true
+        default: '2.5.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-freetype-py.yml'
+      - 'patches/freetype-py/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.5.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  FREETYPE_PY_VERSION: ${{ inputs.version || '2.5.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build freetype-py ${{ inputs.version || '2.5.1' }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout freetype-py v${{ env.FREETYPE_PY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: rougier/freetype-py
+          ref: v${{ env.FREETYPE_PY_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # mirrors.sarata.com (setup-build-freetype.py's default FreeType mirror) 403s
+      # non-browser clients; gotcha 31 pins the sdist version since this dirties the tree.
+      - name: Patch freetype-py source
+        run: git apply python-wheels/patches/freetype-py/${{ env.FREETYPE_PY_VERSION }}/*.patch
+
+      # setup.py bundles a compiled FreeType (statically linking Harfbuzz); upstream
+      # ships only its own LICENSE.txt, so stage the two other licences ourselves.
+      - name: Stage the FreeType and HarfBuzz licences
+        run: |
+          ft_ver="$(sed -n 's/^FREETYPE_TARBALL = "freetype-\(.*\)\.tar\.xz"/\1/p' setup-build-freetype.py)"
+          hb_ver="$(sed -n 's/^HARFBUZZ_TARBALL = "harfbuzz-\(.*\)\.tar\.xz"/\1/p' setup-build-freetype.py)"
+          ft_tag="VER-$(echo "$ft_ver" | tr '.' '-')"
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/freetype/freetype/${ft_tag}/docs/FTL.TXT" -o LICENSE.FreeType.txt
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/harfbuzz/harfbuzz/${hb_ver}/COPYING" -o COPYING.HarfBuzz
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # setup.py's BdistWheel.get_tag() forces py3-none, so one build serves every interpreter.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # backend.py adds a `cmake` build dependency, but the `cmake` PyPI package has
+          # no riscv64 wheel; use the image's own cmake and skip isolated dependency resolution.
+          # setup.py's SharedLibBuildExt calls distutils.dir_util.mkpath()/file_util.copy_file()
+          # with dry_run=, a kwarg setuptools >=81 dropped from its vendored distutils.
+          CIBW_BEFORE_BUILD: >-
+            dnf install -y cmake &&
+            pip install -q -U "setuptools<81" wheel "setuptools_scm[toml]" certifi
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          # CMAKE_POLICY_VERSION_MINIMUM (gotcha 207) as an env var, not a `-D` flag:
+          # setup-build-freetype.py's cmake invocations aren't ours to add flags to.
+          CIBW_ENVIRONMENT: >-
+            FREETYPEPY_BUNDLE_FT=yes PYTHON_ARCH=64
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_FREETYPE_PY=${{ env.FREETYPE_PY_VERSION }}
+            CMAKE_POLICY_VERSION_MINIMUM=3.5
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: pytest {project}/tests
+
+      - name: Check the bundled library and licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          expected = {"LICENSE.txt", "LICENSE.FreeType.txt", "COPYING.HarfBuzz"}
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith("freetype/libfreetype.so") for n in names), whl
+              licenses = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                          if ".dist-info/licenses/" in n and not n.endswith("/")}
+              assert licenses == expected, f"{whl}: {sorted(licenses)}"
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: freetype-py-${{ env.FREETYPE_PY_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish freetype-py ${{ inputs.version || '2.5.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: freetype-py-${{ inputs.version || '2.5.1' }}-*-manylinux_riscv64
