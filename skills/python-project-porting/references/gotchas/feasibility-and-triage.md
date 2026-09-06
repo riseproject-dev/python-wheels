@@ -29,6 +29,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **248** — An "inactive"/deprecated package's own PyPI ceiling can be a real ABI wall, not
 - **273** — A pinned transitive crate can lack riscv64 support outright, and `cargo check
 - **276** — A hand-written-SIMD C library that looks x86/aarch64-only can still have a
+- **284** — A package whose C/C++ extension calls CUDA/HIP/cuFile is not automatically
 
 ---
 
@@ -994,3 +995,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
        well under the time a real riscv64 CI job
        would have taken — full proof of correctness, not just "it compiles",
        before any CI cycle was spent.
+
+284. **A package whose C/C++ extension calls CUDA/HIP/cuFile is not automatically
+     GPU-blocked — check whether those calls are resolved at build time (linked
+     against a CUDA toolkit) or at runtime (`dlopen`/`dlsym`) before assuming the
+     port needs a GPU host to even compile (the fastsafetensors case; see
+     `build-fastsafetensors.yml`).** fastsafetensors' pybind11 extension calls
+     `cudaMemcpy`, `cudaHostAlloc`, `cuFileRead`, etc., and even ships a HIP/ROCm
+     mirror of the same API — reading like a hard CUDA/ROCm build dependency. But
+     `fastsafetensors/cpp/gpu_compat.h` documents the actual design: "All GPU
+     functions are loaded at runtime via `dlopen()`/`dlsym()` — no CUDA or HIP
+     headers are included and no GPU runtime library is linked at build time." The
+     extension defines its own minimal `cudaError_t`/`cudaMemcpyKind`/etc. types in
+     `ext.hpp` instead of including `cuda_runtime.h`, and `load_library_functions()`
+     tries `dlopen("libcudart.so")` then `dlopen("libamdhip64.so")` at import time,
+     falling back to a CPU-only stub table (`cpu_cudaMemcpy` = `memcpy`, etc.) when
+     neither is present — so `is_cuda_found()`/`is_hip_found()` legitimately return
+     `False` on a GPU-less riscv64 CI runner instead of failing.
+     - **Two greps settle it without burning a CI cycle**: `grep -rn
+       '#include.*cuda_runtime\|#include.*<hip/hip_runtime' <ext dir>` (a real
+       compile-time dependency needs the toolkit's own headers) and `grep -rn
+       'dlopen\|dlsym' <ext dir>` (present alongside CUDA/HIP symbol names is the
+       runtime-detection tell). No CUDA/HIP includes plus a `dlopen` table pointed
+       at `libcudart.so`/`libamdhip64.so` means the build never touches a GPU
+       toolkit; a `local_validation` `pip wheel .` on a GPU-less host that succeeds
+       and whose smoke test asserts only `isinstance(is_cuda_found(), bool)` (not
+       `is True`) confirms it before writing the workflow.
+     - This is the inverse of gotcha 40/187's conda/CUDA wall: those catch a
+       dependency that genuinely cannot resolve without a GPU-built channel;
+       this one catches the opposite mistake — assuming CUDA symbols anywhere in
+       a `.cpp`/`.h` file make the *build itself* GPU-blocked, when the runtime
+       merely offers to accelerate on a GPU if one happens to be present.

@@ -60,6 +60,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **263** — A PyPI wheel with no sdist and a closed-binary redistribution licence can still be
 - **273** — A pinned transitive crate can lack riscv64 support outright, and `cargo check
 - **276** — A hand-written-SIMD C library that looks x86/aarch64-only can still have a
+- **284** — A package whose C/C++ extension calls CUDA/HIP/cuFile is not automatically
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
