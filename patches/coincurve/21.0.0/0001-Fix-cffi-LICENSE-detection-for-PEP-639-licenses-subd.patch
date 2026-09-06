@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 6 Sep 2026 10:03:35 +0200
+Subject: [PATCH] Fix cffi LICENSE detection for PEP 639 licenses/ subdirectory
+
+hatch_build.py bundles the _cffi_backend extension straight into the
+wheel to avoid a runtime dependency on cffi, and copies cffi's own
+LICENSE file alongside it. It locates that file by checking
+`f.parent.name.endswith(".dist-info")`, which only matches a LICENSE
+placed directly in the dist-info root. cffi >=2.0.0 (and its own
+official PyPI wheels) ship LICENSE under a nested `licenses/`
+subdirectory per PEP 639, so `f.parent.name` is "licenses" and the
+check silently finds zero files, raising "Expected exactly one
+LICENSE file in cffi distribution, got 0" for any build resolving a
+current cffi -- reproduced here building against our own riscv64 cffi
+wheel, and independent of architecture (also filed against upstream's
+official x86_64 wheels: ofek/coincurve#223).
+
+Backport get_cffi_distribution_license_files() from upstream's PR #188,
+which checks `f.parts[0]` (the dist-info directory itself) instead,
+matching both the flat and nested layouts. Already merged to upstream
+master; not yet in a PyPI release.
+
+Upstream-Status: Submitted [https://github.com/ofek/coincurve/pull/188]
+---
+ hatch_build.py | 17 ++++++++++++++---
+ 1 file changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/hatch_build.py b/hatch_build.py
+index ef35030..012e650 100644
+--- a/hatch_build.py
++++ b/hatch_build.py
+@@ -3,7 +3,7 @@ from __future__ import annotations
+ import os
+ import shutil
+ from functools import cached_property
+-from importlib.metadata import distribution
++from importlib.metadata import PackagePath, distribution
+ from typing import Any
+ 
+ import _cffi_backend  # noqa: PLC2701
+@@ -22,13 +22,24 @@ class CustomBuildHook(BuildHookInterface):
+     def local_cffi_license(self) -> str:
+         return os.path.join(self.root, self.LICENSE_NAME)
+ 
++    @staticmethod
++    def get_cffi_distribution_license_files() -> list[PackagePath]:
++        license_files = []
++
++        dist_files = distribution("cffi").files or []
++        for f in dist_files:
++            if f.name == "LICENSE" and f.parts[0].endswith(".dist-info"):
++                license_files.append(f)
++                break
++
++        return license_files
++
+     def initialize(self, version: str, build_data: dict[str, Any]) -> None:  # noqa: ARG002
+         cffi_shared_lib = _cffi_backend.__file__
+         relative_path = f"coincurve/{os.path.basename(cffi_shared_lib)}"
+         build_data["force_include"][cffi_shared_lib] = relative_path
+ 
+-        dist = distribution("cffi")
+-        license_files = [f for f in dist.files if f.name == "LICENSE" and f.parent.name.endswith(".dist-info")]
++        license_files = self.get_cffi_distribution_license_files()
+         if len(license_files) != 1:
+             message = f"Expected exactly one LICENSE file in cffi distribution, got {len(license_files)}"
+             raise RuntimeError(message)
+-- 
+2.50.1 (Apple Git-155)
+
