@@ -28,6 +28,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **201** — When `package-dir` is a monorepo subdirectory and the package's own build script
 - **216** — An abi3 build's own mandatory floor interpreter (gotcha 96) can itself be the one
 - **217** — Upstream's own `repair-wheel-command` commonly re-runs abi3audit itself via
+- **251** — When `package-dir` is a `.tar.gz`, cibuildwheel extracts it to a temp dir and
 
 ---
 
@@ -503,3 +504,30 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
        cp314t in the same matrix is the tell** — don't debug them as two unrelated
        failures (one YAML/syntax, one logic) when the log for the younger interpreter's
        job still shows the identical malformed one-liner.
+
+251. **When `package-dir` is a `.tar.gz`, cibuildwheel extracts it to a temp dir and
+     `chdir`s the whole build into it — so `CIBW_TEST_SOURCES` (resolved against
+     `Path.cwd()`, gotcha 104) can never see a sibling file staged next to the sdist
+     in `$GITHUB_WORKSPACE` (the quickjs case).** `cibuildwheel/__main__.py` special-cases
+     a package-dir ending in `tar.gz`: it extracts the archive to `mkdtemp(prefix=
+     "cibw-sdist-")`, sets that as the new `package_dir`, and runs the entire
+     `build_in_directory(args)` call inside `with contextlib.chdir(project_dir):`. Every
+     later `Path.cwd()` call for the rest of the build — including
+     `platforms/linux.py`'s `copy_test_sources(test_sources, Path.cwd(), test_cwd, ...)`
+     — now resolves against that temp extraction, not the directory cibuildwheel was
+     launched from. A workflow that downloads a built sdist tarball as `package-dir` and
+     separately checks out a test file that the sdist deliberately excludes (gotcha 245's
+     same shape) builds the wheel successfully and only fails minutes later, deep in the
+     "Testing wheel" phase, with `cibuildwheel: Test source test_quickjs.py does not
+     exist.` — a bare-tarball `package-dir` is not equivalent to a directory one for
+     `CIBW_TEST_SOURCES` purposes, even though both work identically for the build step.
+     - **Fix by extracting the sdist yourself and pointing `package-dir` at the
+       resulting directory** (`tar zxf dist/<name>.tar.gz -C dist` then `package-dir:
+       dist/<name>-<version>`), matching `build-lightgbm.yml`'s existing pattern — with
+       a real directory, `args.package_dir.is_file()` is false and the name doesn't end
+       `tar.gz`, so cibuildwheel calls `build_in_directory(args)` directly with no
+       `chdir`, and `Path.cwd()` stays at the workspace root for the whole run.
+     - **Read `cibuildwheel/__main__.py`'s own dispatch, not just `platforms/linux.py`**,
+       when a `test-sources` failure doesn't match gotcha 104's directory-package-dir
+       story — the `chdir` happens one layer up, before either platform module runs, and
+       nothing in `platforms/linux.py` alone explains it.

@@ -99,6 +99,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **227** — A build that touches `PyObject` internals directly (`ob_refcnt`, `ob_type`,
 - **245** — `actions/checkout` must run before `actions/download-artifact` in the same
 - **247** — A folded `>-` scalar's `python -c "` on its own line puts a leading space
+- **251** — When `package-dir` is a `.tar.gz`, cibuildwheel extracts it to a temp dir and
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
@@ -151,6 +152,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **235** — The manylinux image's bundled `/opt/python/cpXY-cpXY` interpreters have
 - **243** — The `manylinux_2_39_riscv64` container's IPv6 loopback binds but can't send:
 - **250** — A vendored C library's strict-aliasing UB can miscompile *silently* under a
+- **252** — Rocky 10 (the riscv64 manylinux image's base) names the Wayland client
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
@@ -237,6 +239,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **174** — A `<pkg>/` directory at the checkout root is only a shadowing hazard when it holds
 - **218** — Gotcha 25's shadowing condition ("suite is a package") has a second, independent
 - **229** — A test suite that calls GitPython's `Repo(..., search_parent_directories=True)`
+- **253** — A ctypes/dlopen GUI-toolkit wrapper with no upstream pytest suite at all still has
 
 ### Testing: pytest config, servers & test selection — [`gotchas/pytest-config-servers-and-selection.md`](gotchas/pytest-config-servers-and-selection.md)
 
