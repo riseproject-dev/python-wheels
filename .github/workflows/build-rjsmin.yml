@@ -31,8 +31,51 @@ jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
 
-  build_wheels:
+  build_sdist:
     needs: [setup]
+    # The sdist is architecture-independent, so build it once on x86 instead of
+    # a scarce riscv runner. It also excludes debug.unix.cflags, a
+    # coverage/-Werror dev-build flag file that MANIFEST.in doesn't ship in the
+    # sdist; checking out the git tag directly for cibuildwheel (as the first
+    # version of this workflow did) picks that file up and fails cp314t with
+    # "ISO C90 forbids mixed declarations and code" from CPython's own
+    # free-threaded refcount.h.
+    name: Build rjsmin ${{ inputs.version || '1.2.5' }} sdist
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
+    steps:
+      - name: Checkout rjsmin ${{ env.RJSMIN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ndparker/rjsmin
+          ref: ${{ env.RJSMIN_VERSION }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build sdist
+        id: sdist
+        run: |
+          uv pip install build
+          python -m build --sdist
+          sdists=(dist/*.tar.gz)
+          echo "sdist_name=$(basename "${sdists[0]}")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rjsmin-${{ env.RJSMIN_VERSION }}-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_sdist]
     name: Build rjsmin ${{ inputs.version || '1.2.5' }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
@@ -42,14 +85,14 @@ jobs:
         python: ["cp312", "cp313", "cp314", "cp314t"]
 
     steps:
-      - name: Checkout rjsmin ${{ env.RJSMIN_VERSION }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          repository: ndparker/rjsmin
-          ref: ${{ env.RJSMIN_VERSION }}
-          persist-credentials: false
+          name: rjsmin-${{ env.RJSMIN_VERSION }}-sdist
+          path: dist/
 
       - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}
         env:
           CIBW_ARCHS: riscv64
           CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
