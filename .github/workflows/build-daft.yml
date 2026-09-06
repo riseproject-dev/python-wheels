@@ -129,10 +129,19 @@ jobs:
           rm -rf daft
           DAFT_ANALYTICS_ENABLED=0 DAFT_RUNNER=native python -m pytest tests/dataframe --durations=50
         env:
-          PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
-          # Without it pip prefers PyPI's releases, which have no riscv64
-          # wheel for these, and source-builds them in the container.
-          PIP_ONLY_BINARY: numpy,pandas,pyarrow
+          # `uv pip install` (unlike cibuildwheel's pip-based test step) only
+          # honors its own UV_* env vars, not PIP_*; the PIP_-prefixed forms
+          # silently no-op, so uv skipped our registry, resolved pyarrow only
+          # against PyPI (no riscv64 wheel there) and source-built it, which
+          # needs the real Arrow C++ CMake package the manylinux image
+          # doesn't have (gotcha 244). `unsafe-best-match` is needed on top
+          # of the extra index because uv's default "first-index" strategy
+          # stops at the first index that lists the package name at all,
+          # never reaching our registry's riscv64 build (build-matplotlib.yml
+          # uses the same pair for the same reason).
+          UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+          UV_INDEX_STRATEGY: unsafe-best-match
+          UV_ONLY_BINARY: numpy,pandas,pyarrow
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
