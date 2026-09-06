@@ -27,6 +27,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **236** — An "LLVM-based" port is not automatically libclang-scale — check which CMake target
 - **246** — A `pyO3`/uniffi "binding" package can vendor a closed-source Rust core as a git-committed
 - **248** — An "inactive"/deprecated package's own PyPI ceiling can be a real ABI wall, not
+- **273** — A pinned transitive crate can lack riscv64 support outright, and `cargo check
 
 ---
 
@@ -920,3 +921,37 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
        survive zip/cross-OS extraction the way upstream's own wheel ships them), use
        `cp -L` to dereference each name onto its real content** rather than copying the
        CMake-installed symlink chain as-is.
+
+273. **A pinned transitive crate can lack riscv64 support outright, and `cargo check
+     --target` (no cross-linker needed) finds it cheaper than gotcha 182's full
+     `cargo build --release` (the mitmproxy-wireguard case).** mitmproxy-wireguard
+     0.1.23 (archived upstream, PyPI's last release, superseded by the already-ported
+     mitmproxy-rs, PR #962) pins `boringtun = "0.5"` in its released sdist's checked-in
+     `Cargo.lock`, which resolves to `ring v0.16.20`. ring 0.16's `build.rs` hand-lists
+     which target architectures get an assembly-optimized crypto backend; riscv64 isn't
+     on that list, and the lookup that should return "no asm, fall back" instead
+     `unwrap()`s a `None` and panics: `cargo check --target riscv64gc-unknown-linux-gnu`
+     failed with `thread 'main' panicked at .../ring-0.16.20/build.rs:358:10: called
+     'Option::unwrap()' on a 'None' value` — a hard wall, not a missing toolchain flag.
+     ring didn't gain riscv64gc support until 0.17; mitmproxy-rs's own `Cargo.lock`
+     (the actively maintained successor) resolves `boringtun 0.7.1` → `ring 0.17.14`,
+     which is exactly why that port succeeded where this one cannot without forking the
+     unmaintained 0.5.x/0.16.x pin ourselves — out of proportion for an archived
+     predecessor with a maintained, already-ported replacement.
+     - **`cargo check --target <riscv64 triple>` alone (with `rustup target add
+       riscv64gc-unknown-linux-gnu`) is enough to hit this** — unlike gotcha 182's
+       pre-flight, which needs a real cross-linker (`gcc-riscv64-linux-gnu`) and
+       `PYO3_CROSS`/`pyo3/extension-module` because it links a working `.so`, a
+       `build.rs` panic during dependency resolution surfaces at the *check* stage,
+       before any linking, so no cross-linker install is needed to catch it. Reach for
+       the full `cargo build --release --features pyo3/extension-module` link-level
+       check (182) only once `cargo check` is clean.
+     - **Distinct from gotcha 248's Python-ABI wall.** A native `cargo check`/`cargo
+       check --target` against both a stock and a free-threaded CPython (via
+       `PYO3_PYTHON=.../python3.14t`) built cleanly here — `pyo3 0.18.2`'s
+       `abi3-py37` feature makes the crate version-independent of the linked
+       interpreter, so the Python ABI was never the blocker. The wall was purely in a
+       transitive Cargo dependency's own architecture support, invisible to any
+       `Requires-Dist`/PyPI-classifier check (compare gotcha 249's build-time-only
+       Python dependency — same "invisible to the obvious check" shape, one layer
+       further down in the native dependency graph instead of the Python one).

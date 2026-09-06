@@ -58,6 +58,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **248** — An "inactive"/deprecated package's own PyPI ceiling can be a real ABI wall, not
 - **249** — Gotcha 40/187's `Requires-Dist` check can pass clean while a *build-time-only*
 - **263** — A PyPI wheel with no sdist and a closed-binary redistribution licence can still be
+- **273** — A pinned transitive crate can lack riscv64 support outright, and `cargo check
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -237,6 +238,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **222** — A dependency's own `build-system.requires` floor can be past the point its
 - **225** — `wheel>=0.44.0` dropped `wheel.bdist_wheel.get_platform` — a hand-rolled
 - **256** — setuptools 81 dropped the `dry_run` keyword from its vendored
+- **269** — A project's own `build-system.requires` floor can be looser than what its
 
 ### Testing: test-sources & shadowing — [`gotchas/testing-and-shadowing.md`](gotchas/testing-and-shadowing.md)
 
