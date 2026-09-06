@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on: https://github.com/FlorianRhiem/pyGLFW/blob/v2.10.2/.gitlab-ci.yml
+name: Build glfw wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'glfw version/tag to build'
+        required: true
+        default: '2.10.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-glfw.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.10.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  GLFW_VERSION: ${{ inputs.version || '2.10.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build glfw ${{ inputs.version || '2.10.2' }} py2.py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout pyGLFW v${{ env.GLFW_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: FlorianRhiem/pyGLFW
+          ref: v${{ env.GLFW_VERSION }}
+          persist-credentials: false
+
+      # setup.py bundles GLFW's own compiled library but ships only the wrapper's licence.
+      - name: Determine the bundled GLFW C library version and stage its licence
+        run: |
+          glfw_c_version="$(sed -n 's/^ *GLFW_VERSION: "\(.*\)"/\1/p' .gitlab-ci.yml)"
+          echo "GLFW_C_VERSION=${glfw_c_version}" >> "$GITHUB_ENV"
+          curl -fsSL --retry 5 -o LICENSE.glfw.md "https://raw.githubusercontent.com/glfw/glfw/${glfw_c_version}/LICENSE.md"
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
+
+      # GLFW ships no riscv64 binaries; build the X11 and Wayland variants from source
+      # the same way upstream's own manylinux_2_28 jobs do (no manylinux2014 patch needed).
+      - name: Build libglfw.so (X11 + Wayland) and the wheel
+        run: |
+          docker run --rm -v "$(pwd):/work" -w /work -e GLFW_C_VERSION "${MANYLINUX_RISCV64_IMAGE}" bash -c '
+            set -euxo pipefail
+            dnf install -y -q libXinerama-devel libXrandr-devel libXcursor-devel libXi-devel wayland-devel libxkbcommon-devel wayland-protocols-devel
+            curl -fsSL -o glfw.zip "https://github.com/glfw/glfw/releases/download/${GLFW_C_VERSION}/glfw-${GLFW_C_VERSION}.zip"
+            unzip -q glfw.zip
+            cmake -S "glfw-${GLFW_C_VERSION}" -B build_x11 -DBUILD_SHARED_LIBS=ON -DGLFW_BUILD_EXAMPLES=OFF -DGLFW_BUILD_TESTS=OFF -DGLFW_BUILD_DOCS=OFF -DGLFW_BUILD_X11=ON -DGLFW_BUILD_WAYLAND=OFF
+            make -C build_x11 -j"$(nproc)"
+            cmake -S "glfw-${GLFW_C_VERSION}" -B build_wayland -DBUILD_SHARED_LIBS=ON -DGLFW_BUILD_EXAMPLES=OFF -DGLFW_BUILD_TESTS=OFF -DGLFW_BUILD_DOCS=OFF -DGLFW_BUILD_X11=OFF -DGLFW_BUILD_WAYLAND=ON
+            make -C build_wayland -j"$(nproc)"
+            mkdir -p glfw/x11 glfw/wayland
+            install -m755 -T build_x11/src/libglfw.so glfw/x11/libglfw.so
+            install -m755 -T build_wayland/src/libglfw.so glfw/wayland/libglfw.so
+            strip glfw/x11/libglfw.so glfw/wayland/libglfw.so
+            pybin=/opt/python/cp312-cp312/bin
+            "$pybin/pip" install -q -U setuptools wheel
+            "$pybin/python3" setup.py bdist_wheel --python-tag py2.py3 --plat-name manylinux_2_39_riscv64
+            "$pybin/pip" install -q dist/*.whl
+            cd /tmp
+            "$pybin/python3" - <<PYEOF
+          import glfw
+          assert glfw.get_version() == (3, 4, 0), glfw.get_version()
+          assert glfw.get_version_string().startswith(b"3.4.0"), glfw.get_version_string()
+          # No display server in CI: glfwInit() must fail gracefully, not crash.
+          assert glfw.init() == 0
+          print("smoke test OK:", glfw.get_version_string())
+          PYEOF
+          '
+
+      - name: Check the bundled libraries and licences made it into the wheel
+        run: |
+          python3 - dist/*.whl <<'EOF'
+          import sys, zipfile
+          expected = {"LICENSE.txt", "LICENSE.glfw.md"}
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert "glfw/x11/libglfw.so" in names, whl
+              assert "glfw/wayland/libglfw.so" in names, whl
+              licenses = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                          if ".dist-info/licenses/" in n and not n.endswith("/")}
+              assert licenses == expected, f"{whl}: {sorted(licenses)}"
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: glfw-${{ env.GLFW_VERSION }}-py2.py3-none-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish glfw ${{ inputs.version || '2.10.2' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: glfw-${{ inputs.version || '2.10.2' }}-*-manylinux_riscv64
