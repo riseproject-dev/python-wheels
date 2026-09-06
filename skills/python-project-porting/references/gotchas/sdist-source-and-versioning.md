@@ -489,3 +489,29 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
       released tag; always fetch file contents pinned `?ref=<tag>` (or `git show
       <tag>:<path>`), never the bare default-branch path, when a repo's own CI
       history suggests something is mid-flight.
+
+299. **Gotcha 103's "no tag, but a real commit does the bump" can be missing
+    entirely — the maintainer edits the version locally and never commits it
+    (the pyfarmhash case).** `veelion/python-farmhash` has no tags and no
+    releases; its `setup.py` has read `VERSION = (0, 4, 0)` on `master` since
+    commit `954c61f3` (2024-05-02), yet PyPI has since shipped 0.5.0 and then
+    0.5.1 sdists. Unlike gotcha 103 (dbt-extractor) and gotcha 213 (lru-dict),
+    `gh api "repos/<o>/<r>/commits?path=setup.py"` here shows **no candidate
+    commit at all** whose diff touches `VERSION` to `0.5.1` — the maintainer
+    bumps the tuple locally before running the release build and uploading,
+    then discards the change instead of pushing it.
+    - **Prove the rest first, same discipline as 103/213**: download the
+      released sdist and diff every file against the HEAD commit's tree
+      (`gh api repos/<o>/<r>/tarball/<sha>`). If everything but the version
+      string is byte-identical, the port is otherwise a plain build-from-HEAD
+      case — the only gap is the one line git never got.
+    - **Patch it yourself rather than searching harder for a commit that does
+      not exist.** Pin the checkout to HEAD (or whatever commit the diff
+      proved identical) as `<PKG>_REF`, and add a one-line
+      `patches/<pkg>/<version>/` patch bumping the `VERSION`
+      tuple/`version = "..."` string to match, tagged `Upstream-Status:
+      Inappropriate [...]` (there is no upstream commit to backport and
+      nothing to submit — the maintainer's own workflow is "edit locally,
+      never commit"). Verify the patched checkout actually builds a wheel
+      reporting the target version before pushing (`python setup.py
+      bdist_wheel` / `python -m build --sdist` locally is enough — gotcha 9).
