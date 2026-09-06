@@ -19,6 +19,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **226** — GCC 14 turns `-Wincompatible-pointer-types` (and `-Wimplicit-function-declaration`,
 - **235** — The manylinux image's bundled `/opt/python/cpXY-cpXY` interpreters have
 - **243** — The `manylinux_2_39_riscv64` container's IPv6 loopback binds but can't send:
+- **252** — Rocky 10 (the riscv64 manylinux image's base) names the Wayland client
 - **250** — A vendored C library's strict-aliasing UB can miscompile *silently* under a
 
 ---
@@ -352,3 +353,23 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
     than it was written for is reason enough to check whether upstream's own CI sets
     any non-default `CFLAGS`/`CXXFLAGS` before assuming a clean, warning-free build
     means the code is safe on this compiler.
+
+252. **Rocky 10 (the riscv64 manylinux image's base) names the Wayland client
+    library's devel package differently from the Fedora/EPEL convention an
+    upstream's own CI script assumes (the glfw case).** pyGLFW's `.gitlab-ci.yml`
+    installs `libwayland-client-devel` on its manylinux2014/manylinux_2_28 jobs — that
+    name resolves on the AlmaLinux-based x86_64/aarch64 manylinux images the same way
+    it does on Fedora/EPEL, so the line looks portable. It is not a package on Rocky
+    10: `dnf install libwayland-client-devel` reports "No matching Packages to list"
+    on `manylinux_2_39_riscv64`, even with CRB enabled. The library and its pkg-config
+    file (`wayland-client.pc`) are both present — just under Rocky's own package name,
+    **`wayland-devel`** (`dnf -q provides '*/wayland-client.pc'` finds it in seconds
+    and is the fastest way to settle a "no matching packages" dead end without
+    guessing at synonyms). `libxkbcommon-devel` and `wayland-protocols-devel`, by
+    contrast, keep their upstream names unchanged on Rocky 10 — only the client
+    library's package is renamed, so swap that one line rather than assuming the
+    whole dependency list needs translating.
+    - Distinct from gotcha 106 (a `yum_install` that "fails" but actually succeeded
+      under a virtual provide): here the literal name genuinely does not exist under
+      any provide, and the fix is the *correct* package name, not a Rocky-vs-AlmaLinux
+      quirk in how `rpm -q` reports success.

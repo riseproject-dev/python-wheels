@@ -21,6 +21,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
 - **174** — A `<pkg>/` directory at the checkout root is only a shadowing hazard when it holds
 - **218** — Gotcha 25's shadowing condition ("suite is a package") has a second, independent
 - **229** — A test suite that calls GitPython's `Repo(..., search_parent_directories=True)`
+- **253** — A ctypes/dlopen GUI-toolkit wrapper with no upstream pytest suite at all still has
 
 ---
 
@@ -414,3 +415,24 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
     the `.git`-staging fix must land and be reverified before the detached-HEAD one
     becomes visible — so budget two short CI round-trips, not one, for a suite that
     turns out to depend on real git context.
+
+253. **A ctypes/dlopen GUI-toolkit wrapper with no upstream pytest suite at all still has
+    a real headless smoke test: call the version query, then call the init function and
+    assert it fails gracefully (the glfw case).** pyGLFW ships no `tests/` directory —
+    upstream's only CI job lints its `.pyi` stubs with `mypy.stubtest`, not something
+    that exercises the compiled library. But the wrapped C library's own contract answers
+    the question anyway: `glfwGetVersion`/`glfwGetVersionString` need no window or display
+    state at all, and `glfwInit()` on a headless runner (`DISPLAY`/`XDG_RUNTIME_DIR` unset)
+    returns `0` with a caught `GLFWError` warning rather than crashing — confirmed by
+    running it inside `manylinux_2_39_riscv64` with no `-e DISPLAY` and no Xvfb. That
+    three-call sequence — version query, init, assert-init-fails-cleanly — is a real test
+    of "does the bundled `.so` load and export working symbols," not a placeholder, and
+    needs no Xvfb/EGL setup the way an actual windowed exercise would.
+    - **Don't reach for Xvfb/EGL by default.** It would make the check "prettier"
+      (`init()` succeeding), but it is unnecessary complexity: a *failing-but-not-crashing*
+      `init()` already proves the library loaded, resolved its symbols, and ran its own
+      error path correctly.
+    - Applies beyond GLFW to any ctypes/cffi wrapper around an X11/Wayland/GL library that
+      documents a non-fatal failure mode for headless environments — check the wrapped
+      library's own init-failure contract before assuming a display is required to test
+      anything.
