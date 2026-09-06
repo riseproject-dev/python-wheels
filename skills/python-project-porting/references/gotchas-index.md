@@ -103,6 +103,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **245** — `actions/checkout` must run before `actions/download-artifact` in the same
 - **247** — A folded `>-` scalar's `python -c "` on its own line puts a leading space
 - **251** — When `package-dir` is a `.tar.gz`, cibuildwheel extracts it to a temp dir and
+- **262** — Gotcha 201's vendoring step is only needed when the sibling sources are
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 

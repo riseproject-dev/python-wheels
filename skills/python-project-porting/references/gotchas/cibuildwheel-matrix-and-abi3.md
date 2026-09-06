@@ -29,6 +29,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **216** — An abi3 build's own mandatory floor interpreter (gotcha 96) can itself be the one
 - **217** — Upstream's own `repair-wheel-command` commonly re-runs abi3audit itself via
 - **251** — When `package-dir` is a `.tar.gz`, cibuildwheel extracts it to a temp dir and
+- **262** — Gotcha 201's vendoring step is only needed when the sibling sources are
 
 ---
 
@@ -531,3 +532,25 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
        when a `test-sources` failure doesn't match gotcha 104's directory-package-dir
        story — the `chdir` happens one layer up, before either platform module runs, and
        nothing in `platforms/linux.py` alone explains it.
+
+262. **Gotcha 201's vendoring step is only needed when the sibling sources are
+     *generated or gitignored* — a monorepo subdirectory whose build script reaches
+     outside itself for sources that are ordinary, git-tracked files needs no extra
+     step at all (the capstone case; see `build-capstone.yml`).** capstone's
+     `bindings/python/setup.py` computes `BUILD_DIR = ROOT_DIR/../..` (two levels up
+     from `package-dir`) whenever `bindings/python/src` doesn't already exist, and
+     builds the vendored C library from there via `CAPSTONE_BUILD_CORE_ONLY=yes bash
+     ./make.sh`. That looks exactly like gotcha 201's grpcio-tools shape — a
+     `package-dir` pointing into a monorepo, with the actual build reaching outside it
+     — but grpcio-tools needed a host-side `run:` step first because its sibling trees
+     (`third_party/protobuf`, `third_party/abseil-cpp`) are gitignored and only appear
+     after `make_grpcio_tools.py` copies them in. capstone's `arch/`, `include/`, and
+     `Makefile` are ordinary files checked into the repo root, so an unmodified
+     `actions/checkout` (no `path:`, matching the checkout convention every
+     build-from-checkout workflow already uses) leaves them sitting right where
+     `../..` expects them — `package-dir: bindings/python` passed straight to
+     `pypa/cibuildwheel`, no vendoring step, reproduced upstream's own
+     `python-publish-release.yml` line for line. **The question that decides which
+     case you're in: `git status --ignored` (or just `ls`) the sibling path the build
+     script reaches for.** Present and tracked → nothing to do; absent or gitignored
+     → gotcha 201's pre-build `run:` step is what's missing.
