@@ -90,6 +90,9 @@ The porting gotchas (303 of them) live in [`references/gotchas/`](gotchas/), spl
 - **274** — A build-from-checkout package can tag releases in a format the version
 - **275** — A live, legitimate `project_urls` repo link is not proof it holds the released
 - **299** — Gotcha 103's "no tag, but a real commit does the bump" can be missing entirely —
+- **315** — `versioneer` has no `SETUPTOOLS_SCM_PRETEND_VERSION` equivalent for gotcha 31's
+  dirty-tree problem — `git update-index --skip-worktree` on just the patched files fixes
+  it instead.
 
 ### cibuildwheel mechanics, the matrix & abi3 — [`gotchas/cibuildwheel-matrix-and-abi3.md`](gotchas/cibuildwheel-matrix-and-abi3.md)
 

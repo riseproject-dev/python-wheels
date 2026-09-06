@@ -27,6 +27,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
 - **265** — A project's own version-detection script can read `GITHUB_REF` directly,
 - **268** — A vendored C-core git submodule can have its own `git describe`-based
 - **274** — A build-from-checkout package can tag releases in a format the version
+- **315** — `versioneer` has no `SETUPTOOLS_SCM_PRETEND_VERSION` equivalent for gotcha 31's
 
 ---
 
@@ -515,3 +516,32 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
       never commit"). Verify the patched checkout actually builds a wheel
       reporting the target version before pushing (`python setup.py
       bdist_wheel` / `python -m build --sdist` locally is enough — gotcha 9).
+
+315. **`versioneer` has no `SETUPTOOLS_SCM_PRETEND_VERSION` equivalent for gotcha 31's
+    dirty-tree problem — `git update-index --skip-worktree` on just the patched files
+    fixes it instead (the crick case).** Backporting two upstream bugfixes onto crick's
+    `0.0.8` tag means `git apply`-ing a patch that touches tracked files, which dirties
+    the tree exactly like gotcha 31 describes for `setuptools_scm`. But crick uses
+    `versioneer`, not `setuptools_scm`, and `versioneer.py`'s `git_pieces_from_vcs` always
+    runs `git describe --tags --dirty --always --long` with no environment-variable escape
+    hatch — grepping the whole file for `getenv`/`environ`/`PRETEND`/`OVERRIDE` turns up
+    nothing. Gotcha 31 also shows that committing the patch doesn't help (`git describe`
+    then reports a nonzero distance instead of dirty), and there is no `versioneer`
+    mechanism to fake a distance of zero at a moved tag either.
+    - **`git update-index --skip-worktree <files>` hides exactly the patched files from
+      `git diff-index`/`git describe --dirty`, without touching their on-disk content.**
+      Verified with a throwaway repo: tag a commit, modify a tracked file,
+      `git describe --tags --dirty --always --long` reports `...-dirty`; run
+      `git update-index --skip-worktree <file>` on it and the same describe command
+      reports clean again, while the file's patched content is untouched and still what
+      the build compiles. This is more surgical than gotcha 31's fix (no env var needed,
+      no `fetch-depth: 0` becomes dead weight) and generalizes to any version scheme whose
+      only dirty-detection path is `git describe --dirty` with no pretend-version knob.
+    - **Skip-worktree only the files the patch actually touches**, listed explicitly
+      (`git update-index --skip-worktree crick/stats_stubs.c crick/space_saving_stubs.c.in`)
+      — not a blanket `git update-index --skip-worktree .`, which would also hide a
+      genuine accidental modification from `git status` during debugging.
+    - **This is orthogonal to which patch-application step dirties the tree.** The
+      mechanism dirtying the tree here is the same `git apply` gotcha 31 warns about for
+      `setuptools_scm`; the fix differs only because `versioneer` offers no pretend-version
+      variable to short-circuit its own git calls the way `setuptools_scm` does.
