@@ -1,0 +1,42 @@
+From a077fdbc8c091b46e906e39e277ea9b666e62790 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 6 Sep 2026 09:43:30 +0200
+Subject: [PATCH] worker-proto: fall back to prost-build's own protoc lookup on
+ riscv64
+
+Upstream-Status: Inappropriate [protoc-bin-vendored ships no riscv64 binary; prost_build::Config::new() already defaults protoc_executable to its own PROTOC-env/PATH lookup, so simply not overriding it on unsupported platforms is the whole fix]
+
+protoc_bin_vendored::protoc_bin_path() returns Err on any platform outside
+its small enum of prebuilt targets (x86, x86_64, aarch64, ppc64le, s390x,
+macOS, Windows), which the crate's build.rs propagated with ?, aborting
+the build before prost_build ever got a chance to look for a protoc on
+PATH or via $PROTOC. Only calling protoc_executable() when the vendored
+lookup succeeds restores that fallback, which is documented in
+prost-build's own "Sourcing protoc" section.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ crates/worker-proto/build.rs | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/crates/worker-proto/build.rs b/crates/worker-proto/build.rs
+index 5fddbc7..888ec36 100644
+--- a/crates/worker-proto/build.rs
++++ b/crates/worker-proto/build.rs
+@@ -7,7 +7,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
+     let proto = "proto/nemo/relay/worker/v1/plugin_worker.proto";
+     let include = "proto";
+     let mut prost = prost_build::Config::new();
+-    prost.protoc_executable(protoc_bin_vendored::protoc_bin_path()?);
++    // protoc-bin-vendored ships no riscv64 binary; falling through leaves
++    // prost_build's own PROTOC-env/PATH lookup in charge, which resolves to
++    // the system protoc installed alongside this crate's build on that arch.
++    if let Ok(protoc) = protoc_bin_vendored::protoc_bin_path() {
++        prost.protoc_executable(protoc);
++    }
+ 
+     tonic_prost_build::configure().compile_with_config(prost, &[proto], &[include])?;
+     Ok(())
+-- 
+2.50.1 (Apple Git-155)
+
