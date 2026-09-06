@@ -21,6 +21,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
 - **222** — A dependency's own `build-system.requires` floor can be past the point its
 - **225** — `wheel>=0.44.0` dropped `wheel.bdist_wheel.get_platform` — a hand-rolled
 - **256** — setuptools 81 dropped the `dry_run` keyword from its vendored
+- **269** — A project's own `build-system.requires` floor can be looser than what its
 
 ---
 
@@ -449,3 +450,66 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
       this is a *signature* change in two of the most commonly hand-called distutils
       helpers, so any `setup.py` written before mid-2025 against the old stdlib
       distutils API is a candidate, not just projects that compile C++ extensions.
+
+269. **A project's own `build-system.requires` floor can be looser than what its
+    vendored C source actually needs — the newest riscv64 build of a dependency on
+    *our own registry* can be the only version available and still be too new (the
+    tables/blosc2 case; see `build-tables.yml`).** PyTables 3.11.1 vendors
+    `hdf5-blosc2/src/blosc2_filter.c` as a plain copied-in file (not a git submodule,
+    unlike its `c-blosc`/`hdf5-blosc` siblings), frozen against the blosc2 C API of
+    whenever it was last copied. `pyproject.toml` only floors it at `blosc2 >= 2.3.0`,
+    but c-blosc2 3.0 renamed `BLOSC2_MAX_DIM` to `B2ND_MAX_DIM` (and changed its value,
+    8 → 16) as part of the B2ND API going first-class — any `>= 2.3.0` build resolving
+    to a 3.x-bundling blosc2 fails outright:
+    `error: 'BLOSC2_MAX_DIM' undeclared ... did you mean 'B2ND_MAX_DIM'?`. Upstream's
+    own CI never sees this: `CIBW_BEFORE_BUILD`/`requirements.txt` hash-locks
+    `blosc2==4.11.0` in the passing configuration (`blosc2==4.0.0`, pinned to c-blosc2
+    2.23.0, when the affected PR was raised) rather than trusting the loose floor. Our
+    workflow has to neutralize that hash-locked `before-build` (gotcha 76: the
+    lockfile has no riscv64 wheels) and let the floor resolve freely, which on this
+    registry means the *only* riscv64 build we have — 4.11.0, already well past the
+    rename.
+    - **This is the mirror image of gotcha 171**: there, a wheel we publish breaks a
+      *different* package's CI. Here, a package's own real dependency, resolved
+      through our own registry, breaks *its own* build — the registry only ever
+      published a version newer than the vendored code tolerates, with no older
+      riscv64 build to fall back to even if repinning were otherwise viable. It is
+      also distinct from gotcha 222: there, no version satisfies both the floor and
+      the vendored config; here versions satisfying the floor and the vendored source
+      both exist, just none of them riscv64-built here.
+    - **Check upstream's own git history before hand-patching the constant away.**
+      PyTables already fixed this on `master` (unreleased at the time of the v3.11.1
+      tag we build): `PyTables/PyTables@fc026c0` converts the vendored copy into a
+      real git submodule pinned to `Blosc/HDF5-Blosc2@1ca9d34`, and bumps the
+      `pyproject.toml` floor to `blosc2 >= 3.2.0` to match. That submodule commit's
+      diff to `blosc2_filter.c` is exactly the `BLOSC2_MAX_DIM` → `B2ND_MAX_DIM`
+      rename plus one unrelated correctness fix (reporting the compressed frame's
+      real size instead of a precomputed guess, which HDF5 >= 2.2.0 requires to
+      avoid rejecting oversized writes) — both landed in the same upstream commit, so
+      both get backported together even though only one is a compile error today.
+    - **A submodule swap can't be expressed as a `git apply` patch after
+      `actions/checkout` already fetched the old submodule config** — `.gitmodules`
+      changes take effect at checkout time, not build time. Ported the *content* of
+      the upstream fix as a plain text patch against the vendored file instead
+      (`Upstream-Status: Backport`), which reaches the identical compiled result
+      without restructuring the checkout.
+    - **A pre-existing, upstream-acknowledged test-suite race can surface as a hard
+      CI failure once the real compile error it was hiding behind is fixed** —
+      `tables.tests.test_basics.ThreadingTestCase` (PyTables/PyTables#946) started
+      failing every run the moment the build got past this gotcha, on both classic-GIL
+      and free-threaded interpreters, with a different symptom each time (a queued
+      exception vs. a segfault in `tables.utilsextension`). Skipped rather than
+      patched: the issue was already closed upstream without a code fix because
+      neither the reporter's environment nor the maintainer could reproduce it
+      reliably, so there was nothing to backport — just a timing-sensitive race this
+      port's riscv64 runners happen to hit consistently.
+    - **A hand-rolled post-build wheel-contents check can itself carry stale
+      assumptions that only surface once the real build succeeds** — the same PR's
+      own check step hardcoded the `cp311-abi3` leg's `*.abi3.so` suffix (the
+      `cp314t` leg, which can't use the stable ABI, ships
+      `*.cpython-314t-riscv64-linux-gnu.so` instead) and asserted two licence files
+      (`LICENSES/BZIP2.txt`, `LICENSES/HDF5.txt`) that pyproject.toml's own explicit
+      `license-files = ["LICENSE.txt"]` list was never extended to actually bundle —
+      confirmed by diffing against the real PyPI wheel, which ships the same single
+      `LICENSE.txt` and nothing else. Both gaps only failed once the compile fix and
+      the test skip let the build reach that far, one CI cycle apart.
