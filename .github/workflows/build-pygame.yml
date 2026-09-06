@@ -1,0 +1,230 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build` job of
+# https://github.com/pygame/pygame/blob/2.6.1/.github/workflows/build-manylinux.yml
+name: Build pygame wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pygame version to build (git tag, e.g. 2.6.1)'
+        required: true
+        default: '2.6.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pygame.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.6.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYGAME_VERSION: ${{ inputs.version || '2.6.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pygame ${{ inputs.version || '2.6.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 600
+    strategy:
+      fail-fast: false
+      matrix:
+        # Upstream builds no cp314/cp314t wheels for 2.6.1 (predates 3.14; no
+        # free-threading support), so the matrix stops at cp313 to match.
+        python: ["cp312", "cp313"]
+
+    steps:
+      - name: Checkout pygame ${{ env.PYGAME_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pygame/pygame
+          ref: ${{ env.PYGAME_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # No pyproject.toml: cibuildwheel's default "build" frontend still creates an
+          # isolated build venv with only setuptools/wheel, so Cython (installed below,
+          # into the outer env) never reaches the actual build_wheel call without this.
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          # Upstream's own manylinux2014 image (pygame/manylinux2014_base_*) has no
+          # riscv64 build; this rebuilds its dependency stack instead. SDL2/SDL2_image/
+          # SDL2_ttf/SDL2_mixer are built from source at the versions and configure
+          # flags upstream's own docker_base/sdl_libs/build-sdl2-libs.sh uses (no
+          # riscv64 SDL2-devel package exists: Rocky 10 shipped SDL2 as sdl2-compat, a
+          # SDL3-backed runtime shim with no headers/pkg-config). portmidi is built
+          # from source too (EPEL-only package, and manylinux ships no EPEL on
+          # riscv64, gotcha 51); libmodplug and fluidsynth are EPEL-only as well, so
+          # SDL2_mixer's mod/fluidsynth-midi backends are dropped (upstream's own test
+          # command already excludes "music" tests). Everything else (libpng,
+          # libjpeg-turbo, freetype, libwebp, libtiff, mpg123, flac, libvorbis+libogg,
+          # opus, libX11 and friends) comes from Rocky 10's own repos. dbus-tools and
+          # dejavu-sans-fonts match upstream's own Dockerfile (dbus-uuidgen for the
+          # test suite; a real font for pygame.sysfont's alias table to resolve).
+          CIBW_BEFORE_ALL: |
+            dnf install -y -q \
+              libpng-devel libjpeg-turbo-devel freetype-devel libwebp-devel libtiff-devel \
+              mpg123-devel flac-devel libvorbis-devel libogg-devel opus-devel \
+              libX11-devel libXext-devel libXcursor-devel libXi-devel libXrandr-devel \
+              libXinerama-devel libXxf86vm-devel libxkbcommon-devel \
+              wayland-devel wayland-protocols-devel dbus-devel dbus-tools \
+              alsa-lib-devel pulseaudio-libs-devel dejavu-sans-fonts
+
+            export MAKEFLAGS="-j$(nproc)"
+            mkdir -p /tmp/pg-deps && cd /tmp/pg-deps
+
+            mkdir -p /usr/local/share/pg-licenses
+
+            curl -fsSL --retry 5 -o portmidi.tar.gz https://github.com/PortMidi/portmidi/archive/refs/tags/v2.0.3.tar.gz
+            tar xzf portmidi.tar.gz
+            (cd portmidi-2.0.3 && cmake . -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR:PATH=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON && make && make install)
+            cp portmidi-2.0.3/license.txt /usr/local/share/pg-licenses/LICENSE.portmidi.txt
+
+            curl -fsSL --retry 5 -o SDL2.tar.gz https://www.libsdl.org/release/SDL2-2.28.4.tar.gz
+            tar xzf SDL2.tar.gz
+            (cd SDL2-2.28.4 && ./configure --disable-video-vulkan --enable-video-wayland && make && make install)
+            cp SDL2-2.28.4/LICENSE.txt /usr/local/share/pg-licenses/LICENSE.sdl2.txt
+
+            curl -fsSL --retry 5 -o SDL2_image.tar.gz https://www.libsdl.org/projects/SDL_image/release/SDL2_image-2.0.5.tar.gz
+            tar xzf SDL2_image.tar.gz
+            (cd SDL2_image-2.0.5 && ./configure --enable-png --disable-png-shared --enable-jpg --disable-jpg-shared --enable-tif --disable-tif-shared --enable-webp --disable-webp-shared && make && make install)
+            cp SDL2_image-2.0.5/COPYING.txt /usr/local/share/pg-licenses/LICENSE.sdl2_image.txt
+
+            # freetype/harfbuzz-builtin (default): bundles its own copies instead of linking
+            # the image's (no harfbuzz-devel on riscv64; freetype-devel is used separately
+            # below, by pygame's own _freetype module).
+            curl -fsSL --retry 5 -o SDL2_ttf.tar.gz https://www.libsdl.org/projects/SDL_ttf/release/SDL2_ttf-2.20.1.tar.gz
+            tar xzf SDL2_ttf.tar.gz
+            (cd SDL2_ttf-2.20.1 && ./configure && make && make install)
+            cp SDL2_ttf-2.20.1/LICENSE.txt /usr/local/share/pg-licenses/LICENSE.sdl2_ttf.txt
+            cp SDL2_ttf-2.20.1/external/harfbuzz/COPYING /usr/local/share/pg-licenses/LICENSE.harfbuzz.txt
+
+            curl -fsSL --retry 5 -o SDL2_mixer.tar.gz https://www.libsdl.org/projects/SDL_mixer/release/SDL2_mixer-2.6.3.tar.gz
+            tar xzf SDL2_mixer.tar.gz
+            (cd SDL2_mixer-2.6.3 && ./configure \
+                --disable-dependency-tracking \
+                --disable-music-ogg-stb --enable-music-ogg-vorbis \
+                --disable-music-flac-drflac --enable-music-flac-libflac \
+                --disable-music-mp3-drmp3 --enable-music-mp3-mpg123 \
+                --disable-music-mod-modplug --disable-music-mod-mikmod-shared --disable-music-mod-xmp --disable-music-mod-xmp-shared \
+                --disable-music-midi-fluidsynth \
+                --enable-music-opus --disable-music-opus-shared \
+                --disable-music-ogg-vorbis-shared --disable-music-ogg-tremor-shared \
+                --disable-music-flac-libflac-shared --disable-music-mp3-mpg123-shared \
+              && make && make install)
+            cp SDL2_mixer-2.6.3/LICENSE.txt /usr/local/share/pg-licenses/LICENSE.sdl2_mixer.txt
+
+            ldconfig
+          CIBW_ENVIRONMENT: >-
+            PORTMIDI_INC_PORTTIME=1
+            SDL_VIDEODRIVER=dummy
+            SDL_AUDIODRIVER=disk
+            PATH=/usr/local/bin:$PATH
+          CIBW_BEFORE_BUILD: |
+            pip install Sphinx "Cython>=3.0,<3.1" setuptools wheel
+            python setup.py docs
+            cp /usr/local/share/pg-licenses/LICENSE.*.txt docs/licenses/LICENSE.sdl_gfx.txt docs/generated/
+            cp /usr/share/licenses/libpng/LICENSE docs/generated/LICENSE.png.txt
+            cp /usr/share/licenses/freetype/FTL.TXT docs/generated/LICENSE.freetype.txt
+            cp /usr/share/licenses/libjpeg-turbo/LICENSE.md docs/generated/LICENSE.jpeg.txt
+            cp /usr/share/licenses/libwebp/COPYING docs/generated/LICENSE.webp.txt
+            cp /usr/share/licenses/libtiff/LICENSE.md docs/generated/LICENSE.tiff.txt
+            cp /usr/share/licenses/mpg123-libs/COPYING docs/generated/LICENSE.mpg123.txt
+            cp /usr/share/licenses/flac-libs/COPYING.Xiph docs/generated/LICENSE.FLAC.txt
+            cp /usr/share/licenses/libvorbis/COPYING docs/generated/LICENSE.ogg-vorbis.txt
+            cp /usr/share/licenses/opus/COPYING docs/generated/LICENSE.opus.txt
+            cp /usr/share/licenses/alsa-lib/COPYING docs/generated/LICENSE.alsa.txt
+            cp /usr/share/licenses/bzip2-libs/LICENSE docs/generated/LICENSE.bzip2.txt
+            cp /usr/share/licenses/libzstd/LICENSE docs/generated/LICENSE.zstd.txt
+            cp /usr/share/licenses/jbigkit-libs/COPYING docs/generated/LICENSE.jbig.txt
+            cp /usr/share/licenses/libbrotli/LICENSE docs/generated/LICENSE.brotli.txt
+            cp /usr/share/licenses/liblerc/LICENSE docs/generated/LICENSE.lerc.txt
+            cp /usr/share/licenses/graphite2/LICENSE docs/generated/LICENSE.graphite2.txt
+          # To 'solve' this issue:
+          #   >>> process 338: D-Bus library appears to be incorrectly set up; failed to read
+          #   machine uuid: Failed to open "/var/lib/dbus/machine-id": No such file or directory
+          CIBW_BEFORE_TEST: |
+            mkdir -p /var/lib/dbus
+            if [ ! -f /var/lib/dbus/machine-id ]; then
+                dbus-uuidgen > /var/lib/dbus/machine-id
+            fi
+          CIBW_TEST_COMMAND: python -m pygame.tests -v --exclude opengl,music,timing --time_out 300
+
+      - name: Check the vendored licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          expected = {"LICENSE.sdl2.txt", "LICENSE.sdl2_image.txt", "LICENSE.sdl2_ttf.txt",
+                      "LICENSE.sdl2_mixer.txt", "LICENSE.harfbuzz.txt", "LICENSE.portmidi.txt",
+                      "LICENSE.freetype.txt", "LICENSE.jpeg.txt", "LICENSE.png.txt",
+                      "LICENSE.webp.txt", "LICENSE.tiff.txt", "LICENSE.mpg123.txt",
+                      "LICENSE.FLAC.txt", "LICENSE.ogg-vorbis.txt", "LICENSE.opus.txt",
+                      "LICENSE.alsa.txt", "LICENSE.bzip2.txt", "LICENSE.zstd.txt",
+                      "LICENSE.jbig.txt", "LICENSE.brotli.txt", "LICENSE.lerc.txt",
+                      "LICENSE.graphite2.txt", "LICENSE.sdl_gfx.txt"}
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              found = {n.rsplit("/", 1)[1] for n in names if "pygame/docs/generated/LICENSE." in n}
+              assert expected <= found, f"{whl}: missing {expected - found}"
+              assert any(n == "pygame/docs/generated/LGPL.txt" for n in names), whl
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pygame-${{ env.PYGAME_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    name: Collect GPL sources for pygame ${{ inputs.version || '2.6.1' }}
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Every copyleft library auditwheel vendors out of the build image (mpg123 and
+      # jbigkit-libs are GPL; flac-libs, libzstd, freetype and graphite2 are dual/mixed
+      # licensed and dnf resolves them to their copyleft option here).
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: alsa-lib flac-libs freetype graphite2 jbigkit-libs libzstd mpg123-libs
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pygame-${{ env.PYGAME_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish pygame ${{ inputs.version || '2.6.1' }}
+    needs: [setup, build_wheels, gpl_sources]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pygame-${{ inputs.version || '2.6.1' }}-*-manylinux_riscv64
+      gpl-sources-artifact: pygame-${{ inputs.version || '2.6.1' }}-gpl-sources
+      gpl-sources-description: the copyleft libraries bundled in the wheel
