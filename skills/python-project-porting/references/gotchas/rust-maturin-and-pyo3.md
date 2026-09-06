@@ -29,6 +29,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
 - **259** — A maturin `bindings = "bin"` project can declare two `[[bin]]` targets where
 - **260** — `puccinialin` (and similar rust-bootstrap-on-demand helpers) has no riscv64 entry
   the second execs the first over `$PATH`, not a sibling path.
+- **266** — A vendored-C build script's own "require SIMD" default feature can turn
+  upstream's documented non-SIMD fallback into a fatal error on any arch the vendored
+  code has no kernels for.
 
 ---
 
@@ -596,3 +599,36 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
     - **This is a build-system dependency, not a runtime one** — it is resolved into pip's
       isolated build environment regardless of whether `setup_rust()` ever executes, so it
       needs no registry entry and no `CIBW_ENVIRONMENT` mention of its own.
+
+266. **A vendored-C build script's own "require SIMD" default feature can turn upstream's
+    documented non-SIMD fallback into a fatal error on any arch the vendored code has no
+    kernels for — read the actual CMake/build option before assuming the crate is
+    unbuildable (the kornia-rs case; see `build-kornia-rs.yml`).** kornia-py's default
+    `turbojpeg` feature pulls in `turbojpeg-sys`, which vendors libjpeg-turbo and builds it
+    with cmake; `turbojpeg-sys`'s own default features include `require-simd`, which passes
+    `-DREQUIRE_SIMD=ON`. libjpeg-turbo's `simd/CMakeLists.txt` only ships SIMD kernels for
+    x86/x86-64, Arm, MIPS and PowerPC — every other `CPU_TYPE` (riscv64 included) falls
+    through to a `simd_fail()` macro that is a hard `message(FATAL_ERROR ...)` when
+    `REQUIRE_SIMD` is on. The `option(REQUIRE_SIMD ...)` line's own help text says the
+    *default* (off) is "to fall back to a non-SIMD build" with just a warning, so this is
+    not a missing riscv64 port in libjpeg-turbo, just a Rust crate's default feature
+    forcing a stricter mode than the C project itself defaults to. Fix: drop the dependent
+    crate's default features and re-list the ones still wanted, in the workspace member
+    that actually declares the dependency (`kornia-io`'s `Cargo.toml`, not `kornia-py`'s,
+    which only re-exports the feature by name):
+    ```toml
+    turbojpeg = { version = "1.2", optional = true, default-features = false, features = ["cmake", "pkg-config"] }
+    ```
+    - **Two reads settle it before assuming a hand-rolled patch to the vendored C is
+      needed**: the Rust wrapper crate's `[features] default = [...]` list (does it turn on
+      a `require-*`/`strict-*` feature that isn't load-bearing for the functionality this
+      port needs?), and the vendored build's own option help text (does it name a graceful
+      fallback that the wrapper's default simply forecloses?). Both were a `pip download
+      --no-binary` and a `grep -n option\(` away, no riscv64 CI cycle spent.
+    - **The change is a no-op on every already-supported target.** x86/x86-64/Arm/PowerPC
+      all have real SIMD kernels bundled, so `simd_fail()` is never reached there regardless
+      of `REQUIRE_SIMD` — the patch only changes behaviour on architectures that would have
+      hit the fatal branch anyway, which is also the argument for tagging it `To upstream`
+      rather than `Inappropriate`: it is a genuine portability fix, not a riscv64-only hack,
+      simply not filed upstream because this port's session policy is to not open external
+      issues/PRs.

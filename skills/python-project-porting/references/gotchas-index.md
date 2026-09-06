@@ -127,6 +127,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **239** — A maturin project inside a Cargo workspace can have its `pyproject.toml` at a
 - **259** — A maturin `bindings = "bin"` project can declare two `[[bin]]` targets where
 - **260** — `puccinialin` (and similar rust-bootstrap-on-demand helpers) has no riscv64 entry
+- **266** — A vendored-C build script's own "require SIMD" default feature can turn
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
