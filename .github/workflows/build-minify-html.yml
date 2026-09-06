@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build` job of
+# https://github.com/wilsonzlin/minify-html/blob/v0.18.1/.github/workflows/python.yml
+name: Build minify-html wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'minify-html version to build (git tag, e.g. 0.18.1)'
+        required: true
+        default: '0.18.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-minify-html.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.18.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.18.1 there.
+  MINIFY_HTML_VERSION: ${{ inputs.version || '0.18.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build minify-html ${{ inputs.version || '0.18.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # minify-html-python's Cargo.toml carries no abi3 feature, so upstream
+        # publishes one wheel per interpreter (cp38-cp314) and no free-threaded
+        # build; cp312+ follows the repo's default floor.
+        python: ["cp312", "cp313", "cp314"]
+
+    steps:
+      - name: Checkout minify-html v${{ env.MINIFY_HTML_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: wilsonzlin/minify-html
+          ref: v${{ env.MINIFY_HTML_VERSION }}
+          persist-credentials: false
+
+      - name: Rename Cargo package to minify_html
+        # Mirrors upstream's own release workflow (python.yml "Patches" step):
+        # the crate is named minify-html-python in the Cargo workspace (member
+        # names must be unique), but maturin derives the wheel/module name from
+        # Cargo.toml's `name`, and the #[pymodule] fn in src/lib.rs is literally
+        # named `minify_html` -- so the package must be renamed to match.
+        run: |
+          sed -i 's/^name = ".*"$/name = "minify_html"/' minify-html-python/Cargo.toml
+          grep -qx 'name = "minify_html"' minify-html-python/Cargo.toml
+
+      - name: Copy LICENSE next to pyproject.toml
+        # maturin only auto-globs licence files beside pyproject.toml (gotcha
+        # 146); minify-html-python/ has none of its own, so the repo-root
+        # LICENSE would otherwise be dropped from the wheel entirely.
+        run: cp LICENSE minify-html-python/LICENSE
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: minify-html-python
+          output-dir: wheelhouse/
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # minify-html-python ships no [tool.cibuildwheel], so the Rust
+          # toolchain its maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_TEST_COMMAND: >-
+            python -c "
+            import importlib.metadata, minify_html;
+            assert minify_html.__file__.endswith('.so'), minify_html.__file__;
+            out = minify_html.minify('<!-- c --><p  class=\"a\"   >Hello   <b>world</b>!</p>', minify_css=True, minify_js=True);
+            assert out == '<p class=a>Hello <b>world</b>!', out;
+            files = {str(p) for p in importlib.metadata.files('minify_html') if '.dist-info/' in str(p)};
+            assert any('LICENSE' in f for f in files), files"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: minify-html-${{ env.MINIFY_HTML_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish minify-html ${{ inputs.version || '0.18.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: minify-html-${{ inputs.version || '0.18.1' }}-*-manylinux_riscv64
