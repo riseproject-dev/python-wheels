@@ -24,6 +24,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
 - **165** — Three ways gotcha 137's licence sweep silently under-collects, and one image fact that
 - **255** — A project's own build hook that hand-parses a *build-time* dependency's dist-info
 - **301** — Gotcha 146's licence auto-glob only fires for a `pyproject.toml` with a `[project]`
+- **309** — A wrapper's own permissive licence (LGPL, MIT, ...) does not launder a vendored
 
 ---
 
@@ -510,3 +511,31 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
     - **Tell the two shapes apart from `pyproject.toml` alone**: a `[project]` table
       (even a minimal one with just `name`/`dynamic`) means gotcha 146 applies; only
       `[build-system]` and `[tool.maturin]` means this one does.
+
+309. **A wrapper's own permissive licence (LGPL, MIT, ...) does not launder a vendored
+    C library's own, more restrictive terms — read the vendored source's licence text
+    directly, not just `pyproject.toml`'s `license` key (the `triangle` package).**
+    PyPI's `triangle` (`github.com/drufat/triangle`) declares `license = { text =
+    'LGPL-3.0' }`, but its `setup.py` compiles `c/triangle.c` — a submodule pulling
+    Jonathan Shewchuk's original Triangle mesh generator (`github.com/drufat/triangle-c`)
+    straight in as the extension's actual functional core, not an optional or
+    system-linked dependency. That C file's own `c/README` carries Shewchuk's
+    homegrown, non-OSI licence: freely redistributable for private/research/institutional
+    use with copyright notices intact, but **"Distribution of this code as part of a
+    commercial system is permissible ONLY BY DIRECT ARRANGEMENT WITH THE AUTHOR"** and
+    redistribution generally requires "no compensation is received". This is the exact
+    clause that keeps Shewchuk's Triangle out of Debian main (non-free only), and
+    `meshpy`'s own FAQ — another Triangle wrapper — confirms commercial redistribution
+    needs Shewchuk's explicit permission.
+    - **Publishing a wheel to a public package index is redistribution, not private use** —
+      pypi.riseproject.dev serving a wheel that statically links this code is exactly the
+      case the clause gates, so shipping it without first contacting Shewchuk is legally
+      questionable. Parked rather than patched: there is no build-time or patch-time fix
+      for a licence term on code that must be compiled in to make the extension work at
+      all (unlike gotcha 32's swappable vendored libs, where using the system package
+      sidesteps the vendor's terms entirely).
+    - **Check the vendored/git-submodule source's own licence file whenever the top-level
+      `pyproject.toml`/`setup.cfg` licence looks unusually permissive for what the
+      extension does** — a thin Cython/ctypes wrapper claiming a simple permissive licence
+      while compiling in someone else's non-trivial C library is a signal to go read that
+      library's own README/LICENSE before trusting the package metadata.
