@@ -59,6 +59,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **249** — Gotcha 40/187's `Requires-Dist` check can pass clean while a *build-time-only*
 - **263** — A PyPI wheel with no sdist and a closed-binary redistribution licence can still be
 - **273** — A pinned transitive crate can lack riscv64 support outright, and `cargo check
+- **276** — A hand-written-SIMD C library that looks x86/aarch64-only can still have a
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

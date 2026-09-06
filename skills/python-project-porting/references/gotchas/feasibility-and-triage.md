@@ -28,6 +28,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **246** — A `pyO3`/uniffi "binding" package can vendor a closed-source Rust core as a git-committed
 - **248** — An "inactive"/deprecated package's own PyPI ceiling can be a real ABI wall, not
 - **273** — A pinned transitive crate can lack riscv64 support outright, and `cargo check
+- **276** — A hand-written-SIMD C library that looks x86/aarch64-only can still have a
 
 ---
 
@@ -955,3 +956,41 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
        `Requires-Dist`/PyPI-classifier check (compare gotcha 249's build-time-only
        Python dependency — same "invisible to the obvious check" shape, one layer
        further down in the native dependency graph instead of the Python one).
+
+276. **A hand-written-SIMD C library that looks x86/aarch64-only can still have a
+     genuine, full-featured portable-C fallback reachable through a plain Makefile
+     variable, not just through the autotools/CMake arch-detection path (the isal
+     case; see `build-isal.yml`).** ISA-L's `igzip`/`crc`/`erasure_code` units are
+     built almost entirely from `.asm` files under per-arch `x86_64/`/`aarch64/`
+     directories, which reads as "riscv64 has nothing to build with". But
+     python-isal's `setup.py` drives ISA-L through `Makefile.unx`, not
+     `configure.ac`/CMake, and `make.inc` has an unconditional catch-all: `ifeq
+     ($(filter aarch64 x86_%,$(host_cpu)),) host_cpu=base_aliases endif`. Any
+     `uname -m` that isn't `aarch64` or `x86_*` — riscv64 included, with zero
+     riscv64-specific code anywhere in this vendored version — silently switches
+     the source list to `igzip_base.c`/`crc_base.c`/`ec_base.c` (unconditionally
+     compiled for every arch already) plus a thin `*_base_aliases.c` file that
+     wires the public entry points straight to the `_base` implementations
+     (`isal_deflate_body` -> `isal_deflate_body_base`, etc.) — a real, complete
+     deflate/CRC/erasure-code implementation, not a stub, and the same mechanism
+     upstream already ships for ppc64le, and ppc64le is far from the only proof:
+     Debian unstable already builds `libisal2` for riscv64 from the same base.
+     - **Two checks settle it without a CI cycle**: grep the vendored Makefile
+       tree for the *fallback* variable name (`base_aliases`, `generic`, `noarch`,
+       `scalar` — whatever this project calls it) in addition to the per-arch
+       dispatch names, and diff the "always built" (`lsrc +=`) source list against
+       the per-arch (`lsrc_x86_64 +=`, `lsrc_aarch64 +=`) ones — if the
+       always-built list already contains a working implementation and the
+       fallback source list is just a dispatch shim onto it, the arch gap is
+       cosmetic, not structural. Confirm with `grep -l
+       'immintrin\|emmintrin\|_mm_\|arm_neon'` over the fallback and
+       always-built files: none found means no x86/ARM intrinsics leaked into
+       the "portable" path.
+     - **A native QEMU rehearsal is cheap enough to run before writing the
+       workflow, not just after** (extends gotcha 101 from aarch64 to riscv64
+       directly): `docker run --platform linux/riscv64
+       quay.io/pypa/manylinux_2_39_riscv64` built ISA-L, built the wheel, and
+       ran upstream's real pytest suite (228 passed, 6 skipped, 0 failures) in
+       well under the time a real riscv64 CI job
+       would have taken — full proof of correctness, not just "it compiles",
+       before any CI cycle was spent.
