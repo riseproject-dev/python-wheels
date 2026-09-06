@@ -552,3 +552,19 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       Find the full set by watching which `Collecting <dep>` lines download a `.tar.gz`
       instead of a `.whl` in a dry run, then check each one against the registry
       (gotcha 30) before naming it.
+    - **This is a recurring, multi-hop problem for pymatgen specifically, not a one-time
+      fix.** A later moyopy run hit the identical mechanism one hop further down the same
+      tree: `pymatgen` (via `pymatgen-core`) depends on `matplotlib`, whose own runtime deps
+      `contourpy` and `kiwisolver` (plus `pillow`, pulled in as a `matplotlib` dep too) each
+      lack a riscv64 wheel on public PyPI's newest release; pillow's sdist build failed with
+      `RequiredDependencyException: jpeg` (no libjpeg headers in the manylinux image).
+      `pymatgen-core` also depends directly on `spglib`, which has the same gap. Reading
+      `pymatgen-core`'s declared `requires_dist` up front (rather than discovering each
+      culprit via a fresh CI cycle) would have caught all of matplotlib/contourpy/
+      kiwisolver/pillow/spglib in one pass — the final list ended up
+      `PIP_ONLY_BINARY=numpy,scipy,pandas,orjson,pillow,matplotlib,contourpy,kiwisolver,spglib`.
+      build-lightgbm.yml and build-wordcloud.yml already carry the matplotlib/contourpy/
+      kiwisolver/pillow half of this list for the same reason; `fonttools` (also a
+      matplotlib dep, also registry-only) is deliberately absent from all of them because
+      its native extension is optional and its `setup.py` falls back to pure Python on a
+      failed compile instead of failing the install.
