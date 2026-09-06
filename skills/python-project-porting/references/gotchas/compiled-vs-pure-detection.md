@@ -16,6 +16,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
 - **127** — A C extension that does not declare free-threading support turns upstream's
 - **129** — Copying upstream's require-extension env var verbatim ships a degraded wheel —
 - **55** — A `cffi_modules` project is a normal port, and cffi itself is registry-only on
+- **280** — When there's no require-extension knob to force (gotcha 91's shape), check
 
 ---
 
@@ -287,3 +288,26 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
       upstream `before-all = "yum install -y libffi-devel"` runs unchanged — check with a
       60MB `docker run --platform linux/riscv64 rockylinux/rockylinux:10 dnf -q list <pkg>`
       rather than a multi-GB manylinux pull.
+
+280. **When there's no require-extension knob to force (gotcha 91's shape), check
+    whether upstream's own test suite already provides one for free (the mutf8 case; see
+    `build-mutf8.yml`).** mutf8's `[tool.setuptools] ext-modules` declares its single C
+    extension `optional = true` (a compile failure falls back to the pure-Python
+    `mutf8/mutf8.py`), and there is no env var or `setup.py` hook to make it mandatory —
+    the same shape as gotcha 91's pyrsistent. But `tests/conftest.py` does
+    `import mutf8.cmutf8 as cmutf8` at module level with no `try/except`, so a missing
+    `.so` kills the whole pytest session at collection (`ModuleNotFoundError`) instead of
+    quietly testing only the fallback. Grep the suite for an unguarded top-level import of
+    the extension module before assuming gotcha 91's "the assertion is the only defence"
+    leaves a gap — it may already be enforced for free. Keep the explicit
+    `python -c "import <pkg>.<ext> as m; assert m.__file__.endswith('.so'), m.__file__"`
+    ahead of pytest anyway: it costs one line and turns an opaque collection error into a
+    named, obvious one.
+    - Confirmed portable ahead of any riscv64 cycle: the extension is one C99 file with no
+      SIMD/asm/arch `#ifdef`s, and `pip wheel` from a plain checkout on macOS/arm64
+      produces a `.so`-carrying wheel that passes the whole non-benchmark suite.
+    - **Also settles the sdist-vs-checkout question in the same look**: mutf8's PyPI
+      sdist excludes `tests/conftest.py` (it isn't a `test*.py` file, so setuptools'
+      auto-include glob skips it — the same failure mode as gotcha 25's geventhttpclient
+      case). Building from the checked-out git tag rather than the PyPI sdist sidesteps
+      it entirely, and is one more reason to prefer that shape by default.

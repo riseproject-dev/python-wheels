@@ -202,6 +202,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **127** — A C extension that does not declare free-threading support turns upstream's
 - **129** — Copying upstream's require-extension env var verbatim ships a degraded wheel —
 - **55** — A `cffi_modules` project is a normal port, and cffi itself is registry-only on *(reused number — this theme)*
+- **280** — When there's no require-extension knob to force (gotcha 91's shape), check
 
 ### Dependencies & the registry — [`gotchas/dependencies-and-registry.md`](gotchas/dependencies-and-registry.md)
 
