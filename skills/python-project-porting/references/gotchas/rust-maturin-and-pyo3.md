@@ -27,6 +27,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
 - **239** — A maturin project inside a Cargo workspace can have its `pyproject.toml` at a
   different path in the git checkout than in the PyPI sdist.
 - **259** — A maturin `bindings = "bin"` project can declare two `[[bin]]` targets where
+- **260** — `puccinialin` (and similar rust-bootstrap-on-demand helpers) has no riscv64 entry
   the second execs the first over `$PATH`, not a sibling path.
 
 ---
@@ -571,3 +572,27 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       under `crates/zizmor/`, so the *workflow* passes `--manifest-path
       crates/zizmor/Cargo.toml` explicitly. `grep -A3 '\[tool.maturin\]' pyproject.toml`
       settles which shape a new port is in before copying either workflow verbatim.
+
+260. **`puccinialin` (and similar rust-bootstrap-on-demand helpers) has no riscv64 entry
+    in its own target list, but it never runs at all once `cargo` is already on `PATH`
+    (the biotite case).** biotite's `setup.py` (`setuptools-rust`, not maturin) only calls
+    `cargo` directly when it finds one: `if not shutil.which("cargo"): setup_rust()`, where
+    `setup_rust()` comes from the `puccinialin` build-system dependency and downloads a
+    matching rustup-style toolchain when none is installed. `puccinialin`'s target-triple
+    detection (`_target.py`) hardcodes a `rustup_targets` allowlist copied from
+    rustup.rs's install docs, and it has no `riscv64gc-unknown-linux-gnu` entry — calling
+    `setup_rust()` on riscv64 prints "Target triple not supported by rustup" and
+    `sys.exit(1)`. The fix is the same one-liner every other setuptools-rust/maturin port
+    already needs (gotcha 10): install rustup yourself in `CIBW_BEFORE_ALL_LINUX` and put
+    `$HOME/.cargo/bin` on `PATH` via `CIBW_ENVIRONMENT` — `shutil.which("cargo")` then
+    finds it, the whole `puccinialin` branch is skipped, and its missing riscv64 target
+    never matters. No patch needed.
+    - **Read the helper's source, not just its name, before assuming it blocks the port.**
+      `pip download puccinialin --no-deps` (it is pure-Python, `py3-none-any`) and grepping
+      `_target.py` for `rustup_targets` is a 30-second check against guessing from the
+      "Target triple not supported" message alone, which names the *symptom* (a rustup
+      target) rather than the *cause* (a helper's allowlist, not rustup itself — rustup.rs
+      has shipped `riscv64gc-unknown-linux-gnu` as a Tier 2 target for years).
+    - **This is a build-system dependency, not a runtime one** — it is resolved into pip's
+      isolated build environment regardless of whether `setup_rust()` ever executes, so it
+      needs no registry entry and no `CIBW_ENVIRONMENT` mention of its own.

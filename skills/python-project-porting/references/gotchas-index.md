@@ -76,6 +76,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **242** — A third-party tree-sitter grammar's release tag can omit the generated
 - **254** — A build-from-checkout can pick up a maintainer-only dev/coverage cflags
 - **258** — A hardcoded download URL in a project's own build script can 403 automated
+- **261** — A package can require its own compiled extension, plus a large downloaded
 
 ### cibuildwheel mechanics, the matrix & abi3 — [`gotchas/cibuildwheel-matrix-and-abi3.md`](gotchas/cibuildwheel-matrix-and-abi3.md)
 
@@ -122,6 +123,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **238** — A repo-root `rust-toolchain.toml` pinning nightly for lint-only use can still
 - **239** — A maturin project inside a Cargo workspace can have its `pyproject.toml` at a
 - **259** — A maturin `bindings = "bin"` project can declare two `[[bin]]` targets where
+- **260** — `puccinialin` (and similar rust-bootstrap-on-demand helpers) has no riscv64 entry
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 

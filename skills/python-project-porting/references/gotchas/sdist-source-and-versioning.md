@@ -22,6 +22,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
 - **242** — A third-party tree-sitter grammar's release tag can omit the generated
 - **258** — A hardcoded download URL in a project's own build script can 403 automated
 - **254** — A build-from-checkout can pick up a maintainer-only dev/coverage cflags
+- **261** — A package can require its own compiled extension, plus a large downloaded
 
 ---
 
@@ -330,3 +331,35 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
       upstream` when the real fix (pointing upstream's own script at a better mirror)
       is something only they can land — this repo's policy against filing on other
       repos means the patch has to be carried, not submitted, in that case.
+
+261. **A package can require its own compiled extension, plus a large downloaded
+    dataset, just to produce the sdist MANIFEST.in ships as a static file (the biotite
+    case; extends gotcha 242's "the generator, not the tag, makes it reproducible").**
+    biotite's `MANIFEST.in` has `prune tests/` and `prune doc/` (ordinary, gotcha 6's
+    territory) but also `include src/biotite/structure/info/components.bcif` — a 65 MB
+    BinaryCIF file that upstream's own `build-internal` CI job generates fresh with
+    `python -m biotite.setup_ccd`, not something committed to git. That script imports
+    `biotite.structure.io.pdbx`, so it only runs against an *already-built* biotite —
+    upstream's own dependency chain is `_pip-install-editable` (compiles the
+    Cython+Rust extensions) → `_setup-ccd` (downloads and reshapes a ~113 MB CCD file
+    from `files.wwpdb.org`) → `build-sdist`. Skipping straight to `python -m build
+    --sdist` from a bare checkout produces a metadata-valid but incomplete sdist: the
+    `MANIFEST.in include` line silently matches nothing, and the eventual bdist install
+    breaks at import time or first use of `biotite.structure.info`.
+    - **Reproduce upstream's own prerequisite chain on `ubuntu-latest` (gotcha 4),
+      not the riscv64 runner** — none of it is architecture-dependent, it just needs a
+      working local toolchain and network access, both of which are cheaper and faster
+      on x86. `pip install -e .` (or `uv pip install -e .`) is enough to make the
+      generator's own imports resolve; the generator then writes its output directly
+      into the checkout because editable installs keep `__file__` pointing at the
+      source tree, which is exactly where `MANIFEST.in`'s `include` line expects it.
+    - **A second upstream-generated file can ride along the same way.** biotite's
+      `[project] license-files` names `THIRDPARTY.yml`, produced by `cargo
+      bundle-licenses --format yaml --output THIRDPARTY.yml` (a Rust dependency
+      license bundle, gotcha 10's territory) — also absent from a bare checkout, also
+      just another prerequisite step before `python -m build --sdist`, not a patch.
+    - **The generator step being expensive (network + CPU) is not a reason to reach
+      for the released PyPI sdist instead** — the hard rule against wiring in the
+      published sdist as the CI build input (see the playbook's step 3) still applies;
+      pay the cost once on `ubuntu-latest` rather than diverge from how the artifact is
+      actually produced.
