@@ -32,6 +32,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
 - **266** — A vendored-C build script's own "require SIMD" default feature can turn
   upstream's documented non-SIMD fallback into a fatal error on any arch the vendored
   code has no kernels for.
+- **287** — A repo-root `.cargo/config.toml` can unconditionally point `PYO3_CONFIG_FILE`
+  at a file only a task-runner's activation hook generates, breaking every cargo
+  invocation outside that task runner.
 
 ---
 
@@ -632,3 +635,44 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       rather than `Inappropriate`: it is a genuine portability fix, not a riscv64-only hack,
       simply not filed upstream because this port's session policy is to not open external
       issues/PRs.
+
+287. **A repo-root `.cargo/config.toml` can unconditionally point `PYO3_CONFIG_FILE` at a
+    file only a task-runner's activation hook generates, breaking every cargo invocation
+    outside that task runner (the rerun-sdk case; see `build-rerun-sdk.yml`).** rerun's
+    `[env] PYO3_CONFIG_FILE = { value = "rerun_py/pyo3-build.cfg", relative = true }`
+    applies to *every* cargo build cargo config picks up from that checkout — not just
+    `pixi run py-build` — because `.cargo/config.toml` env entries have no conditional
+    scoping. The repo's own pixi tasks generate that file as a side effect of environment
+    activation (`ensure-pyo3-build-cfg`), so a plain `maturin build`/cibuildwheel run that
+    never invokes pixi hits `pyo3-build-config`'s build script erroring with `failed to
+    open PyO3 config file ... No such file or directory` before a single dependency
+    compiles. The fix is not to unset the env var (pyo3-build-config trusts it completely
+    once set, and rerun's own `build.rs` even *requires* it be set in a wheel build to
+    avoid a different isolated-build-environment check) but to write the file by hand:
+    upstream ships the generator as an installable package in the checkout
+    (`rerun_pixi_env/src/rerun_pixi_env/pyo3_config.py`), callable with no extra
+    dependencies (`sys`, `sysconfig`, `struct`, `pathlib` only):
+    ```yaml
+    CIBW_BEFORE_BUILD_LINUX: |
+      python -c "
+      import sys; sys.path.insert(0, 'rerun_pixi_env/src')
+      from pathlib import Path
+      from rerun_pixi_env.pyo3_config import generate_config_file
+      generate_config_file(Path('rerun_py/pyo3-build.cfg'))"
+    ```
+    - **Two greps settle whether a project needs this**: `grep -n PYO3_CONFIG_FILE
+      .cargo/config.toml` for an unconditional `[env]` entry, and whether the path it
+      names exists fresh from a plain git checkout (it won't, since task-runner-generated
+      files are gitignored).
+    - **The generated file's exact values rarely matter for an abi3 extension-module
+      build.** rerun's generator hardcodes `version` to the crate's abi3 floor regardless
+      of which interpreter runs it, and pyo3/extension-module builds link nothing against
+      libpython on Unix, so `executable`/`lib_dir` being stale (pointing at whichever
+      interpreter's `CIBW_BEFORE_BUILD` happened to run) does not break the build. Do not
+      over-invest in matching the exact interpreter per matrix leg before confirming the
+      build actually needs it.
+    - **This is a different failure from gotcha 238's `rust-toolchain.toml` hijack** even
+      though both are repo-committed cargo-adjacent config files silently overriding a
+      port's environment — that one picks a toolchain, this one aborts the build outright
+      with a missing-file error, and the fix is authoring the missing file, not overriding
+      an env var.

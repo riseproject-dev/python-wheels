@@ -136,6 +136,9 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **259** — A maturin `bindings = "bin"` project can declare two `[[bin]]` targets where
 - **260** — `puccinialin` (and similar rust-bootstrap-on-demand helpers) has no riscv64 entry
 - **266** — A vendored-C build script's own "require SIMD" default feature can turn
+- **287** — A repo-root `.cargo/config.toml` can unconditionally point `PYO3_CONFIG_FILE`
+  at a file only a task-runner's activation hook generates, breaking every cargo
+  invocation outside that task runner.
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
@@ -309,6 +312,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **205** — A follow-up commit that fixes a broken `Upstream-Status:` line does not clear
 - **282** — A matplotlib `image_comparison` test failing only on riscv64 is a font-rendering
 - **283** — A `cp314t`-only `PicklingError` from a `multiprocessing.Process(target=<local
+- **285** — A heap-corruption abort in a vendored C++ library's concurrent stress test can
 - **286** — A vendored-ARPACK eigensolver test failing only on musllinux, not manylinux, can
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
