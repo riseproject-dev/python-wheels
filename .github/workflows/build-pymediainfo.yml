@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+name: Build pymediainfo wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pymediainfo version/tag to build (e.g. 7.0.1)'
+        required: true
+        default: '7.0.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pymediainfo.yml'
+      - 'patches/pymediainfo/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '7.0.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYMEDIAINFO_VERSION: ${{ inputs.version || '7.0.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+  # Upstream bundles a prebuilt libmediainfo.so.0 downloaded from mediaarea.net
+  # (scripts/download_library.py), which has no riscv64 build; these are built
+  # from source instead. MediaInfoLib version matches MEDIAINFO_VERSION in that
+  # script; ZenLib has no matching release cadence, so the latest tag is used.
+  MEDIAINFOLIB_VERSION: '24.12'
+  ZENLIB_VERSION: '0.4.41'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pymediainfo ${{ inputs.version || '7.0.1' }} py3-none-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        libc: [manylinux, musllinux]
+
+    steps:
+      - name: Checkout pymediainfo ${{ env.PYMEDIAINFO_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: sbraz/pymediainfo
+          ref: v${{ env.PYMEDIAINFO_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pymediainfo source
+        run: git apply python-wheels/patches/pymediainfo/${{ env.PYMEDIAINFO_VERSION }}/*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: cp312-${{ matrix.libc }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            MEDIAINFOLIB_VERSION=${{ env.MEDIAINFOLIB_VERSION }}
+            ZENLIB_VERSION=${{ env.ZENLIB_VERSION }}
+          CIBW_BEFORE_ALL_LINUX: |
+            set -ex
+            if command -v apk > /dev/null; then
+              apk add --no-cache cmake zlib-dev
+            else
+              dnf install -y cmake zlib-devel
+            fi
+            mkdir -p /tmp/mediainfo-src/ZenLib /tmp/mediainfo-src/MediaInfoLib
+            curl -fsSL "https://github.com/MediaArea/ZenLib/archive/refs/tags/v$ZENLIB_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/mediainfo-src/ZenLib
+            curl -fsSL "https://github.com/MediaArea/MediaInfoLib/archive/refs/tags/v$MEDIAINFOLIB_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/mediainfo-src/MediaInfoLib
+            cmake -S /tmp/mediainfo-src/MediaInfoLib/Project/CMake -B /tmp/mediainfo-src/build \
+              -D CMAKE_BUILD_TYPE=Release \
+              -D BUILD_SHARED_LIBS=ON \
+              -D BUILD_ZENLIB=ON \
+              -D CMAKE_INSTALL_LIBDIR=lib \
+              -D CMAKE_INSTALL_PREFIX=/tmp/mediainfo-install
+            cmake --build /tmp/mediainfo-src/build -j"$(nproc)"
+            cmake --install /tmp/mediainfo-src/build
+            cp -L /tmp/mediainfo-install/lib/libmediainfo.so.0 {package}/src/pymediainfo/libmediainfo.so.0
+          # pdm-backend tags a wheel "py3-none-any" unless told otherwise (there
+          # are no ext_modules); cibuildwheel refuses a "none-any" build output
+          # outright, so a placeholder platform tag is forced here and auditwheel
+          # repair (default, unmodified) turns it into the real manylinux/musllinux tag.
+          CIBW_BUILD_FRONTEND: "build; args: -C--plat-name=linux_riscv64"
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests
+          # test_parse_url needs libcurl, which isn't linked in (kept optional,
+          # matching upstream's own CMake build when libcurl-dev isn't present).
+          CIBW_TEST_COMMAND: python -m pytest {project}/tests -k "not test_parse_url"
+
+      - name: Check the wheel carries libmediainfo and its licence
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith("pymediainfo/libmediainfo.so.0") for n in names), whl
+              for licence in ("mediainfolib.txt", "zenlib.txt"):
+                  assert any(
+                      n.endswith(f".dist-info/licenses/licenses/{licence}") for n in names
+                  ), (licence, names)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pymediainfo-${{ env.PYMEDIAINFO_VERSION }}-py3-none-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pymediainfo ${{ inputs.version || '7.0.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pymediainfo-${{ inputs.version || '7.0.1' }}-*riscv64
