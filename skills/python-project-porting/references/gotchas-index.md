@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (292 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (293 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -356,6 +356,7 @@ The porting gotchas (292 of them) live in [`references/gotchas/`](gotchas/), spl
 - **180** — The aarch64 rehearsal defaults to the *wrong* base image — pass
 - **188** — A fat-LTO maturin release profile makes a full QEMU riscv64 build-rehearsal too
 - **223** — For a `bindings = "bin"` CLI's test assertions, `cargo build --release` the tool
+- **298** — A local rehearsal's `pip`-resolved cibuildwheel can be too old for
 
 ### PR, CI, triggers, publishing & maintainer signals — [`gotchas/pr-ci-and-maintainer.md`](gotchas/pr-ci-and-maintainer.md)
 

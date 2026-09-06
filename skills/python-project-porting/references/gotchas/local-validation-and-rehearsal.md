@@ -15,6 +15,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
 - **180** — The aarch64 rehearsal defaults to the *wrong* base image — pass
 - **188** — A fat-LTO maturin release profile makes a full QEMU riscv64 build-rehearsal too
 - **223** — For a `bindings = "bin"` CLI's test assertions, `cargo build --release` the tool
+- **298** — A local rehearsal's `pip`-resolved cibuildwheel can be too old for
 
 ---
 
@@ -203,3 +204,20 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
     proves nothing about whether the crate graph actually compiles for
     riscv64gc-unknown-linux-gnu — pair it with gotcha 78's `cargo metadata
     --filter-platform` check for that.
+
+298. **A local rehearsal's `pip`-resolved cibuildwheel can be too old for
+    `CIBW_TEST_SOURCES` to do anything, and it fails silently, not loudly (the
+    mecab-python3 case).** Gotcha 101's venv-under-`.git/pw-scratch/<pkg>/` install is
+    usually just `pip install cibuildwheel`, which resolves whatever the *venv's own*
+    Python floor allows — a venv built from a pre-3.11 interpreter caps out at
+    cibuildwheel 2.23.x, which predates the `test-sources`/`CIBW_TEST_SOURCES` option
+    entirely. It is not rejected as an unknown key: cibuildwheel 2.x silently ignores it,
+    tests run from an empty `test_cwd`, and the run fails with cibuildwheel's own built-in
+    `test_fail.py` scaffold ("cibuildwheel executes tests from a different working
+    directory... use the `{project}` placeholder") — a message that reads like *your*
+    `CIBW_TEST_COMMAND` is wrong, not like a tooling-version mismatch, and sends you
+    hunting through path/glob logic for nothing. Rebuild the rehearsal venv from a
+    Python ≥3.11 interpreter (`/opt/homebrew/bin/python3.12 -m venv`, say, alongside a
+    default `python3` that is older) and pin the same major `cibuildwheel` version the
+    target workflow uses (`pip install cibuildwheel==4.2.0`) before trusting a green
+    (or this particular red) local run.
