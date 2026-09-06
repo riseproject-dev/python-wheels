@@ -1,0 +1,167 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/PyTables/PyTables/blob/v3.11.1/.github/workflows/wheels.yml
+name: Build tables wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'tables version to build (git tag without leading v, e.g. 3.11.1)'
+        required: true
+        default: '3.11.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-tables.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '3.11.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 3.11.1 there.
+  TABLES_VERSION: ${{ inputs.version || '3.11.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Matches upstream's own `env.HDF5_VERSION` in wheels.yml ("H5Dchunk_iter needs
+  # at least 1.14.1"). No libaec/szip: upstream's own Linux wheel build doesn't
+  # enable szip either (only zlib), so this needs no szip counterpart.
+  HDF5_VERSION: '2.2.0'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build tables ${{ inputs.version || '3.11.1' }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # setup.py's bdist_wheel_abi3 hardcodes the wheel tag to cp311-abi3
+          # regardless of which Py_LIMITED_API-built interpreter compiles it, so
+          # the produced wheel is the same upstream ships. The build floor here is
+          # cp312, not cp311 like upstream: numexpr (a runtime dependency) only has
+          # a riscv64 build on this registry from cp312 onward (see
+          # build-numexpr.yml), and cibuildwheel's abi3 handling builds once on the
+          # lowest requested identifier and reuses that wheel to test the rest.
+          - tag: cp311-abi3
+            build: >-
+              cp312-manylinux_riscv64 cp313-manylinux_riscv64
+              cp314-manylinux_riscv64
+            timeout: 420
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+            timeout: 180
+
+    steps:
+      - name: Checkout PyTables v${{ env.TABLES_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: PyTables/PyTables
+          ref: v${{ env.TABLES_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Neutralizes pyproject.toml's own before-build, which installs from
+          # hash-pinned lockfiles with no riscv64 wheels; build-system.requires
+          # (Cython, numpy, blosc2, ...) resolves normally instead.
+          CIBW_BEFORE_BUILD: 'true'
+          # zlib/bzip2-devel, then HDF5 from source, mirroring PyTables' own
+          # ci/github/get_hdf5.sh (Linux branch) and wheels.yml's HDF5_VERSION.
+          # No libaec/szip: upstream doesn't enable szip on Linux either.
+          # LICENSES/BZIP2.txt: bzip2, unlike zlib, isn't on the manylinux policy
+          # allow-list, so auditwheel vendors it into the wheel; PyTables' own
+          # license-files glob (LICENSES/*.txt) already covers HDF5/zlib/blosc's
+          # licenses but ships no bzip2 one, so add it the same way netcdf4's port
+          # does for its own vendored bzip2 copy.
+          CIBW_BEFORE_ALL_LINUX: |
+            set -ex
+            dnf -y install zlib-devel bzip2-devel
+            mkdir -p /tmp/hdf5
+            curl -fsSL "https://github.com/HDFGroup/hdf5/archive/refs/tags/$HDF5_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/hdf5
+            cmake -S /tmp/hdf5 -B /tmp/hdf5/build \
+              -D CMAKE_BUILD_TYPE=Release \
+              -D CMAKE_INSTALL_PREFIX=/usr/local \
+              -D CMAKE_INSTALL_LIBDIR=lib \
+              -D BUILD_TESTING=OFF \
+              -D BUILD_STATIC_LIBS=OFF \
+              -D HDF5_BUILD_EXAMPLES=OFF \
+              -D HDF5_BUILD_TOOLS=OFF \
+              -D HDF5_BUILD_UTILS=OFF \
+              -D HDF5_ENABLE_ZLIB_SUPPORT=ON
+            cmake --build /tmp/hdf5/build -j "$(nproc)"
+            cmake --install /tmp/hdf5/build
+            ldconfig
+            cp /usr/share/licenses/bzip2-libs/LICENSE "{project}/LICENSES/BZIP2.txt"
+          CIBW_ENVIRONMENT_LINUX: >-
+            HDF5_DIR=/usr/local
+            HDF5_VERSION=${{ env.HDF5_VERSION }}
+            DISABLE_AVX2=true
+            CFLAGS=-g0
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,blosc2,numexpr
+          # blosc2's shared lib lives inside the separately-installed blosc2
+          # wheel (a runtime dependency, already on this registry); tables loads
+          # it via ctypes at import time (tables/__init__.py's _load_blosc2()),
+          # so auditwheel must not vendor a second copy of it (gotcha 17).
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
+            auditwheel repair -w {dest_dir} {wheel} --exclude 'libblosc2.so*'
+          # Mirrors upstream's own test_wheels job (wheels.yml): no lzo in the
+          # check list because upstream's Linux wheels don't build with lzo
+          # either (their before-all doesn't install lzo-devel).
+          CIBW_TEST_COMMAND: >-
+            python -c "import tables; keys = 'zlib bzip2 blosc blosc2'.split(); missing = [key for key in keys if tables.which_lib_version(key) is None]; assert missing == [], missing" &&
+            python -m tables.tests.test_all -v
+
+      - name: Check the wheel ships the extensions and the bundled licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          expected_ext = {
+              f"tables/{mod}.abi3.so"
+              for mod in (
+                  "utilsextension", "hdf5extension", "tableextension",
+                  "_comp_lzo", "_comp_bzip2", "linkextension",
+                  "lrucacheextension", "indexesextension",
+              )
+          }
+          found_ext = {n for n in names if n.endswith(".abi3.so")}
+          assert found_ext == expected_ext, found_ext
+          licences = {
+              n.split(".dist-info/licenses/", 1)[1] for n in names
+              if ".dist-info/licenses/" in n and not n.endswith("/")
+          }
+          assert "LICENSE.txt" in licences, licences
+          assert "LICENSES/BZIP2.txt" in licences, licences
+          assert "LICENSES/HDF5.txt" in licences, licences
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tables-${{ env.TABLES_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish tables ${{ inputs.version || '3.11.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: tables-${{ inputs.version || '3.11.1' }}-*-manylinux_riscv64
