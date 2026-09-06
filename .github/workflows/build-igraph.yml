@@ -1,0 +1,165 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the manylinux/musllinux jobs of
+# https://github.com/igraph/python-igraph/blob/1.0.0/.github/workflows/build.yml
+name: Build igraph wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'igraph version to build (git tag, e.g. 1.0.0)'
+        required: true
+        default: '1.0.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-igraph.yml'
+      - 'patches/igraph/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.0.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  IGRAPH_VERSION: ${{ inputs.version || '1.0.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build igraph ${{ inputs.version || '1.0.0' }} cp39-abi3-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        libc: [manylinux, musllinux]
+
+    steps:
+      - name: Checkout python-igraph ${{ env.IGRAPH_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: igraph/python-igraph
+          ref: ${{ env.IGRAPH_VERSION }}
+          submodules: true
+          # fetch-depth: 0 also governs the vendor/source/igraph submodule clone
+          # depth (gotcha 268): a shallow submodule has no tags for the C core's
+          # CMake git_describe() version detection, and it has no IGRAPH_VERSION
+          # file either since it isn't a release tarball.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch python-igraph source
+        run: git apply python-wheels/patches/igraph/${{ env.IGRAPH_VERSION }}/*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # setup.py's bdist_wheel_abi3 always tags the wheel cp39-abi3 (gotcha 34),
+          # so build on that floor and let cibuildwheel reuse+retest the same wheel
+          # on cp312-cp314 (gotcha 96). No free-threaded wheel exists upstream either
+          # (their own CIBW_SKIP: cp314t-*, since Py_LIMITED_API can't target it).
+          CIBW_BUILD: >-
+            cp39-${{ matrix.libc }}_riscv64 cp312-${{ matrix.libc }}_riscv64
+            cp313-${{ matrix.libc }}_riscv64 cp314-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_BUILD_LINUX: |
+            if command -v apk > /dev/null; then
+              apk add flex bison libxml2-dev zlib-dev cairo-dev
+            elif command -v yum > /dev/null; then
+              yum install -y flex bison libxml2-devel zlib-devel cairo-devel
+            fi
+            pip install -U cmake pip setuptools wheel
+            python setup.py build_c_core
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_ENVIRONMENT_PASS_LINUX: PYTEST_TIMEOUT
+          PYTEST_TIMEOUT: 60
+          # numpy/scipy/pandas/matplotlib/Pillow (upstream's `test` extra) have no
+          # riscv64 wheel below cp312 on our registry; `test-musl` needs none of
+          # them, so only the manylinux cp39 leg loses test coverage.
+          CIBW_TEST_SKIP: cp39-manylinux_riscv64
+          # test_labels renders vertex labels and diffs against a baseline PNG
+          # (matplotlib image_comparison, tol=4.0); the riscv64 image's font stack
+          # anti-aliases just enough differently to push RMS to 6.084 (gotcha 282).
+          #
+          # testHubScore's vendored-ARPACK non-convergence on musllinux only (not
+          # manylinux) is upstream's own known ARPACK starting-vector flake
+          # (igraph/python-igraph#379, #728), not riscv64-specific -- deselect on
+          # musllinux only (gotcha 286).
+          CIBW_TEST_COMMAND: >-
+            cd {project} &&
+            pip install --prefer-binary ".[${{ matrix.libc == 'musllinux' && 'test-musl' || 'test' }}]" &&
+            python -m pytest -v tests --deselect tests/drawing/matplotlib/test_graph.py::GraphTestRunner::test_labels
+            ${{ matrix.libc == 'musllinux' && '--deselect tests/test_atlas.py::GraphAtlasTests::testHubScore' || '' }}
+
+      - name: Check the wheel is abi3 and carries the compiled extension + LICENSE
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              assert "-cp39-abi3-" in whl, whl
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith("_igraph.abi3.so") for n in names), names
+              licenses = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+              assert licenses == {"LICENSE"}, (whl, licenses)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: igraph-${{ env.IGRAPH_VERSION }}-cp39-abi3-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # plfit (vendored inside the igraph C core) links OpenMP when available, so
+      # auditwheel vendors the image's libgomp into igraph.libs/.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: igraph-${{ env.IGRAPH_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish igraph ${{ inputs.version || '1.0.0' }}
+    needs: [setup, build_wheels, gpl_sources]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: igraph-${{ inputs.version || '1.0.0' }}-*riscv64
+      gpl-sources-artifact: igraph-${{ inputs.version || '1.0.0' }}-gpl-sources
+      gpl-sources-description: gcc
