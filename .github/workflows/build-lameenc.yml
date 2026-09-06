@@ -1,0 +1,146 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/chrisstaite/lameenc/blob/v1.8.4/.github/workflows/build.sh
+name: Build lameenc wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'lameenc version to build (git tag without leading v, e.g. 1.8.4)'
+        required: true
+        default: '1.8.4'
+  pull_request:
+    paths:
+      - '.github/workflows/build-lameenc.yml'
+      - 'patches/lameenc/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.8.4' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.8.4 there.
+  LAMEENC_VERSION: ${{ inputs.version || '1.8.4' }}
+  LAME_VERSION: '3.100'
+  LAME_SHA256: ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build lameenc ${{ inputs.version || '1.8.4' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp310", "cp311", "cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout lameenc v${{ env.LAMEENC_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: chrisstaite/lameenc
+          ref: v${{ env.LAMEENC_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch lameenc source
+        run: git apply python-wheels/patches/lameenc/${{ env.LAMEENC_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Replaces upstream's per-container build.sh, which loops every
+          # /opt/python/*/bin itself; cibuildwheel does that looping for us.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl -fsSL
+            https://sourceforge.net/projects/lame/files/lame/${{ env.LAME_VERSION }}/lame-${{ env.LAME_VERSION }}.tar.gz/download
+            -o lame.tar.gz &&
+            echo "${{ env.LAME_SHA256 }}  lame.tar.gz" | sha256sum -c - &&
+            tar xzf lame.tar.gz &&
+            sed -i 's/0-9\*0-9\*/[0-9]*[0-9]*/g' lame-${{ env.LAME_VERSION }}/configure &&
+            cp {project}/fixed-libmp3lame.sym lame-${{ env.LAME_VERSION }}/include/libmp3lame.sym &&
+            cd lame-${{ env.LAME_VERSION }} &&
+            cp /usr/share/automake-*/config.guess /usr/share/automake-*/config.sub . &&
+            ./configure "CFLAGS=-fPIC -fno-fast-math" LDFLAGS=-fPIC --prefix=/tmp/lame
+            --enable-expopt --enable-nasm --disable-frontend --disable-decoder
+            --disable-analyzer-hooks --disable-debug --disable-dependency-tracking &&
+            make && make install &&
+            cp COPYING {project}/LICENSE.lame
+          CIBW_BUILD_FRONTEND: >-
+            build; args: -C--build-option=--libdir=/tmp/lame/lib
+            -C--build-option=--incdir=/tmp/lame/include/lame
+          # `git apply` above dirties the tree, which renames the
+          # setuptools_scm version; pin it back to the tag.
+          CIBW_ENVIRONMENT: SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LAMEENC=${{ env.LAMEENC_VERSION }}
+          CIBW_TEST_COMMAND: >-
+            python3 -c "import lameenc; enc = lameenc.Encoder(); enc.set_bit_rate(128);
+            enc.set_in_sample_rate(16000); enc.set_channels(1); enc.set_quality(2);
+            data = enc.encode(b'\x00\x00' * 16000) + enc.flush();
+            assert len(data) > 0, 'no mp3 data produced'"
+
+      - name: Check the wheel ships the extension and both licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("lameenc.") and n.endswith(".so") for n in names), whl
+              licences = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+              assert licences == {"LICENSE", "LICENSE.lame"}, (whl, licences)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lameenc-${{ env.LAMEENC_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    name: Collect GPL sources for lameenc ${{ inputs.version || '1.8.4' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download and verify the LAME ${{ env.LAME_VERSION }} source
+        run: |
+          curl -fsSL "https://sourceforge.net/projects/lame/files/lame/${LAME_VERSION}/lame-${LAME_VERSION}.tar.gz/download" \
+            -o "lame-${LAME_VERSION}.tar.gz"
+          echo "${LAME_SHA256}  lame-${LAME_VERSION}.tar.gz" | sha256sum -c -
+          tar cf gpl-sources.tar "lame-${LAME_VERSION}.tar.gz"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lameenc-${{ inputs.version || '1.8.4' }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish lameenc ${{ inputs.version || '1.8.4' }}
+    needs: [setup, build_wheels, gpl_sources]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: lameenc-${{ inputs.version || '1.8.4' }}-*-manylinux_riscv64
+      gpl-sources-artifact: lameenc-${{ inputs.version || '1.8.4' }}-gpl-sources
+      gpl-sources-description: LAME 3.100 (LGPL-2.0, statically linked)
