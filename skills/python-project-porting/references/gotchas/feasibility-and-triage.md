@@ -31,6 +31,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **276** — A hand-written-SIMD C library that looks x86/aarch64-only can still have a
 - **284** — A package whose C/C++ extension calls CUDA/HIP/cuFile is not automatically
 - **303** — A "Python 2 only" classifier is a stop sign the project's own `setup.py` may
+- **311** — A transitive crate's `compile_error!` gated on `target_feature` (not
 
 ---
 
@@ -1086,3 +1087,38 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       precedent (`build-scs.yml`'s OpenBLAS `gpl_sources` job): a pure-C/Cython
       port needs neither the compiler nor the `libgfortran` GPL-sources job that
       comes with linking a Fortran-built BLAS.
+
+311. **A transitive crate's `compile_error!` gated on `target_feature` (not
+    `target_arch`) means there is no scalar fallback to find — stop looking
+    before proposing a patch (the polars-hash/gxhash case).** Gotcha 273's
+    lesson is "check whether a pinned transitive crate has gained riscv64
+    support in a newer release"; gotcha 276's is "check whether an
+    apparently arch-gated build still has a real portable-C path reachable
+    another way." Both assume the crate is *capable* of running without the
+    missing arch-specific code, just not wired up for it yet. `gxhash` (used
+    unconditionally, no Cargo feature gate, by `polars_hash::expressions` to
+    implement the public `nchash.gxhash32/64/128` Polars expressions) is a
+    different shape: its only two platform modules are `x86.rs`
+    (`cfg(target_arch = "x86"/"x86_64")`) and `arm.rs`
+    (`cfg(target_arch = "arm"/"aarch64")`), and `x86.rs` itself opens with an
+    unconditional `#[cfg(not(any(all(target_feature = "aes", target_feature =
+    "sse2"), docsrs, doc)))] compile_error!{"Gxhash requires aes and sse2
+    intrinsics..."}` — proof the crate has never had a portable/scalar path on
+    *any* architecture, x86 included without AES-NI: every hash step is a
+    direct call to a hardware AES intrinsic
+    (`_mm_aesenc_si128`/`_mm_aesenclast_si128` or the ARM crypto-extension
+    equivalent). Confirmed no fix exists to wait for: the crate's own git
+    `main` branch (two years of history past the last crates.io release) still
+    has only these two platform files, and the downstream project's issue
+    tracker and unreleased `Cargo.toml` still pin it unconditionally. Because
+    the downstream test suite hardcodes exact expected hash values sourced
+    from the reference PyPI `gxhash` package, even forking the downstream
+    crate to add a `platform/riscv64.rs` would require a from-scratch,
+    bit-exact reimplementation of AES-based hashing for an architecture whose
+    vector-crypto extension (Zvkned) is itself new and not reliably present on
+    generic riscv64 CI hardware — out of proportion to a small plugin port,
+    and not a fix upstream could plausibly adopt. Verdict: `blocked-on-dependency`,
+    not a patch candidate — the tell that separates this from gotchas 273/276
+    is the `target_feature`-gated `compile_error!` itself, visible by reading
+    the one platform source file the crate ships for the closest supported
+    architecture.
