@@ -19,6 +19,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **226** — GCC 14 turns `-Wincompatible-pointer-types` (and `-Wimplicit-function-declaration`,
 - **235** — The manylinux image's bundled `/opt/python/cpXY-cpXY` interpreters have
 - **243** — The `manylinux_2_39_riscv64` container's IPv6 loopback binds but can't send:
+- **250** — A vendored C library's strict-aliasing UB can miscompile *silently* under a
 
 ---
 
@@ -332,3 +333,22 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
     than this single failure); copy the nodeid verbatim from the `FAILED` line
     (gotcha 144) and confirm it repeats identically across the whole interpreter
     matrix before trusting it is not a flake.
+
+250. **A vendored C library's strict-aliasing UB can miscompile *silently* under a
+    newer GCC — no error, no warning, just wrong output (the pyreadstat/ReadStat
+    case).** ReadStat's `readstat_writer.c` casts `void*` through
+    `readstat_variable_t**` and similar type-punning the C standard forbids; GCC 13+
+    at `-O2` exploits the type-based-aliasing assumption those casts violate and
+    optimizes away the affected value-label writes. Unlike gotcha 226's
+    `-Wincompatible-pointer-types` (a hard build-time error), this produces a wheel
+    that builds cleanly and passes any test that doesn't specifically check the
+    corrupted field — it only shows up as wrong output, on any sufficiently new GCC,
+    nothing riscv64-specific about it. pyreadstat's own upstream CI already carries
+    the fix — `CFLAGS=-O2 -fno-strict-aliasing` on Linux, with a comment naming the
+    exact function and GCC version — so `manylinux_2_39_riscv64`'s GCC 14.3.1
+    qualifies and the flag has to be carried into `CIBW_ENVIRONMENT_LINUX` even
+    though nothing about the port itself triggers it. The tell, when upstream's own
+    comment isn't there to find: a project vendoring older C against a newer image
+    than it was written for is reason enough to check whether upstream's own CI sets
+    any non-default `CFLAGS`/`CXXFLAGS` before assuming a clean, warning-free build
+    means the code is safe on this compiler.

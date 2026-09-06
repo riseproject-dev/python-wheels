@@ -149,6 +149,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **226** — GCC 14 turns `-Wincompatible-pointer-types` (and `-Wimplicit-function-declaration`,
 - **235** — The manylinux image's bundled `/opt/python/cpXY-cpXY` interpreters have
 - **243** — The `manylinux_2_39_riscv64` container's IPv6 loopback binds but can't send:
+- **250** — A vendored C library's strict-aliasing UB can miscompile *silently* under a
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
