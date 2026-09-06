@@ -1,0 +1,98 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/lmmx/comrak/blob/py-0.0.16/.github/workflows/CI.yml
+name: Build comrak wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'comrak version to build (git tag without the py- prefix, e.g. 0.0.16)'
+        required: true
+        default: '0.0.16'
+  pull_request:
+    paths:
+      - '.github/workflows/build-comrak.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.0.16' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.0.16 there.
+  COMRAK_VERSION: ${{ inputs.version || '0.0.16' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build comrak ${{ inputs.version || '0.0.16' }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # pyo3's abi3/abi3t features carry no fixed pyNN floor (Cargo.toml:
+          # features = ["abi3", "abi3t", ...]), so pyo3-build-config floors the
+          # ABI at whichever interpreter builds it -- cp312 here, this repo's
+          # own floor -- rather than a version upstream pinned.
+          - tag: cp312-abi3
+            # Built on cp312 -- the floor this build chooses -- and re-tested
+            # on the newer ones via find_compatible_wheel.
+            build: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+
+    steps:
+      - name: Checkout comrak py-${{ env.COMRAK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: lmmx/comrak
+          ref: py-${{ env.COMRAK_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # comrak ships no [tool.cibuildwheel], so the Rust toolchain its
+          # maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests pyproject.toml
+          # __init__.py re-exports from the compiled comrak.comrak submodule
+          # (gotcha 56); comrak.__file__ alone would point at the pure-Python shim.
+          CIBW_TEST_COMMAND: >-
+            python -c "import comrak.comrak as m; assert m.__file__.endswith('.so'), m.__file__" &&
+            python -m pytest -v tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: comrak-${{ env.COMRAK_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish comrak ${{ inputs.version || '0.0.16' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: comrak-${{ inputs.version || '0.0.16' }}-*-manylinux_riscv64
