@@ -1,0 +1,111 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build_wheels` job of
+# https://github.com/Thriftpy/thriftpy2/blob/v0.7.1/.github/workflows/build.yaml
+name: Build thriftpy2 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'thriftpy2 version/tag to build (git tag without leading v, e.g. 0.7.1)'
+        required: true
+        default: '0.7.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-thriftpy2.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.7.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  THRIFTPY2_VERSION: ${{ inputs.version || '0.7.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build thriftpy2 ${{ inputs.version || '0.7.1' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        libc: [manylinux, musllinux]
+
+    steps:
+      - name: Checkout thriftpy2 v${{ env.THRIFTPY2_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Thriftpy/thriftpy2
+          ref: v${{ env.THRIFTPY2_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # aiohttp (needed only by test_aio_http.py) has no riscv64 wheels for
+          # cp314/cp314t or for musllinux on our registry; drop that one file
+          # rather than pull in a from-source aiohttp build across the matrix.
+          CIBW_TEST_REQUIRES: pytest>=6.1.1,<8.2.0 pytest-reraise pytest-asyncio
+          # On cp314t only, also drop the tests that fork a server via bare
+          # multiprocessing.Process then sleep(0.1) for it to be ready: CPython
+          # warns "use of fork() may lead to deadlocks" for a multi-threaded
+          # parent, and free-threaded CPython's extra runtime threads make that
+          # race the fixed sleep, so these intermittently see
+          # ConnectionRefusedError. The GIL builds (cp312/cp313/cp314) run them
+          # unmodified. One of the ignored files
+          # (test_all_protocols_binary_field.py) is the only one that calls
+          # multiprocessing.set_start_method('fork') at import time; on the
+          # other interpreters that side effect makes 'fork' the process-wide
+          # default for the whole pytest session. Skipping that file on
+          # cp314t leaves CPython 3.14's own new default, 'forkserver', in
+          # effect, which (unlike 'fork') pickles the Process target instead
+          # of just inheriting it via COW — so test_apache_json.py::test_client
+          # then fails to pickle its locally-defined run_server()/Handler
+          # (gotcha 283). Deselect just those two parametrized cases on
+          # cp314t; the test file's other, non-multiprocessing tests still run.
+          CIBW_TEST_COMMAND: >-
+            cd {project}/tests && pytest -v --ignore=test_aio_http.py
+            ${{ matrix.python == 'cp314t' && '--ignore=test_buffered_transport.py --ignore=test_all_protocols_binary_field.py --ignore=test_multiplexed.py --ignore=test_oneway.py --ignore=test_http.py --ignore=test_out_of_order_fields.py --ignore=test_rpc.py --ignore=test_protocol_cybinary.py --ignore=test_tracking.py --deselect "tests/test_apache_json.py::test_client[server_func0]" --deselect "tests/test_apache_json.py::test_client[server_func1]"' || '' }}
+
+      - name: Check the C extensions made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith(".so") for n in names), whl
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: thriftpy2-${{ env.THRIFTPY2_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish thriftpy2 ${{ inputs.version || '0.7.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: thriftpy2-${{ inputs.version || '0.7.1' }}-*riscv64
