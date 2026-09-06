@@ -21,6 +21,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **169** — `astral-sh/setup-uv` hands you a python-build-standalone interpreter, and PBS links
 - **170** — `np.linalg.eig` on a symmetric matrix returns *real* eigenvalues on x86_64 and
 - **205** — A follow-up commit that fixes a broken `Upstream-Status:` line does not clear
+- **282** — A matplotlib `image_comparison` test failing only on riscv64 is a font-rendering
 
 ---
 
@@ -440,3 +441,25 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
     - **Run the exact CI invocation locally first**, on the full commit range, not
       just the working tree: `git log --oneline origin/main..HEAD` shows every
       commit `check_patches` will separately replay.
+
+282. **A matplotlib `image_comparison` test failing only on riscv64 is a font-rendering
+    divergence, not a logic bug — deselect that one test, don't touch the module (the
+    igraph case).** python-igraph's `test_labels` renders vertex labels with matplotlib
+    and diffs the PNG against a bundled baseline via `image_comparison(tol=4.0)`; on the
+    riscv64 manylinux image the failure is `ImageComparisonFailure: images not close (RMS
+    6.084)` with every other test in the module (522 of them) passing. `remove_text=True`
+    strips titles/ticks but deliberately leaves "more deliberate" text like vertex labels
+    in the diff, so any FreeType/fontconfig difference between the image that produced the
+    baseline and the manylinux riscv64 image's font stack pushes the RMS over the
+    tolerance. Upstream's own CI doesn't special-case this on aarch64 either — its
+    aarch64 runners just happen to anti-alias close enough to the baseline.
+    - **Confirm it's pixel-diff, not a crash or wrong-value assertion**, before treating it
+      as cosmetic: the traceback should bottom out in
+      `matplotlib.testing.exceptions.ImageComparisonFailure`, not an `AssertionError` on
+      igraph's own output.
+    - **Fix with a targeted `--deselect` in `CIBW_TEST_COMMAND`**, e.g. `--deselect
+      tests/drawing/matplotlib/test_graph.py::GraphTestRunner::test_labels`, with a
+      one-line comment naming the mechanism (font-rendering divergence, not a functional
+      bug). Do not skip the whole `test_graph.py` module or drop matplotlib from the test
+      extras — every other image-comparison test in the same file (`test_basic`, etc.)
+      passes and stays covered.
