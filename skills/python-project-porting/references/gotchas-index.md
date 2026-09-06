@@ -78,6 +78,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **254** — A build-from-checkout can pick up a maintainer-only dev/coverage cflags
 - **258** — A hardcoded download URL in a project's own build script can 403 automated
 - **261** — A package can require its own compiled extension, plus a large downloaded
+- **265** — A project's own version-detection script can read `GITHUB_REF` directly,
 
 ### cibuildwheel mechanics, the matrix & abi3 — [`gotchas/cibuildwheel-matrix-and-abi3.md`](gotchas/cibuildwheel-matrix-and-abi3.md)
 

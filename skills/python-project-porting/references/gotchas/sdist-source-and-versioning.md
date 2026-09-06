@@ -23,6 +23,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
 - **258** — A hardcoded download URL in a project's own build script can 403 automated
 - **254** — A build-from-checkout can pick up a maintainer-only dev/coverage cflags
 - **261** — A package can require its own compiled extension, plus a large downloaded
+- **265** — A project's own version-detection script can read `GITHUB_REF` directly,
 
 ---
 
@@ -363,3 +364,23 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
       published sdist as the CI build input (see the playbook's step 3) still applies;
       pay the cost once on `ubuntu-latest` rather than diverge from how the artifact is
       actually produced.
+
+265. **A project's own version-detection script can read `GITHUB_REF` directly, not
+    through `setuptools_scm` — reproduce the env var, not just the checkout (the
+    pmdarima case).** Gotcha 112 covers `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_<NAME>` for
+    the common case; not every project defers to that machinery. pmdarima's
+    `meson.build` calls `run_command(['build_tools/get_tag.py'])` for its `version:`,
+    and that script only prints a real version when `CIRCLECI`+`CIRCLE_TAG` are set
+    (their CircleCI build) or when `GITHUB_REF` starts with `refs/tags/` — anything
+    else silently falls back to a hardcoded `0.0.0`. cibuildwheel's container starts
+    with none of the host's environment (no GitHub Actions context leaks in), so a
+    bare `actions/checkout` at the tag builds a wheel stamped `0.0.0` with no error
+    anywhere in the log.
+    - **Set the var the script actually checks, shaped the way it expects**:
+      `CIBW_ENVIRONMENT: GITHUB_REF=refs/tags/v${{ env.PKG_VERSION }}` satisfies
+      `get_tag.py`'s `startswith('refs/tags/')` check and its `v`-stripping — read the
+      script before guessing the shape, since not every project uses the `v` prefix.
+    - **A wrong-but-present version doesn't fail the build or the tests** — check the
+      wheel filename or `dist-info/METADATA` after a local `pip wheel` (playbook step
+      2) rather than assuming a successful build proves the version came through
+      correctly.
