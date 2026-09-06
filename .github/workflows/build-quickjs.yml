@@ -48,6 +48,7 @@ jobs:
       contents: read
     outputs:
       sdist_name: ${{ steps.sdist.outputs.sdist_name }}
+      package_version: ${{ steps.sdist.outputs.package_version }}
     steps:
       - name: Checkout quickjs ${{ env.QUICKJS_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -70,7 +71,9 @@ jobs:
           uv pip install setuptools
           python setup.py sdist
           sdists=(dist/*.tar.gz)
-          echo "sdist_name=$(basename "${sdists[0]}")" >> "$GITHUB_OUTPUT"
+          sdist_name=$(basename "${sdists[0]}")
+          echo "sdist_name=${sdist_name}" >> "$GITHUB_OUTPUT"
+          echo "package_version=$(echo "${sdist_name}" | sed -En 's/quickjs-(.+)\.tar\.gz/\1/p')" >> "$GITHUB_OUTPUT"
 
       - name: Upload sdist artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -93,7 +96,7 @@ jobs:
     steps:
       # actions/checkout defaults to clean: true (git clean -ffdx on the whole
       # workspace, not just repo-tracked paths), so it must run before the sdist
-      # is downloaded into dist/ below — otherwise it wipes the download (gotcha 244).
+      # is downloaded into dist/ below — otherwise it wipes the download (gotcha 245).
       #
       # test_quickjs.py isn't part of the sdist (upstream keeps it out of
       # MANIFEST.in too); sparse-checkout just that file for CIBW_TEST_SOURCES.
@@ -112,9 +115,18 @@ jobs:
           name: quickjs-${{ env.QUICKJS_VERSION }}-sdist
           path: dist/
 
+      # cibuildwheel extracts a .tar.gz package-dir into its own temp directory and
+      # chdir's the whole process into it for the build (including CIBW_TEST_SOURCES
+      # resolution, which is against Path.cwd()) — so a bare tarball package-dir can
+      # never see test_quickjs.py sitting in $GITHUB_WORKSPACE above (gotcha 246).
+      # Extracting it ourselves and pointing package-dir at the directory keeps
+      # Path.cwd() at the workspace root for the whole build.
+      - name: Extract sdist
+        run: tar zxf "dist/${{ needs.build_sdist.outputs.sdist_name }}" -C dist
+
       - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
-          package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}
+          package-dir: dist/quickjs-${{ needs.build_sdist.outputs.package_version }}
           output-dir: wheelhouse/
         env:
           CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
