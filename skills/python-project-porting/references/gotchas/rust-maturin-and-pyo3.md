@@ -47,6 +47,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
   `pyproject.toml` that exists nowhere in the git checkout at all, not even in a
   subdirectory — building the tag directly silently ships the wheel under the Cargo
   crate's name instead of the real distribution name.
+- **314** — A maturin library project with no `python-source` and no `<name>/` directory
+  in the git checkout can still ship an auto-generated `<name>/__init__.py` shim around a
+  `<name>.<name>` compiled submodule.
 
 ---
 
@@ -828,3 +831,39 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       A file written at the checkout root (the workspace root here) is therefore found even
       though it sits several directories above the crate `--manifest-path` names — no
       `--manifest-path` change needed alongside it.
+
+314. **A maturin library project (`bindings` unset, i.e. plain `pyo3`) with no
+    `python-source` and no `<name>/` directory anywhere in the git checkout can still ship
+    a wheel with an auto-generated `<name>/__init__.py` re-export shim around a compiled
+    `<name>.<name>` submodule — a `.so` probe against the top-level import fails on a
+    perfectly good wheel (the rbloom case; see `build-rbloom.yml`).** rbloom's
+    `pyproject.toml` has no `[tool.maturin] python-source`, and `find . -iname
+    '__init__.py'`/`find . -maxdepth 1 -name rbloom` on a fresh clone come up empty — only
+    `src/lib.rs` and a root-level `rbloom.pyi` stub exist. Gotcha 224 uses exactly this
+    signature (no `python-source`, no package directory) to conclude a `bindings = "bin"`
+    wheel ships *bare*, with nothing to import as a package. That conclusion doesn't
+    transfer to an ordinary library binding: maturin's default (non-`bin`) mixed-layout
+    detection still synthesizes a `<name>/__init__.py` at build time —
+    ```python
+    from .rbloom import *
+
+    __doc__ = rbloom.__doc__
+    if hasattr(rbloom, "__all__"):
+        __all__ = rbloom.__all__
+    ```
+    — wrapping the real extension at `rbloom/rbloom.abi3.so`, and hoists the root
+    `rbloom.pyi` stub into `rbloom/__init__.pyi` alongside a generated `py.typed`. None of
+    this exists as a file in the repository; `unzip -l` on the built wheel is the only way
+    to see it (gotcha 56's "probe the extension by its real name" applies once you know to
+    look, but nothing in the checkout hints that a shim will appear). A probe written from
+    the checkout's apparent bare shape — `python -c "import rbloom; assert
+    rbloom.__file__.endswith('.so')"` — asserts on the shim's `__init__.py` and fails a
+    wheel where `import rbloom` and the whole upstream test suite (`from rbloom import
+    Bloom`) work perfectly, because the shim's `from .rbloom import *` re-exports
+    correctly.
+    - **One local `maturin build` on any host settles it before writing `CIBW_TEST_COMMAND`**
+      (gotcha 9's discipline, extended past sdist inspection to the *built wheel*):
+      `unzip -l dist/*.whl` shows the real layout in seconds, no riscv64 cycle needed.
+    - **Probe the submodule, not the package**: `import <name>.<name> as m;
+      assert m.__file__.endswith('.so')`, then let the actual test suite (which imports the
+      public name normally) exercise the shim.
