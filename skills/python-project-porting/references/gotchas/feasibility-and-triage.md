@@ -844,3 +844,33 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       to find the exact minor where a C extension's assumptions about CPython's public
       headers break**, and it's portable across host arches — the failure is a header
       compile error, unrelated to riscv64 itself.
+
+249. **Gotcha 40/187's `Requires-Dist` check can pass clean while a *build-time-only*
+     dependency, invisible to that check, is the real wall — and that dependency can
+     itself need a from-scratch native port (the torch-c-dlpack-ext case).**
+     `torch-c-dlpack-ext`'s only `Requires-Dist` is `torch`, which pypi.riseproject.dev
+     already serves for riscv64 (cp312-cp314t) — the check gotcha 40 prescribes says
+     "go ahead." But the package ships no `.so` in its sdist; its custom PEP 517 backend
+     (`build_backend.py`, `backend-path = ["."]`) only returns a static `Requires-Dist`
+     and instead adds `apache-tvm-ffi>=0.1.1` *dynamically*, from
+     `get_requires_for_build_wheel()`, only when a prebuilt library isn't already
+     sitting in the tree — a requirement that never appears in PyPI JSON, wheel
+     METADATA, or `pyproject.toml`'s `[project.dependencies]`, only in code that runs
+     during resolution. Building requires running
+     `python -m tvm_ffi.utils._build_optional_torch_c_dlpack`, and merely importing
+     that module is enough to sink the port: `tvm_ffi/__init__.py` unconditionally
+     ctypes-loads its own compiled native core (`libinfo.load_lib_ctypes`) at package
+     import time, with no lazy path. `apache-tvm-ffi` has zero riscv64 wheels anywhere
+     (not PyPI, not our registry) and its native core is an independent ~10k-line
+     CMake/C++ project (vendored `3rdparty/dlpack`, optional libbacktrace) that has
+     never targeted riscv64 — porting *it* first would be a whole separate package port,
+     out of scope for whatever package merely happens to build against it.
+     - **A dynamic `get_requires_for_build_wheel()`/`get_requires_for_build_sdist()` in a
+       custom `build-backend` is exactly the kind of requirement gotcha 40's static
+       `info.requires_dist` read cannot see.** Read `build_backend.py` (or equivalent)
+       before trusting a clean `Requires-Dist` — a package whose only declared runtime
+       dependency is already portable can still be built by a tool that is not.
+     - **A build tool failing to *import* is a harder stop than one failing to *compile*
+       against your target's headers** — no amount of patching the package under port
+       helps if the tool it shells out to 500-errors before running a single build step
+       because its own native core has no riscv64 artifact to load.

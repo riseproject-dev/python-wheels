@@ -56,6 +56,7 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **236** — An "LLVM-based" port is not automatically libclang-scale — check which CMake target
 - **246** — A `pyO3`/uniffi "binding" package can vendor a closed-source Rust core as a git-committed
 - **248** — An "inactive"/deprecated package's own PyPI ceiling can be a real ABI wall, not
+- **249** — Gotcha 40/187's `Requires-Dist` check can pass clean while a *build-time-only*
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -97,7 +98,6 @@ The porting gotchas (221 of them) live in [`references/gotchas/`](gotchas/), spl
 - **225** — `CIBW_BEFORE_ALL_LINUX` and `CIBW_BEFORE_BUILD_LINUX` are two different hooks —
 - **227** — A build that touches `PyObject` internals directly (`ob_refcnt`, `ob_type`,
 - **245** — `actions/checkout` must run before `actions/download-artifact` in the same
-- **247** — A folded `>-` scalar's `python -c "` on its own line puts a leading space
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
