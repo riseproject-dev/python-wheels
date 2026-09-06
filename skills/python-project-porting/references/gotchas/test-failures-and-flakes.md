@@ -22,6 +22,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **170** — `np.linalg.eig` on a symmetric matrix returns *real* eigenvalues on x86_64 and
 - **205** — A follow-up commit that fixes a broken `Upstream-Status:` line does not clear
 - **282** — A matplotlib `image_comparison` test failing only on riscv64 is a font-rendering
+- **283** — A `cp314t`-only `PicklingError` from a `multiprocessing.Process(target=<local
 
 ---
 
@@ -463,3 +464,42 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       bug). Do not skip the whole `test_graph.py` module or drop matplotlib from the test
       extras — every other image-comparison test in the same file (`test_basic`, etc.)
       passes and stays covered.
+
+283. **A `cp314t`-only `PicklingError` from a `multiprocessing.Process(target=<local
+    function>)` can be a side effect of an *earlier* `--ignore`, not a free-threading bug
+    in the target itself (the thriftpy2 case).** CPython 3.14 changed the default
+    multiprocessing start method on POSIX from `fork` to `forkserver` (all interpreter
+    builds, GIL or free-threaded) specifically to avoid multithreaded fork
+    incompatibilities; unlike `fork`'s copy-on-write child, `forkserver` (like `spawn`)
+    must pickle the `Process` target to hand it to the forkserver, so a locally-defined
+    closure passed as `target=` now fails with
+    `_pickle.PicklingError: Can't pickle local object <function ...>`. thriftpy2's suite
+    only stays on `fork` because one test module
+    (`test_all_protocols_binary_field.py`) calls `multiprocessing.set_start_method('fork')`
+    at import time, which — since `set_start_method` has no per-module scope — pins
+    `fork` for the rest of that pytest **session**. Deselecting that whole module on
+    `cp314t` (to dodge an unrelated fork-race flake) means its
+    `set_start_method('fork')` never runs there, so CPython's own new `forkserver`
+    default takes over and a sibling file's `test_client` (building `Process(target=` a
+    local `run_server()` closure that captures a local `Handler` class) starts failing —
+    on `cp314t` only, since `cp312`/`cp313`/`cp314` still import the skipped module and
+    inherit its `fork` override.
+    - **Diagnose by reading the multiprocessing frames in the traceback, not just the
+      final `PicklingError`.** `popen_fork.py` never calls `reduction.dump`/pickle at all
+      (the child inherits everything via COW); `popen_forkserver.py`/`popen_spawn_posix.py`
+      do, and `_launch: reduction.dump(process_obj, buf)` is exactly where this
+      `PicklingError` originates — that frame confirms it's a start-method question, not
+      "this object is fundamentally unpicklable so the library is broken."
+    - **Confirm the trigger is test selection, not the interpreter**: grep every
+      module your `--ignore`/`--deselect` list drops for
+      `multiprocessing.set_start_method(` or `get_context(`. If one of them sets the
+      process-wide default and the combination of *that module being skipped* plus
+      *CPython 3.14's new forkserver default* is what breaks a sibling test, it isn't a
+      genuine `cp314t` compatibility bug in the library worth reporting upstream.
+    - **Fix scope**: `--deselect` just the parametrized cases whose target is a local
+      closure, using the exact nodeid pytest's own `FAILED`/`--collect-only` output
+      reports (e.g. `test_apache_json.py::test_client[server_func0]`) — a path-qualified
+      nodeid silently no-ops when it doesn't match pytest's rootdir-relative form. Leave
+      alone any test that already requests `get_context("fork")` explicitly (unaffected
+      by the default) or whose target is a module-level function/bound method (pickles
+      fine under any start method).
