@@ -1,0 +1,153 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 6 Sep 2026 00:00:00 +0000
+Subject: [PATCH] Backport hdf5-blosc2 filter fixes for newer blosc2
+
+hdf5-blosc2/src/blosc2_filter.c is a plain vendored copy (not a git
+submodule) of Blosc/HDF5-Blosc2's filter plugin, frozen at whatever state
+it was in when last copied into this tree. It uses BLOSC2_MAX_DIM, a
+macro c-blosc2 dropped in its 3.0 release (renamed to B2ND_MAX_DIM, and
+bumped from 8 to 16) as part of the B2ND API becoming first-class. Any
+blosc2 Python package bundling that newer c-blosc2 -- which is what
+`blosc2 >= 2.3.0` (this project's own floor in pyproject.toml) resolves
+to today -- fails to compile this file:
+
+    hdf5-blosc2/src/blosc2_filter.c:48:32: error: 'BLOSC2_MAX_DIM'
+    undeclared (first use in this function); did you mean 'B2ND_MAX_DIM'?
+
+Not riscv64-specific: any platform building against a current blosc2
+hits the same error, which is presumably why upstream, after this v3.11.1
+tag, replaced the vendored copy with a proper git submodule pinned to
+Blosc/HDF5-Blosc2 (PyTables/PyTables@fc026c03871c63ea33d86f5eaffdeb55f8aa18da,
+"Add submodule for hdf5-blosc2", 2026-08-16) and raised the pyproject.toml
+blosc2 floor to >= 3.2.0 to match. That submodule now pins
+Blosc/HDF5-Blosc2@1ca9d34b132ad9c62c91db4337088b3c676b368a.
+
+This backports that commit's effect on blosc2_filter.c as a plain text
+patch instead of a submodule swap, since converting a vendored copy into
+a submodule mid-tree can't be expressed as a patch applied after
+actions/checkout has already fetched submodules. Besides the
+BLOSC2_MAX_DIM -> B2ND_MAX_DIM rename, the pinned commit also fixes
+blosc2_filter_function() to report the compressed frame's real size
+(`status`) instead of the precomputed buffer-size guess, which HDF5 >=
+2.2.0 -- the version this port's own workflow builds HDF5 from -- rejects
+writes against when the guess undershoots. Both hunks are carried
+together since they come from the same upstream commit and this port
+depends on both preconditions (a current blosc2, HDF5 2.2.0).
+
+Upstream-Status: Backport [https://github.com/Blosc/HDF5-Blosc2/commit/1ca9d34b132ad9c62c91db4337088b3c676b368a]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/hdf5-blosc2/src/blosc2_filter.c b/hdf5-blosc2/src/blosc2_filter.c
+index 03bf789..f79d478 100644
+--- a/hdf5-blosc2/src/blosc2_filter.c
++++ b/hdf5-blosc2/src/blosc2_filter.c
+@@ -38,14 +38,14 @@
+  * - 4: compression level
+  * - 5: shuffle method
+  * - 6: compressor code
+- * - 7: chunk rank (number of dimensions) (present if 1 < rank <= BLOSC2_MAX_DIM, for B2ND)
++ * - 7: chunk rank (number of dimensions) (present if 1 < rank <= B2ND_MAX_DIM, for B2ND)
+  * - 8 + i: length of chunk dimension i (0 <= i < rank)
+  *
+  * If a value is specified, all values before it must be specified too.
+  *
+  * If the chunk rank is specified, chunk dimensions must follow.
+  */
+-#define MAX_FILTER_VALUES (8 + BLOSC2_MAX_DIM)
++#define MAX_FILTER_VALUES (8 + B2ND_MAX_DIM)
+ /* Compression level default */
+ #define DEFAULT_CLEVEL 5
+ /* Shuffle default */
+@@ -95,7 +95,7 @@ int register_blosc2(char **version, char **date){
+
+     3. Compute the chunk size in bytes and store it in slot 3.
+
+-    4. If 1 < rank <= BLOSC2_MAX_DIM, store it in slot 7, and chunk dimensions in the following slots.
++    4. If 1 < rank <= B2ND_MAX_DIM, store it in slot 7, and chunk dimensions in the following slots.
+ */
+ herr_t blosc2_set_local(hid_t dcpl, hid_t type, hid_t space) {
+
+@@ -157,7 +157,7 @@ herr_t blosc2_set_local(hid_t dcpl, hid_t type, hid_t space) {
+   fprintf(stderr, "Blosc2: Computed buffer size %d\n", bufsize);
+ #endif
+
+-  if (1 < ndim && ndim <= BLOSC2_MAX_DIM) {
++  if (1 < ndim && ndim <= B2ND_MAX_DIM) {
+     if (nelements < 5) { values[4] = DEFAULT_CLEVEL; }
+     if (nelements < 6) { values[5] = DEFAULT_SHUFFLE; }
+     if (nelements < 7) { values[6] = DEFAULT_COMPCODE; }
+@@ -172,7 +172,7 @@ herr_t blosc2_set_local(hid_t dcpl, hid_t type, hid_t space) {
+     /* The user may be expecting more efficient storage than we can currently provide,
+      * so convey some information when tracing. */
+     BLOSC_TRACE_WARNING("Chunk rank %d exceeds B2ND build limit %d, "
+-                        "using plain Blosc2 instead", ndim, BLOSC2_MAX_DIM);
++                        "using plain Blosc2 instead", ndim, B2ND_MAX_DIM);
+   }
+
+   r = H5Pmodify_filter(dcpl, FILTER_BLOSC2, flags, nelements, values);
+@@ -297,7 +297,7 @@ size_t blosc2_filter_function(unsigned flags, size_t cd_nelmts,
+
+   /* Filter params that are only set for B2ND */
+   int ndim = -1;
+-  int32_t chunkshape[BLOSC2_MAX_DIM];
++  int32_t chunkshape[B2ND_MAX_DIM];
+   size_t chunksize = typesize;
+   if (cd_nelmts >= 8) {
+     /* Get chunk shape for B2ND */
+@@ -308,10 +308,10 @@ size_t blosc2_filter_function(unsigned flags, size_t cd_nelmts,
+                ndim);
+       goto failed;
+     }
+-    if (ndim > BLOSC2_MAX_DIM) {
++    if (ndim > B2ND_MAX_DIM) {
+       PUSH_ERR("blosc2_filter", H5E_CALLBACK,
+                "Chunk rank %d (filter value) exceeds B2ND build limit %d",
+-               ndim, BLOSC2_MAX_DIM);
++               ndim, B2ND_MAX_DIM);
+       goto failed;
+     }
+     if (cd_nelmts < (size_t)(8 + ndim)) {
+@@ -391,12 +391,12 @@ size_t blosc2_filter_function(unsigned flags, size_t cd_nelmts,
+         }
+         blocksize = sugg_blocksize;
+       }
+-      int32_t blockdims[BLOSC2_MAX_DIM];
++      int32_t blockdims[B2ND_MAX_DIM];
+       cparams.blocksize = compute_b2nd_block_shape(blocksize, typesize,
+                                                    ndim, chunkshape,
+                                                    blockdims);
+
+-      int64_t chunkshape_l[BLOSC2_MAX_DIM];
++      int64_t chunkshape_l[B2ND_MAX_DIM];
+       for (int i = 0; i < ndim; i++) {
+         chunkshape_l[i] = chunkshape[i];
+       }
+@@ -454,6 +454,15 @@ size_t blosc2_filter_function(unsigned flags, size_t cd_nelmts,
+
+     }
+
++    if (status > 0) {
++      /* The cframe returned by Blosc2 is exactly `status` bytes long.  Report
++       * its real size instead of the precomputed guess: when the frame is
++       * larger than the guess (e.g. incompressible data), HDF5 >= 2.2.0
++       * rejects the write if the reported buffer size is smaller than the
++       * returned data size. */
++      outbuf_size = (size_t) status;
++    }
++
+ #ifdef BLOSC2_DEBUG
+     fprintf(stderr, "Blosc2: Compressed into %zd bytes\n", status);
+ #endif
+@@ -504,7 +513,7 @@ size_t blosc2_filter_function(unsigned flags, size_t cd_nelmts,
+                  "B2ND array rank (%hhd) != filter rank (%d)", array->ndim, ndim);
+         goto b2nd_decomp_out;
+       }
+-      int64_t start[BLOSC2_MAX_DIM], stop[BLOSC2_MAX_DIM], size = typesize;
++      int64_t start[B2ND_MAX_DIM], stop[B2ND_MAX_DIM], size = typesize;
+       for (int i = 0; i < array->ndim; i++) {
+         start[i] = 0;
+         stop[i] = array->shape[i];
+--
+2.43.0
