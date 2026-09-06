@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/KenanHanke/rbloom/blob/v1.5.4/.github/workflows/CI.yml
+name: Build rbloom wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'rbloom version to build (git tag without the leading v, e.g. 1.5.4)'
+        required: true
+        default: '1.5.4'
+  pull_request:
+    paths:
+      - '.github/workflows/build-rbloom.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.5.4' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.5.4 there.
+  RBLOOM_VERSION: ${{ inputs.version || '1.5.4' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build rbloom ${{ inputs.version || '1.5.4' }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # pyo3's abi3-py37 feature is on unconditionally (Cargo.toml), so one
+          # abi3 wheel serves every GIL-ful interpreter; pyo3 disables abi3
+          # under Py_GIL_DISABLED, giving the free-threaded build its own wheel.
+          - tag: cp37-abi3
+            # cp37/cp38 aren't in manylinux_2_39_riscv64 (cp39-cp315 only), and
+            # our registry floor is cp312 anyway (build-pycryptodome.yml is the
+            # same-shaped precedent), so build there instead of at the claimed
+            # floor and let find_compatible_wheel retest on cp313/cp314.
+            build: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+
+    steps:
+      - name: Checkout rbloom v${{ env.RBLOOM_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: KenanHanke/rbloom
+          ref: v${{ env.RBLOOM_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # rbloom ships no [tool.cibuildwheel], so the Rust toolchain its
+          # maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_TEST_SOURCES: tests
+          # rbloom's pyproject.toml has no python-source; maturin auto-generates
+          # a rbloom/__init__.py shim ("from .rbloom import *") around the
+          # compiled rbloom.rbloom submodule, so that's the .so to check.
+          CIBW_TEST_COMMAND: >-
+            python -c "import rbloom.rbloom as m; assert m.__file__.endswith('.so'), m.__file__" &&
+            python tests/api_test.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rbloom-${{ env.RBLOOM_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish rbloom ${{ inputs.version || '1.5.4' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: rbloom-${{ inputs.version || '1.5.4' }}-*-manylinux_riscv64
