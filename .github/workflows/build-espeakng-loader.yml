@@ -1,0 +1,202 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own build/publish workflows:
+#   https://github.com/thewh1teagle/espeakng-loader/blob/146599e29be3/.github/workflows/build.yml
+#   https://github.com/thewh1teagle/espeakng-loader/blob/146599e29be3/.github/workflows/pypi.yml
+# which compile eSpeak NG (build.sh) for each platform and repackage the shared
+# library + data as a platform-tagged wheel via hatch_build.py's WHEEL_TAG hook.
+# This narrows that to Linux riscv64: one build.sh invocation inside the
+# manylinux_riscv64 image, then hatchling packages the wheel directly (no
+# cibuildwheel - upstream's own wheel-build step is a plain `uv build`).
+name: Build espeakng-loader wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'espeakng-loader version to build (e.g. 0.2.4)'
+        required: true
+        default: '0.2.4'
+  pull_request:
+    paths:
+      - '.github/workflows/build-espeakng-loader.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.2.4' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.2.4 there.
+  ESPEAKNG_LOADER_VERSION: ${{ inputs.version || '0.2.4' }}
+  # Upstream cuts releases without git tags, so pin the release commit: this is
+  # "bump version to 0.2.4", whose tree matches the published 0.2.4 wheels
+  # (pyproject.toml is byte-identical to main). Update it alongside
+  # ESPEAKNG_LOADER_VERSION.
+  ESPEAKNG_LOADER_REF: 146599e29be31bf17d99f0bcb7dbb2f92aef3d95
+  ESPEAK_NG_VERSION: '1.52.0'
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build espeakng-loader ${{ inputs.version || '0.2.4' }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout espeakng-loader ${{ env.ESPEAKNG_LOADER_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: thewh1teagle/espeakng-loader
+          ref: ${{ env.ESPEAKNG_LOADER_REF }}
+          persist-credentials: false
+
+      # espeak-ng/ exists already as an uninitialized submodule placeholder;
+      # clear it so the second checkout has an empty directory to write into.
+      - run: rm -rf espeak-ng
+
+      - name: Checkout eSpeak NG ${{ env.ESPEAK_NG_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: espeak-ng/espeak-ng
+          ref: ${{ env.ESPEAK_NG_VERSION }}
+          path: espeak-ng
+          persist-credentials: false
+
+      # Upstream ships no LICENSE at this commit (added on main later); eSpeak
+      # NG's own licences live in the checkout already. hatchling's PEP 639
+      # default glob (LICEN[CS]E*/COPYING*) packages all of these into
+      # dist-info/licenses/ with no pyproject.toml change.
+      - name: Stage licences
+        run: |
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/thewh1teagle/espeakng-loader/0ddc87adf77e5850d7eeb542ac8a87d421b64daa/LICENSE" -o LICENSE
+          cp espeak-ng/COPYING espeak-ng/COPYING.APACHE espeak-ng/COPYING.BSD2 espeak-ng/COPYING.UCD .
+
+      # espeak-ng/'s CMakeLists gives the espeak-ng target -fPIC but not the
+      # vendored sonic subproject, which riscv64's ld (unlike x86_64/aarch64)
+      # refuses to link non-PIC into a shared object; EXTRA_CMAKE_ARGS is
+      # build.sh's own per-platform hook (upstream's build.yml uses it for
+      # Windows arm64's `-A ARM64`), so this needs no source patch.
+      - name: Build eSpeak NG ${{ env.ESPEAK_NG_VERSION }} and package the wheel
+        env:
+          EXTRA_CMAKE_ARGS: -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        run: |
+          docker run --rm \
+            -v "$(pwd)":/workspace \
+            --workdir /workspace \
+            -e EXTRA_CMAKE_ARGS \
+            "${{ env.MANYLINUX_RISCV64_IMAGE }}" \
+            bash -c '
+              set -euo pipefail
+              bash build.sh
+
+              cd espeak-ng
+              rm -rf build
+              cmake -B build . -DCMAKE_INSTALL_PREFIX=_espeak_ng_data -DCOMPILE_INTONATIONS=ON
+              cmake --build build
+              cmake --install build
+              cd ..
+
+              mkdir -p src/espeakng_loader
+              cp -rf espeak-ng/_espeak_ng_data/share/espeak-ng-data src/espeakng_loader/
+              tar xzf espeak-ng/espeak-ng-libs.tar.gz
+              find -L espeak-ng-libs -type f -name "*.so*" -exec cp -P {} src/espeakng_loader/ \;
+
+              PY=/opt/python/cp312-cp312/bin
+              "$PY"/pip install -q hatchling
+              WHEEL_TAG=py3-none-manylinux_2_39_riscv64 "$PY"/pip wheel . --no-deps --no-build-isolation -w wheelhouse
+            '
+
+      - name: Check the bundled library, data and licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          expected = {"LICENSE", "COPYING", "COPYING.APACHE", "COPYING.BSD2", "COPYING.UCD"}
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith("espeakng_loader/libespeak-ng.so") for n in names), whl
+              assert any(n.endswith("espeakng_loader/espeak-ng-data/phonindex") for n in names), whl
+              licenses = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                          if ".dist-info/licenses/" in n and not n.endswith("/")}
+              assert licenses == expected, f"{whl}: {sorted(licenses)}"
+              print(whl, "ok")
+          EOF
+
+      # Upstream ships no test suite; this exercises the README's own usage
+      # example the same way a real riscv64 user would, against the just-built wheel.
+      - name: Install the built wheel and exercise the loader
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install -q wheelhouse/*.whl
+          python3 -c "
+          import ctypes, os
+          from espeakng_loader import get_library_path, get_data_path, load_library, make_library_available
+
+          assert os.path.isfile(get_library_path())
+          assert os.path.isdir(get_data_path())
+
+          lib = load_library()
+          assert lib is not None
+          make_library_available()
+          assert os.environ['LD_LIBRARY_PATH'].startswith(os.path.dirname(get_library_path()))
+
+          lib.espeak_Info.restype = ctypes.c_char_p
+          version = lib.espeak_Info(None)
+          assert version == b'${{ env.ESPEAK_NG_VERSION }}', version
+          print('espeakng_loader OK:', version)
+          "
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: espeakng-loader-${{ env.ESPEAKNG_LOADER_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    name: Collect GPL sources (eSpeak NG) for espeakng-loader ${{ inputs.version || '0.2.4' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout eSpeak NG ${{ env.ESPEAK_NG_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: espeak-ng/espeak-ng
+          ref: ${{ env.ESPEAK_NG_VERSION }}
+          path: espeak-ng
+          persist-credentials: false
+
+      # espeakng-loader compiles a real eSpeak NG (GPLv3) shared library
+      # itself (build.sh) and ships it directly as the wheel's payload, so
+      # unlike gotcha 66's gcc/libgomp case the GPL source is the checkout we
+      # build from, not the build image: archive it verbatim as Corresponding
+      # Source under GPLv3 6.
+      - name: Archive eSpeak NG source
+        run: tar -cf gpl-sources.tar espeak-ng
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: espeakng-loader-${{ inputs.version || '0.2.4' }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish espeakng-loader ${{ inputs.version || '0.2.4' }}
+    needs: [setup, build_wheels, gpl_sources]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: espeakng-loader-${{ inputs.version || '0.2.4' }}-*-manylinux_riscv64
+      gpl-sources-artifact: espeakng-loader-${{ inputs.version || '0.2.4' }}-gpl-sources
+      gpl-sources-description: eSpeak NG (compiled from source; see build.sh)
