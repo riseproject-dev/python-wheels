@@ -62,9 +62,10 @@ jobs:
       - name: Patch edlib source
         run: git apply python-wheels/patches/edlib/${{ env.EDLIB_VERSION }}/00*.patch
 
-      # Docker's build context is bindings/python (the package-dir below), so the
-      # C++ core and the root LICENSE it doesn't otherwise see must be copied in
-      # first -- exactly what bindings/python/Makefile's own `edlib` target does.
+      # setup.py's Extension() sources/include_dirs are relative to itself and
+      # expect a local edlib/ subdir (edlib/src/edlib.cpp, edlib/include/edlib.h)
+      # -- exactly what bindings/python/Makefile's own `edlib` target populates by
+      # copying the top-level C++ core in before invoking cibuildwheel.
       - name: Copy the edlib C++ core and LICENSE into the Python binding dir
         run: |
           cp -r edlib bindings/python/edlib
@@ -84,9 +85,13 @@ jobs:
           # isn't checked in (upstream's own Makefile regenerates it before
           # every build too); no pyproject.toml means no long_description
           # source either (README.rst is cog-generated, requires a built wheel).
-          CIBW_BEFORE_BUILD: pip install cython && cython --cplus edlib.pyx -o edlib.bycython.cpp
+          # {package}, not a bare filename: before-build's cwd is {project}
+          # (the whole checkout), not {package} (gotcha 5).
+          CIBW_BEFORE_BUILD: >-
+            pip install cython &&
+            cython --cplus {package}/edlib.pyx -o {package}/edlib.bycython.cpp
           CIBW_ENVIRONMENT: EDLIB_OMIT_README_RST=1
-          CIBW_TEST_COMMAND: python3 {project}/test.py
+          CIBW_TEST_COMMAND: python3 {package}/test.py
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
