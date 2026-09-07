@@ -1,0 +1,98 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Upstream ships no CI workflow of its own; this mirrors the single cp38-abi3
+# Linux wheel it publishes to PyPI, narrowed to riscv64.
+name: Build python-geohash wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'python-geohash version to build (e.g. 0.9.2)'
+        required: true
+        default: '0.9.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-python-geohash.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.9.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.9.2 there.
+  GEOHASH_VERSION: ${{ inputs.version || '0.9.2' }}
+  # Upstream cuts releases without git tags. This is the "fix packaging" commit
+  # that bumped pyproject.toml to 0.9.2, byte-identical to the released sdist
+  # (whose Cargo.toml only gains one `readme =` line). Update alongside
+  # GEOHASH_VERSION.
+  GEOHASH_REF: 1159f4f751d3c97406d8af016d7b4119aa03b8a3
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build python-geohash ${{ inputs.version || '0.9.2' }} cp312-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    steps:
+      - name: Checkout python-geohash ${{ env.GEOHASH_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: hkwi/python-geohash
+          ref: ${{ env.GEOHASH_REF }}
+          persist-credentials: false
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # setup.py hardcodes cp38-abi3, so cibuildwheel compiles once for
+          # cp312 and reuses+tests that wheel for cp313/cp314. No cp314t: pyo3's
+          # abi3 feature cannot build for Py_GIL_DISABLED (verified locally),
+          # and upstream ships no free-threaded wheel either.
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$PATH:$HOME/.cargo/bin"'
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: >-
+            python -c "import geohash; assert geohash._geohash.__file__.endswith('.so'), geohash._geohash.__file__" &&
+            pytest tests
+
+      - name: Check the extension and license made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert "_geohash.abi3.so" in names, names
+              assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: python-geohash-${{ env.GEOHASH_VERSION }}-cp312-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish python-geohash ${{ inputs.version || '0.9.2' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: python-geohash-${{ inputs.version || '0.9.2' }}-*-manylinux_riscv64
