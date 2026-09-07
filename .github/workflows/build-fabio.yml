@@ -1,0 +1,131 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel builder:
+#   https://github.com/silx-kit/fabio/blob/v2026.06/.github/workflows/release.yml
+name: Build fabio wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'fabio version to build (git tag without leading v, e.g. 2026.06)'
+        required: true
+        default: '2026.06'
+  pull_request:
+    paths:
+      - '.github/workflows/build-fabio.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2026.06' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  FABIO_VERSION: ${{ inputs.version || '2026.06' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_sdist:
+    needs: [setup]
+    name: Build fabio ${{ inputs.version || '2026.06' }} sdist
+    runs-on: ubuntu-latest
+    outputs:
+      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
+      package_version: ${{ steps.sdist.outputs.package_version }}
+    steps:
+      - name: Checkout fabio v${{ env.FABIO_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: silx-kit/fabio
+          ref: v${{ env.FABIO_VERSION }}
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build sdist
+        id: sdist
+        run: |
+          uv pip install build twine
+          python -m build --sdist
+          twine check dist/*
+          sdists=(dist/*.tar.gz)
+          sdist_name="$(basename "${sdists[0]}")"
+          echo "sdist_name=${sdist_name}" >> "$GITHUB_OUTPUT"
+          echo "package_version=$(echo "${sdist_name}" | sed -En 's/fabio-(.+)\.tar\.gz/\1/p')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fabio-${{ env.FABIO_VERSION }}-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_sdist]
+    name: Build fabio ${{ inputs.version || '2026.06' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # Upstream's own release.yml CIBW_BUILD is cp311-cp314 (no cp314t); cp311
+        # is dropped here because pypi.riseproject.dev ships h5py - a hard
+        # runtime dep - only for cp312+ (gotcha 84).
+        python: ["cp312", "cp313", "cp314"]
+
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: fabio-${{ env.FABIO_VERSION }}-sdist
+          path: dist/
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT_LINUX: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # hdf5plugin (a hard runtime dep) has no riscv64 wheel and its sdist
+          # vendors a large set of its own compression libraries - a separate
+          # port in its own right. Keep the wheel install bare and pre-install
+          # what the test suite actually exercises instead (gotcha 122).
+          CIBW_TEST_ENVIRONMENT: PIP_NO_DEPS=1
+          CIBW_BEFORE_TEST_LINUX: >-
+            PIP_NO_DEPS=0 PIP_ONLY_BINARY=numpy,h5py,lxml,pillow pip install numpy h5py lxml pillow filelock
+          # fabio.test.test_import unconditionally imports every module,
+          # including fabio/qt/dialogs.py, which needs a real Qt binding
+          # (PySide6/PyQt); none publish a riscv64 wheel anywhere. Skip that
+          # one module - test_all.suite() picks up test_import by name, so
+          # stubbing its suite() before building the suite drops just it.
+          CIBW_TEST_COMMAND: >-
+            python3 -c "import sys, unittest; from fabio.test import test_all, test_import; test_import.suite = lambda: unittest.TestSuite(); r = unittest.TextTestRunner().run(test_all.suite()); sys.exit(0 if r.wasSuccessful() else 1)"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fabio-${{ needs.build_sdist.outputs.package_version }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish fabio ${{ inputs.version || '2026.06' }}
+    needs: [setup, build_sdist, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: fabio-${{ needs.build_sdist.outputs.package_version }}-*-manylinux_riscv64
