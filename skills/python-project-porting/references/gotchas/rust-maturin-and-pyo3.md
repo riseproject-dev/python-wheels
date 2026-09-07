@@ -50,6 +50,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
 - **314** — A maturin library project with no `python-source` and no `<name>/` directory
   in the git checkout can still ship an auto-generated `<name>/__init__.py` shim around a
   `<name>.<name>` compiled submodule.
+- **322** — A pyo3 release old enough to hand-roll CPython's legacy `PyUnicode_KIND`/
+  `PyUnicode_DATA` macros as raw struct-offset reads can compile clean against a newer
+  CPython and still segfault the first time a string crosses the FFI boundary.
 
 ---
 
@@ -891,3 +894,35 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
     - **Probe the submodule, not the package**: `import <name>.<name> as m;
       assert m.__file__.endswith('.so')`, then let the actual test suite (which imports the
       public name normally) exercise the shim.
+
+322. **A pyo3 release old enough to hand-roll CPython's legacy `PyUnicode_KIND`/`PyUnicode_DATA`
+    macros as raw struct-offset reads can compile clean against a newer CPython and still
+    segfault the first time a string crosses the FFI boundary (the markdown-it-pyrs case; see
+    `build-markdown-it-pyrs.yml`).** Gotcha 306 shows an old pyo3 (0.15.1) compiling *and*
+    running correctly against a CPython it predates by years, because `pyo3-build-config`'s
+    only version check is a floor, never a ceiling. markdown-it-pyrs's pyo3 0.19.2 looks like
+    the same shape at compile time — `cp312`/`cp313`/`cp314` all build clean — but only
+    `cp312`/`cp313` pass their test suite; `cp314` SIGSEGVs inside the compiled `.so` on the
+    very first `MarkdownIt().render()` call, right after an earlier test in the same file that
+    only calls `enable()`/`enable_many()` (no string crosses the FFI boundary there) passes
+    clean. The tell that this is a Unicode-layout break, not a riscv64 arch bug: a *newer*
+    pyo3-ffi, which generates its raw FFI declarations by parsing the real installed headers,
+    fails to even find `PyUnicode_KIND`/`PyUnicode_New`/`PyUnicode_DATA`/`PyUnicode_1BYTE_KIND`
+    against Python 3.14 headers (`PyO3/pyo3#4662`) — those were never real exported C-ABI
+    symbols, they were header macros that read `PyASCIIObject`/`PyCompactUnicodeObject` fields
+    directly, and pyo3-ffi 0.19.2 reimplements that read in Rust against a struct layout frozen
+    from ~2023. CPython 3.14 changed that internal layout enough to break the frozen offsets,
+    so a 3.14 string handed back through pyo3 0.19.2's fast path reads a garbage `kind`/`data`
+    pointer.
+    - **Bisect by interpreter, not by rebuilding once.** cibuildwheel's matrix already builds
+      one wheel per interpreter for a non-abi3 pyo3 crate (gotcha 10/11), so a segfault on only
+      the newest leg while the identical riscv64 image/toolchain builds the siblings clean *is*
+      the diagnosis — no separate x86_64/aarch64 rehearsal is needed to rule out an arch-specific
+      asm bug (contrast gotcha 78/179, where a crash reproduces identically on every arch and is
+      a genuine dependency-tree issue instead).
+    - **Drop the broken interpreter — there is no source-level knob to reach for.** Unlike
+      gotcha 237's opt-in Cargo feature, the fix here lives in a pyo3 upgrade upstream hasn't
+      shipped. `CIBW_BUILD`/the matrix simply excludes `cp314` alongside the free-threaded
+      exclusion gotcha 306 already covers, and the PR's **Matrix** line should name both reasons
+      since they are independent (no abi3 feature, `Py_GIL_DISABLED` absent, *and* this
+      Unicode-layout break all apply to the same crate).

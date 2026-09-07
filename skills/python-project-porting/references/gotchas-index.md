@@ -167,6 +167,10 @@ The porting gotchas (314 of them) live in [`references/gotchas/`](gotchas/), spl
   and no `<name>/` directory anywhere in the git checkout can still ship a wheel with an
   auto-generated `<name>/__init__.py` re-export shim wrapping a `<name>.<name>` compiled
   submodule — probing `import <name>; <name>.__file__.endswith('.so')` fails on the shim.
+- **322** — A pyo3 release old enough to hand-roll CPython's legacy `PyUnicode_KIND`/
+  `PyUnicode_DATA` macros as raw struct-offset reads can compile clean against a newer
+  CPython and still segfault the first time a string crosses the FFI boundary — bisect by
+  interpreter in the matrix (a segfault on only the newest leg is the diagnosis) and drop it.
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
