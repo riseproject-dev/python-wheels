@@ -9,20 +9,20 @@ has no wheel: it needs pybind11 and google_crc32c, neither of which has a
 riscv64 build anywhere, and building the chain from source is out of scope
 for testing this package. Since the loaded fixture is only ever used to
 generate a labeled volume with per-label binary images to fill, replace it
-with an equivalent synthetic volume (a handful of hollow spherical shells,
-each carrying its own label id) built from numpy/scipy alone, keeping every
-test function and assertion unchanged.
+with an equivalent synthetic volume (a 3x3x3 grid of non-overlapping
+hollow cubes, each with a thick wall and its own label id) built from
+numpy alone, keeping every test function and assertion unchanged.
 
 Upstream-Status: Inappropriate [riscv64 CI has no crackle-codec wheel to load test_data.npy.ckl.gz; irrelevant on platforms where crackle-codec ships]
 ---
- automated_test.py | 29 ++++++++++++++++++++++-------
- 1 file changed, 22 insertions(+), 7 deletions(-)
+ automated_test.py | 32 +++++++++++++++++++++++++-------
+ 1 file changed, 25 insertions(+), 7 deletions(-)
 
 diff --git a/automated_test.py b/automated_test.py
-index 47aea34..0c26596 100644
+index 47aea34..571ae1f 100644
 --- a/automated_test.py
 +++ b/automated_test.py
-@@ -4,19 +4,34 @@ import fill_voids
+@@ -4,19 +4,37 @@ import fill_voids
  import scipy.ndimage
  from scipy.ndimage import binary_fill_holes
  
@@ -34,20 +34,23 @@ index 47aea34..0c26596 100644
 -img = crackle.load('test_data.npy.ckl.gz')
 +# riscv64 CI has no crackle-codec wheel (nor any dependency of one) to load
 +# test_data.npy.ckl.gz, so this builds an equivalent synthetic 3D label
-+# volume instead: a handful of hollow spherical shells, each with its own
-+# label id, giving the same shape (a labeled volume with cavities) the
-+# real tests need without requiring crackle.
-+def _make_test_volume(size=48, n_shapes=14, seed=1234):
-+  rng = np.random.default_rng(seed)
++# volume instead: a 3x3x3 grid of non-overlapping hollow cubes, each its
++# own label id, with a 3-voxel-thick wall so no diagonal-only pinch point
++# can make scipy's 4/6-connected flood fill and fill_voids disagree on
++# whether a cavity is enclosed (a real risk with round/thin shapes at
++# pixel resolution). Gives the same shape (a labeled volume with
++# cavities) the real tests need without requiring crackle.
++def _make_test_volume(size=56):
 +  img = np.zeros((size, size, size), dtype=np.uint32)
-+  zz, yy, xx = np.ogrid[:size, :size, :size]
-+  for i in range(1, n_shapes + 1):
-+    cz, cy, cx = rng.integers(10, size - 10, size=3)
-+    r_outer = int(rng.integers(6, 9))
-+    r_inner = max(r_outer - int(rng.integers(2, 4)), 1)
-+    dist = np.sqrt((zz - cz) ** 2 + (yy - cy) ** 2 + (xx - cx) ** 2)
-+    shell = (dist <= r_outer) & (dist >= r_inner)
-+    img[shell & (img == 0)] = i
++  centers = (16, 32, 48)
++  half_outer, half_inner = 6, 3
++  label = 1
++  for cz in centers:
++    for cy in centers:
++      for cx in centers:
++        img[cz-half_outer:cz+half_outer, cy-half_outer:cy+half_outer, cx-half_outer:cx+half_outer] = label
++        img[cz-half_inner:cz+half_inner, cy-half_inner:cy+half_inner, cx-half_inner:cx+half_inner] = 0
++        label += 1
 +  return img
 +
 +img = _make_test_volume()
@@ -62,7 +65,7 @@ index 47aea34..0c26596 100644
      print(segid)
      binimg = (img == segid).view(np.uint8)
      slices = scipy.ndimage.find_objects(binimg)[0]
-@@ -36,9 +51,9 @@ def test_scipy_comparison2d():
+@@ -36,9 +54,9 @@ def test_scipy_comparison2d():
    segids = np.copy(SEGIDS)
    np.random.shuffle(segids)
  
