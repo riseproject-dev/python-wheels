@@ -94,6 +94,8 @@ The porting gotchas (308 of them) live in [`references/gotchas/`](gotchas/), spl
 - **315** — `versioneer` has no `SETUPTOOLS_SCM_PRETEND_VERSION` equivalent for gotcha 31's
   dirty-tree problem — `git update-index --skip-worktree` on just the patched files fixes
   it instead.
+- **319** — A release tag can exist, be reachable, and check out cleanly, yet still be the
+  wrong commit — check `git merge-base --is-ancestor <tag> origin/main` before trusting it.
 
 ### cibuildwheel mechanics, the matrix & abi3 — [`gotchas/cibuildwheel-matrix-and-abi3.md`](gotchas/cibuildwheel-matrix-and-abi3.md)
 
@@ -376,6 +378,8 @@ The porting gotchas (308 of them) live in [`references/gotchas/`](gotchas/), spl
 - **255** — A project's own build hook that hand-parses a *build-time* dependency's dist-info
 - **301** — Gotcha 146's licence auto-glob only fires for a `pyproject.toml` with a `[project]`
 - **309** — A wrapper's own permissive licence (LGPL, MIT, ...) does not launder a vendored
+- **320** — gotcha 123's PEP 639 default license glob is not implemented by meson-python —
+  check the built wheel, don't assume it is backend-agnostic.
 
 ### Local validation & the aarch64/QEMU rehearsal — [`gotchas/local-validation-and-rehearsal.md`](gotchas/local-validation-and-rehearsal.md)
 

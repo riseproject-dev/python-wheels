@@ -25,6 +25,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
 - **255** — A project's own build hook that hand-parses a *build-time* dependency's dist-info
 - **301** — Gotcha 146's licence auto-glob only fires for a `pyproject.toml` with a `[project]`
 - **309** — A wrapper's own permissive licence (LGPL, MIT, ...) does not launder a vendored
+- **320** — gotcha 123's PEP 639 default license glob is not implemented by meson-python —
 
 ---
 
@@ -539,3 +540,23 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
       extension does** — a thin Cython/ctypes wrapper claiming a simple permissive licence
       while compiling in someone else's non-trivial C library is a signal to go read that
       library's own README/LICENSE before trusting the package metadata.
+
+320. **gotcha 123's PEP 639 default license glob is not implemented by meson-python —
+    check the built wheel, don't assume it is backend-agnostic (the memory-allocator
+    case).** meson-python's `mesonpy/__init__.py` only ever writes
+    `dist-info/licenses/<f>` for files present in `self._metadata.license_files`, which it
+    gets straight from `pyproject_metadata`'s parse of `[project] license-files` — and that
+    library's `get_license_files()` returns `None` outright when the key is absent from
+    `pyproject.toml`, with no fallback glob of its own. Gotcha 123 verified the PEP 639
+    default (`LICEN[CS]E*`/`COPYING*`/`NOTICE*`/`AUTHORS*`) for scikit-build-core, which
+    layers that default on top of the same `pyproject_metadata` library; meson-python has
+    no equivalent layer, so the two backends behave differently from an identical
+    `pyproject.toml`. Concretely: sagemath/memory_allocator declares
+    `license = "GPL-3.0-or-later"` with no `license-files` key, and every wheel it
+    publishes on PyPI — verified against the real
+    `memory_allocator-0.2.0-cp312-cp312-macosx_10_13_x86_64.whl` — ships zero LICENSE
+    files. The fix is the same one-line patch as gotcha 105
+    (`license-files = ["LICENSE"]`), but the trigger condition is backend identity, not
+    the key alone — for a meson-python project, treat `license-files` as *always*
+    required, never assume the PEP 639 default covers you. Settle it in one command rather
+    than reading backend source: `uv build --wheel && unzip -l dist/*.whl | grep -i licen`.

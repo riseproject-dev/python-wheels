@@ -27,6 +27,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
 - **265** — A project's own version-detection script can read `GITHUB_REF` directly,
 - **268** — A vendored C-core git submodule can have its own `git describe`-based
 - **274** — A build-from-checkout package can tag releases in a format the version
+- **319** — A release tag can exist, be reachable, and check out cleanly, yet still be the
 - **315** — `versioneer` has no `SETUPTOOLS_SCM_PRETEND_VERSION` equivalent for gotcha 31's
 
 ---
@@ -545,3 +546,18 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
       mechanism dirtying the tree here is the same `git apply` gotcha 31 warns about for
       `setuptools_scm`; the fix differs only because `versioneer` offers no pretend-version
       variable to short-circuit its own git calls the way `setuptools_scm` does.
+
+319. **A release tag can exist, be reachable, and check out cleanly, yet still be the
+    wrong commit — because it is not even an ancestor of the default branch (the
+    memory-allocator case).** Gotcha 103 covers upstream shipping no tag at all; this is
+    subtler because `ref: v${{ env.<PKG>_VERSION }}` succeeds and produces *a* build, just
+    the wrong one. sagemath/memory_allocator's `v0.2.0` tag checks out fine, but its
+    `pyproject.toml` still reads `version = "0.1.4"` at that commit — a squash-merge around
+    the meson-build migration left the tag pointing at a pre-version-bump commit, and
+    neither `git merge-base --is-ancestor v0.2.0 origin/main` nor the reverse answers `yes`.
+    Run that check whenever a tag's checked-out version disagrees with what PyPI actually
+    published (or as routine due diligence): `git log --oneline origin/main -20` plus
+    `git show origin/main:pyproject.toml | grep version` usually finds the real bump within
+    a handful of commits, and gotcha 103's proof step (diff the built wheel/sdist
+    byte-for-byte against the one PyPI hosts) confirms it before pinning the SHA over the
+    tag, same as `<PKG>_REF`/`<PKG>_VERSION` for a no-tag upstream.
