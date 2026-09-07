@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/moderngl/glcontext/blob/3.0.0/.github/workflows/release.yml
+name: Build glcontext wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'glcontext version to build (git tag, e.g. 3.0.0)'
+        required: true
+        default: '3.0.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-glcontext.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '3.0.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 3.0.0 there.
+  GLCONTEXT_VERSION: ${{ inputs.version || '3.0.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build glcontext ${{ inputs.version || '3.0.0' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        libc: [manylinux, musllinux]
+
+    steps:
+      - name: Checkout glcontext ${{ env.GLCONTEXT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: moderngl/glcontext
+          ref: ${{ env.GLCONTEXT_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # Upstream's own release.yml builds wheels with no CIBW_TEST_COMMAND at
+          # all (it doesn't test wheels before publishing), and its pytest suite
+          # (tests/default_context_test.py) hard-requires glcontext.default_backend(),
+          # which on Linux is the x11 backend - it needs a running X server, absent
+          # on this headless runner. The manylinux/musllinux riscv64 images do ship
+          # Mesa with a software rasterizer, so the egl backend (this package's
+          # actual "headless" use case) creates a real OpenGL context via
+          # EGL_PLATFORM_DEVICE_EXT/llvmpipe with no display - verified locally, so
+          # that path gets a genuine functional test. The x11 backend is only
+          # checked for a clean failure (proves the .so loads and resolves its glX
+          # symbols) rather than a crash, the same pattern as gotcha 253 for glfw.
+          CIBW_TEST_COMMAND: |
+            python3 -c "
+            import ctypes
+            import glcontext
+
+            create_egl = glcontext.get_backend_by_name('egl')
+            ctx = create_egl(mode='standalone', glversion=330)
+            glGetString = ctypes.CFUNCTYPE(ctypes.c_char_p, ctypes.c_uint32)(ctx.load('glGetString'))
+            vendor = glGetString(0x1F00)
+            assert vendor, 'empty GL_VENDOR string'
+            print('EGL standalone context OK, GL_VENDOR =', vendor)
+            ctx.release()
+
+            try:
+                glcontext.default_backend()(mode='standalone', glversion=330)
+                raise SystemExit('expected x11 context creation to fail without a display')
+            except Exception as exc:
+                assert 'display' in str(exc).lower(), exc
+                print('x11 backend failed gracefully as expected:', exc)
+            "
+
+      - name: Check the x11 and egl extensions made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("glcontext/x11.") and n.endswith(".so") for n in names), whl
+              assert any(n.startswith("glcontext/egl.") and n.endswith(".so") for n in names), whl
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: glcontext-${{ env.GLCONTEXT_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish glcontext ${{ inputs.version || '3.0.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: glcontext-${{ inputs.version || '3.0.0' }}-*riscv64
