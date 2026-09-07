@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel builder:
+#   https://github.com/WeblateOrg/siphashc/blob/v2.8/.github/workflows/setup.yml
+name: Build siphashc wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'siphashc version to build (git tag without leading v, e.g. 2.8)'
+        required: true
+        default: '2.8'
+  pull_request:
+    paths:
+      - '.github/workflows/build-siphashc.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.8' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 2.8 there.
+  SIPHASHC_VERSION: ${{ inputs.version || '2.8' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build siphashc ${{ inputs.version || '2.8' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # setup.py hardcodes py_limited_api="cp310" for every non-free-threaded build, so
+        # cp310 is the only regular build needed (gotcha 96: build on the floor interpreter
+        # its abi3 tag claims). Free-threaded builds have no limited-API target and fall
+        # back to per-interpreter wheels; upstream's own CI tests 3.14t and 3.15t (not
+        # 3.13t), and the manylinux_riscv64 image has no cp313t anyway.
+        python: ["cp310", "cp314t", "cp315t"]
+
+    steps:
+      - name: Checkout siphashc v${{ env.SIPHASHC_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: WeblateOrg/siphashc
+          ref: v${{ env.SIPHASHC_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: siphashc-${{ env.SIPHASHC_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish siphashc ${{ inputs.version || '2.8' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: siphashc-${{ inputs.version || '2.8' }}-*-manylinux_riscv64
