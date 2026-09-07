@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/sagemath/cysignals/blob/1.12.6/.github/workflows/dist.yml
+name: Build cysignals wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'cysignals version to build (git tag, e.g. 1.12.6)'
+        required: true
+        default: '1.12.6'
+  pull_request:
+    paths:
+      - '.github/workflows/build-cysignals.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.12.6' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  CYSIGNALS_VERSION: ${{ inputs.version || '1.12.6' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build cysignals ${{ inputs.version || '1.12.6' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    # cysignals's own test suite deliberately triggers stack overflows, infinite
+    # loops and alarm-based interrupts; fail fast if one of those hangs instead
+    # of recovering on this architecture.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        libc: [manylinux, musllinux]
+
+    steps:
+      - name: Checkout cysignals ${{ env.CYSIGNALS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: sagemath/cysignals
+          ref: ${{ env.CYSIGNALS_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # Upstream's pyproject.toml sets build-frontend = "build[uv]"; that
+          # crashes cibuildwheel's post-build audit step on our self-hosted
+          # runner, which has no host `uv` (gotcha 13).
+          CIBW_BUILD_FRONTEND: build
+
+      - name: Check the wheel ships the extensions and licence
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("cysignals/") and n.endswith(".so") for n in names), whl
+              assert any(n.endswith(".dist-info/LICENSE") for n in names), whl
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cysignals-${{ env.CYSIGNALS_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cysignals ${{ inputs.version || '1.12.6' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: cysignals-${{ inputs.version || '1.12.6' }}-*riscv64
