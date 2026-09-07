@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build` job of
+# https://github.com/adamchainz/djade/blob/1.9.0/.github/workflows/main.yml
+name: Build djade wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'djade version to build (git tag, e.g. 1.9.0)'
+        required: true
+        default: '1.9.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-djade.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.9.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.9.0 there.
+  DJADE_VERSION: ${{ inputs.version || '1.9.0' }}
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheel:
+    needs: [setup]
+    name: Build djade ${{ inputs.version || '1.9.0' }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout djade v${{ env.DJADE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: adamchainz/djade
+          ref: ${{ env.DJADE_VERSION }}
+          persist-credentials: false
+
+      # `[tool.maturin] bindings = "bin"`: the wheel is one compiled executable
+      # with no ABI tag, so a single native build covers every interpreter.
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --locked --out dist
+          manylinux: '2_39'
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: djade-${{ env.DJADE_VERSION }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test djade ${{ inputs.version || '1.9.0' }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    env:
+      # Without this uv would reuse the runner image's system CPython for 3.12
+      # and download a standalone build for the others.
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        # This repo's default interpreter matrix (gotcha in workflow-anatomy.md);
+        # the wheel is interpreter-agnostic (bindings = "bin"), so every
+        # interpreter -- including free-threaded -- exercises the same binary.
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: djade-${{ env.DJADE_VERSION }}-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . djade
+
+      # No wheel-level test suite ships in the sdist (gotcha 187): djade's own
+      # tests/integration.rs suite is run by upstream's own `cargo test`, never
+      # packaged. Drive the real formatter against the README's own documented
+      # rules instead of settling for a bare --help check: stdin/stdout
+      # reformatting, already-formatted detection, --check mode, and the
+      # endblock-labelling rule applied to a file in place.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          djade --help >/dev/null
+
+          out=$(printf '{{  engine  |  paint  }}' | djade -)
+          [ "$out" = '{{ engine|paint }}' ]
+
+          printf '{{ engine|paint }}\n' | djade - >/dev/null
+
+          set +e
+          printf '{{  engine  |  paint  }}' | djade --check - >/dev/null
+          rc=$?
+          set -e
+          [ "$rc" -eq 1 ]
+
+          work=$(mktemp -d)
+          printf '{%% block funnel %%}\nhi\n{%% endblock %%}\n' > "$work/t.html"
+          djade "$work/t.html"
+          grep -qx '{% endblock funnel %}' "$work/t.html"
