@@ -1,0 +1,109 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build_wheels` job of
+# https://github.com/Nykakin/chompjs/blob/5e6ecf05644efce78524d1dd05b077da5cab25aa/.github/workflows/compile.yml
+name: Build chompjs wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'chompjs version to build (e.g. 1.4.1)'
+        required: true
+        default: '1.4.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-chompjs.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.4.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  CHOMPJS_VERSION: ${{ inputs.version || '1.4.1' }}
+  # Upstream cuts releases without git tags; this commit's tree is
+  # byte-identical to the released 1.4.1 sdist (setup.py already reads
+  # version='1.4.1'). Update alongside CHOMPJS_VERSION for a newer release.
+  CHOMPJS_REF: 5e6ecf05644efce78524d1dd05b077da5cab25aa
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build chompjs ${{ inputs.version || '1.4.1' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        libc: [manylinux, musllinux]
+        include:
+          - python: cp312
+            libc: manylinux
+            orjson: 'orjson'
+          - python: cp313
+            libc: manylinux
+            orjson: 'orjson'
+          - python: cp314
+            libc: manylinux
+            orjson: 'orjson'
+
+    steps:
+      - name: Checkout chompjs ${{ env.CHOMPJS_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Nykakin/chompjs
+          ref: ${{ env.CHOMPJS_REF }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: ${{ matrix.orjson }}
+          # pypi.riseproject.dev only carries orjson for cp312/cp313/cp314
+          # manylinux today; the doctest below imports orjson as a custom
+          # `loader`, so it only runs where a riscv64 wheel exists rather
+          # than forcing a from-source PyO3 build on the rest of the matrix.
+          CIBW_TEST_COMMAND: >-
+            python -m unittest discover {package} &&
+            ${{ matrix.orjson == 'orjson' && 'python -m doctest {package}/chompjs/chompjs.py --verbose' || 'true' }}
+
+      - name: Check the C extension made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith(".so") for n in names), whl
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: chompjs-${{ env.CHOMPJS_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish chompjs ${{ inputs.version || '1.4.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: chompjs-${{ inputs.version || '1.4.1' }}-*riscv64
