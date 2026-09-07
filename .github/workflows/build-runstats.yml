@@ -15,6 +15,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/build-runstats.yml'
+      - 'patches/runstats/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.version || '2.0.0' }}-${{ github.head_ref || github.run_id }}
@@ -48,6 +49,15 @@ jobs:
           ref: v${{ env.RUNSTATS_VERSION }}
           persist-credentials: false
 
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch runstats source
+        run: git apply python-wheels/patches/runstats/${{ env.RUNSTATS_VERSION }}/*.patch
+
       - name: Build wheels
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
@@ -60,14 +70,19 @@ jobs:
           # back to a pure-Python wheel (CLAUDE.md gotcha 57).
           CIBW_BEFORE_BUILD: pip install cython setuptools
           CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
-          CIBW_TEST_REQUIRES: pytest pytest-cov pytest-xdist
+          CIBW_TEST_REQUIRES: pytest
+          # test/__init__.py exists, so build-from-checkout's own runstats/ would
+          # shadow the installed wheel under pytest's default import mode; stage
+          # only tests/ into an empty cwd instead (gotcha 25). Also sidesteps
+          # tox.ini's --cov-fail-under=100, which measures unrelated dev checks.
+          CIBW_TEST_SOURCES: tests
           # setup.py falls back to a pure-Python wheel if cythonize/build_ext raises
           # (bare try/except around the Extension build) -- assert the compiled
           # extension actually loaded before trusting the test suite (gotcha 91).
           CIBW_TEST_COMMAND: >-
-            python -c "from runstats import _core; assert _core.__file__.endswith('.so'), _core.__file__"
-            && python -m pytest {project}/tests
-            && python {project}/tests/benchmark.py
+            python -c "import runstats._core; assert runstats._core.__file__.endswith('.so'), runstats._core.__file__"
+            && python -m pytest tests
+            && python tests/benchmark.py
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
