@@ -1,0 +1,152 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on:
+# https://github.com/spglib/moyo/blob/v0.18.0/.github/workflows/rw-python-release.yaml
+name: Build moyopy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'moyopy version to build (git tag without leading v, e.g. 0.18.0)'
+        required: true
+        default: '0.18.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-moyopy.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.18.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.18.0 there.
+  MOYOPY_VERSION: ${{ inputs.version || '0.18.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build moyopy ${{ inputs.version || '0.18.0' }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # pyo3's abi3-py310 feature is on unconditionally in moyopy/Cargo.toml,
+          # so one abi3 wheel serves every GIL-ful interpreter; pyo3 disables
+          # abi3 under Py_GIL_DISABLED, giving the free-threaded build its own
+          # wheel. cp313t is dropped: cibuildwheel 4.2.0 has no cp313t build
+          # identifier on any platform (gotcha 204).
+          - tag: cp310-abi3
+            # Built on cp310 -- the oldest interpreter the abi3 tag claims --
+            # and re-tested on the newer ones via find_compatible_wheel
+            # (gotcha 96).
+            build: >-
+              cp310-manylinux_riscv64 cp311-manylinux_riscv64
+              cp312-manylinux_riscv64 cp313-manylinux_riscv64
+              cp314-manylinux_riscv64
+            test-requires: pytest numpy pymatgen ase>=3.23
+            test-ignore: ''
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+            # pymatgen hard-requires orjson, whose build script refuses to
+            # compile under a free-threaded interpreter ("orjson v3.12.0 does
+            # not support free-threaded Python") on every release so far -- so
+            # pymatgen/ase and the interface tests that need them are dropped
+            # for this one identifier only (gotcha 216's shape: the build is
+            # unaffected, only test coverage has a gap).
+            test-requires: pytest numpy
+            test-ignore: --ignore=moyopy/python/tests/test_interface.py
+
+    steps:
+      - name: Checkout moyo v${{ env.MOYOPY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: spglib/moyo
+          ref: v${{ env.MOYOPY_VERSION }}
+          persist-credentials: false
+
+      - name: Stage the dual licence beside moyopy's pyproject.toml
+        # maturin globs LICEN[CS]E* relative to the pyproject directory, which
+        # is moyopy/ in this workspace -- the licence files live at the repo
+        # root instead, so upstream's own published wheels carry no licence
+        # text at all (build-primp.yml hits the same gap).
+        run: cp LICENSE-APACHE LICENSE-MIT moyopy/
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: moyopy
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # moyopy's pyproject.toml carries no [tool.cibuildwheel], so the Rust
+          # toolchain its maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          # numpy/scipy/pandas/orjson are pymatgen-core's own runtime deps,
+          # and matplotlib (also pymatgen-core, dragging in contourpy/
+          # kiwisolver/pillow) is one too -- none of these eight has a
+          # riscv64 wheel on public PyPI's newest release, but all do on our
+          # registry; pymatgen and ase are otherwise pure-Python
+          # (py3-none-any) and resolve from public PyPI either way. Without
+          # PIP_ONLY_BINARY, pip picks the highest version across both indexes
+          # regardless of whether it has a riscv64 wheel, so it reaches past
+          # our registry's build to PyPI's newer sdist-only release and
+          # compiles it from source -- scipy needs OpenBLAS headers the
+          # container lacks, pillow needs libjpeg headers it also lacks, and
+          # so on (dependencies-and-registry.md gotcha 67/84/291). spglib
+          # (also pymatgen-core) is deliberately left OUT of this list: our
+          # registry only carries cp312+ spglib wheels (build-spglib.yml's
+          # own matrix), so forcing it wheel-only starves cp310/cp311 of any
+          # candidate at all and sends pip's resolver backtracking through
+          # every pymatgen release ever published looking for one old enough
+          # to not depend on spglib -- eventually reaching one (4.4.11) whose
+          # numpy-distutils-era setup.py hard-crashes under modern numpy
+          # (gotcha 291's addendum below). Leaving spglib unpinned lets pip
+          # take our registry's wheel where one exists (cp312+, same version
+          # as PyPI's so the wheel still wins the tie) and fall back to
+          # building the sdist where it doesn't (cp310/cp311) -- spglib's
+          # sdist has no riscv64-specific build step upstream doesn't already
+          # exercise for other architectures.
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy,pandas,orjson,pillow,matplotlib,contourpy,kiwisolver
+          # Mirrors upstream's own `py-test` (moyopy[testing,interface] + pytest
+          # -v moyopy/python/tests); prek (also in the testing extra) is a
+          # pre-commit lint runner the suite itself never imports, so it's
+          # dropped.
+          CIBW_TEST_REQUIRES: ${{ matrix.test-requires }}
+          # Stage only the test tree, not the sibling `moyopy/python/moyopy`
+          # source package, so pytest imports the installed wheel rather than
+          # shadowing it with the local source (testing-and-shadowing gotchas).
+          CIBW_TEST_SOURCES: moyopy/python/tests
+          CIBW_TEST_COMMAND: python -m pytest -v moyopy/python/tests ${{ matrix.test-ignore }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: moyopy-${{ env.MOYOPY_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish moyopy ${{ inputs.version || '0.18.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: moyopy-${{ inputs.version || '0.18.0' }}-*-manylinux_riscv64
