@@ -1,0 +1,82 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/earwig/mwparserfromhell/blob/v0.7.2/.github/workflows/build.yml
+name: Build mwparserfromhell wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'mwparserfromhell version to build (git tag without leading v, e.g. 0.7.2)'
+        required: true
+        default: '0.7.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-mwparserfromhell.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.7.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MWPARSERFROMHELL_VERSION: ${{ inputs.version || '0.7.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build mwparserfromhell ${{ inputs.version || '0.7.2' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        libc: [manylinux, musllinux]
+
+    steps:
+      - name: Checkout mwparserfromhell v${{ env.MWPARSERFROMHELL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: earwig/mwparserfromhell
+          ref: v${{ env.MWPARSERFROMHELL_VERSION }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # Overriding CIBW_ENVIRONMENT replaces (not merges with) pyproject's
+          # [tool.cibuildwheel] environment table, so WITH_EXTENSION=1 (which
+          # selects the C tokenizer) has to be repeated here; PIP_EXTRA_INDEX_URL
+          # is added so the `dev` test-group's psutil resolves for riscv64.
+          CIBW_ENVIRONMENT: >-
+            WITH_EXTENSION=1
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mwparserfromhell-${{ env.MWPARSERFROMHELL_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish mwparserfromhell ${{ inputs.version || '0.7.2' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: mwparserfromhell-${{ inputs.version || '0.7.2' }}-*riscv64
