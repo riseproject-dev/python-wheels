@@ -1,0 +1,95 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/amol-/dukpy/blob/0.6.0/.github/workflows/build-wheels.yml
+name: Build dukpy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'dukpy version to build (git tag, e.g. 0.6.0)'
+        required: true
+        default: '0.6.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-dukpy.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.6.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.6.0 there.
+  DUKPY_VERSION: ${{ inputs.version || '0.6.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build dukpy ${{ inputs.version || '0.6.0' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        libc: [manylinux, musllinux]
+
+    steps:
+      - name: Checkout dukpy ${{ env.DUKPY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: amol-/dukpy
+          ref: ${{ env.DUKPY_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # Mirrors upstream's run-tests.yml (testing+webassets extras); all four
+          # are pure-Python wheels on public PyPI, so no registry plumbing needed.
+          CIBW_TEST_REQUIRES: pytest pytest-cov mock webassets
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: >-
+            python -c "import dukpy._dukpy as e; assert e.__file__.endswith('.so'), e.__file__" &&
+            pytest -v --cov=dukpy --cov-report=term-missing tests
+
+      - name: Check the extension and license made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("dukpy/_dukpy") and n.endswith(".so") for n in names), names
+              assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dukpy-${{ env.DUKPY_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish dukpy ${{ inputs.version || '0.6.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: dukpy-${{ inputs.version || '0.6.0' }}-*riscv64
