@@ -1,0 +1,95 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/Penlect/rectangle-packer/blob/2.1.0/.github/workflows/build_wheels.yml
+name: Build rectangle-packer wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'rectangle-packer version to build (git tag, e.g. 2.1.0)'
+        required: true
+        default: '2.1.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-rectangle-packer.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.1.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 2.1.0 there.
+  RECTANGLE_PACKER_VERSION: ${{ inputs.version || '2.1.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build rectangle-packer ${{ inputs.version || '2.1.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Per-interpreter (not abi3): the Cython extension links the version-specific
+        # ABI. cp314t excluded to match upstream's own CIBW_SKIP ("cp31?t-*"); our
+        # Cython registry mirror also carries no cp314t riscv64 wheel yet.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+
+    steps:
+      - name: Checkout rectangle-packer ${{ env.RECTANGLE_PACKER_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Penlect/rectangle-packer
+          ref: ${{ env.RECTANGLE_PACKER_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # Only manylinux: our registry carries no musllinux riscv64 Cython wheel,
+          # so the build-time Cython dependency would need compiling from sdist there.
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_COMMAND: "python -m unittest discover -v {project}/test"
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert any("_core" in n and n.endswith(".so") for n in names), names
+          licences = {n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n} - {""}
+          assert licences == {"LICENSE.md"}, licences
+          EOF
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rectangle-packer-${{ env.RECTANGLE_PACKER_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish rectangle-packer ${{ inputs.version || '2.1.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: rectangle-packer-${{ inputs.version || '2.1.0' }}-*-manylinux_riscv64
