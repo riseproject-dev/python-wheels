@@ -27,6 +27,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **297** — A test harness's own unbounded `readline()`-until-marker wait turns any slow or
 - **304** — A hardcoded exact-equality assertion on a neural-network/matmul-heavy
 - **316** — A hardcoded timing threshold on a metric that measures raw wall-clock
+- **317** — A pure-Python, allocation-heavy test suite running ~8x slower on musllinux
 
 ---
 
@@ -758,3 +759,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       repo's own policy against filing anything on a package's own upstream repo
       makes `Issue` unavailable regardless. Pick a ceiling with real headroom above
       every observed sample, not just clearing the worst one.
+
+317. **A pure-Python, allocation-heavy test suite running ~8x slower on musllinux
+    than manylinux (or its own free-threaded sibling) is musl's malloc, not a
+    riscv64 regression — check the GIL-vs-free-threaded split before raising the
+    timeout again (the stream-inflate case; see `build-stream-inflate.yml`).**
+    stream-inflate's Cython extension is a thin wrapper around plain byte-slicing
+    generator loops; its `test_stream_inflate.py` fuzzes 1956 parametrized cases up
+    to 8MB of data, byte-chunked. `cp312`/`cp313`/`cp314`-`musllinux_riscv64` each
+    ran the identical suite to only ~43-44% inside a 240-minute budget, reproducibly,
+    twice — while every `manylinux_riscv64` job (same four interpreters) and
+    `cp314t`-`musllinux_riscv64` finished cleanly in under 2h15m. The 2x2 pattern
+    (glibc: fast regardless of GIL; musl: fast only when free-threaded) is the tell.
+    - **PEP 703 explains the split.** CPython's free-threaded build replaces pymalloc
+      with mimalloc precisely because pymalloc "is not thread-safe without the GIL";
+      every other interpreter keeps pymalloc, which delegates allocations above its
+      small-object threshold straight to the platform `malloc()`. musl's allocator is
+      well known to be markedly slower than glibc's for churn-heavy workloads, and a
+      byte-chunking fuzz loop with `input_size`/`output_size` down to 1 is exactly
+      that; mimalloc's own arenas sidestep the platform allocator almost entirely, so
+      only the free-threaded build escapes the penalty.
+    - **Confirm it's not riscv64-wide first** (mirrors gotcha 286): read the manylinux
+      leg's log for the same interpreter — a suite that's merely slow everywhere, or
+      failing outright rather than timing out mid-suite, points elsewhere. Here the
+      manylinux jobs ran the same 1956 cases to completion at a normal pace.
+    - **No workflow-level fix exists** — this isn't a flag, a constraint file, or a
+      `before-all` step; it's musl's allocator on the exact allocation pattern this
+      suite exercises. Raising `timeout-minutes` further only delays the same result
+      (43-44% was consistent at both 60 and 240 minutes) and ties up scarce
+      self-hosted riscv64 runners for hours to prove a known-slow path eventually
+      finishes. Per this skill's own guidance, drop musllinux from the matrix
+      (`build-stream-inflate.yml` ships manylinux-only) rather than keep paying for it.
