@@ -1,0 +1,167 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/biosustain/swiglpk/blob/5.0.13/.github/workflows/build-wheels.yml
+name: Build swiglpk wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'swiglpk version to build (git tag, e.g. 5.0.13)'
+        required: true
+        default: '5.0.13'
+  pull_request:
+    paths:
+      - '.github/workflows/build-swiglpk.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '5.0.13' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 5.0.13 there.
+  SWIGLPK_VERSION: ${{ inputs.version || '5.0.13' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # swiglpk's own CI resolves "latest GLPK" at release time and records the
+  # result only in the GitHub release body; swiglpk 5.0.13 built against GLPK
+  # 5.0 (github.com/biosustain/swiglpk/releases/tag/5.0.13). Pin both the
+  # version and its upstream tarball hash so the build is reproducible, and
+  # bump them in lockstep with SWIGLPK_VERSION.
+  GLPK_VERSION: '5.0'
+  GLPK_SHA256: '4a1013eebb50f728fc601bdd833b0b2870333c3b3e5a816eeba921d95bec6f15'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build swiglpk ${{ inputs.version || '5.0.13' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      - name: Checkout swiglpk ${{ env.SWIGLPK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: biosustain/swiglpk
+          ref: ${{ env.SWIGLPK_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply -v python-wheels/patches/swiglpk/${{ env.SWIGLPK_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # GLPK itself has no riscv64 distro package (Rocky 10 ships neither it
+          # nor EPEL for riscv64), so it is built from the pinned upstream
+          # tarball the same way swiglpk's own config.sh does; --libdir=/usr/lib64
+          # is needed because autotools defaults to /usr/lib, off the riscv64
+          # linker/pkg-config path (gotcha 140). GLPK 5.0's bundled config.guess
+          # predates riscv64, so it's swapped for automake's (gotcha 138) before
+          # configuring. This runs once per container (before-all), not per
+          # interpreter like upstream's before-build does, since the GLPK build
+          # doesn't depend on the Python version. gmp-devel and swig both come
+          # from Rocky 10's repos, replacing upstream's from-source builds of
+          # GMP/an ancient SWIG 3.0.10 - build-time tools only, so the
+          # substitution has no effect on what ships in the wheel.
+          CIBW_BEFORE_ALL_LINUX: >-
+            cd /tmp &&
+            dnf -y install gmp-devel swig &&
+            curl -fsSLO https://ftp.gnu.org/gnu/glpk/glpk-${{ env.GLPK_VERSION }}.tar.gz &&
+            echo "${{ env.GLPK_SHA256 }}  glpk-${{ env.GLPK_VERSION }}.tar.gz" | sha256sum -c - &&
+            tar xzf glpk-${{ env.GLPK_VERSION }}.tar.gz &&
+            cp /usr/share/automake-*/config.guess /usr/share/automake-*/config.sub glpk-${{ env.GLPK_VERSION }}/ &&
+            (cd glpk-${{ env.GLPK_VERSION }} && ./configure --disable-reentrant --prefix=/usr --libdir=/usr/lib64 --with-gmp && make -j"$(nproc)" && make install) &&
+            cp glpk-${{ env.GLPK_VERSION }}/COPYING /project/LICENSE.glpk &&
+            cp glpk-${{ env.GLPK_VERSION }}/src/amd/COPYING /project/LICENSE.glpk-amd &&
+            cp glpk-${{ env.GLPK_VERSION }}/src/colamd/COPYING /project/LICENSE.glpk-colamd &&
+            cp glpk-${{ env.GLPK_VERSION }}/src/minisat/LICENSE /project/LICENSE.glpk-minisat
+          CIBW_TEST_COMMAND: >-
+            cp {project}/test_swiglpk.py . &&
+            python test_swiglpk.py &&
+            python -c "import importlib.metadata as md;
+            n={p.name for p in md.files('swiglpk') if '.dist-info/licenses/' in str(p)};
+            assert n == {'LICENSE', 'LICENSE.glpk', 'LICENSE.glpk-amd', 'LICENSE.glpk-colamd', 'LICENSE.glpk-minisat'}, n"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: swiglpk-${{ env.SWIGLPK_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc gmp
+          output: rpm-gpl-sources.tar
+
+      # GLPK itself (GPLv3) isn't in the manylinux image's repos - it's fetched
+      # straight from ftp.gnu.org (see build_wheels' CIBW_BEFORE_ALL_LINUX), so
+      # its corresponding source is collected here rather than via the RPM-based
+      # action above.
+      - name: Fetch pinned GLPK source
+        run: |
+          set -euo pipefail
+          curl -fsSLO "https://ftp.gnu.org/gnu/glpk/glpk-${GLPK_VERSION}.tar.gz"
+          echo "${GLPK_SHA256}  glpk-${GLPK_VERSION}.tar.gz" | sha256sum -c -
+
+      - name: Combine GPL sources into one archive
+        run: |
+          set -euo pipefail
+          mkdir gpl-sources
+          tar xf rpm-gpl-sources.tar -C gpl-sources
+          cp "glpk-${GLPK_VERSION}.tar.gz" gpl-sources/
+          tar cf gpl-sources.tar -C gpl-sources .
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: swiglpk-${{ env.SWIGLPK_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish swiglpk ${{ inputs.version || '5.0.13' }}
+    needs: [setup, build_wheels, gpl_sources]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: swiglpk-${{ inputs.version || '5.0.13' }}-*-manylinux_riscv64
+      gpl-sources-artifact: swiglpk-${{ inputs.version || '5.0.13' }}-gpl-sources
+      gpl-sources-description: gcc, gmp, glpk
