@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `publish` job of
+# https://github.com/astrofrog/fast-histogram/blob/v0.14/.github/workflows/main.yml
+name: Build fast-histogram wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'fast-histogram version to build (git tag without the leading v, e.g. 0.14)'
+        required: true
+        default: '0.14'
+  pull_request:
+    paths:
+      - '.github/workflows/build-fast-histogram.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.14' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.14 there.
+  FAST_HISTOGRAM_VERSION: ${{ inputs.version || '0.14' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build fast-histogram ${{ inputs.version || '0.14' }} cp39-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout fast-histogram v${{ env.FAST_HISTOGRAM_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: astrofrog/fast-histogram
+          ref: v${{ env.FAST_HISTOGRAM_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # setup.cfg pins `[bdist_wheel] py_limited_api = cp39` unconditionally,
+          # so one abi3 wheel serves every interpreter it claims; upstream
+          # publishes no free-threaded (cp314t) wheel -- and building under one
+          # would fail outright, since setuptools rejects py_limited_api under
+          # Py_GIL_DISABLED -- so there is no second job here.
+          # Built on cp39 -- the oldest interpreter the abi3 tag claims -- and
+          # re-tested on the newer ones via find_compatible_wheel.
+          CIBW_BUILD: >-
+            cp39-manylinux_riscv64 cp310-manylinux_riscv64
+            cp311-manylinux_riscv64 cp312-manylinux_riscv64
+            cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy is both a build and a runtime requirement, and only our
+          # registry has it for riscv64; only-binary keeps a newer PyPI release
+          # from winning the resolution and then compiling from sdist.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+          CIBW_TEST_REQUIRES: pytest hypothesis[numpy]
+          # Mirrors upstream's own wheel test command (main.yml's publish job).
+          CIBW_TEST_COMMAND: python -m pytest --pyargs fast_histogram -m "not hypothesis"
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert "fast_histogram/_histogram_core.abi3.so" in names, names
+              assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
+              print(whl, "ok")
+          EOF
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fast-histogram-${{ env.FAST_HISTOGRAM_VERSION }}-cp39-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish fast-histogram ${{ inputs.version || '0.14' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: fast-histogram-${{ inputs.version || '0.14' }}-*-manylinux_riscv64
