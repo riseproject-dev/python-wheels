@@ -1,0 +1,110 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/jdrouet/mrml/blob/mrml-python-v0.2.4/.github/workflows/mrml-python-release.yml
+name: Build mrml wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'mrml version to build (git tag without the mrml-python-v prefix, e.g. 0.2.4)'
+        required: true
+        default: '0.2.4'
+  pull_request:
+    paths:
+      - '.github/workflows/build-mrml.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.2.4' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.2.4 there.
+  MRML_VERSION: ${{ inputs.version || '0.2.4' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build mrml ${{ inputs.version || '0.2.4' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # PyO3 extension built per interpreter (upstream ships cp3x-cp3x wheels, no
+        # abi3). lib.rs declares `m.gil_used(false)`, so cp314t is a real target.
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout mrml mrml-python-v${{ env.MRML_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: jdrouet/mrml
+          ref: mrml-python-v${{ env.MRML_VERSION }}
+          persist-credentials: false
+
+      - name: Stage the licence beside mrml-python's pyproject.toml
+        # maturin globs LICEN[CS]E* relative to the pyproject directory, which is
+        # packages/mrml-python here -- upstream's own published wheels carry none.
+        run: cp LICENSE packages/mrml-python/LICENSE
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: packages/mrml-python
+          output-dir: wheelhouse/
+        env:
+          # musllinux is out of reach: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # packages/mrml-python ships no [tool.cibuildwheel], so the Rust toolchain
+          # its maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$PATH:$HOME/.cargo/bin"'
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: packages/mrml-python/tests packages/mrml-python/resources
+          # test_http_loader_success(_allow_everything) and
+          # test_concurrent_http_loader fetch a live gist.githubusercontent.com
+          # fixture; every other test is self-contained.
+          CIBW_TEST_COMMAND: >-
+            cd packages/mrml-python &&
+            python -m pytest tests --deselect tests/test_loader.py::test_http_loader_success
+            --deselect tests/test_loader.py::test_http_loader_success_allow_everything
+            --deselect tests/test_thread_safety.py::test_concurrent_http_loader
+
+      - name: Check the extension and licence made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("mrml/mrml.") and n.endswith(".so") for n in names), names
+              assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mrml-${{ env.MRML_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish mrml ${{ inputs.version || '0.2.4' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: mrml-${{ inputs.version || '0.2.4' }}-*-manylinux_riscv64
