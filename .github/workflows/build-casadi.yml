@@ -1,0 +1,182 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Mirrors the Linux core of upstream's .github/workflows/binaries.yml `build_flags`
+# (WITH_IPOPT/WITH_MUMPS/WITH_QPOASES + threading/GIL flags, used unmodified for every
+# platform upstream ships). Upstream cross-compiles from dockcross images it maintains
+# at ghcr.io/jgillis/<target> (no riscv64 target exists there); this workflow instead
+# builds natively in the riscv64 manylinux image with the same flags. It also follows
+# upstream's own single-wheel-per-release-line approach: casadi builds one abi3 wheel
+# (WITH_PYTHON_LIMITED_API) against its oldest supported interpreter and tests it on
+# every newer one, rather than a per-interpreter matrix.
+name: Build casadi wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'casadi version to build (git tag, e.g. 3.8.0)'
+        required: true
+        default: '3.8.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-casadi.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '3.8.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CASADI_VERSION: ${{ inputs.version || '3.8.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build casadi ${{ inputs.version || '3.8.0' }} cp312-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    steps:
+      - name: Checkout casadi/casadi ${{ env.CASADI_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: casadi/casadi
+          ref: ${{ env.CASADI_VERSION }}
+          path: casadi
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Build casadi core and cp312-abi3 wheel
+        run: |
+          mkdir -p output
+          docker run -i --rm \
+            -v "$PWD/casadi:/casadi" \
+            -v "$PWD/output:/output" \
+            -e CASADI_VERSION \
+            "$MANYLINUX_RISCV64_IMAGE" bash -s <<'CASADI_BUILD_EOF'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+
+          CASADI_VERSION="${CASADI_VERSION:?must be set, e.g. 3.8.0}"
+          PY=/opt/python/cp312-cp312/bin/python
+
+          # swig ships preinstalled at /usr/local/bin in this image; only these are missing.
+          # wget: CasADi's metis-external ExternalProject_Add patch step shells out to wget
+          # (not curl) to fetch a patch file; the image only has curl (gotcha 289).
+          dnf install -y --setopt=install_weak_deps=False openblas-devel lapack-devel blas-devel wget
+          "$PY" -m pip install -U --no-cache-dir --extra-index-url https://pypi.riseproject.dev/simple/ \
+            --only-binary=numpy numpy
+
+          cd /casadi
+          # Unix Makefiles, not Ninja: CasADi's ExternalProject_Add calls (ipopt, mumps,
+          # metis) don't declare BYPRODUCTS, so Ninja's stricter DAG check fails with
+          # "missing and no known rule to make it" on their externally-built .so files.
+          #
+          # CMAKE_POSITION_INDEPENDENT_CODE=ON: CasADi's own top-level CMakeLists.txt only
+          # adds -fPIC to CMAKE_C/CXX_FLAGS when CMAKE_SYSTEM_PROCESSOR is x86_64 or aarch64
+          # (its "-fPIC" section), so on riscv64 its vendored casadi-sundials static library
+          # builds without -fPIC and fails to link into libcasadi_sundials_common.so /
+          # libcasadi_rootfinder_kinsol.so ("relocation R_RISCV_JAL ... recompile with
+          # -fPIC"). Setting this CMake variable forces PIC on every target regardless of
+          # that arch allowlist (gotcha 294).
+          cmake -Bbuild -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/tmp/install \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DWITH_SELFCONTAINED=ON -DWITH_BUILD_REQUIRED=ON -DWITH_THREAD=ON -DWITH_THREADSAFE_SYMBOLICS=ON \
+            -DWITH_PYTHON_GIL_RELEASE=ON \
+            -DWITH_PYTHON=ON -DPython3_EXECUTABLE="$PY" -DPYTHON_EXECUTABLE="$PY" \
+            -DWITH_PYTHON_LIMITED_API=ON -DPYTHON_LIMITED_API_TARGET=3.12 \
+            -DWITH_IPOPT=ON -DWITH_BUILD_IPOPT=ON \
+            -DWITH_MUMPS=ON -DWITH_BUILD_MUMPS=ON -DWITH_BUILD_METIS=ON \
+            -DWITH_LAPACK=ON -DWITH_QPOASES=ON \
+            -H.
+          cmake --build build --target install -j "$(nproc)"
+
+          wheel=$("$PY" misc/create_wheel_local.py "$CASADI_VERSION" 312 linux 64 manylinux_2_39-riscv64 /tmp/install --abi3)
+          mv "$wheel" /output/
+
+          "$PY" -m pip install -q abi3audit
+          "$PY" -m abi3audit --strict --report "/output/$wheel"
+          ls -la /output
+          CASADI_BUILD_EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: casadi-${{ env.CASADI_VERSION }}-cp312-abi3-manylinux_riscv64
+          path: output/*.whl
+          if-no-files-found: error
+
+      - name: Test casadi wheel
+        run: |
+          docker run -i --rm \
+            -v "$PWD/casadi:/casadi" \
+            -v "$PWD/output:/output" \
+            "$MANYLINUX_RISCV64_IMAGE" bash -s <<'CASADI_TEST_EOF'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+
+          # abi3: same wheel installs on every interpreter its tag claims (upstream's own
+          # test-python job reuses one build across cp311/cp313/cp314 the same way).
+          for tag in cp312-cp312 cp313-cp313 cp314-cp314; do
+            PY="/opt/python/$tag/bin/python"
+            "$PY" -m pip install --extra-index-url https://pypi.riseproject.dev/simple/ \
+              --only-binary=numpy,scipy,pandas numpy scipy pandas looseversion
+            "$PY" -m pip install /output/casadi-*.whl
+
+            # Deselect tests that depend on bindings generated by CasADi's own patched
+            # SWIG fork (jaeandersson/swig@98c1840, built into ghcr.io/casadi/ci-swig by
+            # upstream's misc/Dockerfile.swig) rather than the stock SWIG this image
+            # ships: -stubs (.pyi) generation and a %feature("customdoc") codegen path
+            # that changes overload-dispatch/operator-NotImplemented fallback and merges
+            # base-class option docs into derived docstrings. Confirmed by diffing the
+            # fork against swig/swig and reading upstream's own doc/error-message output;
+            # none of these are riscv64 codegen bugs (gotcha 307).
+            (cd /casadi/test/python && "$PY" - <<'PYEOF'
+          import sys
+          import unittest
+
+          import alltests
+
+          DESELECTED = {
+              "pyright_stubs.TypingTests.test_stubs_installed",
+              "typemaps.typemaptests.test_issue4268",
+              "typemaps.typemaptests.test_OUTPUT",
+              "nlp.NLPtests.test_simple_bounds_detect",
+              "sparsity.Sparsitytests.test_get_ccs",
+              "matrix.Matrixtests.test_mul3_issue_1465",
+              "mx.MXtests.test_extract",
+              "misc.Misctests.test_doc",
+          }
+
+          def prune(suite):
+              kept = unittest.TestSuite()
+              for t in suite:
+                  if isinstance(t, unittest.TestSuite):
+                      sub = prune(t)
+                      if sub.countTestCases():
+                          kept.addTest(sub)
+                  elif t.id() not in DESELECTED:
+                      kept.addTest(t)
+              return kept
+
+          result = unittest.TextTestRunner(verbosity=2).run(prune(alltests.build_suite()))
+          sys.exit(0 if result.wasSuccessful() else 1)
+          PYEOF
+            )
+          done
+          CASADI_TEST_EOF
+
+  publish:
+    name: Publish casadi ${{ inputs.version || '3.8.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: casadi-${{ inputs.version || '3.8.0' }}-*-manylinux_riscv64
