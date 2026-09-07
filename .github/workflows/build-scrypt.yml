@@ -1,0 +1,96 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/holgern/py-scrypt/blob/v0.9.4/.github/workflows/wheels_linux.yml
+name: Build scrypt wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'scrypt version/tag to build (e.g. v0.9.4)'
+        required: true
+        default: 'v0.9.4'
+  pull_request:
+    paths:
+      - '.github/workflows/build-scrypt.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || 'v0.9.4' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  SCRYPT_VERSION: ${{ inputs.version || 'v0.9.4' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build scrypt ${{ inputs.version || 'v0.9.4' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout scrypt ${{ env.SCRYPT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: holgern/py-scrypt
+          ref: ${{ env.SCRYPT_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # setup.py links libcrypto (openssl/aes.h software fallback path);
+          # openssl-devel isn't in the base image. auditwheel then vendors its
+          # runtime .so, so its licence has to travel with the wheel too, along
+          # with the vendored scrypt-1.3.3 C library's own COPYRIGHT - neither
+          # is covered by the top-level LICENSE (different copyright holders).
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf -y install openssl-devel &&
+            cp /usr/share/licenses/openssl-libs/LICENSE.txt {project}/LICENSE.openssl &&
+            cp {project}/scrypt-1.3.3/COPYRIGHT {project}/LICENSE.scrypt-1.3.3
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: pytest --pyargs scrypt
+
+      - name: Check the wheel ships the extension and every licence
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("_scrypt.cpython") and n.endswith(".so")
+                         for n in names), whl
+              licences = {n.rsplit("/", 1)[1]
+                          for n in names if ".dist-info/licenses/" in n} - {""}
+              assert licences == {"LICENSE", "LICENSE.openssl", "LICENSE.scrypt-1.3.3"}, (whl, licences)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: scrypt-${{ env.SCRYPT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish scrypt ${{ inputs.version || 'v0.9.4' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: scrypt-${{ inputs.version || 'v0.9.4' }}-*-manylinux_riscv64
