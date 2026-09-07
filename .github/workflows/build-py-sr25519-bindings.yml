@@ -1,0 +1,154 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux`/`sdist` jobs of
+# https://github.com/polkascan/py-sr25519-bindings/blob/v0.2.4/.github/workflows/CI.yml
+name: Build py-sr25519-bindings wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'py-sr25519-bindings version to build (git tag without the v prefix, e.g. 0.2.4)'
+        required: true
+        default: '0.2.4'
+  pull_request:
+    paths:
+      - '.github/workflows/build-py-sr25519-bindings.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.2.4' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.2.4 there.
+  PY_SR25519_BINDINGS_VERSION: ${{ inputs.version || '0.2.4' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  python_sdist:
+    needs: [setup]
+    runs-on: ubuntu-latest
+    outputs:
+      sdist_artifact_name: ${{ steps.build_sdist.outputs.sdist_artifact_name }}
+      package_version: ${{ steps.build_sdist.outputs.package_version }}
+    steps:
+      - name: Checkout py-sr25519-bindings v${{ env.PY_SR25519_BINDINGS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: polkascan/py-sr25519-bindings
+          ref: v${{ env.PY_SR25519_BINDINGS_VERSION }}
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build sdist
+        id: build_sdist
+        run: |
+          set -euo pipefail
+          rm -rf dist
+
+          uv pip install 'maturin>=1.8.0,<2.0.0' build
+          python -m build --sdist --outdir dist
+
+          sdist_name="$(ls dist)"
+          {
+            echo "sdist_artifact_name=${sdist_name}"
+            echo "package_version=$(echo "${sdist_name}" | sed -En 's/py_sr25519_bindings-(.+)\.tar\.gz/\1/p')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ steps.build_sdist.outputs.sdist_artifact_name }}
+          path: dist/${{ steps.build_sdist.outputs.sdist_artifact_name }}
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, python_sdist]
+    name: Build py-sr25519-bindings ${{ inputs.version || '0.2.4' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # py-sr25519-bindings' pyo3 dependency has a plain
+        # `features = ["extension-module"]` (no abi3-pyNN), so every interpreter
+        # needs its own build.
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Fetch sdist artifact
+        id: fetch_sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ needs.python_sdist.outputs.sdist_artifact_name }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build and test wheel
+        env:
+          CIBW_ARCHS: riscv64
+          # musllinux can't build: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # py-sr25519-bindings ships no [tool.cibuildwheel], so the Rust toolchain
+          # its maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$PATH:$HOME/.cargo/bin"'
+          # No python-source in pyproject.toml, so maturin ships an auto-generated
+          # sr25519/__init__.py shim around the compiled sr25519/sr25519.*.so
+          # submodule - probe that submodule, not the top-level import. Test
+          # vectors are upstream's own src/lib.rs unit tests (TEST_SEED etc).
+          CIBW_TEST_COMMAND: >-
+            python -c "import sr25519.sr25519 as m, importlib.metadata as md;
+            assert m.__file__.endswith('.so'), m.__file__;
+            assert any(str(p).endswith('licenses/LICENSE') for p in md.files('py_sr25519_bindings'));
+            import sr25519;
+            seed = bytes.fromhex('f30eb58ad9bde4a702da3c723709cbfaf7030b22d5e4d16bcbf733c9c09bf6bd');
+            pub, priv = sr25519.pair_from_seed(seed);
+            assert pub == bytes.fromhex('0e563c7dcb4446c0ed7e7a9d9f0a3a3d41c8767a87f205bd48fb8ef5db066b6b'), pub.hex();
+            sig = sr25519.sign((pub, priv), b'test message');
+            assert sr25519.verify(sig, b'test message', pub);
+            assert not sr25519.verify(sig, b'tampered', pub);
+            print('sr25519 OK')"
+        run: |
+          set -euo pipefail
+          mkdir py-sr25519-bindings
+          tar zxf "${{ steps.fetch_sdist.outputs.download-path }}/${{ needs.python_sdist.outputs.sdist_artifact_name }}" \
+            --strip-components=1 -C py-sr25519-bindings
+          uv pip install --upgrade cibuildwheel
+          python -m cibuildwheel --output-dir wheelhouse ./py-sr25519-bindings
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: py-sr25519-bindings-${{ env.PY_SR25519_BINDINGS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish py-sr25519-bindings ${{ inputs.version || '0.2.4' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: py-sr25519-bindings-${{ inputs.version || '0.2.4' }}-*-manylinux_riscv64
