@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build:
+#   https://github.com/m1stadev/pylzss/blob/v0.3.8/.github/workflows/pypi-build-publish.yml
+name: Build pylzss wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pylzss version/tag to build (git tag without leading v, e.g. 0.3.8)'
+        required: true
+        default: '0.3.8'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pylzss.yml'
+      - 'patches/pylzss/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.3.8' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYLZSS_VERSION: ${{ inputs.version || '0.3.8' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pylzss ${{ inputs.version || '0.3.8' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        libc: [manylinux, musllinux]
+
+    steps:
+      - name: Checkout pylzss v${{ env.PYLZSS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: m1stadev/pylzss
+          ref: v${{ env.PYLZSS_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # py3c's MIT notice lives only as a header comment (src/include/py3c/*),
+      # not a discoverable LICEN[CS]E*/COPYING* file, so setuptools' default
+      # root glob never ships it - see the patch commit message.
+      - name: Patch pylzss source
+        run: git apply python-wheels/patches/pylzss/${{ env.PYLZSS_VERSION }}/00*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # Upstream's own test.py calls lzss.encode()/decode(), which the
+          # extension has never exported (it's compress()/decompress() - see
+          # src/pylzss.c's pylzss_methods); neither of upstream's CI workflows
+          # actually run test.py, so the mismatch went unnoticed there. Test
+          # the real API with a round trip instead.
+          CIBW_TEST_COMMAND: >-
+            python -c "import lzss, importlib.metadata;
+            assert lzss.__file__.endswith(('.so', '.pyd')), lzss.__file__;
+            data = b'Lorem ipsum dolor sit amet, consectetur adipisicing elit.' * 50;
+            assert lzss.decompress(lzss.compress(data)) == data;
+            licenses = {p.name for p in importlib.metadata.files('pylzss') if '.dist-info/licenses/' in str(p)};
+            assert licenses == {'COPYING', 'COPYING.LESSER', 'LICENSE.py3c'}, licenses"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pylzss-${{ env.PYLZSS_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pylzss ${{ inputs.version || '0.3.8' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pylzss-${{ inputs.version || '0.3.8' }}-*riscv64
