@@ -1,0 +1,45 @@
+From 8faa680140e0824c716c234b1e1401d85cd49579 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 7 Sep 2026 14:18:17 +0200
+Subject: [PATCH] test_set_consistency: compare fastdump() by decompressed
+ content, not exact zlib bytes
+
+fastdump() zlib-compresses intbitset's internal representation via the
+stdlib zlib module (intbitset.pyx: return zlib.compress(tmp)), and
+test_set_consistency hardcodes the exact compressed byte string it expects
+back. deflate does not guarantee identical output across zlib builds - only
+that decompressing it recovers the original bytes - so the test is only
+stable on whatever zlib build produced the fixture data. manylinux_riscv64
+(quay.io/pypa/manylinux_2_39_riscv64) links zlib-ng-compat, which compresses
+this input to a functionally identical but byte-different stream, failing
+the raw equality on every interpreter (cp313/cp314/cp314t all hit the same
+single assertion, 13929/13930 tests otherwise passing).
+
+Comparing zlib.decompress() of both sides keeps the real check - that
+fastdump()'s output decodes back to the expected uncompressed
+representation - without assuming a specific zlib build's compression
+output. intbitset1 == intbitset3 and intbitset2 == intbitset4 (parsing the
+same hardcoded dumped bytes back into a set) already cover fastload()'s
+correctness independently.
+
+Upstream-Status: To upstream [not submitted from this automated port run; needs a pull request against inveniosoftware-contrib/intbitset]
+---
+ tests/test_intbitset.py | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/tests/test_intbitset.py b/tests/test_intbitset.py
+index 6418b38..c44b0b8 100644
+--- a/tests/test_intbitset.py
++++ b/tests/test_intbitset.py
+@@ -762,9 +762,9 @@ def test_set_consistency(original, dumped, dumped_trailing_bits):
+     check_bitset(intbitset3)
+     check_bitset(intbitset4)
+ 
+-    assert intbitset1.fastdump() == dumped
++    assert zlib.decompress(intbitset1.fastdump()) == zlib.decompress(dumped)
+     assert intbitset1 == intbitset3
+-    assert intbitset2.fastdump() == dumped_trailing_bits
++    assert zlib.decompress(intbitset2.fastdump()) == zlib.decompress(dumped_trailing_bits)
+     assert intbitset2 == intbitset4
+ 
+ 
