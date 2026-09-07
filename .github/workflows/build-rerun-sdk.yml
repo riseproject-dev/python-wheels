@@ -65,11 +65,16 @@ jobs:
       # riscv64: datafusion, lance, tonic/tokio, hdf5-pure, ...) and builds
       # against its sibling crates, so the checkout root has to be the
       # workspace root, not rerun_py itself.
+      # lfs: true is required: the test suite's binary fixtures (HDF5, MP4,
+      # ...) are Git LFS pointers without it, and get fed straight into their
+      # native parsers -- "HDF5 signature not found" / "MP4 ... box with a
+      # larger size than it" is what that looks like from the Python side.
       - name: Checkout rerun ${{ env.RERUN_SDK_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: rerun-io/rerun
           ref: ${{ env.RERUN_SDK_VERSION }}
+          lfs: true
           persist-credentials: false
 
       - name: Checkout python-wheels
@@ -169,22 +174,33 @@ jobs:
             syrupy==5.0.0 inline-snapshot==0.31.1 semver>=3.0,<3.1 tomli==2.0.1
           # test-sources resolves against the checkout root, not package-dir.
           # tests/assets is the workspace-level fixture dir test_asset3d.py
-          # reads via `Path(__file__).parents[3] / "tests" / "assets"`.
-          CIBW_TEST_SOURCES: rerun_py/tests rerun_py/pyproject.toml tests/assets
+          # reads via `Path(__file__).parents[3] / "tests" / "assets"`; the
+          # importer_mcap assets and the animated_urdf example data are the
+          # same shape for test_mcap_reader.py / test_urdf_tree.py. Cargo.toml
+          # is test_version.py's own fixture (it parses the workspace version
+          # straight out of it).
+          CIBW_TEST_SOURCES: >-
+            rerun_py/tests rerun_py/pyproject.toml tests/assets
+            crates/store/re_importer/src/importer_mcap/tests/assets
+            examples/rust/animated_urdf/data Cargo.toml
           # e2e_redap_tests needs the "server" Cargo feature (not built, see
           # the scope note above) to start its local catalog server.
           # api_sandbox mixes in drafts of a future, unreleased API. Both are
           # upstream-labelled sandboxes/integration suites, not the SDK's
           # regression tests. test_headless_viewer.py spawns the (unbuilt)
-          # rerun-cli binary; the remaining files all reach
+          # rerun-cli binary, same as test_rrd_reader_multi_store.py's
+          # session fixture (`rerun rrd merge`). test_server.py needs the
+          # `datafusion` Python package (no riscv64 wheel anywhere, same as
+          # test_datafusion_utils.py); the remaining ignored files all reach
           # rerun.experimental.dataloader, whose decoders import torchvision
-          # or datafusion (both dropped from CIBW_TEST_REQUIRES above, no
-          # riscv64 wheel anywhere). `-o markers=local_only` registers the
+          # or datafusion transitively. `-o markers=local_only` registers the
           # mark e2e_redap_tests/conftest.py normally defines -- pytest only
           # loads conftest.py files under the paths it actually collects, so
           # excluding that directory drops the registration too and
           # `filterwarnings = error` turns the resulting "unknown mark"
-          # warning into a collection failure.
+          # warning into a collection failure. The deselected tests are
+          # single failures in otherwise-passing files, for the same three
+          # reasons (rerun-cli, av, datafusion).
           CIBW_TEST_COMMAND: >-
             cd rerun_py &&
             python -c "import rerun_bindings.rerun_bindings as m; assert m.__file__.endswith('.so'), m.__file__" &&
@@ -195,6 +211,7 @@ jobs:
             --ignore=tests/integration/test_dataloader_video.py
             --ignore=tests/integration/test_dataloader_video_codecs.py
             --ignore=tests/integration/test_chunk_store_reader.py
+            --ignore=tests/integration/test_rrd_reader_multi_store.py
             --ignore=tests/unit/test_dataloader_decoder_helpers.py
             --ignore=tests/unit/test_dataloader_manifest.py
             --ignore=tests/unit/test_dataloader_query_indices.py
@@ -202,6 +219,12 @@ jobs:
             --ignore=tests/unit/test_sample_index.py
             --ignore=tests/unit/test_datafusion_utils.py
             --ignore=tests/unit/test_viewer_client.py
+            --ignore=tests/unit/test_server.py
+            --deselect=tests/integration/test_chunk_store.py::test_collect_optimize_video_stream_summary
+            --deselect=tests/integration/test_lazy_chunk_stream.py::test_identity_roundtrip
+            --deselect=tests/unit/test_binary_stream.py::test_binary_stream
+            --deselect=tests/unit/test_multi_stream.py::test_isolated_streams
+            --deselect=tests/unit/test_send_dataframe.py::test_send_dataframe_roundtrip
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
