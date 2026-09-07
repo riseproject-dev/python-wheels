@@ -1,0 +1,173 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux`/`sdist` jobs of
+# https://github.com/kyutai-labs/sphn/blob/0.2.1/.github/workflows/CI.yml
+name: Build sphn wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'sphn version to build (git tag, e.g. 0.2.1)'
+        required: true
+        default: '0.2.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-sphn.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.2.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.2.1 there.
+  SPHN_VERSION: ${{ inputs.version || '0.2.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  python_sdist:
+    needs: [setup]
+    runs-on: ubuntu-latest
+    outputs:
+      sdist_artifact_name: ${{ steps.build_sdist.outputs.sdist_artifact_name }}
+      package_version: ${{ steps.build_sdist.outputs.package_version }}
+    steps:
+      - name: Checkout sphn ${{ env.SPHN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: kyutai-labs/sphn
+          ref: ${{ env.SPHN_VERSION }}
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build sdist
+        id: build_sdist
+        run: |
+          set -euo pipefail
+          rm -rf dist
+
+          uv pip install 'maturin>=1.4,<2.0' build
+          python -m build --sdist --outdir dist
+
+          sdist_name="$(ls dist)"
+          {
+            echo "sdist_artifact_name=${sdist_name}"
+            echo "package_version=$(echo "${sdist_name}" | sed -En 's/sphn-(.+)\.tar\.gz/\1/p')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ steps.build_sdist.outputs.sdist_artifact_name }}
+          path: dist/${{ steps.build_sdist.outputs.sdist_artifact_name }}
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, python_sdist]
+    name: Build sphn ${{ inputs.version || '0.2.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # sphn's pyo3 dependency has a plain `features = ["extension-module"]`
+        # (no abi3-pyNN), so every interpreter needs its own build.
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Fetch sdist artifact
+        id: fetch_sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ needs.python_sdist.outputs.sdist_artifact_name }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build and test wheel
+        env:
+          CIBW_ARCHS: riscv64
+          # musllinux can't build: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # sphn ships no [tool.cibuildwheel], so the Rust toolchain its
+          # maturin backend needs is installed in-container here. audiopus_sys's
+          # vendored libopus build (see CIBW_ENVIRONMENT_LINUX) installs to a
+          # GNUInstallDirs-computed libdir; that default is `lib64` on any non-Debian/
+          # Alpine/Arch 64-bit Linux (manylinux's Rocky base included) unless one of
+          # those distro marker files exists, and audiopus_sys's build.rs only ever
+          # searches `<prefix>/lib`, so a real Debian/Alpine/Arch marker keeps it there.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
+            touch /etc/debian_version
+          # The isolated build env's `cmake` (a build-system dependency) only ships
+          # riscv64 wheels at 4.x on PyPI, whose removed pre-3.5 compatibility mode
+          # rejects libopus's own CMakeLists.txt (CLAUDE.md gotcha 207).
+          # LIBOPUS_STATIC/OPUS_STATIC/LIBOPUS_NO_PKG/OPUS_NO_PKG mirror upstream's
+          # own CI.yml.
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            CMAKE_POLICY_VERSION_MINIMUM=3.5
+            LIBOPUS_STATIC=1
+            OPUS_STATIC=1
+            LIBOPUS_NO_PKG=1
+            OPUS_NO_PKG=1
+          CIBW_TEST_REQUIRES: numpy
+          CIBW_TEST_COMMAND: >-
+            python -c "import numpy as np, sphn, importlib.metadata as md, tempfile, os;
+            assert sphn.sphn.__file__.endswith('.so'), sphn.sphn.__file__;
+            assert any(str(p).endswith('licenses/LICENSE') for p in md.files('sphn'));
+            d = tempfile.mkdtemp();
+            sr = 48000;
+            t = np.linspace(0, 1.0, sr, endpoint=False, dtype=np.float32);
+            data = (0.1 * np.sin(2 * np.pi * 440 * t)).astype(np.float32);
+            wav_path = os.path.join(d, 'test.wav');
+            sphn.write_wav(wav_path, data, sr);
+            rt, rt_sr = sphn.read(wav_path);
+            assert rt_sr == sr and rt.shape[-1] == data.shape[-1];
+            opus_path = os.path.join(d, 'test.opus');
+            sphn.write_opus(opus_path, data[None, :], sr);
+            op_data, op_sr = sphn.read_opus(opus_path);
+            assert op_sr == 48000;
+            res = sphn.resample(data[None, :], sr, 16000);
+            assert res.shape[-1] > 0"
+        run: |
+          set -euo pipefail
+          mkdir sphn
+          tar zxf "${{ steps.fetch_sdist.outputs.download-path }}/${{ needs.python_sdist.outputs.sdist_artifact_name }}" \
+            --strip-components=1 -C sphn
+          uv pip install --upgrade cibuildwheel
+          python -m cibuildwheel --output-dir wheelhouse ./sphn
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sphn-${{ env.SPHN_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish sphn ${{ inputs.version || '0.2.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: sphn-${{ inputs.version || '0.2.1' }}-*-manylinux_riscv64
