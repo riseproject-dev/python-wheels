@@ -53,6 +53,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
 - **322** — A pyo3 release old enough to hand-roll CPython's legacy `PyUnicode_KIND`/
   `PyUnicode_DATA` macros as raw struct-offset reads can compile clean against a newer
   CPython and still segfault the first time a string crosses the FFI boundary.
+- **325** — A maturin `[tool.maturin] include` list is scoped to the wheel, not the sdist,
+  so omitting `tests/` there ships a tests-less sdist even though every port needs one.
 
 ---
 
@@ -926,3 +928,32 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       exclusion gotcha 306 already covers, and the PR's **Matrix** line should name both reasons
       since they are independent (no abi3 feature, `Py_GIL_DISABLED` absent, *and* this
       Unicode-layout break all apply to the same crate).
+
+325. **A maturin `[tool.maturin] include` list is scoped to the *wheel*, not the sdist — a
+    project whose list omits `tests/` ships a tests-less sdist even though the sdist->bdist
+    shape (gotcha 6) needs one (the typeid-python case; see `build-typeid-python.yml`).**
+    typeid-python's `pyproject.toml` declares `include = ["LICENSE", "README.md",
+    "typeid/**", "rust-base32/**"]` with no `tests/**` entry; `python -m build --sdist`
+    honors that list for the sdist too, not just the wheel, so `tar tzf` on the built
+    tarball shows zero `tests/` matches. cibuildwheel's build and install steps succeed
+    normally — the failure only surfaces at the test step, and only because the extracted
+    sdist is what `CIBW_TEST_COMMAND` points at: `ERROR: file or directory not found:
+    /project/typeid-python/tests`. Gotcha 104 already covers the general fix (check out the
+    tag *alongside* the extracted sdist, at cibuildwheel's cwd, and stage `tests/` from
+    there via `CIBW_TEST_SOURCES`), but a maturin project has a simpler option when it
+    applies: **the sdist job existed only to guard against gotcha 10's floating-dependency
+    trap, and that trap needs an upstream-gitignored `Cargo.lock`.** When `Cargo.lock` is
+    committed to git instead (`git show <tag>:rust-base32/Cargo.lock` succeeds), there is
+    nothing left for the sdist step to protect against, so drop the whole `python_sdist` job
+    and build straight from the git checkout (`build-fastnanoid.yml`'s shape) — `tests/` is
+    simply present there, no `CIBW_TEST_SOURCES` staging needed either.
+    - **Two greps settle which fix applies before writing the workflow**: `git show
+      <tag>:<manifest-dir>/Cargo.lock >/dev/null` (present -> build-from-checkout is safe
+      and simplest) and `grep -A5 '\[tool.maturin\]' pyproject.toml` for an `include` list
+      that omits `tests/**` (absent entirely, or a `tests/**` entry present, means the
+      sdist already carries tests and neither fix is needed).
+    - **Confirm from the artifact, not from the pyproject read alone.** `gh run download
+      <run-id> -n <pkg>-<version>.tar.gz && tar tzf *.tar.gz | grep -c tests/` on the
+      actual sdist your `python_sdist` job produced is what turns "the include list looks
+      like it might exclude tests" into certainty, cheaper than a second failed riscv64
+      matrix leg.

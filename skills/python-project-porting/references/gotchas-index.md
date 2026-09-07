@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (317 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (316 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -172,6 +172,10 @@ The porting gotchas (317 of them) live in [`references/gotchas/`](gotchas/), spl
   `PyUnicode_DATA` macros as raw struct-offset reads can compile clean against a newer
   CPython and still segfault the first time a string crosses the FFI boundary — bisect by
   interpreter in the matrix (a segfault on only the newest leg is the diagnosis) and drop it.
+- **325** — A maturin `[tool.maturin] include` list is scoped to the wheel, not the sdist,
+  so a project whose list omits `tests/` ships a tests-less sdist; when the project's
+  `Cargo.lock` is already committed (no gotcha 10 floating-deps risk), drop the sdist job
+  and build straight from the git checkout instead of staging tests via gotcha 104.
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 

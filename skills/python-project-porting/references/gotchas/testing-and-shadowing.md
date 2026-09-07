@@ -197,6 +197,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
       second reason to matter. lightgbm's tests read their training data as
       `Path(__file__).parents[2] / "examples" / ...`, so `CIBW_TEST_SOURCES: tests examples`
       is what reproduces the checkout's layout inside the otherwise empty `test_cwd`.
+    - **A maturin project has a cheaper option when the only reason for a separate sdist job
+      was gotcha 10's floating-`Cargo.lock` trap** — gotcha 325 drops the sdist job (and this
+      staging) entirely and builds from the checkout directly once `Cargo.lock` is already
+      committed to git.
     - **Shadowing answers itself in this shape**: neither the checkout root nor the sdist's
       importable package reaches `test_cwd`, so `import <pkg>` can only resolve to the
       installed wheel. Nothing from gotchas 21/25 is needed.
