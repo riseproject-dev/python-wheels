@@ -29,6 +29,7 @@ env:
   GPIOD_VERSION: ${{ inputs.version || '2.5.0' }}
   LIBGPIOD_VERSION: ${{ inputs.libgpiod_version || '2.3' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
 
 jobs:
   setup:
@@ -36,13 +37,14 @@ jobs:
 
   build_wheels:
     needs: [setup]
-    name: Build gpiod ${{ inputs.version || '2.5.0' }} ${{ matrix.python }}-manylinux_riscv64
+    name: Build gpiod ${{ inputs.version || '2.5.0' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         python: ["cp312", "cp313", "cp314", "cp314t"]
+        libc: [manylinux, musllinux]
 
     steps:
       # The Python bindings live in git.kernel.org/libgpiod, tagged
@@ -59,12 +61,17 @@ jobs:
           package-dir: gpiod-src/bindings/python
           output-dir: wheelhouse/
         env:
-          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
           # Sets LIBGPIOD_VERSION inside the build container, where setup.py's
           # fetch_tarball wrapper downloads and vendors libgpiod's lib/include
           # sources before compiling gpiod._ext -- no system libgpiod needed.
           CIBW_ENVIRONMENT: LIBGPIOD_VERSION=${{ env.LIBGPIOD_VERSION }}
+          # lib/uapi/gpio.h pulls in the system linux/const.h,linux/ioctl.h,
+          # linux/types.h; musllinux's Alpine base needs linux-headers for
+          # those, manylinux already has them via glibc-devel.
+          CIBW_BEFORE_ALL_LINUX: (command -v apk && apk add linux-headers) || true
           # Upstream's own generate_pypi_artifacts.sh builds wheels with no test
           # step at all: the real test suite needs a gpio-sim kernel module and
           # the separately-built libgpiosim helper library (tests/gpiosim/,
@@ -87,7 +94,7 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: gpiod-${{ env.GPIOD_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          name: gpiod-${{ env.GPIOD_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
           path: wheelhouse/*.whl
           if-no-files-found: error
 
@@ -99,4 +106,4 @@ jobs:
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: gpiod-${{ inputs.version || '2.5.0' }}-*-manylinux_riscv64
+      artifact-pattern: gpiod-${{ inputs.version || '2.5.0' }}-*riscv64
