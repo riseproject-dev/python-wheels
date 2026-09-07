@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/pmneila/PyMaxflow/blob/v1.3.2/.github/workflows/maxflow-deployment.yml
+name: Build pymaxflow wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pymaxflow version to build (git tag without leading v, e.g. 1.3.2)'
+        required: true
+        default: '1.3.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pymaxflow.yml'
+      - 'patches/pymaxflow/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.3.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.3.2 there.
+  PYMAXFLOW_VERSION: ${{ inputs.version || '1.3.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pymaxflow ${{ inputs.version || '1.3.2' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # cp314t dropped: Cython has no free-threaded wheel on any platform yet,
+        # so there is nothing to build the extension with.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+
+    steps:
+      - name: Checkout PyMaxflow v${{ env.PYMAXFLOW_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pmneila/PyMaxflow
+          ref: v${{ env.PYMAXFLOW_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pymaxflow source
+        run: git apply python-wheels/patches/pymaxflow/${{ env.PYMAXFLOW_VERSION }}/*.patch
+
+      # The core solver (maxflow/src/core/) is a separate GPLv3-licensed
+      # vendored library with its own copyright notice; it is compiled
+      # straight into the extension but never installed as package data.
+      - name: Stage the vendored core solver's licence notice
+        run: cp maxflow/src/core/README.TXT LICENSE.maxflow-core
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy is both a build and a runtime requirement, and only our
+          # registry has it for riscv64; Cython has no public riscv64 wheel
+          # anywhere either, so it comes from the registry too.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+          CIBW_TEST_REQUIRES: pytest imageio networkx
+          CIBW_TEST_SOURCES: test_maxflow.py examples
+          CIBW_TEST_COMMAND: python -m pytest test_maxflow.py
+
+      - name: Check the wheel ships the extension and both licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("maxflow/_maxflow.") and n.endswith(".so") for n in names), whl
+              licences = {n.rsplit("/", 1)[1]
+                          for n in names if ".dist-info/licenses/" in n} - {""}
+              assert licences == {"LICENSE", "LICENSE.maxflow-core"}, (whl, licences)
+              print(whl, "ok")
+          EOF
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pymaxflow-${{ env.PYMAXFLOW_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pymaxflow ${{ inputs.version || '1.3.2' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pymaxflow-${{ inputs.version || '1.3.2' }}-*-manylinux_riscv64
