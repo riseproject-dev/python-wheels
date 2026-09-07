@@ -1,0 +1,151 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build:
+#   https://github.com/astrorigin/pyswisseph/blob/v2.10.03.2/.github/workflows/build.yml
+name: Build pyswisseph wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pyswisseph version to build (e.g. 2.10.3.2)'
+        required: true
+        default: '2.10.3.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pyswisseph.yml'
+      - 'patches/pyswisseph/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.10.3.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYSWISSEPH_VERSION: ${{ inputs.version || '2.10.3.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pyswisseph ${{ inputs.version || '2.10.3.2' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        libc: [manylinux, musllinux]
+
+    steps:
+      # Git tags zero-pad the middle (swisseph library) version segment
+      # that the PyPI version doesn't (v2.10.03.2 vs. 2.10.3.2).
+      - name: Compute upstream git tag
+        id: tag
+        run: |
+          set -euo pipefail
+          IFS='.' read -r major minor patch build <<< "${PYSWISSEPH_VERSION}"
+          echo "value=v${major}.$(printf '%02d' "${minor}").${patch}.${build}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout pyswisseph ${{ steps.tag.outputs.value }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: astrorigin/pyswisseph
+          ref: ${{ steps.tag.outputs.value }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pyswisseph source
+        run: git apply python-wheels/patches/pyswisseph/${{ env.PYSWISSEPH_VERSION }}/00*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_REQUIRES: pytest
+          # Real coverage from the packaged suite (94/126 tests pass with no
+          # ephemeris data files present). The deselected tests all assert
+          # exact swe.FLG_SWIEPH-precision output (fixed-star catalog lookups,
+          # eclipse/rise/heliacal timings, ...), which without the multi-file
+          # Swiss Ephemeris dataset (a large download from Astrodienst, not
+          # bundled in the sdist or by upstream's own CI either) silently
+          # falls back to the lower-precision Moshier ephemeris and fails the
+          # exact-value assertions - not a riscv64-specific failure.
+          CIBW_TEST_COMMAND: >-
+            pytest {package}/tests -v
+            --deselect tests/test_swe_azalt_refrac.py::TestSweAzaltRefrac::test_01
+            --deselect tests/test_swe_calc.py::TestSweCalc::test_01
+            --deselect tests/test_swe_calc_pctr.py::TestSweCalcPctr::test_01
+            --deselect tests/test_swe_calc_ut.py::TestSweCalcUt::test_01
+            --deselect tests/test_swe_fixstar.py::TestSweFixstar::test_01
+            --deselect tests/test_swe_fixstar2.py::TestSweFixstar2::test_01
+            --deselect tests/test_swe_fixstar2_mag.py::TestSweFixstar2Mag::test_01
+            --deselect tests/test_swe_fixstar2_ut.py::TestSweFixstar2Ut::test_01
+            --deselect tests/test_swe_fixstar_mag.py::TestSweFixstarMag::test_01
+            --deselect tests/test_swe_fixstar_ut.py::TestSweFixstarUt::test_01
+            --deselect tests/test_swe_gauquelin_sector.py::TestSweGauquelinSector::test_01
+            --deselect tests/test_swe_gauquelin_sector.py::TestSweGauquelinSector::test_02
+            --deselect tests/test_swe_get_current_file_data.py::TestSweGetCurrentFileData::test_01
+            --deselect tests/test_swe_get_orbital_elements.py::TestSweGetOrbitalElements::test_01
+            --deselect tests/test_swe_heliacal_pheno_ut.py::TestSweHeliacalPhenoUt::test_01
+            --deselect tests/test_swe_helio_cross.py::TestSweHelioCross::test_01
+            --deselect tests/test_swe_helio_cross_ut.py::TestSweHelioCrossUt::test_01
+            --deselect tests/test_swe_house_pos.py::TestSweHousePos::test_01
+            --deselect tests/test_swe_lun_eclipse.py::TestSweLunEclipse::test_01
+            --deselect tests/test_swe_lun_occult.py::TestSweLunOccult::test_01
+            --deselect tests/test_swe_pheno.py::TestSwePheno::test_01
+            --deselect tests/test_swe_pheno_ut.py::TestSwePhenoUt::test_01
+            --deselect tests/test_swe_rise_trans.py::TestSweRiseTrans::test_01
+            --deselect tests/test_swe_rise_trans.py::TestSweRiseTrans::test_02
+            --deselect tests/test_swe_rise_trans_true_hor.py::TestSweRiseTrans::test_01
+            --deselect tests/test_swe_rise_trans_true_hor.py::TestSweRiseTrans::test_02
+            --deselect tests/test_swe_set_sid_mode.py::TestSweSetSidMode::test_01
+            --deselect tests/test_swe_set_topo.py::TestSweSetTopo::test_01
+            --deselect tests/test_swe_sol_eclipse.py::TestSweSolEclipse::test_01
+            --deselect tests/test_swe_solcross.py::TestSweSolcross::test_01
+            --deselect tests/test_swe_solcross_ut.py::TestSweSolcrossUt::test_01
+            --deselect tests/test_swe_vis_limit_mag.py::TestSweVisLimitMag::test_01
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          path = sys.argv[1]
+          names = zipfile.ZipFile(path).namelist()
+          exts = [n for n in names if n.endswith((".so", ".pyd"))]
+          assert exts and all("swisseph" in n for n in exts), exts
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          assert licences == {"LICENSE.txt", "libswe/LICENSE", "swephelp/LICENSE.txt"}, licences
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyswisseph-${{ env.PYSWISSEPH_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyswisseph ${{ inputs.version || '2.10.3.2' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pyswisseph-${{ inputs.version || '2.10.3.2' }}-*riscv64
