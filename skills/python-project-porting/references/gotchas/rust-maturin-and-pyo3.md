@@ -957,3 +957,27 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       actual sdist your `python_sdist` job produced is what turns "the include list looks
       like it might exclude tests" into certainty, cheaper than a second failed riscv64
       matrix leg.
+
+326. **Gotcha 306's "pyo3-build-config only floors the version, it has no ceiling" stopped
+    being universally true at some point — a newer pyo3 release can hard-error at build time
+    for an interpreter it postdates (the pyrage case; see `build-pyrage.yml`).** pyrage
+    v1.4.0 pins `pyo3 = "0.24.2"` (`abi3-py310`, unconditional per gotcha 181); its `cp314t`
+    leg (no abi3 under `Py_GIL_DISABLED`) fails in-container with `error: The configured
+    Python interpreter version (3.14) is newer than PyO3's maximum supported version
+    (3.13)` — an explicit ceiling check, not the silent-cfg floor-only behavior gotcha 306
+    documented for pyo3 0.15.1. The two gotchas aren't contradictory, they're evidence that
+    this check's presence/strictness has changed across pyo3's own history — **verify
+    empirically per pyo3 release, don't assume either behavior from a citation.** The
+    `cp310-abi3` leg is unaffected: only the interpreter actually *compiling* hits this
+    check (cp310, well under the 3.13 ceiling), and cibuildwheel's `find_compatible_wheel`
+    reuses that build to merely *install and test* on cp311-cp314 with no second compile.
+    - **A version bump to clear the ceiling is not automatically low-risk — verify the
+      cascade before choosing it over dropping the interpreter.** A local `cargo check`
+      with `pyo3` bumped to the release upstream's own `main` branch later moved to
+      (0.29.2, confirmed via the upstream repo's post-v1.4.0 `Cargo.toml`) first fails
+      dependency resolution (`pyo3-file 0.12.0` pins `pyo3 = ">=0.24, <0.25"`, so it needs
+      bumping too), and bumping `pyo3-file` to 0.17.0 then surfaces 13 real compile errors
+      across every `src/*.rs` file (`Python::with_gil` was renamed to `try_attach` in a
+      later pyo3 release) — a source-level API migration, not a patch-worthy one-liner.
+      Dropping the interpreter (gotcha 322's fix) stays correct here; reach for a bump only
+      when the local `cargo check` comes back clean.

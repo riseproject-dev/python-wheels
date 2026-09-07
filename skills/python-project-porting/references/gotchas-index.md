@@ -172,6 +172,10 @@ The porting gotchas (316 of them) live in [`references/gotchas/`](gotchas/), spl
   `PyUnicode_DATA` macros as raw struct-offset reads can compile clean against a newer
   CPython and still segfault the first time a string crosses the FFI boundary — bisect by
   interpreter in the matrix (a segfault on only the newest leg is the diagnosis) and drop it.
+- **326** — Gotcha 306's "pyo3-build-config has no ceiling" is not universal — a newer pyo3
+  release can hard-error at build time against an interpreter it postdates; verify per
+  release rather than assuming, and check whether a version bump is low-risk (a clean local
+  `cargo check`) before choosing it over dropping the interpreter.
 - **325** — A maturin `[tool.maturin] include` list is scoped to the wheel, not the sdist,
   so a project whose list omits `tests/` ships a tests-less sdist; when the project's
   `Cargo.lock` is already committed (no gotcha 10 floating-deps risk), drop the sdist job
