@@ -1,0 +1,97 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/ail-project/faup-rs/blob/pyfaup-rs-v0.4.19/.github/workflows/maturin.yml
+name: Build pyfaup-rs wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pyfaup-rs version to build (git tag without the pyfaup-rs-v prefix, e.g. 0.4.19)'
+        required: true
+        default: '0.4.19'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pyfaup-rs.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.4.19' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.4.19 there.
+  PYFAUP_RS_VERSION: ${{ inputs.version || '0.4.19' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pyfaup-rs ${{ inputs.version || '0.4.19' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # No abi3 feature on pyo3 in python/Cargo.toml, so upstream ships one
+        # wheel per interpreter (matches PyPI's cp3xx-cp3xx tags).
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout faup-rs pyfaup-rs-v${{ env.PYFAUP_RS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ail-project/faup-rs
+          ref: pyfaup-rs-v${{ env.PYFAUP_RS_VERSION }}
+          persist-credentials: false
+
+      - name: Stage LICENSE beside python/pyproject.toml
+        # maturin auto-discovers LICENSE* files relative to the pyproject.toml
+        # directory (python/), not the workspace root where LICENSE actually
+        # lives -- upstream's own published wheel ships no licence file at all.
+        run: cp LICENSE python/
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # pyfaup-rs ships no [tool.cibuildwheel], so the Rust toolchain its
+          # maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: python/tests
+          CIBW_TEST_COMMAND: >-
+            python -c "import pyfaup.pyfaup as ext, importlib.metadata as md;
+            assert ext.__file__.endswith('.so'), ext.__file__;
+            assert {p.name for p in md.files('pyfaup-rs') if 'licenses' in str(p)} == {'LICENSE'}" &&
+            python -m pytest -v python/tests/test_pyfaup.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyfaup-rs-${{ env.PYFAUP_RS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyfaup-rs ${{ inputs.version || '0.4.19' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pyfaup-rs-${{ inputs.version || '0.4.19' }}-*-manylinux_riscv64
