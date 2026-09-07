@@ -1,0 +1,91 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build:
+#   https://github.com/jrast/littlefs-python/blob/v0.19.0/.github/workflows/deploy.yml
+name: Build littlefs-python wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'littlefs-python version to build (git tag without leading v, e.g. 0.19.0)'
+        required: true
+        default: '0.19.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-littlefs-python.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.19.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  LITTLEFS_PYTHON_VERSION: ${{ inputs.version || '0.19.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build littlefs-python ${{ inputs.version || '0.19.0' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # No cp314t: the extension is a legacy (single-phase init) Cython module with
+        # no Py_mod_gil slot, and upstream builds no free-threaded wheels either, so a
+        # cp314t wheel would just silently re-enable the GIL (as build-python-rapidjson.yml
+        # notes for the same reason).
+        python: ["cp312", "cp313", "cp314"]
+        libc: [manylinux, musllinux]
+
+    steps:
+      - name: Checkout littlefs-python v${{ env.LITTLEFS_PYTHON_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: jrast/littlefs-python
+          ref: v${{ env.LITTLEFS_PYTHON_VERSION }}
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: false
+
+      # setup.py has no explicit license_files, so setuptools' default LICEN[CS]E*
+      # root glob is still active; the extension compiles the vendored littlefs C
+      # sources in, so stage its licence next to ours (gotcha 44).
+      - name: Stage the littlefs licence
+        run: cp littlefs/LICENSE.md LICENSE.littlefs
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as md; got = sorted(p.name for p in md.files('littlefs-python') if '.dist-info/licenses/' in str(p) and p.name); assert got == ['LICENSE', 'LICENSE.littlefs'], got"
+            && pytest {project}/test
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: littlefs-python-${{ env.LITTLEFS_PYTHON_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish littlefs-python ${{ inputs.version || '0.19.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: littlefs-python-${{ inputs.version || '0.19.0' }}-*riscv64
