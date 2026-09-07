@@ -1,0 +1,92 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/SpotlightKid/python-rtmidi/blob/1.5.8/.github/workflows/pr_to_master.yml
+name: Build python-rtmidi wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'python-rtmidi version to build (git tag, e.g. 1.5.8)'
+        required: true
+        default: '1.5.8'
+  pull_request:
+    paths:
+      - '.github/workflows/build-python-rtmidi.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.5.8' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYTHON_RTMIDI_VERSION: ${{ inputs.version || '1.5.8' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build python-rtmidi ${{ inputs.version || '1.5.8' }} cp312-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout python-rtmidi ${{ env.PYTHON_RTMIDI_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: SpotlightKid/python-rtmidi
+          ref: ${{ env.PYTHON_RTMIDI_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch python-rtmidi source
+        run: git apply python-wheels/patches/python-rtmidi/${{ env.PYTHON_RTMIDI_VERSION }}/*.patch
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install cibuildwheel
+        run: uv pip install cibuildwheel
+
+      # Build/test settings (before-all installing alsa-lib-devel and building
+      # jack2 from source, the auditwheel --exclude libasound.so.2 repair, and
+      # the pytest -m ci test selection) all come from upstream's own
+      # [tool.cibuildwheel] in pyproject.toml; only the riscv64 image and
+      # version selection are set here.
+      - name: Build wheels
+        run: python -m cibuildwheel --output-dir wheelhouse
+        env:
+          CIBW_BUILD: cp312-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: python-rtmidi-${{ env.PYTHON_RTMIDI_VERSION }}-cp312-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish python-rtmidi ${{ inputs.version || '1.5.8' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: python-rtmidi-${{ inputs.version || '1.5.8' }}-*-manylinux_riscv64
