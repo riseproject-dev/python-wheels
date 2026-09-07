@@ -28,6 +28,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **304** — A hardcoded exact-equality assertion on a neural-network/matmul-heavy
 - **316** — A hardcoded timing threshold on a metric that measures raw wall-clock
 - **317** — A pure-Python, allocation-heavy test suite running ~8x slower on musllinux
+- **323** — Gotcha 127's GIL-reenable safety net only rules out concurrency races — a
+  single-phase-init C extension can still segfault on cp314t with no threading involved.
 
 ---
 
@@ -103,6 +105,27 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
     - Distinct from gotchas 21 and 25, which are about what the xdist *workers*
       import. This one is the **controller** process crashing outright, and no
       amount of `PYTHONNOUSERSITE`/`test-sources` touches it.
+
+323. **Gotcha 127's GIL-reenable safety net only rules out concurrency races —
+     a single-phase-init C extension can still segfault on cp314t with no
+     threading involved at all (the mwparserfromhell case).** mwparserfromhell's
+     tokenizer extension calls `PyModule_Create` (no `Py_mod_gil` slot), so by
+     gotcha 127 it should be immune: CPython re-enables the GIL at import and
+     warns, which is supposed to serialize every call into it. It still
+     segfaulted deterministically inside `Tokenizer_parse`, on a plain
+     single-worker `pytest` run (no `-n`, no xdist frames on the stack, no
+     concurrency of any kind) — proof this was never a race gotcha 127's
+     safety net could have caught. Confirmed by an open upstream tracking
+     issue (`earwig/mwparserfromhell#343`, "Enable mwparserfromhell for use
+     with thread-free Python releases") rather than by chasing the C bug:
+     free-threading support is genuinely unimplemented, not a build artifact,
+     and PyPI itself ships no `cp314`/`cp314t` wheel for the package either.
+     Don't treat "no `Py_mod_gil` slot" as proof cp314t is safe to ship — it
+     only means races get serialized, not that the extension behaves
+     correctly under the free-threaded build's other differences. Drop the
+     interpreter and cite the upstream issue in a one-line matrix comment,
+     same as gotcha 14's "settled by upstream signals, not by debugging the
+     crashes" rule.
 
 38. **A slow runner turns a latent test race into a hard failure — simulate the
     slowness on your fast host instead of guessing.** Test suites are full of

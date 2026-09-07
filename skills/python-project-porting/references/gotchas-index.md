@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (315 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (316 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -361,6 +361,7 @@ The porting gotchas (315 of them) live in [`references/gotchas/`](gotchas/), spl
 - **304** — A hardcoded exact-equality assertion on a neural-network/matmul-heavy
 - **316** — A hardcoded timing threshold on a metric that measures raw wall-clock GIL-acquire
 - **317** — A pure-Python, allocation-heavy test suite running ~8x slower on musllinux
+- **323** — Gotcha 127's GIL-reenable safety net only rules out concurrency races — a
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
