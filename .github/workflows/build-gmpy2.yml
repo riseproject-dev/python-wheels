@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/gmpy2/gmpy2/blob/v2.3.1/.github/workflows/wheels.yml
+name: Build gmpy2 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'gmpy2 version to build (git tag without leading v, e.g. 2.3.1)'
+        required: true
+        default: '2.3.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-gmpy2.yml'
+      - 'patches/gmpy2/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.3.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 2.3.1 there.
+  GMPY2_VERSION: ${{ inputs.version || '2.3.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build gmpy2 ${{ inputs.version || '2.3.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        include:
+          # Cython, a hard test-only requirement (test-extras builds and imports
+          # a Cython extension against gmpy2's headers), publishes no
+          # free-threaded wheel on any architecture, so the suite cannot run
+          # under cp314t.
+          - python: "cp314t"
+            test_skip: "*"
+        # musllinux dropped: test-extras' numpy and cython both have no
+        # musllinux riscv64 wheel on PyPI or our registry, so CIBW_TEST_EXTRAS
+        # cannot resolve in a musl venv (same reasoning as the tree-sitter-*
+        # family dropping musllinux for its own test dependency).
+
+    steps:
+      - name: Checkout gmpy2 v${{ env.GMPY2_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: gmpy2/gmpy2
+          ref: v${{ env.GMPY2_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # The wheels dynamically link GMP/MPFR/MPC but ship only gmpy2's own
+      # COPYING/COPYING.LESSER.
+      - name: Patch gmpy2 source
+        run: git apply python-wheels/patches/gmpy2/${{ env.GMPY2_VERSION }}/00*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Restates upstream's [tool.cibuildwheel.environment], which
+          # CIBW_ENVIRONMENT replaces wholesale; the patch above leaves the
+          # tree dirty, so pin the version. PIP_EXTRA_INDEX_URL resolves the
+          # numpy/cython test-extras, which have no riscv64 wheel on PyPI.
+          CIBW_ENVIRONMENT: >-
+            LD_LIBRARY_PATH=$(pwd)/.local/lib:$LD_LIBRARY_PATH
+            PKG_CONFIG_PATH=$(pwd)/.local/lib/pkgconfig
+            PYTEST_ADDOPTS=--verbose
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_GMPY2=${{ env.GMPY2_VERSION }}
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
+
+      - name: Check the extension made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          expected = {"gmpy2/gmpy2"}
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              got = {n.split(".", 1)[0] for n in names if n.endswith(".so")}
+              assert got == expected, f"{whl}: got {got}, expected {expected}"
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: gmpy2-${{ env.GMPY2_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish gmpy2 ${{ inputs.version || '2.3.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: gmpy2-${{ inputs.version || '2.3.1' }}-*-manylinux_riscv64
