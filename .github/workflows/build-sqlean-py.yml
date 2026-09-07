@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `wheels` job of
+# https://github.com/nalgeon/sqlean.py/blob/3.50.4.5/.github/workflows/publish.yaml
+name: Build sqlean-py wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'sqlean-py version/tag to build, e.g. 3.50.4.5'
+        required: true
+        default: '3.50.4.5'
+  pull_request:
+    paths:
+      - '.github/workflows/build-sqlean-py.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '3.50.4.5' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  SQLEAN_PY_VERSION: ${{ inputs.version || '3.50.4.5' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build sqlean-py ${{ inputs.version || '3.50.4.5' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout sqlean-py ${{ env.SQLEAN_PY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: nalgeon/sqlean.py
+          ref: ${{ env.SQLEAN_PY_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Mirrors upstream's `download-sources` job: sqlite/sqlean sources
+          # aren't checked in, they're fetched at build time (Makefile).
+          CIBW_BEFORE_BUILD: >-
+            dnf install -y unzip &&
+            make prepare-src download-sqlite download-sqlean
+          CIBW_TEST_SOURCES: tests setup.py README.md
+          CIBW_TEST_COMMAND: python -m tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sqlean-py-${{ env.SQLEAN_PY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish sqlean-py ${{ inputs.version || '3.50.4.5' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: sqlean-py-${{ inputs.version || '3.50.4.5' }}-*-manylinux_riscv64
