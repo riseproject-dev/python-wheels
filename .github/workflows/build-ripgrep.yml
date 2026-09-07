@@ -1,0 +1,203 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-release` job of
+# https://github.com/BurntSushi/ripgrep/blob/15.1.0/.github/workflows/release.yml
+name: Build ripgrep wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'ripgrep version to build (git tag, e.g. 15.1.0)'
+        required: true
+        default: '15.1.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-ripgrep.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '15.1.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 15.1.0 there.
+  RIPGREP_VERSION: ${{ inputs.version || '15.1.0' }}
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheel:
+    needs: [setup]
+    name: Build ripgrep ${{ inputs.version || '15.1.0' }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout ripgrep v${{ env.RIPGREP_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: BurntSushi/ripgrep
+          ref: ${{ env.RIPGREP_VERSION }}
+          persist-credentials: false
+
+      # The git tag ships no pyproject.toml anywhere (only the released sdist
+      # has one, synthesized by whatever out-of-repo process cuts the PyPI
+      # release). Recreate it verbatim; the root Cargo.toml already defines
+      # the `rg` binary, so no manifest-path override is needed.
+      - name: Write pyproject.toml
+        run: |
+          cat > pyproject.toml <<'TOML'
+          [build-system]
+          build-backend = "maturin"
+          requires = [
+              "maturin>=1.7,<2.0",
+          ]
+
+          [project]
+          name = "ripgrep"
+          description = "ripgrep is a line-oriented search tool that recursively searches the current directory for a regex pattern while respecting gitignore rules. ripgrep has first class support on Windows, macOS and Linux."
+          requires-python = ">=3.8"
+          authors = [
+              { name = "Andrew Gallant", email = "jamslam@gmail.com" },
+          ]
+          keywords = [
+              "command-line-utilities",
+              "egrep",
+              "grep",
+              "pattern",
+              "regex",
+              "search",
+              "text-processing",
+          ]
+          classifiers = [
+              "Programming Language :: Rust",
+              "Programming Language :: Python :: Implementation :: CPython",
+              "Programming Language :: Python :: Implementation :: PyPy",
+          ]
+          readme = "README.md"
+          license = "Unlicense OR MIT"
+          dynamic = ["version"]
+
+          [project.urls]
+          Documentation = "https://github.com/BurntSushi/ripgrep"
+          Homepage = "https://github.com/BurntSushi/ripgrep"
+          Repository = "https://github.com/BurntSushi/ripgrep"
+
+          [tool.maturin]
+          bindings = "bin"
+          TOML
+
+      # `[tool.maturin] bindings = "bin"`: the wheel is one compiled executable
+      # with no ABI tag, so a single native build covers every interpreter.
+      # No `--features pcre2`: the released PyPI wheel links only libc/libgcc_s
+      # (verified against the published manylinux_2_39_x86_64 wheel), so the
+      # default build (no PCRE2 backreferences/look-around) matches what
+      # upstream actually ships.
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --locked --out dist
+          manylinux: '2_39'
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ripgrep-${{ env.RIPGREP_VERSION }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test ripgrep ${{ inputs.version || '15.1.0' }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    env:
+      # Without this uv would reuse the runner image's system CPython for 3.12
+      # and download a standalone build for the others.
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        # This repo's default interpreter matrix (gotcha in workflow-anatomy.md);
+        # the wheel is interpreter-agnostic (bindings = "bin"), so every
+        # interpreter -- including free-threaded -- exercises the same binary.
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ripgrep-${{ env.RIPGREP_VERSION }}-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . ripgrep
+
+      # No wheel-level test suite ships in the sdist (gotcha 187): ripgrep's
+      # own tests/tests.rs integration suite is run by upstream's own `cargo
+      # test`, never packaged. Drive the real search engine against known
+      # fixtures (regex match, -i, -c, -v, --json, and a .gitignore-respecting
+      # recursive search) instead of settling for a bare --version check.
+      #
+      # No `python -m ripgrep`: ripgrep's own source tree ships no
+      # ripgrep/__init__.py shim, so the wheel carries only the
+      # .data/scripts/rg binary and no importable module.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          rg --version
+          rg --help >/dev/null
+
+          work=$(mktemp -d)
+          cd "$work"
+          git init -q
+          mkdir -p sub
+          printf 'hello world\nHELLO AGAIN\nnothing here\n' > sub/a.txt
+          printf 'ignored line\n' > sub/b.log
+          echo '*.log' > .gitignore
+
+          out=$(rg -i hello sub/a.txt)
+          echo "$out"
+          [ "$(echo "$out" | wc -l)" -eq 2 ]
+
+          [ "$(rg -c -i hello sub/a.txt)" -eq 2 ]
+
+          out=$(rg -v hello sub/a.txt)
+          echo "$out"
+          [ "$out" = "$(printf 'HELLO AGAIN\nnothing here')" ]
+
+          rg --json hello sub/a.txt | grep -q '"type":"match"'
+
+          set +e
+          rg --quiet nomatch sub/a.txt
+          rc=$?
+          set -e
+          [ "$rc" -eq 1 ]
+
+          # Recursive search from the repo root must skip .gitignore'd files.
+          cd "$work"
+          [ "$(rg -l --no-messages ignored . | wc -l)" -eq 0 ]
+          [ "$(rg -l hello .)" = "./sub/a.txt" ]
+
+  publish:
+    name: Publish ripgrep ${{ inputs.version || '15.1.0' }}
+    needs: [setup, build_wheel, test_wheel]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: ripgrep-${{ inputs.version || '15.1.0' }}-manylinux_riscv64
