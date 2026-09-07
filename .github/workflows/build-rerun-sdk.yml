@@ -78,22 +78,31 @@ jobs:
           path: python-wheels
           persist-credentials: false
 
-      # lance-core 9.0.0's SIMD-tier detection (a build-dependency of
-      # re_datafusion via lance) has cfg arms for aarch64/x86_64/loongarch64
-      # with no catch-all, so the closure that selects a tier evaluates to
-      # `()` instead of `SimdSupport` on riscv64 (CLAUDE.md gotcha 287).
-      # There is no compatible bugfix release to `cargo update` to, so a
-      # riscv64-fixed copy is vendored here (the crates.io tarball, already
-      # free of the workspace-inherited fields the git checkout carries) and
-      # wired in via `[patch.crates-io]`.
-      - name: Vendor a riscv64-fixed lance-core
+      # lance-core and lance-linalg 9.0.0 (build-dependencies of re_datafusion
+      # via lance) have per-arch SIMD structs/closures with cfg arms for
+      # aarch64/x86_64/loongarch64 and no catch-all, so they don't compile on
+      # riscv64: lance-core's SIMD-tier-detection closure evaluates to `()`
+      # instead of `SimdSupport` (E0308), and lance-linalg's f32x8/f32x16/
+      # f64x4/f64x8/i32x8 types don't exist at all there (E0425) (CLAUDE.md
+      # gotchas 287/300). There is no compatible bugfix release to `cargo
+      # update` to, so riscv64-fixed copies are vendored here (the crates.io
+      # tarballs, already free of the workspace-inherited fields the git
+      # checkouts carry) and wired in via `[patch.crates-io]`.
+      - name: Vendor riscv64-fixed lance-core and lance-linalg
         run: |
           curl -fsSL -A "python-wheels (https://github.com/riseproject-dev/python-wheels)" -o lance-core.tar.gz https://crates.io/api/v1/crates/lance-core/9.0.0/download
           mkdir lance-core-9.0.0-riscv64
           tar xzf lance-core.tar.gz -C lance-core-9.0.0-riscv64 --strip-components=1
           rm lance-core.tar.gz
           patch -p1 -d lance-core-9.0.0-riscv64 < python-wheels/patches/rerun-sdk/${{ env.RERUN_SDK_VERSION }}/0001-lance-core-riscv64-simd-fallback.patch
-          git apply python-wheels/patches/rerun-sdk/${{ env.RERUN_SDK_VERSION }}/0002-cargo-patch-lance-core-for-riscv64.patch
+
+          curl -fsSL -A "python-wheels (https://github.com/riseproject-dev/python-wheels)" -o lance-linalg.tar.gz https://crates.io/api/v1/crates/lance-linalg/9.0.0/download
+          mkdir lance-linalg-9.0.0-riscv64
+          tar xzf lance-linalg.tar.gz -C lance-linalg-9.0.0-riscv64 --strip-components=1
+          rm lance-linalg.tar.gz
+          patch -p1 -d lance-linalg-9.0.0-riscv64 < python-wheels/patches/rerun-sdk/${{ env.RERUN_SDK_VERSION }}/0003-lance-linalg-riscv64-simd-fallback.patch
+
+          git apply python-wheels/patches/rerun-sdk/${{ env.RERUN_SDK_VERSION }}/0002-cargo-patch-lance-crates-for-riscv64.patch
 
       # This workspace links ~760 crates (datafusion, lance, tonic, hdf5-pure,
       # ...) concurrently; same OOM guard build-deltalake.yml/
