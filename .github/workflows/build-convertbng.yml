@@ -1,0 +1,106 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/urschrei/convertbng/blob/v1.0.0/.github/workflows/wheels.yml
+name: Build convertbng wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'convertbng version to build (git tag without the leading v, e.g. 1.0.0)'
+        required: true
+        default: '1.0.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-convertbng.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.0.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.0.0 there.
+  CONVERTBNG_VERSION: ${{ inputs.version || '1.0.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # The urschrei/lonlat_bng tag that was latest when convertbng 1.0.0 shipped.
+  # Upstream's own CI fetches whatever tag is latest at release time; it has no
+  # riscv64 release asset, so this is built from source instead (gotcha 77).
+  LONLAT_BNG_TAG: v0.9.0
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build convertbng ${{ inputs.version || '1.0.0' }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # wheel.py-api = "cp311" collapses cp312/cp313/cp314 into one abi3
+          # build; the newer interpreters re-test that wheel via find_compatible_wheel.
+          - tag: cp312-abi3
+            build: >-
+              cp312-manylinux_riscv64 cp313-manylinux_riscv64
+              cp314-manylinux_riscv64
+          # Free-threaded builds fall outside the Limited API (CMakeLists.txt's
+          # SKBUILD_SABI_VERSION is empty under Py_GIL_DISABLED).
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+
+    steps:
+      - name: Checkout convertbng v${{ env.CONVERTBNG_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: urschrei/convertbng
+          ref: v${{ env.CONVERTBNG_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream downloads a prebuilt liblonlat_bng.so from urschrei/lonlat_bng's
+          # releases; there is no riscv64 asset, so build it from source instead
+          # (gotcha 77) and stage it where CMakeLists.txt's find_library expects it.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
+            git clone --depth 1 --branch ${{ env.LONLAT_BNG_TAG }}
+            https://github.com/urschrei/lonlat_bng /tmp/lonlat_bng &&
+            cd /tmp/lonlat_bng &&
+            $HOME/.cargo/bin/cargo build --release --features headers &&
+            cp target/release/liblonlat_bng.so include/header.h {project}/src/convertbng/
+          # cibuildwheel's build[uv] frontend (upstream's pyproject.toml default)
+          # crashes the audit step: it asserts a host `uv`, which the self-hosted
+          # riscv64 runner doesn't have (gotcha 13).
+          CIBW_BUILD_FRONTEND: build
+          # numpy/cython have riscv64 wheels only on our registry.
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: convertbng-${{ env.CONVERTBNG_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish convertbng ${{ inputs.version || '1.0.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: convertbng-${{ inputs.version || '1.0.0' }}-*-manylinux_riscv64
