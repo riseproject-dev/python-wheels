@@ -351,6 +351,7 @@ The porting gotchas (303 of them) live in [`references/gotchas/`](gotchas/), spl
 - **290** — A `NameError` in an e2e test for a name the package genuinely exports is a
 - **297** — A test harness's own unbounded `readline()`-until-marker wait turns any slow or
 - **304** — A hardcoded exact-equality assertion on a neural-network/matmul-heavy
+- **316** — A hardcoded timing threshold on a metric that measures raw wall-clock GIL-acquire
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 

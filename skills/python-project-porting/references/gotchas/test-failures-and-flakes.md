@@ -26,6 +26,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **286** — A vendored-ARPACK eigensolver test failing only on musllinux, not manylinux, can
 - **297** — A test harness's own unbounded `readline()`-until-marker wait turns any slow or
 - **304** — A hardcoded exact-equality assertion on a neural-network/matmul-heavy
+- **316** — A hardcoded timing threshold on a metric that measures raw wall-clock
 
 ---
 
@@ -713,3 +714,47 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       rendering) — same family of "arch-specific numeric divergence is not
       necessarily a bug," different failure shape (here, the value itself is off by
       a few ULP, and the failure is directly at the assertion).
+
+316. **A hardcoded timing threshold on a metric that measures raw wall-clock
+    GIL-acquire latency (not literal lock contention) inflates under a busy shared
+    CI host, in either direction depending on which side of the range the workload
+    sits on (the gilknocker case).** `test_knockknock_available_gil` asserts
+    `contention_metric < 0.2` for a workload (`a_little_gil`: four threads doing
+    NumPy FFT work, expected to mostly release the GIL). On this repo's shared
+    riscv64 runners — which routinely run many other build jobs concurrently — it
+    instead lands at 0.27-0.49, 12/12 samples across cp312/cp313/cp314 with
+    pytest-rerunfailures retries, never once under the ceiling.
+    `contention_metric` is computed from `Python::with_gil(move |_| start.elapsed())`:
+    the elapsed time from *deciding* to acquire the GIL to actually running inside
+    it, which bundles genuine lock contention with plain OS thread-scheduling
+    latency for the sampling thread itself — a busier host inflates the metric even
+    when no other Python thread is really holding the GIL for long. Upstream's own
+    test file already hedges every one of its four assertions with a per-platform
+    comment ("usually ~0.9, but sometimes ~0.6 on Mac", "usually ~0.002, but can be
+    up to ~0.15 on windows") and has an open, unresolved issue
+    (milesgranger/gilknocker#36) for the same class of hardware-dependent flake in
+    the sibling `test_knockknock_some_gil` test, on a *fast* Mac landing anomalously
+    low instead of high — same mechanism, opposite direction.
+    - **Verify with real CI logs across every interpreter in the matrix, not one
+      job** — a single failing job could be a one-off scheduler hiccup; three
+      interpreters each failing the same assertion at similar magnitudes across
+      three retries apiece is a host characteristic, not noise.
+    - **Reproducing the mechanism locally doesn't need the failing package's own
+      optional test dependency** — build the crate directly with `cargo build
+      --release` (no maturin needed) and load the resulting `.so` under an
+      `__init__.py` shim, per gotcha 314's shape, to get a working import without
+      installing anything. A *real* multi-threaded GIL-contention scenario (several
+      pure-Python CPU-bound threads) reproduces near-1.0 contention identically with
+      and without a `docker run --cpus=` quota, confirming the harness measures
+      genuine contention correctly; an *idle* scenario (no other thread wants the
+      GIL) stays near-zero even under heavy host CPU oversubscription (`yes` loops)
+      or a cgroup CPU quota — the elevated CI readings are specific to the *mixed*
+      NumPy-releases-then-reacquires pattern this test exercises, not reproducible
+      from host load alone without the actual optional numpy dependency.
+    - **Fix scope: raise the threshold, cite the evidence, don't skip the test** —
+      this is the "artificial test limitation" patch case
+      (patching-and-licensing.md). Use `Upstream-Status: Inappropriate`, since the
+      cause is this repo's shared-runner load, not an upstream bug — and this
+      repo's own policy against filing anything on a package's own upstream repo
+      makes `Issue` unavailable regardless. Pick a ceiling with real headroom above
+      every observed sample, not just clearing the worst one.
