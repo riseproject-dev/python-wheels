@@ -1,0 +1,91 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/hunyadi/tsv2py/blob/0.8.0/.github/workflows/publish.yml
+name: Build tsv2py wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'tsv2py version to build (git tag, e.g. 0.8.0)'
+        required: true
+        default: '0.8.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-tsv2py.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.8.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.8.0 there.
+  TSV2PY_VERSION: ${{ inputs.version || '0.8.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build tsv2py ${{ inputs.version || '0.8.0' }} cp310-abi3-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # setup.py's bdist_wheel_abi3 tags every CPython wheel cp310-abi3
+          # (Py_LIMITED_API=0x030A0000); upstream ships no free-threaded wheel
+          # at all, so one build per libc, reused+retested on cp312/cp313/cp314.
+          - libc: manylinux
+            build: >-
+              cp312-manylinux_riscv64 cp313-manylinux_riscv64
+              cp314-manylinux_riscv64
+          - libc: musllinux
+            build: >-
+              cp312-musllinux_riscv64 cp313-musllinux_riscv64
+              cp314-musllinux_riscv64
+
+    steps:
+      - name: Checkout tsv2py ${{ env.TSV2PY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: hunyadi/tsv2py
+          ref: ${{ env.TSV2PY_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: >-
+            python -c "from tsv import cpu_features, parser_plain;
+            assert cpu_features.__file__.endswith('.so'), cpu_features.__file__;
+            assert parser_plain.__file__.endswith('.so'), parser_plain.__file__" &&
+            python -m unittest discover tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tsv2py-${{ env.TSV2PY_VERSION }}-cp310-abi3-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish tsv2py ${{ inputs.version || '0.8.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: tsv2py-${{ inputs.version || '0.8.0' }}-*riscv64
