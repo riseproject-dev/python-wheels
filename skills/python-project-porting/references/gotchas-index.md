@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (316 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (317 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -126,6 +126,7 @@ The porting gotchas (316 of them) live in [`references/gotchas/`](gotchas/), spl
 - **270** — Gotcha 134's "leaked `Py`-prefixed symbol" failure has a real fix, not just
 - **281** — Gotcha 251 recurs even when the port's own notes cite gotcha 104 — a
 - **313** — A dynamic abi3 floor (`setup.py` tags whichever interpreter builds it) lets you
+- **324** — `{project}` is exactly the on-disk root of the checkout with no `path:` —
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 

@@ -33,6 +33,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **270** — Gotcha 134's "leaked `Py`-prefixed symbol" failure has a real fix, not just
 - **281** — Gotcha 251 recurs even when the port's own notes cite gotcha 104 — a
 - **313** — A dynamic abi3 floor (`setup.py` tags whichever interpreter builds it) lets you
+- **324** — `{project}` is exactly the on-disk root of the checkout with no `path:` —
 
 ---
 
@@ -647,3 +648,25 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
        install` — no libtool/autoconf version questions (contrast build-cffi.yml's libffi
        step, which clones a tag archive and needs `autogen.sh`). Confirm before writing the
        step: `tar tzf <tarball> | grep -x '<dir>/configure'`.
+
+324. **`{project}` (gotcha 5) is *exactly* the on-disk root of whatever checkout has no
+     `path:` — copying another port's `cd {project}/foo/foo`-style sibling-directory path
+     into a differently-shaped monorepo silently breaks it (the mecab case).** mecab-python3
+     (PR #1117) has no native sources of its own, so its `CIBW_BEFORE_ALL_LINUX`
+     `git clone`s the *separate* taku910/mecab repo into a scratch `/tmp/mecab`, whose own
+     top-level layout nests the C library one level down — `/tmp/mecab/mecab`. Porting the
+     plain `mecab` package (shogo82148/mecab, a *monorepo* checked out directly at the
+     workspace root with `repository: shogo82148/mecab` and no `path:`) by copying that
+     `cd {project}/mecab/mecab` pattern verbatim fails: this repo's own top-level `mecab/`
+     dir already *is* the C library (`mecab/configure.ac`, `mecab/src`, `mecab/python`), so
+     the right path is `cd {project}/mecab` — one level, not two. Symptom: cibuildwheel's own
+     `Copying project into container...` step succeeds (fast, no error) because the whole
+     checkout genuinely is present under `{project}`; the failure comes seconds later from
+     the shell itself — `sh: line N: cd: {project}/foo/foo: No such file or directory`,
+     `cibuildwheel: Command [...] failed with code 1` — a red herring that looks like a
+     `{project}` mounting bug (it isn't; gotcha 5's mapping is exact) when it is really a
+     wrong assumption about a *different* repo's directory depth carried over verbatim.
+     **Don't guess the layout from a sibling port's precedent when the checkout shape
+     differs — spend one CI cycle on a throwaway `find {project} -maxdepth 2` (or
+     `ls -la {project}`) in `CIBW_BEFORE_ALL_LINUX` to see the real tree**, then delete the
+     diagnostic once the real path is confirmed.
