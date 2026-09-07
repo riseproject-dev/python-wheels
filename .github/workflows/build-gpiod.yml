@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+name: Build gpiod wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'gpiod (Python bindings) version/tag to build, e.g. 2.5.0'
+        required: true
+        default: '2.5.0'
+      libgpiod_version:
+        description: 'libgpiod C library source version to vendor (LIBGPIOD_VERSION)'
+        required: true
+        default: '2.3'
+  pull_request:
+    paths:
+      - '.github/workflows/build-gpiod.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.5.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  GPIOD_VERSION: ${{ inputs.version || '2.5.0' }}
+  LIBGPIOD_VERSION: ${{ inputs.libgpiod_version || '2.3' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build gpiod ${{ inputs.version || '2.5.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      # The Python bindings live in git.kernel.org/libgpiod, tagged
+      # python-v<version>; that tag isn't mirrored to github.com/brgl/libgpiod,
+      # so actions/checkout can't reach it.
+      - name: Checkout gpiod python-v${{ env.GPIOD_VERSION }}
+        run: |
+          git clone --depth 1 --branch "python-v${{ env.GPIOD_VERSION }}" \
+            https://git.kernel.org/pub/scm/libs/libgpiod/libgpiod.git gpiod-src
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: gpiod-src/bindings/python
+          output-dir: wheelhouse/
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Sets LIBGPIOD_VERSION inside the build container, where setup.py's
+          # fetch_tarball wrapper downloads and vendors libgpiod's lib/include
+          # sources before compiling gpiod._ext -- no system libgpiod needed.
+          CIBW_ENVIRONMENT: LIBGPIOD_VERSION=${{ env.LIBGPIOD_VERSION }}
+          # Upstream's own generate_pypi_artifacts.sh builds wheels with no test
+          # step at all: the real test suite needs a gpio-sim kernel module and
+          # the separately-built libgpiosim helper library (tests/gpiosim/,
+          # tests/system/), neither available in the build container. Exercise
+          # the compiled extension and the real chip-open/ioctl error path instead.
+          CIBW_TEST_COMMAND: |
+            python3 - <<'PYEOF'
+            import gpiod
+            from gpiod import _ext
+            assert _ext.__file__.endswith(".so"), _ext.__file__
+            assert gpiod.__version__ == "${{ env.GPIOD_VERSION }}", gpiod.__version__
+            assert gpiod.api_version == "${{ env.LIBGPIOD_VERSION }}", gpiod.api_version
+            try:
+                gpiod.Chip("/dev/null")
+            except OSError:
+                pass
+            else:
+                raise SystemExit("expected OSError for a non-gpiochip device")
+            PYEOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: gpiod-${{ env.GPIOD_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish gpiod ${{ inputs.version || '2.5.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: gpiod-${{ inputs.version || '2.5.0' }}-*-manylinux_riscv64
