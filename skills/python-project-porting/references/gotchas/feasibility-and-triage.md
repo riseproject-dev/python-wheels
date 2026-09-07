@@ -32,6 +32,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **284** — A package whose C/C++ extension calls CUDA/HIP/cuFile is not automatically
 - **303** — A "Python 2 only" classifier is a stop sign the project's own `setup.py` may
 - **311** — A transitive crate's `compile_error!` gated on `target_feature` (not
+- **318** — An explicit `python_requires` *upper* bound is a harder wall than an
 
 ---
 
@@ -1122,3 +1123,37 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     is the `target_feature`-gated `compile_error!` itself, visible by reading
     the one platform source file the crate ships for the closest supported
     architecture.
+
+318. **An explicit `python_requires` *upper* bound is a harder wall than an
+    unsupported-on-newer-interpreters staleness signal, and it can mean the
+    package's entire purpose was absorbed by the stdlib (the pickle5 case).**
+    pickle5 backports PEP 574 (pickle protocol 5, `pickle.PickleBuffer`) for
+    Python versions that predate it. Its `setup.py` hard-pins
+    `python_requires='>=3.5, <3.8'`, and every one of its 12 releases
+    (0.0.1-0.0.12) has published wheels only for cp36/cp37 — never cp38+, in
+    over five years of releases. That upper bound isn't a maintenance gap
+    like gotcha 248's typed-ast (which kept compiling past its stated ceiling
+    until a real CPython internal-API removal stopped it) — `python_requires`
+    is installer-enforced metadata, not an aspirational classifier, so `pip`
+    refuses to even attempt the build on any excluded interpreter. And unlike
+    gotcha 303's subprocess32 (whose `setup.py` redirects Python 3 to the
+    stdlib module it shadows), pickle5 ships no compatibility shim at all for
+    3.8+ — because none is needed: protocol 5 and `PickleBuffer` have been in
+    the stdlib `pickle` module since Python 3.8 (confirmed importable on a
+    plain Python 3.9 here), so every interpreter this repo could target
+    already has upstream's feature natively. This repo's default matrix
+    (cp312/cp313/cp314/cp314t, `workflow-anatomy.md`) has zero overlap with
+    cp36/cp37, and deviating to build only cp36/cp37 wouldn't help — numpy's
+    own floor is 3.12 so nothing else in the registry could use those wheels,
+    and the manylinux riscv64 image/runners (`ubuntu-24.04-riscv`) don't carry
+    EOL Python 3.6/3.7 toolchains to build against regardless. `parked`, no
+    worktree pushed.
+    - **Read `Requires-Python` on `pypi.org/pypi/<pkg>/json` and diff it
+      against this repo's interpreter matrix before anything else** — an
+      upper bound that excludes the whole matrix is decidable from one HTTP
+      read, cheaper than gotcha 248's "build it and see."
+    - **Check whether the backported feature already shipped in the stdlib at
+      or before this repo's floor interpreter.** A backport package for a
+      now-stdlib feature, gated to versions before that feature landed, is
+      `parked` by construction — not because the port is hard, but because
+      every interpreter capable of consuming the wheel doesn't need it.
