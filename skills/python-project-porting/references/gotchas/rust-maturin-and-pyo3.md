@@ -767,6 +767,30 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       add `-A "<anything descriptive>"` and it succeeds. Cheap to catch locally before
       relying on this pattern in a `run:` step at all (this cost one full CI queue-and-fail
       cycle on the runner to notice).
+    - **The same `[patch.crates-io]`-at-a-vendored-copy technique extends past a missing
+      cfg *arm* (gotcha 78's signature) to a type that does not exist on the target
+      architecture at all.** lance-linalg 9.0.0's `f32x8`/`f32x16`/`f64x4`/`f64x8`/`i32x8`
+      each have three `#[cfg(target_arch = "...")]`-gated struct *definitions*
+      (x86_64/aarch64/loongarch64) with **unconditional** trait impls (`Add`, `Mul`,
+      `Debug`, the crate's own `SIMD` trait, ...) referencing them — riscv64 gets
+      `error[E0425]: cannot find type 'f32x16' in this scope` at every impl, not a type
+      mismatch inside one closure. The same crate's `u8x16` (in a sibling file) already
+      ships a fourth, portable `#[cfg(not(any(x86_64, aarch64)))] pub struct
+      u8x16([u8; 16])` arm with a scalar-loop body for every method — grep sibling files
+      in the same `simd`-shaped module for this pattern before writing one from scratch;
+      copying its shape (one array-backed struct, one added `#[cfg(not(any(...)))]` arm
+      per method, per operator impl) turned an initially-daunting ~2,700-line, five-type
+      gap into a mechanical, low-risk patch.
+    - **Validate a scalar-fallback SIMD patch by borrowing an architecture you don't have,
+      not by trying to cross-compile.** No local cross C toolchain reproduces the riscv64
+      runner, but the fallback code itself is architecture-agnostic — temporarily rename
+      the *real* `target_arch = "aarch64"` guards in a scratch copy (e.g. to
+      `"aarch64_disabled_for_local_check"`, an unrecognized cfg value that never matches)
+      and widen the new fallback's `not(any(...))` to no longer exclude aarch64. `cargo
+      test` then runs the crate's own SIMD unit tests through the new scalar path for
+      real, using a fully working native toolchain (no cross-compiler, no QEMU) — this
+      caught nothing here (24/24 passed unmodified) but would have caught a transposed
+      index or wrong accumulator before spending a riscv64 CI cycle on it.
 
 306. **A pyo3 release that predates a newer CPython by years does not necessarily fail to
     build against it — pyo3-build-config only floors the supported version, it has no
