@@ -1,0 +1,155 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux`/`sdist` jobs of
+# https://github.com/polkascan/py-bip39-bindings/blob/v0.3.0/.github/workflows/CI.yml
+name: Build py-bip39-bindings wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'py-bip39-bindings version to build (git tag without the v prefix, e.g. 0.3.0)'
+        required: true
+        default: '0.3.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-py-bip39-bindings.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.3.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.3.0 there.
+  PY_BIP39_BINDINGS_VERSION: ${{ inputs.version || '0.3.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  python_sdist:
+    needs: [setup]
+    runs-on: ubuntu-latest
+    outputs:
+      sdist_artifact_name: ${{ steps.build_sdist.outputs.sdist_artifact_name }}
+      package_version: ${{ steps.build_sdist.outputs.package_version }}
+    steps:
+      - name: Checkout py-bip39-bindings v${{ env.PY_BIP39_BINDINGS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: polkascan/py-bip39-bindings
+          ref: v${{ env.PY_BIP39_BINDINGS_VERSION }}
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build sdist
+        id: build_sdist
+        run: |
+          set -euo pipefail
+          rm -rf dist
+
+          uv pip install 'maturin>=1.7.0,<1.10.0' build
+          python -m build --sdist --outdir dist
+
+          sdist_name="$(ls dist)"
+          {
+            echo "sdist_artifact_name=${sdist_name}"
+            echo "package_version=$(echo "${sdist_name}" | sed -En 's/py_bip39_bindings-(.+)\.tar\.gz/\1/p')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ steps.build_sdist.outputs.sdist_artifact_name }}
+          path: dist/${{ steps.build_sdist.outputs.sdist_artifact_name }}
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, python_sdist]
+    name: Build py-bip39-bindings ${{ inputs.version || '0.3.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # py-bip39-bindings' pyo3 dependency has a plain
+        # `features = ["extension-module"]` (no abi3-pyNN), so every interpreter
+        # needs its own build.
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Fetch sdist artifact
+        id: fetch_sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ needs.python_sdist.outputs.sdist_artifact_name }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build and test wheel
+        env:
+          CIBW_ARCHS: riscv64
+          # musllinux can't build: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # py-bip39-bindings ships no [tool.cibuildwheel], so the Rust toolchain
+          # its maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$PATH:$HOME/.cargo/bin"'
+          # No python-source in pyproject.toml, so maturin ships an auto-generated
+          # bip39/__init__.py shim around the compiled bip39/bip39.*.so submodule -
+          # probe that submodule, not the top-level import. Test vectors are
+          # upstream's own tests.py (mnemonic/mini_secret/seed fixtures).
+          CIBW_TEST_COMMAND: >-
+            python -c "import bip39.bip39 as m, importlib.metadata as md;
+            assert m.__file__.endswith('.so'), m.__file__;
+            assert any(str(p).endswith('licenses/LICENSE') for p in md.files('py_bip39_bindings'));
+            import bip39;
+            mnemonic = 'daughter song common combine misery cotton audit morning stuff weasel flee field';
+            assert bip39.bip39_validate(mnemonic);
+            assert not bip39.bip39_validate('invalid mnemonic');
+            assert bytes(bip39.bip39_to_mini_secret(mnemonic, '')) == bytes([49, 98, 91, 191, 124, 49, 124, 0, 208, 99, 248, 41, 196, 131, 195, 96, 115, 127, 171, 82, 16, 205, 187, 45, 20, 195, 40, 22, 91, 21, 209, 128]);
+            assert bytes(bip39.bip39_to_seed(mnemonic, '')) == bytes([97, 142, 41, 83, 73, 179, 98, 128, 176, 134, 250, 222, 64, 184, 51, 176, 121, 119, 215, 115, 220, 77, 28, 15, 253, 64, 10, 1, 213, 54, 239, 124]);
+            generated = bip39.bip39_generate(12);
+            assert bip39.bip39_validate(generated);
+            print('bip39 OK')"
+        run: |
+          set -euo pipefail
+          mkdir py-bip39-bindings
+          tar zxf "${{ steps.fetch_sdist.outputs.download-path }}/${{ needs.python_sdist.outputs.sdist_artifact_name }}" \
+            --strip-components=1 -C py-bip39-bindings
+          uv pip install --upgrade cibuildwheel
+          python -m cibuildwheel --output-dir wheelhouse ./py-bip39-bindings
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: py-bip39-bindings-${{ env.PY_BIP39_BINDINGS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish py-bip39-bindings ${{ inputs.version || '0.3.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: py-bip39-bindings-${{ inputs.version || '0.3.0' }}-*-manylinux_riscv64
