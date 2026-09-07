@@ -124,16 +124,29 @@ jobs:
           CIBW_ENVIRONMENT_LINUX: >-
             PATH="$PATH:$HOME/.cargo/bin"
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # Test each wheel the way upstream does - run its unittest suite. trio is
-          # an upstream ci-extra dev dependency used by one async test; pycryptodome
-          # and stream-inflate are pulled in automatically as the wheel's own runtime
-          # dependencies (pycryptodome already ships a riscv64 wheel on our registry;
-          # stream-inflate doesn't yet, so pip builds it from its public sdist using
-          # the Cython wheel above). Tests and fixtures live at the sdist root, not
-          # inside the importable package, so reference them via {package} (=
+          # Test each wheel the way upstream does - run its test suite (via pytest,
+          # which can also collect a plain unittest.TestCase, so upstream's suite
+          # runs unmodified). trio is an upstream ci-extra dev dependency used by
+          # one async test; pycryptodome and stream-inflate are pulled in
+          # automatically as the wheel's own runtime dependencies (pycryptodome
+          # already ships a riscv64 wheel on our registry; stream-inflate doesn't
+          # yet, so pip builds it from its public sdist using the Cython wheel
+          # above). Tests and fixtures live at the sdist root, not inside the
+          # importable package, so reference them via {package} (=
           # /project/stream-unzip), NOT {project} - see gotcha 5.
-          CIBW_TEST_REQUIRES: trio
-          CIBW_TEST_COMMAND: cd {package} && python -m unittest -v test
+          #
+          # test_bad_deflate_data is deselected: it corrupts one byte of a raw
+          # DEFLATE stream and asserts zlib.decompressobj raises (mapped to
+          # DeflateError). manylinux_2_39_riscv64 has no dedicated zlib build step
+          # (unlike e.g. openssl/sqlite3) and links CPython's zlib module against
+          # the image's system zlib-ng-compat instead, which decodes this
+          # particular corrupted stream without raising - the corruption then only
+          # surfaces once the decompressed bytes fail the trailing CRC-32 check, as
+          # CRC32IntegrityError. Same underlying image behavior as gotchas 272/279.
+          CIBW_TEST_REQUIRES: pytest trio
+          CIBW_TEST_COMMAND: >-
+            cd {package} &&
+            python -m pytest -v test.py --deselect test.py::TestStreamUnzip::test_bad_deflate_data
         run: |
           set -euo pipefail
           mkdir stream-unzip
