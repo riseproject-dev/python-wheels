@@ -15,6 +15,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/build-hdrhistogram.yml'
+      - 'patches/hdrhistogram/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.version || '0.10.7' }}-${{ github.head_ref || github.run_id }}
@@ -54,6 +55,15 @@ jobs:
           ref: ${{ env.HDRHISTOGRAM_VERSION }}
           persist-credentials: false
 
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply python-wheels/patches/hdrhistogram/${{ env.HDRHISTOGRAM_VERSION }}/*.patch
+
       - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         env:
           CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
@@ -77,7 +87,10 @@ jobs:
           names = zipfile.ZipFile(sys.argv[1]).namelist()
           assert any(n.startswith("pyhdrh") and n.endswith(".so") for n in names), names
           licences = {n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n} - {""}
-          assert licences == {"AUTHORS", "LICENSE"}, licences
+          # AUTHORS ships on PyPI because upstream's sdist is built from full git
+          # history; our shallow single-tag checkout has none for pbr to derive it
+          # from, so only the real licence text (LICENSE) is expected here.
+          assert licences == {"LICENSE"}, licences
           EOF
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
