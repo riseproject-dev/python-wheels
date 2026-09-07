@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/pyvista/fast-simplification/blob/v0.2.0/.github/workflows/testing-and-deployment.yml
+name: Build fast-simplification wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'fast-simplification version to build (git tag is v<version>)'
+        required: true
+        default: '0.2.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-fast-simplification.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.2.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.2.0 there.
+  FAST_SIMPLIFICATION_VERSION: ${{ inputs.version || '0.2.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build fast-simplification ${{ inputs.version || '0.2.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout fast-simplification v${{ env.FAST_SIMPLIFICATION_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pyvista/fast-simplification
+          ref: v${{ env.FAST_SIMPLIFICATION_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # pyvista (and the VTK it wraps) has no riscv64 wheel; the suite's own
+          # has_vtk guard skips every test that needs it when pyvista is absent.
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          path = sys.argv[1]
+          names = zipfile.ZipFile(path).namelist()
+          exts = [n for n in names if n.endswith(".so")]
+          assert exts and {"_simplify", "_replay"} <= {n.split("/")[-1].split(".")[0] for n in exts}, exts
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          assert licences == {"LICENSE"}, licences
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fast-simplification-${{ env.FAST_SIMPLIFICATION_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish fast-simplification ${{ inputs.version || '0.2.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: fast-simplification-${{ inputs.version || '0.2.0' }}-*-manylinux_riscv64
