@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/mitsuhiko/minijinja/blob/2.24.0/.github/workflows/build-wheels.yml
+name: Build minijinja wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'minijinja version to build (git tag, e.g. 2.24.0)'
+        required: true
+        default: '2.24.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-minijinja.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.24.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 2.24.0 there.
+  MINIJINJA_VERSION: ${{ inputs.version || '2.24.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build minijinja ${{ inputs.version || '2.24.0' }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # pyo3's abi3-py38 feature is on unconditionally (minijinja-py/Cargo.toml), so
+          # one abi3 wheel serves every GIL-ful interpreter; pyo3 disables abi3 under
+          # Py_GIL_DISABLED, giving the free-threaded build its own wheel (upstream's own
+          # tests.yml runs a "freethreaded" variant of the Python binding test job).
+          - tag: cp38-abi3
+            # The riscv64 manylinux image ships no cp38 (cp39 is its floor), so build on
+            # cp39 instead -- the oldest interpreter it has -- and re-test on the newer
+            # ones via find_compatible_wheel. Upstream's own build-wheels.yml does the
+            # same thing for the same reason: its linux job builds with
+            # `--interpreter "3.9"` despite the crate's cp38-abi3 tag.
+            build: >-
+              cp39-manylinux_riscv64 cp310-manylinux_riscv64
+              cp311-manylinux_riscv64 cp312-manylinux_riscv64
+              cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+
+    steps:
+      - name: Checkout minijinja ${{ env.MINIJINJA_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: mitsuhiko/minijinja
+          ref: ${{ env.MINIJINJA_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: minijinja-py
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # minijinja-py ships no [tool.cibuildwheel], so the Rust toolchain its
+          # maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: minijinja-py/tests minijinja-py/pyproject.toml
+          # test_load_from_path resolves "tests/templates" relative to cwd, so pytest
+          # must run from minijinja-py/ (matching upstream's own Makefile) rather than
+          # the staged test_cwd root.
+          CIBW_TEST_COMMAND: >-
+            python -c "import minijinja._lowlevel as m, importlib.metadata as md;
+            assert m.__file__.endswith('.so'), m.__file__;
+            assert any(str(p).endswith('licenses/LICENSE') for p in md.files('minijinja'))" &&
+            cd minijinja-py && python -m pytest -v tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: minijinja-${{ env.MINIJINJA_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish minijinja ${{ inputs.version || '2.24.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: minijinja-${{ inputs.version || '2.24.0' }}-*-manylinux_riscv64
