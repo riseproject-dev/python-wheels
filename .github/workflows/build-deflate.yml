@@ -1,0 +1,92 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/dcwatson/deflate/blob/main/.github/workflows/build.yml
+name: Build deflate wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'deflate version to build (e.g. 0.9.0)'
+        required: true
+        default: '0.9.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-deflate.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.9.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.9.0 there.
+  DEFLATE_VERSION: ${{ inputs.version || '0.9.0' }}
+  # Upstream cuts releases without git tags past 0.7.0, so pin the release
+  # commit: this is "Appease ruff, allow/default to compresslevel=-1", whose
+  # tree is byte-identical to the 0.9.0 PyPI sdist. Update it alongside
+  # DEFLATE_VERSION.
+  DEFLATE_REF: 009771737430efe37be54a25fc9b22bebbcba247
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build deflate ${{ inputs.version || '0.9.0' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Wheels are abi3 (pyproject sets wheel.py-api = "cp311"), so a single
+        # build is loadable on 3.11+; only the free-threaded cp314t build needs
+        # its own wheel. Our repo floor is cp312, so build there instead of 3.11.
+        python: [cp312, cp314t]
+        libc: [manylinux, musllinux]
+
+    steps:
+      - name: Checkout deflate ${{ env.DEFLATE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: dcwatson/deflate
+          ref: ${{ env.DEFLATE_REF }}
+          # libdeflate is vendored as a git submodule and compiled in statically.
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # Override upstream's build-frontend = "build[uv]": cibuildwheel's
+          # audit step runs on the host runner and requires a host `uv` binary
+          # when the frontend is build[uv], which the self-hosted riscv64
+          # runner doesn't have (gotcha 13).
+          CIBW_BUILD_FRONTEND: build
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: deflate-${{ env.DEFLATE_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish deflate ${{ inputs.version || '0.9.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: deflate-${{ inputs.version || '0.9.0' }}-*riscv64
