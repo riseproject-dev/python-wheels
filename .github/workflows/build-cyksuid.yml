@@ -1,0 +1,87 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `wheel` job of
+# https://github.com/timonwong/cyksuid/blob/v2.1.0/.github/workflows/wheels.yml
+name: Build cyksuid wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'cyksuid version to build (git tag without leading v, e.g. 2.1.0)'
+        required: true
+        default: '2.1.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-cyksuid.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.1.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  CYKSUID_VERSION: ${{ inputs.version || '2.1.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build cyksuid ${{ inputs.version || '2.1.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout cyksuid v${{ env.CYKSUID_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: timonwong/cyksuid
+          ref: v${{ env.CYKSUID_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # pyproject.toml's build-system.requires omits Cython, and setup.py only
+          # cythonizes the .pyx sources when CYTHON=1 is set (upstream's own CI sets
+          # this via `--with-cython` before running cibuildwheel); the tagged repo
+          # ships no pre-generated .cpp, so both are needed here.
+          CIBW_BEFORE_BUILD: pip install "cython==3.0.10" setuptools
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          CIBW_ENVIRONMENT: CYTHON=1
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: >-
+            python -c "from cyksuid import _ksuid, fast_base62;
+            m = [_ksuid, fast_base62];
+            bad = [x.__name__ for x in m if not x.__file__.endswith('.so')];
+            assert not bad, bad"
+            && python -m pytest {project}/tests -v
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cyksuid-${{ env.CYKSUID_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cyksuid ${{ inputs.version || '2.1.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: cyksuid-${{ inputs.version || '2.1.0' }}-*-manylinux_riscv64
