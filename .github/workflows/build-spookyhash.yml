@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build_wheels` job of
+# https://github.com/buhanec/spookyhash/blob/2.1.1/.github/workflows/wheels.yml
+name: Build spookyhash wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'spookyhash version to build (git tag, e.g. 2.1.1)'
+        required: true
+        default: '2.1.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-spookyhash.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.1.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  SPOOKYHASH_VERSION: ${{ inputs.version || '2.1.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build spookyhash ${{ inputs.version || '2.1.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout spookyhash ${{ env.SPOOKYHASH_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: buhanec/spookyhash
+          ref: ${{ env.SPOOKYHASH_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BUILD_FRONTEND: build
+          CIBW_TEST_EXTRAS: test
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: >-
+            python -c "import _spookyhash; assert _spookyhash.__file__.endswith('.so'), _spookyhash.__file__" &&
+            pytest {project}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: spookyhash-${{ env.SPOOKYHASH_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish spookyhash ${{ inputs.version || '2.1.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: spookyhash-${{ inputs.version || '2.1.1' }}-*-manylinux_riscv64
