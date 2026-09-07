@@ -168,24 +168,38 @@ jobs:
             pytest opencv-python>4.6 torch>=2.5 pandas>=2
             syrupy==5.0.0 inline-snapshot==0.31.1 semver>=3.0,<3.1 tomli==2.0.1
           # test-sources resolves against the checkout root, not package-dir.
-          CIBW_TEST_SOURCES: rerun_py/tests rerun_py/pyproject.toml
+          # tests/assets is the workspace-level fixture dir test_asset3d.py
+          # reads via `Path(__file__).parents[3] / "tests" / "assets"`.
+          CIBW_TEST_SOURCES: rerun_py/tests rerun_py/pyproject.toml tests/assets
           # e2e_redap_tests needs the "server" Cargo feature (not built, see
           # the scope note above) to start its local catalog server.
           # api_sandbox mixes in drafts of a future, unreleased API. Both are
           # upstream-labelled sandboxes/integration suites, not the SDK's
           # regression tests. test_headless_viewer.py spawns the (unbuilt)
-          # rerun-cli binary; the video/datafusion-dependent files need the
-          # packages dropped from CIBW_TEST_REQUIRES above.
+          # rerun-cli binary; the remaining files all reach
+          # rerun.experimental.dataloader, whose decoders import torchvision
+          # or datafusion (both dropped from CIBW_TEST_REQUIRES above, no
+          # riscv64 wheel anywhere). `-o markers=local_only` registers the
+          # mark e2e_redap_tests/conftest.py normally defines -- pytest only
+          # loads conftest.py files under the paths it actually collects, so
+          # excluding that directory drops the registration too and
+          # `filterwarnings = error` turns the resulting "unknown mark"
+          # warning into a collection failure.
           CIBW_TEST_COMMAND: >-
             cd rerun_py &&
             python -c "import rerun_bindings.rerun_bindings as m; assert m.__file__.endswith('.so'), m.__file__" &&
-            python -m pytest tests -v
+            python -m pytest tests -v -o markers=local_only
             --ignore=tests/e2e_redap_tests
             --ignore=tests/api_sandbox
             --ignore=tests/integration/test_headless_viewer.py
+            --ignore=tests/integration/test_dataloader_video.py
             --ignore=tests/integration/test_dataloader_video_codecs.py
             --ignore=tests/integration/test_chunk_store_reader.py
             --ignore=tests/unit/test_dataloader_decoder_helpers.py
+            --ignore=tests/unit/test_dataloader_manifest.py
+            --ignore=tests/unit/test_dataloader_query_indices.py
+            --ignore=tests/unit/test_dataloader_skip_incomplete.py
+            --ignore=tests/unit/test_sample_index.py
             --ignore=tests/unit/test_datafusion_utils.py
             --ignore=tests/unit/test_viewer_client.py
 
