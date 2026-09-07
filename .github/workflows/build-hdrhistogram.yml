@@ -1,0 +1,110 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build:
+#   https://github.com/HdrHistogram/HdrHistogram_py/blob/0.10.7/.github/workflows/python-publish.yml
+name: Build hdrhistogram wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'hdrhistogram version to build (git tag, e.g. 0.10.7)'
+        required: true
+        default: '0.10.7'
+  pull_request:
+    paths:
+      - '.github/workflows/build-hdrhistogram.yml'
+      - 'patches/hdrhistogram/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.10.7' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.10.7 there.
+  HDRHISTOGRAM_VERSION: ${{ inputs.version || '0.10.7' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build hdrhistogram ${{ inputs.version || '0.10.7' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Matches upstream's own CIBW_BUILD/CIBW_SKIP: cp310-cp314, free-threaded
+        # skipped because the C extension is not validated for that ABI.
+        python: ["cp310", "cp311", "cp312", "cp313", "cp314"]
+        libc: [manylinux, musllinux]
+
+    steps:
+      - name: Checkout HdrHistogram_py ${{ env.HDRHISTOGRAM_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: HdrHistogram/HdrHistogram_py
+          ref: ${{ env.HDRHISTOGRAM_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply python-wheels/patches/hdrhistogram/${{ env.HDRHISTOGRAM_VERSION }}/*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # Fixture lookups in test/test_hdrhistogram.py are the literal relative
+          # path "test/*.hlog", so only "test" is staged (gotcha 36) and conftest.py
+          # comes along to reproduce upstream's default perf-test skip (tox.yml runs
+          # plain `tox`, never passing --runperf). tox.ini registers the pytest
+          # markers the suite uses, silencing PytestUnknownMarkWarning.
+          CIBW_TEST_SOURCES: test conftest.py tox.ini
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: >-
+            python -c "import pyhdrh; assert pyhdrh.__file__.endswith('.so'), pyhdrh.__file__" &&
+            python -m pytest test -v
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert any(n.startswith("pyhdrh") and n.endswith(".so") for n in names), names
+          licences = {n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n} - {""}
+          # AUTHORS ships on PyPI because upstream's sdist is built from full git
+          # history; our shallow single-tag checkout has none for pbr to derive it
+          # from, so only the real licence text (LICENSE) is expected here.
+          assert licences == {"LICENSE"}, licences
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: hdrhistogram-${{ env.HDRHISTOGRAM_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish hdrhistogram ${{ inputs.version || '0.10.7' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: hdrhistogram-${{ inputs.version || '0.10.7' }}-*riscv64
