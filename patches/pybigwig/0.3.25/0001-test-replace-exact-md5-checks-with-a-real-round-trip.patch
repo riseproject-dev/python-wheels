@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Tue, 8 Sep 2026 00:00:00 +0000
+Subject: [PATCH] test: replace exact md5 checks with a real round-trip
+
+doWrite2 and doWriteEmpty each write a bigWig file with libBigWig's
+zlib-compressed data/index blocks, then assert the *exact* md5 of the
+resulting bytes. That only holds if the system zlib produces the same
+compressed bytes the hash was recorded against; decompression-compatible
+implementations are free to encode differently.
+
+The riscv64 manylinux image's system zlib is zlib-ng in zlib-ng-compat
+mode (Rocky's zlib-devel resolves to zlib-ng-compat-devel), whose
+deflate implementation is not byte-identical to stock zlib. Both hashes
+mismatch there even though the written files are perfectly valid --
+reproduced locally against Apple's system zlib, where both pass
+unmodified.
+
+doWriteEmpty already re-opens the file and checks chroms/intervals/
+values/stats right after its hash check, so dropping that check alone
+keeps the same coverage. doWrite2 had no such re-open, so add one that
+verifies the header and every entry just written, which is strictly
+more real functional coverage than an opaque hash.
+
+Upstream-Status: Inappropriate [zlib-ng-compat is riscv64 manylinux image infrastructure, not something upstream's own CI encounters]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ pyBigWigTest/test.py | 11 +++++------
+ 1 file changed, 5 insertions(+), 6 deletions(-)
+
+diff --git a/pyBigWigTest/test.py b/pyBigWigTest/test.py
+index 7a1bd6a..5ac0e60 100644
+--- a/pyBigWigTest/test.py
++++ b/pyBigWigTest/test.py
+@@ -135,9 +135,12 @@ class TestRemote():
+         #Add a few intervals on a new chromosome
+         bw.addEntries(["2"]*3, starts[0:3], ends=ends[0:3], values=values[0:3])
+         bw.close()
+-        #check md5sum, this is the simplest method to check correctness
+-        h = hashlib.md5(open(oname, "rb").read()).hexdigest()
+-        assert(h=="ef104f198c6ce8310acc149d0377fc16")
++        #Ensure the written file reads back the entries we just wrote
++        bw = pyBigWig.open(oname)
++        assert(bw.chroms() == {'1': 1000000, '2': 1500000})
++        assert(bw.intervals("1") == ((0, 5, 0.0), (100, 120, 1.0), (125, 126, 200.0), (200, 205, -2.0), (220, 226, 150.0), (230, 231, 25.0), (500, 520, 0.0), (600, 620, 1.0), (625, 645, 200.0), (700, 720, -2.0), (800, 820, 150.0), (850, 870, 25.0), (900, 920, -5.0), (930, 950, -20.0), (960, 980, 25.0), (990, 1010, -5.0), (1020, 1040, -20.0), (1050, 1070, 25.0)))
++        assert(bw.intervals("2") == ((0, 5, 0.0), (100, 120, 1.0), (125, 126, 200.0)))
++        bw.close()
+         #Clean up
+         os.remove(oname)
+
+@@ -149,10 +152,6 @@ class TestRemote():
+         bw.addHeader([("1", 1000000), ("2", 1500000)])
+         bw.close()
+
+-        #check md5sum
+-        h = hashlib.md5(open(oname, "rb").read()).hexdigest()
+-        assert(h=="361c600e5badf0b45d819552a7822937")
+-
+         #Ensure we can open and get reasonable results
+         bw = pyBigWig.open(oname)
+         assert(bw.chroms() == {'1': 1000000, '2': 1500000})
+--
+2.43.0
