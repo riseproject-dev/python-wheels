@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build_wheels` job of
+# https://github.com/unum-cloud/USearch/blob/v2.26.1/.github/workflows/release.yml
+name: Build usearch wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'usearch version to build (git tag without the leading v, e.g. 2.26.1)'
+        required: true
+        default: '2.26.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-usearch.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.26.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  USEARCH_VERSION: ${{ inputs.version || '2.26.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build usearch ${{ inputs.version || '2.26.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout usearch v${{ env.USEARCH_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: unum-cloud/USearch
+          ref: v${{ env.USEARCH_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # setup.py unconditionally links -static-libstdc++ on Linux; the
+          # image's gcc-c++ package doesn't pull in the static archive, so
+          # add it to upstream's own before-all (glibc-devel wget python3-devel).
+          CIBW_BEFORE_ALL_LINUX: >-
+            yum update -y --disablerepo=extras --setopt=install_weak_deps=0 &&
+            yum install -y --disablerepo=extras glibc-devel wget python3-devel libstdc++-static
+          # numpy has no riscv64 wheel on public PyPI yet; numkong and cmake
+          # already publish one there, so only numpy needs our registry.
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Upstream disables cibuildwheel's own test step (pyproject.toml:
+          # "everything is happening in a super slow container" / tests run in
+          # prerelease.yml instead) - run that suite here since it's the only
+          # place riscv64 wheels get tested. numba/cppyy/peachpy are skipped:
+          # none has a riscv64 wheel, and every test using them already
+          # self-skips via ImportError (or a platform.machine() check for
+          # peachpy) when the optional package is absent.
+          CIBW_TEST_REQUIRES: pytest pytest-repeat
+          CIBW_TEST_COMMAND: pytest {package}/python/scripts
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: usearch-${{ env.USEARCH_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # setup.py unconditionally passes -static-libstdc++ on Linux, embedding
+      # the image's gcc runtime into usearch/compiled.*.so.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: usearch-${{ env.USEARCH_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish usearch ${{ inputs.version || '2.26.1' }}
+    needs: [setup, build_wheels, gpl_sources]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: usearch-${{ inputs.version || '2.26.1' }}-*-manylinux_riscv64
+      gpl-sources-artifact: usearch-${{ inputs.version || '2.26.1' }}-gpl-sources
+      gpl-sources-description: gcc
