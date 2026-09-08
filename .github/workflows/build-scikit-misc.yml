@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/has2k1/scikit-misc/blob/v0.5.2/.github/workflows/build-wheels.yml
+name: Build scikit-misc wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'scikit-misc version to build (git tag without the leading v, e.g. 0.5.2)'
+        required: true
+        default: '0.5.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-scikit-misc.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.5.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  SCIKIT_MISC_VERSION: ${{ inputs.version || '0.5.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build scikit-misc ${{ inputs.version || '0.5.2' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout scikit-misc v${{ env.SCIKIT_MISC_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: has2k1/scikit-misc
+          ref: v${{ env.SCIKIT_MISC_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy has a riscv64 wheel only on our registry; cython/meson-python
+          # build from sdist there, same as upstream's own build-time resolution.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: scikit-misc-${{ env.SCIKIT_MISC_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    # scikit-misc compiles real Fortran (blas_lite.f, linpack_lite.f, loessf.f)
+    # with the image's gfortran, so auditwheel vendors its libgfortran runtime.
+    name: Collect GPL sources (gcc) for scikit-misc ${{ inputs.version || '0.5.2' }}
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Collect gcc source RPM from manylinux_riscv64
+        uses: riseproject-dev/python-wheels/actions/collect-gpl-sources@main
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: scikit-misc-${{ inputs.version || '0.5.2' }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish scikit-misc ${{ inputs.version || '0.5.2' }}
+    needs: [setup, build_wheels, gpl_sources]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: scikit-misc-${{ inputs.version || '0.5.2' }}-*-manylinux_riscv64
+      gpl-sources-artifact: scikit-misc-${{ inputs.version || '0.5.2' }}-gpl-sources
+      gpl-sources-description: gcc
