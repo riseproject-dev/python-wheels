@@ -1,0 +1,121 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# pyicu-binary is PyICU's own gitlab.pyicu.org/main/pyicu tree (setup.py:
+# name="PyICU-binary"), which carries no wheel-build CI of its own.
+name: Build pyicu-binary wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pyicu-binary version to build (git tag without leading v, e.g. 2.7.4)'
+        required: true
+        default: '2.7.4'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pyicu-binary.yml'
+      - 'patches/pyicu-binary/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.7.4' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 2.7.4 there.
+  PYICU_BINARY_VERSION: ${{ inputs.version || '2.7.4' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pyicu-binary ${{ inputs.version || '2.7.4' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      # gitlab.pyicu.org isn't github.com, so actions/checkout can't reach it.
+      - name: Checkout pyicu v${{ env.PYICU_BINARY_VERSION }}
+        run: |
+          git clone --depth 1 --branch "v${{ env.PYICU_BINARY_VERSION }}" \
+            https://gitlab.pyicu.org/main/pyicu.git pyicu
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply riscv64 patches
+        working-directory: pyicu
+        run: git apply -v ../python-wheels/patches/pyicu-binary/${{ env.PYICU_BINARY_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: pyicu
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # setup.py links ICU dynamically via icu-config/pkg-config; auditwheel
+          # then vendors libicudata/libicuuc/libicui18n into the wheel (the
+          # "-binary" in the name), which is what makes it self-contained. Its
+          # Unicode License requires the notice to travel with the binary.
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf -y install libicu-devel &&
+            cp /usr/share/licenses/libicu/LICENSE {package}/LICENSE.icu
+          CIBW_TEST_REQUIRES: pytest six
+          CIBW_TEST_SOURCES: pyicu/test
+          # 2.7.4's own tests hardcode CLDR-formatted strings and a tzdata
+          # transition pinned to ICU <=69 (test_DateTimeParserGenerator's
+          # own ICU_VERSION check tops out at "68.0"); manylinux_2_39
+          # links 74.2, whose newer CLDR/tzdata legitimately renders these
+          # four differently (e.g. narrow-no-break-space in "5:30 PM",
+          # Fiji's DST rule having no further transitions). Not a riscv64
+          # or code defect - deselect rather than chase upstream's CLDR pin.
+          CIBW_TEST_COMMAND: >-
+            python -c "import icu; print('linked ICU', icu.ICU_VERSION)" &&
+            python -m pytest pyicu/test
+            --deselect pyicu/test/test_DateTimeParserGenerator.py::TestDateTimePatternGenerator::testAddPattern
+            --deselect pyicu/test/test_DateTimeParserGenerator.py::TestDateTimePatternGenerator::testGetBestPattern
+            --deselect pyicu/test/test_DateTimeParserGenerator.py::TestDateTimePatternGenerator::testReplaceFieldType
+            --deselect pyicu/test/test_TimeZone.py::TestTimeZone::testTransition
+
+      - name: Check the wheel bundles ICU and its licence
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.split("/")[-1].startswith("_icu") and n.endswith(".so") for n in names), (whl, names)
+              assert any(".libs/" in n and "icu" in n.lower() for n in names), (whl, names)
+              assert any(n.endswith(".dist-info/licenses/LICENSE.icu") for n in names), (whl, names)
+              print(whl, "OK")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyicu-binary-${{ env.PYICU_BINARY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyicu-binary ${{ inputs.version || '2.7.4' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pyicu-binary-${{ inputs.version || '2.7.4' }}-*-manylinux_riscv64
