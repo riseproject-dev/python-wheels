@@ -1,0 +1,150 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build workflow:
+#   https://github.com/Esri/lerc/blob/v4.2.0/.github/workflows/build_wheels.yml
+# which compiles libLerc via CMake inside a glibc-pinned container, then lets
+# OtherLanguages/Python/setup.py's own bdist_wheel override (any Python 3, one
+# native lib per OS) package it and rename the platform tag to a manylinux one.
+# This narrows that to Linux riscv64, building inside the manylinux_riscv64
+# image directly instead of upstream's rockylinux:8 + separate host Python.
+name: Build pylerc wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pylerc version to build (matches the lerc git tag, e.g. 4.2.0)'
+        required: true
+        default: '4.2.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pylerc.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '4.2.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 4.2.0 there.
+  PYLERC_VERSION: ${{ inputs.version || '4.2.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pylerc ${{ inputs.version || '4.2.0' }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout lerc v${{ env.PYLERC_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Esri/lerc
+          ref: v${{ env.PYLERC_VERSION }}
+          persist-credentials: false
+
+      # setup.py lives in OtherLanguages/Python, so setuptools' default licence
+      # glob runs there and never sees the repo-root LICENSE/NOTICE (gotcha 86).
+      - name: Stage licences where setuptools' default glob looks
+        run: cp LICENSE NOTICE OtherLanguages/Python/
+
+      - name: Build libLerc and the wheel
+        run: |
+          docker run --rm \
+            -v "$(pwd)":/workspace \
+            --workdir /workspace \
+            "${{ env.MANYLINUX_RISCV64_IMAGE }}" \
+            bash -c '
+              set -euo pipefail
+              dnf install -y cmake
+              mkdir -p cmake_build
+              cd cmake_build
+              cmake .. -DCMAKE_BUILD_TYPE=Release
+              cmake --build . --config Release
+              cd ..
+              cp cmake_build/libLerc.so.4 OtherLanguages/Python/lerc/
+
+              PY=/opt/python/cp312-cp312/bin
+              cd OtherLanguages/Python
+              "$PY"/pip install -q --upgrade pip setuptools wheel
+              "$PY"/pip wheel . --no-deps --no-build-isolation -w /workspace/wheelhouse
+            '
+
+      # setup.py's bdist_wheel override forces "py3-none-<plat>", detecting
+      # <plat> from the build host the same way upstream does for x86_64;
+      # standardize it to the manylinux tag libLerc.so.4 was actually built
+      # against, mirroring upstream's own "Standardize Wheel Platform Labels"
+      # step (which does the same rename for its x86_64 job).
+      - name: Retag the wheel manylinux_2_39_riscv64
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" wheelhouse
+          cd wheelhouse
+          for f in *-none-linux_riscv64.whl; do
+            mv "$f" "${f%-linux_riscv64.whl}-manylinux_2_39_riscv64.whl"
+          done
+
+      - name: Check licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith("lerc/libLerc.so.4") for n in names), whl
+              licenses = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                          if ".dist-info/licenses/" in n and not n.endswith("/")}
+              assert licenses == {"LICENSE", "NOTICE"}, f"{whl}: {sorted(licenses)}"
+              print(whl, "ok")
+          EOF
+
+      # lerc/__init__.py is a pure-Python `from ._lerc import *` shim; the
+      # actual compiled-lib proof is loading and exercising libLerc.so.4
+      # through it, not a `__file__.endswith('.so')` check (gotcha 148/174).
+      - name: Install the built wheel and exercise the LERC round trip
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          # The runner's stock pip predates riscv64 manylinux tag support and
+          # rejects the wheel as unsupported.
+          pip install -q --upgrade pip
+          # numpy has no riscv64 wheel on public PyPI; keep pip on our registry's copy.
+          PIP_ONLY_BINARY=numpy PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            pip install -q wheelhouse/*.whl
+          python3 -c "
+          import os
+          import lerc
+          import lerc._lerc as _lerc
+
+          so_path = os.path.realpath(_lerc.lercDll._name)
+          assert so_path.endswith('/lerc/libLerc.so.4'), so_path
+          assert '.venv' in so_path, so_path
+
+          rc = lerc.test()
+          assert rc == 0, rc
+          print('pylerc OK:', so_path)
+          "
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pylerc-${{ env.PYLERC_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pylerc ${{ inputs.version || '4.2.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pylerc-${{ inputs.version || '4.2.0' }}-*-manylinux_riscv64
