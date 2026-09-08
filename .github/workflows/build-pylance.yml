@@ -1,0 +1,155 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/lancedb/lance/blob/v11.0.0/.github/workflows/pypi-publish.yml
+name: Build pylance wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pylance version to build (git tag without the leading v, e.g. 11.0.0)'
+        required: true
+        default: '11.0.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pylance.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '11.0.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 11.0.0 there.
+  PYLANCE_VERSION: ${{ inputs.version || '11.0.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pylance ${{ inputs.version || '11.0.0' }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+
+    steps:
+      - name: Checkout lance v${{ env.PYLANCE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: lancedb/lance
+          ref: v${{ env.PYLANCE_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          sparse-checkout: patches/pylance
+          persist-credentials: false
+
+      # lance-core's SIMD_SUPPORT already has a portable riscv64 fallback, but
+      # lance-linalg's f32x8/f32x16/i32x8/f64x4/f64x8 SIMD types still compile
+      # only for x86_64/aarch64/loongarch64 upstream (unlike u8x16/u8x32, which
+      # already have one); see patches/pylance/11.0.0/0001*.patch.
+      - name: Apply pylance patches
+        run: git apply -v python-wheels/patches/pylance/${{ env.PYLANCE_VERSION }}/0001*.patch
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+
+      # Same OOM guard build-deltalake.yml/build-lancedb.yml need on these
+      # runners for a comparably sized Rust workspace (lance's own core, not
+      # just a downstream binding).
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 16
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python
+          output-dir: wheelhouse/
+          # pyo3 carries `abi3-py310` unconditionally in python/Cargo.toml, so
+          # upstream ships one cp310-abi3 wheel and no free-threaded variant
+          # (its own linux-wheel job only builds cp310 too): one build, on our
+          # minimum interpreter. musllinux is dropped: rustup.rs ships no
+          # riscv64 musl toolchain.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # lance ships no [tool.cibuildwheel], so the Rust toolchain its
+          # maturin backend needs is installed in-container here. Rocky 10's
+          # CRB repo (enabled in the manylinux image) has protoc; PROTOC_INCLUDE
+          # is needed because it resolves google/protobuf/*.proto from disk
+          # rather than from the binary (same as build-lancedb.yml).
+          CIBW_BEFORE_ALL_LINUX: >-
+            yum install -y protobuf-compiler protobuf-devel &&
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          # python/pyproject.toml leaves `[tool.maturin]` at the default `dev`
+          # profile, so a plain PEP 517 build ships an unoptimised wheel unless
+          # `--profile release` is passed explicitly (gotcha 141; the
+          # deltalake case). python/.cargo/config.toml already pins
+          # `[profile.release]` to thin LTO; only codegen-units is raised from
+          # 1 to 16 here, the same compile-time/runtime tradeoff upstream's own
+          # `release-with-debug`/`bench` profiles make, needed for this
+          # workspace's size on the riscv64 runner (same reasoning as
+          # build-deltalake.yml/build-lancedb.yml).
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PROTOC=/usr/bin/protoc
+            PROTOC_INCLUDE=/usr/include
+            MATURIN_PEP517_ARGS="--profile release --strip"
+            CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+            CARGO_BUILD_JOBS=2
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Without this pip prefers PyPI's releases, which have no riscv64
+          # wheel for these, and source-builds them in the container. ml_dtypes
+          # has no riscv64 wheel anywhere and is left off this list so pip
+          # builds it from its (pure C++) sdist instead.
+          CIBW_TEST_ENVIRONMENT: >-
+            PIP_ONLY_BINARY=numpy,pandas,pyarrow,duckdb,psutil,pillow,torch
+          CIBW_TEST_REQUIRES: >-
+            pytest pytest-xdist numpy pandas pyarrow duckdb
+            polars[pyarrow,pandas] psutil pillow ml_dtypes torch lance_namespace tqdm
+          # test_migration.py reads fixture .lance datasets from the repo-root
+          # test_data/ directory, which isn't under python/ so isn't picked up by
+          # the other CIBW_TEST_SOURCES entries.
+          CIBW_TEST_SOURCES: python/pyproject.toml python/python/tests test_data
+          # cibuildwheel runs CIBW_TEST_COMMAND from the parent of the copied
+          # CIBW_TEST_SOURCES tree, one level above python/pyproject.toml;
+          # pytest's rootdir/inifile search only looks upward from the cwd, so
+          # `cd python` first puts pyproject.toml back in the search path
+          # (same fix as build-lancedb.yml, gotcha discovered there). Mirrors
+          # upstream's own `make test` (Makefile: `pytest -vvv -s
+          # --durations=30 python/tests`, `-n auto --dist loadgroup` from
+          # run_tests/action.yml's default `pytest-workers: auto`).
+          CIBW_TEST_COMMAND: >-
+            cd python &&
+            python -m pytest python/tests -vvv -s --durations=30
+            -n auto --dist loadgroup
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pylance-${{ env.PYLANCE_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pylance ${{ inputs.version || '11.0.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pylance-${{ inputs.version || '11.0.0' }}-*-manylinux_riscv64
