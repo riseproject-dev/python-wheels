@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/messense/rjieba-py/blob/v0.2.1/.github/workflows/CI.yml
+name: Build rjieba wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'rjieba version to build (git tag without the leading v, e.g. 0.2.1)'
+        required: true
+        default: '0.2.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-rjieba.yml'
+      - 'patches/rjieba/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.2.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.2.1 there.
+  RJIEBA_VERSION: ${{ inputs.version || '0.2.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build rjieba ${{ inputs.version || '0.2.1' }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # pyo3's abi3-py38 feature (Cargo.toml) gives one wheel for every
+          # GIL-ful interpreter; free-threaded builds disable abi3 and get
+          # their own (upstream's CI.yml builds them as a separate maturin
+          # pass with `-i python3.14t` for the same reason).
+          - tag: cp38-abi3
+            # Built on cp312 -- the oldest interpreter in our matrix -- and
+            # re-tested on cp313/cp314 via find_compatible_wheel.
+            build: >-
+              cp312-manylinux_riscv64 cp313-manylinux_riscv64
+              cp314-manylinux_riscv64
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+
+    steps:
+      - name: Checkout rjieba v${{ env.RJIEBA_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: messense/rjieba-py
+          ref: v${{ env.RJIEBA_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch rjieba source
+        run: git apply python-wheels/patches/rjieba/${{ env.RJIEBA_VERSION }}/*.patch
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # rjieba ships no [tool.cibuildwheel], so the Rust toolchain its
+          # maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: >-
+            python -c "import rjieba; assert rjieba.rjieba.__file__.endswith('.so'), rjieba.rjieba.__file__" &&
+            python -m pytest -v tests
+
+      - name: Check the licence made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith("dist-info/licenses/LICENSE") for n in names), names
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rjieba-${{ env.RJIEBA_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish rjieba ${{ inputs.version || '0.2.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: rjieba-${{ inputs.version || '0.2.1' }}-*-manylinux_riscv64
