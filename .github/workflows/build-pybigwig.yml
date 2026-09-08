@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `test-builds` job of
+# https://github.com/deeptools/pyBigWig/blob/0.3.25/.github/workflows/build.yml
+name: Build pybigwig wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pyBigWig version to build (git tag, e.g. 0.3.25)'
+        required: true
+        default: '0.3.25'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pybigwig.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.3.25' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.3.25 there.
+  PYBIGWIG_VERSION: ${{ inputs.version || '0.3.25' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pybigwig ${{ inputs.version || '0.3.25' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout pyBigWig ${{ env.PYBIGWIG_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: deeptools/pyBigWig
+          ref: ${{ env.PYBIGWIG_VERSION }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pyBigWig source
+        run: git apply python-wheels/patches/pybigwig/${{ env.PYBIGWIG_VERSION }}/00*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # No libcurl-devel in the build image, so setup.py's curl-config probe
+          # fails and remote-file support compiles out, matching upstream's own
+          # published wheels (built the same way, also without libcurl-devel).
+          # testNumpyValues opens the same remote URL directly (not gated behind
+          # TestRemote), so it needs deselecting too.
+          CIBW_TEST_REQUIRES: numpy pytest
+          CIBW_TEST_COMMAND: pytest -k "not TestRemote and not testNumpyValues" --pyargs pyBigWigTest.test
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pybigwig-${{ env.PYBIGWIG_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pybigwig ${{ inputs.version || '0.3.25' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pybigwig-${{ inputs.version || '0.3.25' }}-*-manylinux_riscv64
