@@ -1,0 +1,107 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's wheel builder:
+#   https://github.com/lmdu/pyfastx/blob/2.3.1/.github/workflows/wheel.yml
+name: Build pyfastx wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pyfastx version/tag to build, e.g. 2.3.1'
+        required: true
+        default: '2.3.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pyfastx.yml'
+      - 'patches/pyfastx/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.3.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 2.3.1 there.
+  PYFASTX_VERSION: ${{ inputs.version || '2.3.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pyfastx ${{ inputs.version || '2.3.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout pyfastx ${{ env.PYFASTX_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: lmdu/pyfastx
+          ref: ${{ env.PYFASTX_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pyfastx source
+        run: git apply python-wheels/patches/pyfastx/${{ env.PYFASTX_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_REQUIRES: pyfaidx==0.5.8 pytest
+          # Not upstream's `setup.py build_ext -i && pytest {project}/tests`:
+          # tests/ is a package, so pytest would put {project} on sys.path
+          # ahead of site-packages and import that in-place rebuild instead
+          # of the wheel just installed (gotcha 25). test_fasta.py also reads
+          # src/version.h directly, so src/ is staged alongside tests/.
+          CIBW_TEST_SOURCES: tests src
+          CIBW_TEST_COMMAND: python -m pytest tests
+
+      - name: Check the wheel ships the extension and every vendored licence
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("pyfastx.") and n.endswith(".so") for n in names), whl
+              licences = {n.rsplit("/", 1)[1]
+                          for n in names if ".dist-info/licenses/" in n} - {""}
+              assert licences == {"LICENSE", "LICENSE.zlib", "LICENSE.sqlite3", "LICENSE.indexed_gzip"}, (whl, licences)
+              print(whl, "ok")
+          EOF
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyfastx-${{ env.PYFASTX_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyfastx ${{ inputs.version || '2.3.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pyfastx-${{ inputs.version || '2.3.1' }}-*-manylinux_riscv64
