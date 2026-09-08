@@ -1,0 +1,214 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# dprint-py (https://github.com/trim21/dprint-py) repackages dprint/dprint's own
+# release binaries into a pip-installable wheel; its own tooling has no riscv64
+# target at all. dprint/dprint's own CI (ci.generated.yml) already cross-builds
+# and publishes a riscv64gc-unknown-linux-gnu release asset, so this workflow
+# builds it natively from source instead, following the same recipe this repo
+# already uses for other single-binary Rust CLIs (build-ripgrep.yml).
+name: Build dprint-py wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'dprint-py version to build (git tag of dprint/dprint, e.g. 0.57.0)'
+        required: true
+        default: '0.57.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-dprint-py.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.57.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.57.0 there.
+  DPRINT_VERSION: ${{ inputs.version || '0.57.0' }}
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheel:
+    needs: [setup]
+    name: Build dprint-py ${{ inputs.version || '0.57.0' }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout dprint v${{ env.DPRINT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: dprint/dprint
+          ref: ${{ env.DPRINT_VERSION }}
+          persist-credentials: false
+
+      # dprint/dprint is a Cargo workspace with no pyproject.toml anywhere (it
+      # isn't self-published to PyPI; trim21/dprint-py's third-party wrapper
+      # is). Write one at the workspace root with `manifest-path` pointing at
+      # the `dprint` binary crate, same shape as build-taplo.yml/ast-grep-cli
+      # (CLAUDE.md gotcha 259) -- no `--manifest-path` needed on the maturin
+      # step, maturin reads it from `[tool.maturin]`.
+      #
+      # `version` is static (not `dynamic`) and set to the crate version plus
+      # a trailing `.0`, matching the real PyPI dprint-py's own versioning
+      # convention (dprint 0.57.0 -> dprint-py 0.57.0.0) -- maturin only
+      # cross-checks pyproject.toml against Cargo.toml when `version` is
+      # `dynamic`, so this static override needs no patch to Cargo.toml
+      # (which must stay valid 3-part semver for cargo itself).
+      - name: Write pyproject.toml
+        run: |
+          cat > pyproject.toml <<TOML
+          [build-system]
+          build-backend = "maturin"
+          requires = [
+              "maturin>=1.7,<2.0",
+          ]
+
+          [project]
+          name = "dprint-py"
+          version = "${DPRINT_VERSION}.0"
+          description = "a pluggable and configurable code formatting platform."
+          requires-python = ">=3.8"
+          authors = [
+              { name = "dprint code formatting", email = "david@dprint.dev" },
+          ]
+          keywords = [
+              "code-formatter",
+              "formatter",
+          ]
+          classifiers = [
+              "Programming Language :: Rust",
+              "Topic :: Software Development",
+          ]
+          readme = "README.md"
+          license = "MIT"
+
+          [project.urls]
+          Homepage = "https://dprint.dev/"
+          Documentation = "https://dprint.dev/overview"
+          Repository = "https://github.com/dprint/dprint"
+
+          [tool.maturin]
+          bindings = "bin"
+          manifest-path = "crates/dprint/Cargo.toml"
+          TOML
+
+      # `[tool.maturin] bindings = "bin"`: the wheel is one compiled executable
+      # with no ABI tag, so a single native build covers every interpreter.
+      # No musl target: rustup.rs ships no riscv64 musl toolchain (unlike
+      # dprint's own ci.generated.yml, which cross-compiles to
+      # riscv64gc-unknown-linux-musl from x86_64 with `cross`).
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --locked --out dist
+          manylinux: '2_39'
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dprint-py-${{ env.DPRINT_VERSION }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test dprint-py ${{ inputs.version || '0.57.0' }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    env:
+      # Without this uv would reuse the runner image's system CPython for 3.12
+      # and download a standalone build for the others.
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        # This repo's default interpreter matrix (gotcha in workflow-anatomy.md);
+        # the wheel is interpreter-agnostic (bindings = "bin"), so every
+        # interpreter -- including free-threaded -- exercises the same binary.
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: dprint-py-${{ env.DPRINT_VERSION }}-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . dprint-py
+
+      # No wheel-level test suite ships in the sdist (gotcha 187, and
+      # dprint-py has no sdist at all): dprint's own crates/*/tests are Rust
+      # tests run by upstream's own `cargo test`, never packaged. Drive the
+      # real formatter against a real config and a real plugin instead of
+      # settling for a bare --version check -- this also exercises the
+      # wasmtime Cranelift JIT backend, which build.rs documents as having a
+      # native (not interpreted/Pulley) codegen path on riscv64.
+      #
+      # No `python -m dprint`: dprint's own source tree ships no
+      # dprint/__init__.py shim, so the wheel carries only the
+      # .data/scripts/dprint binary and no importable module.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          dprint --version
+          dprint --help >/dev/null
+          dprint license >/dev/null
+
+          work=$(mktemp -d)
+          cd "$work"
+          cat > dprint.json <<'JSON'
+          {
+            "json": {
+              "indentWidth": 2
+            },
+            "includes": ["**/*.json"],
+            "plugins": [
+              "https://plugins.dprint.dev/json-0.19.3.wasm"
+            ]
+          }
+          JSON
+          printf '{"a":1,   "b":[1,2,3]}' > messy.json
+
+          dprint fmt
+
+          expected='{ "a": 1, "b": [1, 2, 3] }'
+          actual=$(cat messy.json)
+          echo "$actual"
+          [ "$actual" = "$expected" ]
+
+          # A freshly-formatted file must pass check with no diff.
+          dprint check
+
+          printf '{"a":1}' > unformatted.json
+          set +e
+          dprint check
+          rc=$?
+          set -e
+          [ "$rc" -ne 0 ]
+
+  publish:
+    name: Publish dprint-py ${{ inputs.version || '0.57.0' }}
+    needs: [setup, build_wheel, test_wheel]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: dprint-py-${{ inputs.version || '0.57.0' }}-manylinux_riscv64
