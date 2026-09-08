@@ -1,0 +1,138 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel builder:
+#   https://github.com/alex-petrenko/faster-fifo/blob/v1.5.2/.github/workflows/python-publish.yml
+name: Build faster-fifo wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'faster-fifo version to build (git tag without leading v, e.g. 1.5.2)'
+        required: true
+        default: '1.5.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-faster-fifo.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.5.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  FASTER_FIFO_VERSION: ${{ inputs.version || '1.5.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build faster-fifo ${{ inputs.version || '1.5.2' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        libc: [manylinux, musllinux]
+
+    steps:
+      - name: Checkout faster-fifo v${{ env.FASTER_FIFO_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: alex-petrenko/faster-fifo
+          ref: v${{ env.FASTER_FIFO_VERSION }}
+          persist-credentials: false
+
+      - name: Stage riscv64 smoke test
+        # Upstream ships no test suite at all (make test's `python -m
+        # unittest` discovers zero files), so this drives the real
+        # PTHREAD_PROCESS_SHARED mutex/condvar path across two OS processes
+        # instead of settling for an import-only check.
+        run: |
+          cat > riscv64_smoke_test.py <<'PY'
+          import multiprocessing as mp
+          from queue import Empty, Full
+
+          import faster_fifo
+
+          assert faster_fifo.__file__.endswith(".so"), faster_fifo.__file__
+
+          q = faster_fifo.Queue(1000 * 1000)
+          assert q.empty()
+
+          obj = dict(a=42, b=(1, 2, 3), c=[1, 2, 3], d="text", e=b"bytes")
+          q.put(obj)
+          assert q.qsize() == 1
+          assert q.get() == obj
+          assert q.empty()
+
+          q.put_many([1, 2, 3])
+          assert q.get_many(max_messages_to_get=3) == [1, 2, 3]
+
+          small_q = faster_fifo.Queue(64)
+          small_q.put(b"x" * 32)
+          try:
+              small_q.put_nowait(b"y" * 32)
+              raise AssertionError("expected Full")
+          except Full:
+              pass
+          assert small_q.get() == b"x" * 32
+          try:
+              small_q.get(timeout=0.2)
+              raise AssertionError("expected Empty")
+          except Empty:
+              pass
+
+          def producer(queue, n):
+              for i in range(n):
+                  queue.put(i)
+
+          if __name__ == "__main__":
+              n = 2000
+              cross_q = faster_fifo.Queue(4 * 1000 * 1000)
+              proc = mp.Process(target=producer, args=(cross_q, n))
+              proc.start()
+
+              received = []
+              while len(received) < n:
+                  received.extend(cross_q.get_many(timeout=5))
+              proc.join(timeout=10)
+
+              assert proc.exitcode == 0, proc.exitcode
+              assert sorted(received) == list(range(n))
+              print("faster-fifo riscv64 smoke test passed")
+          PY
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_SOURCES: riscv64_smoke_test.py
+          CIBW_TEST_COMMAND: python {package}/riscv64_smoke_test.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: faster-fifo-${{ env.FASTER_FIFO_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish faster-fifo ${{ inputs.version || '1.5.2' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: faster-fifo-${{ inputs.version || '1.5.2' }}-*riscv64
