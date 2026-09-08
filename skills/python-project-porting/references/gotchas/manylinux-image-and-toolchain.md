@@ -32,6 +32,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **279** — Gotcha 272's zlib-ng `vsetvli` SIGILL recurs whenever a *second*, independent
 - **288** — Rocky/AlmaLinux 10 dropped the classic SDL2-devel package entirely, on every
 - **327** — A project's own `before-all`/`before-build` can already "fix" gotcha 138's
+  stale `config.guess`/`config.sub` by downloading fresh copies at build time.
+- **328** — A vendored SIMD library with no portable/generic implementation at all can
+  still be ported to riscv64 by routing its x86-only path through SIMDe.
 
 ---
 
@@ -655,3 +658,60 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
     `/usr/share/automake-*/config.guess`/`config.sub` (already current enough for
     riscv64) instead of reaching the network at all, rather than trying to debug *why*
     the external mirror is unreachable from that specific runner.
+
+328. **A vendored SIMD library with genuinely no portable/generic implementation at all
+    (not even a slow reference one wired to the same public API) can still be ported to
+    riscv64 by routing its x86-only path through SIMDe, as long as the actual intrinsics
+    used stay within what SIMDe covers (the pyhmmer/HMMER case; see `build-pyhmmer.yml`).**
+    HMMER3's fast filters (MSVFilter, ViterbiFilter, the striped Forward/Backward) exist
+    only as hand-written SSE/NEON/VMX kernels operating on `P7_OPROFILE`/`P7_OMX`, and
+    `CMakeLists.txt`'s own detection cascade hard `FATAL_ERROR`s when none of the three
+    is found. Unlike gotcha 276's isal case, there is no `_base`/generic C implementation
+    of the *optimized* pipeline sitting in the "always built" source list — the
+    `generic_*.c` files are a separate, unoptimized reference algorithm used only for
+    calibration/testing, not something `Pipeline` can fall back to. Two checks settle
+    whether SIMDe is even viable before writing anything: `grep -ohE '_mm_[a-zA-Z0-9_]+'`
+    over every file the SSE backend compiles, filtered to actual call sites (not comments
+    — one hit here was `_mm_hadd_ps` named only in a comment explaining why the code
+    avoids it) to see how far up the SSE/SSE2/SSE3/SSSE3/SSE4.1/AVX ladder the code
+    actually reaches (SIMDe supports all of these, but the deeper the ISA, the larger the
+    portable-fallback compile cost), and grepping for the corresponding `esl*ENABLE_SSE4`
+    (or equivalent) build-time toggle to confirm any deeper-ISA calls are already gated
+    off when that toggle is unset — HMMER's own `eslENABLE_SSE4` gate around its one
+    SSE4.1 use (`_mm_max_epi8`/`_mm_blendv_ps`, both with an SSE2 fallback already coded)
+    meant the riscv64 path only ever needs `simde/x86/sse3.h`.
+    - **Route the redirect through a build-time header shim, not a source patch, when the
+      project carries its own line-number-based patch mechanism against those same
+      files.** pyhmmer's `src/hmmer/CMakeLists.txt` applies `patches/impl_sse/*.c.patch`
+      against the vendored sources at build time via a custom `apply_patch.py` that seeks
+      by the diff's absolute `-`-side line numbers with **no context verification** —
+      inserting even one line above the patched hunk (e.g. wrapping
+      `#include <emmintrin.h>` in an `#ifdef`) silently shifts every subsequent hunk onto
+      the wrong lines and corrupts the file without erroring. Two of the twelve
+      SSE-backend files here (`p7_omx.c`, `p7_oprofile.c`) are exactly the ones pyhmmer's
+      own patches touch. The fix that avoids the whole class of bug: generate a small
+      include directory at CMake configure time (`file(WRITE ...)`) containing stub files
+      literally named `xmmintrin.h`/`emmintrin.h`/`pmmintrin.h`/`x86intrin.h`, each just
+      `#define SIMDE_ENABLE_NATIVE_ALIASES` + `#include <simde/x86/sse3.h>`, and
+      `include_directories(BEFORE <that dir> <simde source dir>)` only on the
+      no-native-SIMD branch — every vendored file's own `#include <xmmintrin.h>` line
+      resolves to the shim without a single byte of the vendored tree changing, so
+      pyhmmer's own patches keep applying at their original, correct line numbers.
+    - **A build's own runtime CPU-feature detection can assume "this vector backend
+      implies real x86", which breaks independently of the SIMD redirect itself.**
+      Easel's `esl_cpu.c` compiles `cpu_run_id()`/`cpu_has_sse()` — raw
+      `__asm__("cpuid" ...)` — whenever `eslENABLE_SSE` is defined, because historically
+      that could only be true on real x86/x86-64 hardware. Turning `eslENABLE_SSE` on for
+      the SIMDe/riscv64 path breaks that assumption and the inline asm fails to
+      assemble; grep for who actually *calls* the corresponding `esl_cpu_has_*()`
+      function before patching (here: nobody in the compiled sources), so the fix is
+      just gating the asm-bearing internals on an additional "are we really on x86"
+      macro rather than reimplementing a CPUID equivalent for riscv64.
+    - **Confirm the wheel doesn't build a wrong `HMMER_IMPL`/`eslENABLE_*`-keyed dispatch
+      dead — grep the Cython/pybind layer for its own copy of the same dispatch,** not
+      just the C headers. pyhmmer's `.pxd` files gate `libhmmer.impl_sse` vs `impl_neon`
+      vs `impl_vmx` on a literal `HMMER_IMPL` string Cython constant piped in from the
+      *same* CMake variable (`cython_extension(... DIRECTIVES -E HMMER_IMPL=${HMMER_IMPL})`)
+      — reusing `"SSE"` (rather than inventing a new `"SIMDE"` value) for the riscv64
+      branch is what keeps this second, easy-to-miss dispatch pointed at the right impl
+      directory without a matching Cython-side change.
