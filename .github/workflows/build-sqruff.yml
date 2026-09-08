@@ -1,0 +1,125 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/quarylabs/sqruff/blob/v0.40.0/.github/workflows/python-ci.yml
+name: Build sqruff wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'sqruff version to build (git tag without the leading v, e.g. 0.40.0)'
+        required: true
+        default: '0.40.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-sqruff.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.40.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.40.0 there.
+  SQRUFF_VERSION: ${{ inputs.version || '0.40.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build sqruff ${{ inputs.version || '0.40.0' }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # pyo3's abi3-py38 feature is on unconditionally (crates/cli-python/Cargo.toml),
+          # so one abi3 wheel serves every GIL-ful interpreter; pyo3 disables abi3 under
+          # Py_GIL_DISABLED, giving the free-threaded build its own wheel.
+          - tag: cp38-abi3
+            # The riscv64 manylinux image ships no cp38 (cp39 is its floor), so build on
+            # cp39 instead -- the oldest interpreter it has -- and re-test on the newer
+            # ones via find_compatible_wheel.
+            build: >-
+              cp39-manylinux_riscv64 cp310-manylinux_riscv64
+              cp311-manylinux_riscv64 cp312-manylinux_riscv64
+              cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+
+    steps:
+      - name: Checkout sqruff v${{ env.SQRUFF_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: quarylabs/sqruff
+          ref: v${{ env.SQRUFF_VERSION }}
+          persist-credentials: false
+
+      - name: Stage the licence beside sqruff's pyproject.toml
+        # maturin globs LICEN[CS]E* relative to the pyproject directory, which
+        # in this workspace is crates/cli-python/ -- so upstream's published
+        # wheels carry no licence text at all.
+        run: cp LICENSE crates/cli-python/LICENSE
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: crates/cli-python
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # sqruff's crates/cli-python ships no [tool.cibuildwheel], so the Rust
+          # toolchain its maturin backend needs is installed in-container here;
+          # rustup then picks up the repo's rust-toolchain.toml (1.97.1) itself.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          # No wheel-level test suite ships in the sdist (crates/cli-python/tests/*.rs
+          # are Rust integration tests run by upstream's own `cargo test`, never
+          # packaged), so drive the real linter/fixer against a known fixture instead
+          # of settling for a bare --version check.
+          CIBW_TEST_COMMAND: |
+            python3 -c "import sqruff._lib_name as m, importlib.metadata as md; assert m.__file__.endswith('.so'), m.__file__; assert any(str(p).endswith('licenses/LICENSE') for p in md.files('sqruff'))"
+            sqruff --version
+            sqruff --help >/dev/null
+            sqruff dialects >/dev/null
+            work=$(mktemp -d)
+            printf 'SELECT foo bar, * FROM tabs\n' > "$work/bad.sql"
+            set +e
+            sqruff lint "$work/bad.sql"
+            rc=$?
+            set -e
+            [ "$rc" -eq 1 ]
+            set +e
+            sqruff fix "$work/bad.sql"
+            rc=$?
+            set -e
+            [ "$rc" -eq 0 ]
+            grep -q 'SELECT foo AS bar, \* FROM tabs' "$work/bad.sql"
+            sqruff lint "$work/bad.sql"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sqruff-${{ env.SQRUFF_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish sqruff ${{ inputs.version || '0.40.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: sqruff-${{ inputs.version || '0.40.0' }}-*-manylinux_riscv64
