@@ -1,0 +1,87 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build:
+#   https://github.com/aboSamoor/pycld2/blob/v0.3.0/.github/workflows/pythonpackage.yaml
+name: Build pycld2 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pycld2 version to build (e.g. 0.42)'
+        required: true
+        default: '0.42'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pycld2.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.42' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYCLD2_VERSION: ${{ inputs.version || '0.42' }}
+  # No git tag was ever pushed for the 0.42 PyPI release (upstream tagged this
+  # commit v0.3.0 while PYCLD2_VERSION in bindings/pycldmodule.cc already read
+  # "0.42"); pin the commit proven byte-identical to the released sdist and
+  # move it together with PYCLD2_VERSION.
+  PYCLD2_REF: bc9d269f603dc79d4a6e64887065839e62ef3dde
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pycld2 ${{ inputs.version || '0.42' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        libc: [manylinux, musllinux]
+
+    steps:
+      - name: Checkout pycld2 ${{ env.PYCLD2_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: aboSamoor/pycld2
+          ref: ${{ env.PYCLD2_REF }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # test_pycld2.py lives next to the pycld2/ source package at the repo
+          # root; without test-sources cibuildwheel would run it from a cwd
+          # where that source package shadows the installed wheel (gotcha 25).
+          CIBW_TEST_SOURCES: test_pycld2.py
+          CIBW_TEST_COMMAND: >-
+            python -c "import pycld2; assert pycld2._pycld2.__file__.endswith(('.so', '.pyd')), pycld2._pycld2.__file__" &&
+            python test_pycld2.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pycld2-${{ env.PYCLD2_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pycld2 ${{ inputs.version || '0.42' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pycld2-${{ inputs.version || '0.42' }}-*riscv64
