@@ -1,0 +1,62 @@
+From e775ca339d48d2383d849f38b4d7ff1324e5664a Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Tue, 8 Sep 2026 06:20:37 +0200
+Subject: [PATCH] Replace deprecated in-place ndarray.shape assignment with
+ reshape
+
+Upstream-Status: To upstream [not yet submitted; this port workflow does not open upstream issues or PRs]
+
+NumPy 2.5 deprecates assigning to ndarray.shape in place (only reshapes
+that need a copy are still rejected outright; a plain reshape is always
+the documented replacement). normalize() and GaussianHMM/GMMHMM's single-
+feature covariance init hit this on every array they reshape this way,
+turning `DeprecationWarning: Setting the shape on a NumPy array has been
+deprecated in NumPy 2.5.` into a hard test failure wherever
+`filterwarnings = ["error::DeprecationWarning:hmmlearn", ...]` (this
+project's own pytest config) applies. Reproduces with numpy>=2.5 on any
+architecture, not just riscv64.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ src/hmmlearn/hmm.py   | 4 ++--
+ src/hmmlearn/utils.py | 2 +-
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/hmmlearn/hmm.py b/src/hmmlearn/hmm.py
+index fec0a13..59b3a64 100644
+--- a/src/hmmlearn/hmm.py
++++ b/src/hmmlearn/hmm.py
+@@ -316,7 +316,7 @@ class GaussianHMM(_emissions.BaseGaussianHMM, BaseHMM):
+         if self._needs_init("c", "covars_"):
+             cv = np.cov(X.T) + self.min_covar * np.eye(X.shape[1])
+             if not cv.shape:
+-                cv.shape = (1, 1)
++                cv = cv.reshape(1, 1)
+             self.covars_ = \
+                 _utils.distribute_covar_matrix_to_match_covariance_type(
+                     cv, self.covariance_type, self.n_components).copy()
+@@ -576,7 +576,7 @@ class GMMHMM(_emissions.BaseGMMHMM):
+             if cv is None:
+                 cv = compute_cv()
+             if not cv.shape:
+-                cv.shape = (1, 1)
++                cv = cv.reshape(1, 1)
+             if self.covariance_type == 'tied':
+                 self.covars_ = np.zeros((nc, nf, nf))
+                 self.covars_[:] = cv
+diff --git a/src/hmmlearn/utils.py b/src/hmmlearn/utils.py
+index a080e56..751339f 100644
+--- a/src/hmmlearn/utils.py
++++ b/src/hmmlearn/utils.py
+@@ -24,7 +24,7 @@ def normalize(a, axis=None):
+         a_sum[a_sum == 0] = 1
+         shape = list(a.shape)
+         shape[axis] = 1
+-        a_sum.shape = shape
++        a_sum = a_sum.reshape(shape)
+ 
+     a /= a_sum
+ 
+-- 
+2.50.1 (Apple Git-155)
+

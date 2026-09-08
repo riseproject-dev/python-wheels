@@ -1,0 +1,106 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/hmmlearn/hmmlearn/blob/0.3.3/.github/workflows/build.yml
+name: Build hmmlearn wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'hmmlearn version to build (git tag, e.g. 0.3.3)'
+        required: true
+        default: '0.3.3'
+  pull_request:
+    paths:
+      - '.github/workflows/build-hmmlearn.yml'
+      - 'patches/hmmlearn/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.3.3' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.3.3 there.
+  HMMLEARN_VERSION: ${{ inputs.version || '0.3.3' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build hmmlearn ${{ inputs.version || '0.3.3' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Per-interpreter (not abi3): the pybind11 extension links the version-specific
+        # ABI. cp38-cp311 dropped from upstream's cp38-cp313 (gotcha 67/84): hmmlearn's
+        # hard runtime dependency scikit-learn>=0.16 only has riscv64 wheels on
+        # pypi.riseproject.dev for cp312/cp313/cp314/cp314t, so older interpreters would
+        # fall back to a from-source scikit-learn build during the test-install step.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      - name: Checkout hmmlearn ${{ env.HMMLEARN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: hmmlearn/hmmlearn
+          ref: ${{ env.HMMLEARN_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch hmmlearn source
+        run: git apply python-wheels/patches/hmmlearn/${{ env.HMMLEARN_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy,scikit-learn
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_HMMLEARN=${{ env.HMMLEARN_VERSION }}
+          CIBW_TEST_REQUIRES: pytest
+          # Mirrors upstream's own test invocation (build.yml's CIBW_TEST_COMMAND), plus
+          # -X gil=1: _hmmc has no Py_mod_gil slot, so cp314t re-enables the GIL at
+          # import and warns; hmmlearn's own filterwarnings=["error", ...] turns that
+          # into a collection error. CIBW_TEST_ENVIRONMENT's PYTHON_GIL=1 would be the
+          # usual fix, but -I (already used here) ignores all PYTHON* env vars, so it
+          # has to be the -X flag instead; a no-op on the non-free-threaded builds.
+          CIBW_TEST_COMMAND: >-
+            python -I -X gil=1 -mpytest --pyargs hmmlearn.tests {project}/doc
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: hmmlearn-${{ env.HMMLEARN_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish hmmlearn ${{ inputs.version || '0.3.3' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: hmmlearn-${{ inputs.version || '0.3.3' }}-*-manylinux_riscv64
