@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Tue, 8 Sep 2026 00:00:00 +0000
+Subject: [PATCH] common: gate the deprecated PyUnicode_WCHAR_KIND case out on
+ Python 3.12+
+
+Upstream-Status: Backport [https://gitlab.pyicu.org/main/pyicu/-/commit/8850cfca5aeaf040170edca6796002feff0eb82c]
+
+First released in v2.11 (an earlier attempt at the same fix is
+e7a54d1, tightened to this final form the next day by 8850cfc).
+
+CPython 3.12 removed the legacy PyUnicode_WCHAR_KIND enumerator along
+with the rest of the pre-3.3 "legacy Unicode" C API
+(Include/cpython/unicodeobject.h), so building this file against a
+3.12+ header fails with:
+
+    common.cpp: In function '...PyObject_AsUnicodeString(...)':
+    common.cpp:358:16: error: 'PyUnicode_WCHAR_KIND' was not declared
+    in this scope; did you mean 'PyUnicode_4BYTE_KIND'?
+
+Every other PyUnicode_KIND case already predates the switch this
+enumerator lives in, so the fix is the same one upstream shipped two
+releases after 2.7.4: only compile the WCHAR_KIND arm on interpreters
+old enough to still declare it.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ common.cpp | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/common.cpp b/common.cpp
+index 601f1c3..98f86ff 100644
+--- a/common.cpp
++++ b/common.cpp
+@@ -355,6 +355,7 @@ EXPORT UnicodeString &PyObject_AsUnicodeString(PyObject *object,
+         PyUnicode_READY(object);
+ 
+         switch (PyUnicode_KIND(object)) {
++#if PY_VERSION_HEX < 0x030c0000
+           case PyUnicode_WCHAR_KIND: {  // this code path should be deprecated
+               if (SIZEOF_WCHAR_T == sizeof(UChar))
+               {
+@@ -381,7 +382,7 @@ EXPORT UnicodeString &PyObject_AsUnicodeString(PyObject *object,
+               }
+               break;
+           }
+-
++#endif
+           case PyUnicode_1BYTE_KIND: {
+               Py_ssize_t len = PyUnicode_GET_LENGTH(object);
+               Py_UCS1 *pchars = PyUnicode_1BYTE_DATA(object);
+--
+2.43.0
