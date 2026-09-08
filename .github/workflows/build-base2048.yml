@@ -1,0 +1,105 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build` job of
+# https://github.com/ionite34/base2048/blob/v0.1.3/.github/workflows/build.yml
+name: Build base2048 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'base2048 version to build (git tag without leading v, e.g. 0.1.3)'
+        required: true
+        default: '0.1.3'
+  pull_request:
+    paths:
+      - '.github/workflows/build-base2048.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.1.3' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  BASE2048_VERSION: ${{ inputs.version || '0.1.3' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build base2048 ${{ inputs.version || '0.1.3' }} cp37-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout base2048 v${{ env.BASE2048_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ionite34/base2048
+          ref: v${{ env.BASE2048_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          # pyo3's abi3-py37 feature is on unconditionally (Cargo.toml), so
+          # one abi3 wheel serves every interpreter in our matrix; pyo3
+          # 0.17.1 predates PEP 703 entirely, so there is no free-threaded
+          # (cp314t) job.
+          CIBW_BUILD: >-
+            cp312-manylinux_riscv64 cp313-manylinux_riscv64
+            cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # base2048 ships no [tool.cibuildwheel], so the Rust toolchain its
+          # maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          # pyproject.toml pins maturin>=0.13,<0.14 (2022), which has no
+          # riscv64 wheel on PyPI and fails to build from sdist (its own
+          # bootstrap needs setuptools, which Python 3.12+ no longer seeds
+          # into a fresh build-isolation venv). A current maturin builds
+          # this tree unmodified, so install one and skip isolation to
+          # bypass the pin.
+          CIBW_BEFORE_BUILD: pip install maturin
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: >-
+            python -c "import base2048; assert base2048.base2048.__file__.endswith('.abi3.so'), base2048.base2048.__file__" &&
+            python -m pytest -v tests
+
+      - name: Check the licence made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith("dist-info/licenses/LICENSE") for n in names), names
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: base2048-${{ env.BASE2048_VERSION }}-cp37-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish base2048 ${{ inputs.version || '0.1.3' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: base2048-${{ inputs.version || '0.1.3' }}-*-manylinux_riscv64
