@@ -225,6 +225,7 @@ The porting gotchas (322 of them) live in [`references/gotchas/`](gotchas/), spl
 - **294** — An upstream CMakeLists' own `-fPIC` allowlist can name only `x86_64`/`aarch64`,
 - **327** — A project's own `before-all`/`before-build` can already "fix" gotcha 138's
 - **328** — A vendored SIMD library with no portable/generic implementation at all can
+- **332** — A SIMDe SSE-emulation port can compile clean, pass its own project's
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 

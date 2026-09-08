@@ -35,6 +35,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
   stale `config.guess`/`config.sub` by downloading fresh copies at build time.
 - **328** — A vendored SIMD library with no portable/generic implementation at all can
   still be ported to riscv64 by routing its x86-only path through SIMDe.
+- **332** — A SIMDe SSE-emulation port can compile clean, pass its own project's
+  per-primitive unit tests, and still produce wrong full-pipeline results on riscv64.
 
 ---
 
@@ -715,3 +717,88 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       — reusing `"SSE"` (rather than inventing a new `"SIMDE"` value) for the riscv64
       branch is what keeps this second, easy-to-miss dispatch pointed at the right impl
       directory without a matching Cython-side change.
+
+332. **A SIMDe SSE-emulation port (gotcha 328) can compile clean, pass its own project's
+    per-primitive/per-function unit tests, and still produce wrong results at the
+    full-pipeline level on riscv64 specifically — and the wrongness does not reproduce
+    on any other host you can test locally, including one exercising the exact same
+    "portable, no native ISA" SIMDe fallback (the pyhmmer/HMMER MSVFilter case; PR
+    riseproject-dev/python-wheels#1497, parked rather than merged).** After landing
+    gotcha 328's SIMDe redirect for pyhmmer's `impl_sse` backend, real riscv64 CI (not
+    a QEMU rehearsal — the actual self-hosted `ubuntu-24.04-riscv` runners) failed 60
+    of 995 tests with hit counts of `0` where real hits were expected, or under-counts
+    like `479 != 482`. That pattern — mostly-zero with occasional near-misses, not
+    uniformly wrong — is what actually happened when the underlying cause was
+    isolated to one specific function, `p7_MSVFilter()` in `impl_sse/msvfilter.c`.
+    - **Reproduce with a QEMU container, not Docker Desktop, if Docker is stuck**
+      behind a stalled privileged-access dialog with no way to click through it in an
+      agent session: `podman machine ssh` can itself hang for unrelated reasons, but
+      `podman run --privileged --platform linux/riscv64 <manylinux image>` on a
+      `tonistiigi/binfmt`-registered podman machine works — the container needs
+      `--privileged` for QEMU's user-mode ptrace-based emulation even after
+      `docker/podman run --privileged docker.io/tonistiigi/binfmt --install riscv64`
+      shows the interpreter `enabled` with flags `POCF` (F/fix-binary set); without it,
+      any riscv64 container exits 139 (SIGSEGV) before your entrypoint ever runs.
+    - **The project's own per-function unit test drivers (`#ifdef pXXX_TESTDRIVE` in
+      HMMER's case, one per `impl_sse/*.c` file, comparing the SIMD-optimized filter
+      against the project's independent portable/"generic" reference implementation)
+      are exactly the right tool to bisect a SIMDe port with — but passing all of them
+      individually does not prove the full pipeline is correct.** Every other
+      `impl_sse` component (ViterbiFilter, the Forward filter, posterior decoding,
+      optimal-accuracy alignment, null2 bias correction) and the hand-vectorized
+      `expf`/`logf` approximations in `esl_sse.c` passed their own dedicated unit
+      tests on real riscv64/GCC 14.3.1 (accuracy matching arm64 almost to the bit:
+      ~6e-9 average relative error, ~1.2e-7 max, right at float precision). Only
+      `p7_MSVFilter` failed, and it failed *hard* — `scores differ (-21.25, -10.86)`,
+      a ~10-nat divergence, not a rounding artifact.
+    - **A deterministic, non-flaky wrong answer that reproduces identically across
+      every optimization level rules out a compiler miscompilation, not just an
+      `-O3`-specific one.** The exact same `(-21.25, -10.86)` mismatch reproduced at
+      `-O1`, `-O2` and `-O3` (test the specific translation unit at each level by
+      dropping a single freshly-compiled `.o` into a copy of the otherwise-`-O3`
+      static archive with `ar rcs` — no need to rebuild the whole library per level).
+      A genuine GCC backend bug from register pressure/spilling would be expected to
+      be *sensitive* to optimization level, not identical across three of them.
+    - **When a filter has an internal fast-path shortcut to a related, separately
+      testable function, A/B it by force-disabling the shortcut** — here,
+      `p7_MSVFilter()` unconditionally tries `p7_SSVFilter()` first
+      (`if (status != eslENORESULT) return status;`) before falling into its own DP
+      loop. Patching that call to `status = eslENORESULT;` (skip the shortcut,
+      guaranteed fallthrough) reproduced the *identical* wrong score. That rules out
+      `ssvfilter.c`'s control flow as the cause and points at something the two paths
+      share (most obviously the input data both read, `om->rbv`/`om->sbv`, but see
+      below) rather than either filter's own loop logic.
+    - **Every individual SIMD primitive the failing function uses can check out fine
+      in a tiny synthetic harness, and the full function can still be wrong** — this
+      is the core, hard-won lesson. Standalone probes against real riscv64 GCC 14.3.1,
+      each run hundreds of random trials against a scalar C reference: the saturating
+      DP step (`_mm_max_epu8`/`_mm_adds_epu8`/`_mm_subs_epu8`), the byte-lane shift
+      (`_mm_slli_si128`), the horizontal-max reduction chain
+      (`_mm_shuffle_epi32`/`_mm_shufflelo_epi16`/`_mm_srli_si128`), and even the
+      `union { __m128i v; uint8_t i[16]; }` type-pun pattern the profile-conversion
+      code (`mf_conversion()` in `p7_oprofile.c`) uses to build `om->rbv` — every one
+      of them was bit-exact correct in isolation. The bug is therefore not in any
+      single SIMDe primitive's semantics; it is in how the real function composes
+      many of them across a real loop (many live `__m128i` temporaries, `Q`-many
+      inner iterations, `L`-many outer iterations) — something no small synthetic
+      harness reproduces, and something that would need either a real riscv64 GCC
+      debugger session stepping through the actual failing call, or upstream
+      SIMDe/HMMER maintainer input, to pin to an exact line.
+    - **Checking the "generic"/reference implementation's own internal self-consistency
+      is a cheap way to make "maybe the reference is wrong, not the SIMD path" less
+      likely, without being able to directly diff scores across architectures.**
+      `generic_viterbi.c` has its own `p7GENERIC_VITERBI_TESTDRIVE` that checks
+      `p7_GViterbi()`'s score against an independently reconstructed optimal
+      traceback's score (`p7_GTrace` + `p7_trace_Score`, tolerance `1e-6`) — pure
+      portable C, zero SIMD/SIMDe dependency. It passed cleanly on real riscv64,
+      which doesn't *prove* the Generic score matches what x86 would compute, but
+      combined with "pure C, no architecture-specific code path exists to diverge
+      through" it's good enough evidence to stop suspecting the reference and treat
+      the ~10-nat divergence as real.
+    - **When a bisection this thorough still can't isolate the exact line within a
+      bounded budget, park the port rather than merging a function you can't explain
+      the wrongness of** — `.queue.yml` `status: parked` with a note naming the exact
+      function, what was ruled out, and what remains (a real debugger session or
+      upstream input), and leave the PR open (not draft, not deleted) with the
+      investigation written up in its description, so the next attempt starts from
+      "here's what's already eliminated" instead of from zero.
