@@ -1,0 +1,150 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `libheif`/`all-pythons-repaired` stages of
+# https://github.com/carsales/pyheif/blob/release-0.8.0/Dockerfile
+name: Build pyheif wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pyheif version to build (git tag is release-<version>, e.g. 0.8.0)'
+        required: true
+        default: '0.8.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pyheif.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.8.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYHEIF_VERSION: ${{ inputs.version || '0.8.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pyheif ${{ inputs.version || '0.8.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout pyheif release-${{ env.PYHEIF_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: carsales/pyheif
+          ref: release-${{ env.PYHEIF_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream's own Dockerfile builds x265/libde265/libaom/libheif from source rather
+          # than relying on distro packages (none of the four are in Rocky 10's repos anyway).
+          # pkg-config is already on the image (gotcha 46); nasm is x86-only and x265/libaom
+          # both no-op their asm paths without it (upstream's own build_libs.py skips it the
+          # same way on non-x86_64). Upstream's own pin, x265 3.6, hard-sets CMP0025/CMP0054
+          # to OLD, which CMake 4 (on the image) refuses outright regardless of
+          # CMAKE_POLICY_VERSION_MINIMUM (gotcha 207/257 doesn't cover this, since it's an
+          # explicit cmake_policy() call, not a bare cmake_minimum_required floor); 4.2 (the
+          # version pillow-heif's own riscv64 port already bumped to for the same reason)
+          # dropped both.
+          CIBW_BEFORE_ALL_LINUX: |
+            set -e
+            export BUILD_DIR=/tmp/ph_build_stuff
+            mkdir -p "$BUILD_DIR"
+            cd "$BUILD_DIR"
+
+            curl -fLO https://bitbucket.org/multicoreware/x265_git/downloads/x265_4.2.tar.gz
+            tar xf x265_4.2.tar.gz
+            cmake -DCMAKE_INSTALL_PREFIX=/usr -G "Unix Makefiles" x265_4.2/source
+            make -j"$(nproc)" && make install && ldconfig
+
+            curl -fLO https://github.com/strukturag/libde265/releases/download/v1.0.15/libde265-1.0.15.tar.gz
+            tar xf libde265-1.0.15.tar.gz
+            cd libde265-1.0.15
+            ./autogen.sh
+            CXXFLAGS="-g1 -O2" ./configure --prefix /usr --disable-encoder --disable-dec265 --disable-sherlock265 --disable-dependency-tracking
+            make -j"$(nproc)" && make install && ldconfig
+            cd ..
+
+            mkdir aom && cd aom
+            curl -fLO https://aomedia.googlesource.com/aom/+archive/v3.8.3.tar.gz
+            tar xf v3.8.3.tar.gz
+            cd ..
+            mkdir aom_build && cd aom_build
+            cmake -DENABLE_TESTS=0 -DENABLE_TOOLS=0 -DENABLE_EXAMPLES=0 -DENABLE_DOCS=0 -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_SHARED_LIBS=1 ../aom
+            make -j"$(nproc)" && make install && ldconfig
+            cd ..
+
+            curl -fLO https://github.com/strukturag/libheif/releases/download/v1.18.2/libheif-1.18.2.tar.gz
+            tar xf libheif-1.18.2.tar.gz
+            mkdir libheif_build && cd libheif_build
+            cmake --install-prefix=/usr --preset=release-noplugins -DWITH_EXAMPLES=no ../libheif-1.18.2
+            make -j"$(nproc)" && make install && ldconfig
+            cd ..
+
+            cp x265_4.2/COPYING "{package}/LICENSE.x265"
+            cp libde265-1.0.15/COPYING "{package}/LICENSE.libde265"
+            cat aom/LICENSE aom/PATENTS > "{package}/LICENSE.libaom"
+            cp libheif-1.18.2/COPYING "{package}/LICENSE.libheif"
+          # pyheif's own requirements-test.txt pins pytest==6.2.5 (2021), which predates
+          # cp312+ internals; Pillow ships no riscv64 wheel on public PyPI, ours is what the
+          # test env installs.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest piexif Pillow
+          # test_versions.py reads pyheif/data/version.txt by a cwd-relative path rather than
+          # through the installed package, so that one file has to be staged at its original
+          # relative position too (gotcha 36) -- it does not reintroduce the shadow gotcha 25
+          # warns about, since the resulting `pyheif/` here has no __init__.py (gotcha 174).
+          CIBW_TEST_SOURCES: tests pyheif/data
+          CIBW_TEST_COMMAND: python -m pytest tests
+
+      - name: Check the wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("_libheif_cffi") and n.endswith(".so") for n in names), whl
+              libs = sorted(n.split("/")[1].split("-")[0] for n in names if n.startswith("pyheif.libs/") and n != "pyheif.libs/")
+              assert libs == ["libaom", "libde265", "libheif", "libx265"], (whl, libs)
+              licenses = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+              assert licenses == {
+                  "LICENSE", "LICENSE.x265", "LICENSE.libde265", "LICENSE.libaom", "LICENSE.libheif",
+              }, (whl, licenses)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyheif-${{ env.PYHEIF_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyheif ${{ inputs.version || '0.8.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pyheif-${{ inputs.version || '0.8.0' }}-*-manylinux_riscv64
