@@ -1,0 +1,163 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/PoseLib/PoseLib/blob/v2.0.5/.github/workflows/build-pypi.yaml
+name: Build poselib wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'poselib version to build (git tag without leading v, e.g. 2.0.5)'
+        required: true
+        default: '2.0.5'
+  pull_request:
+    paths:
+      - '.github/workflows/build-poselib.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.0.5' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 2.0.5 there.
+  POSELIB_VERSION: ${{ inputs.version || '2.0.5' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build poselib ${{ inputs.version || '2.0.5' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # Per-interpreter (not abi3): pybind11 links the version-specific ABI.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      - name: Checkout PoseLib v${{ env.POSELIB_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: PoseLib/PoseLib
+          ref: v${{ env.POSELIB_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Fix hardcoded version and stage riscv64 smoke test
+        # The v2.0.5 tag never bumped its hardcoded "2.0.4" version literals
+        # (setup.py, CMakeLists.txt), so this reproduces the version-injection
+        # step upstream's own release process evidently runs out-of-band
+        # (same fix shape as build-stream-unzip.yml's placeholder sed).
+        # The upstream `tests/test_poselib.py` pulls in posebench, whose
+        # pyproject.toml now floats to `poselib @ git+...` HEAD (3.0.0-dev),
+        # conflicting with the 2.0.5 wheel under test; a self-contained smoke
+        # test avoids that drift (see gotcha precedent for third-party test
+        # helpers with unpinned dependencies).
+        run: |
+          sed -i -E "s/version=\"[0-9]+\.[0-9]+\.[0-9]+\"/version=\"${POSELIB_VERSION}\"/" setup.py
+          sed -i -E "s/project\(PoseLib VERSION [0-9]+\.[0-9]+\.[0-9]+\)/project(PoseLib VERSION ${POSELIB_VERSION})/" CMakeLists.txt
+          cat > riscv64_test_poselib.py <<'EOF'
+          import numpy as np
+          import poselib
+
+
+          def _random_pose(rng):
+              axis = rng.normal(size=3)
+              axis /= np.linalg.norm(axis)
+              angle = rng.uniform(-0.3, 0.3)
+              K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+              R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
+              t = np.array([0.1, -0.05, 0.2])
+              return R, t
+
+
+          def test_version():
+              assert poselib.__version__
+
+
+          def test_estimate_absolute_pose_recovers_known_pose():
+              rng = np.random.default_rng(42)
+              n_points = 50
+              X = rng.uniform(-2.0, 2.0, size=(n_points, 3))
+              X[:, 2] += 6.0
+
+              R_true, t_true = _random_pose(rng)
+
+              camera = {"model": "SIMPLE_PINHOLE", "width": 1280, "height": 720, "params": [1000.0, 640.0, 360.0]}
+              f, cx, cy = camera["params"]
+
+              Xc = (R_true @ X.T).T + t_true
+              assert np.all(Xc[:, 2] > 0)
+              p2d = np.stack([f * Xc[:, 0] / Xc[:, 2] + cx, f * Xc[:, 1] / Xc[:, 2] + cy], axis=1)
+
+              pose, info = poselib.estimate_absolute_pose(list(p2d), list(X), camera, {"max_reproj_error": 4.0}, {})
+
+              assert info["num_inliers"] >= n_points - 2
+              np.testing.assert_allclose(pose.R, R_true, atol=1e-3)
+              np.testing.assert_allclose(pose.t, t_true, atol=1e-3)
+
+
+          def test_p3p_minimal_solver():
+              rng = np.random.default_rng(7)
+              X = rng.uniform(-1.0, 1.0, size=(3, 3))
+              X[:, 2] += 4.0
+
+              R_true, t_true = _random_pose(rng)
+              Xc = (R_true @ X.T).T + t_true
+              x = Xc / np.linalg.norm(Xc, axis=1, keepdims=True)
+
+              poses = poselib.p3p(list(x), list(X))
+              assert poses
+              best = min(poses, key=lambda p: np.linalg.norm(p.R - R_true) + np.linalg.norm(p.t - t_true))
+              np.testing.assert_allclose(best.R, R_true, atol=1e-6)
+              np.testing.assert_allclose(best.t, t_true, atol=1e-6)
+          EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: yum install -y eigen3-devel
+          CIBW_ENVIRONMENT: >-
+            BUILD_SHARED_LIBS=OFF
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+          # Clears upstream's own [tool.cibuildwheel] test-extras = ["test"]
+          # (env vars fully replace, not merge, pyproject.toml cibuildwheel
+          # options) - it would otherwise still pull in posebench regardless
+          # of CIBW_TEST_COMMAND below.
+          CIBW_TEST_EXTRAS: ""
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: riscv64_test_poselib.py
+          CIBW_TEST_COMMAND: python -m pytest {project}/riscv64_test_poselib.py -v
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: poselib-${{ env.POSELIB_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish poselib ${{ inputs.version || '2.0.5' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: poselib-${{ inputs.version || '2.0.5' }}-*-manylinux_riscv64
