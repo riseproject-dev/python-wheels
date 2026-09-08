@@ -37,6 +37,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
   still be ported to riscv64 by routing its x86-only path through SIMDe.
 - **332** — A SIMDe SSE-emulation port can compile clean, pass its own project's
   per-primitive unit tests, and still produce wrong full-pipeline results on riscv64.
+- **333** — A vendored C++ library's architecture-fallback stub (unlike gotcha 267's
+  dead `#warning` branch) can have a genuinely correct no-op body that still trips
+  `-Werror=unused-parameter` on any architecture outside its named x86/ARM/PPC set.
 
 ---
 
@@ -802,3 +805,39 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       upstream input), and leave the PR open (not draft, not deleted) with the
       investigation written up in its description, so the next attempt starts from
       "here's what's already eliminated" instead of from zero.
+
+333. **A vendored C++ library's architecture-fallback stub can have a genuinely correct
+    no-op body and still trip `-Werror=unused-parameter` on any architecture outside its
+    named x86/ARM/PPC set — unlike gotcha 267's dead `#warning` branch, there is no
+    wrong/missing code here, just an unused parameter (the pyorc/liborc case).**
+    liborc (Apache ORC's C++ core, which pyorc's `setup.py` downloads and builds from
+    source) gates its CPU-feature-detection code in `CpuInfoUtil.cc` on
+    `CPUINFO_ARCH_X86`/`CPUINFO_ARCH_ARM`/`CPUINFO_ARCH_PPC`; riscv64 matches none of
+    them, so it falls into the final `#else` branch — a correct, intentional catch-all
+    whose `ArchParseUserSimdLevel`/`ArchVerifyCpuRequirements` bodies are genuine no-ops
+    (`return true;` and an empty body) that simply never reference their parameters.
+    liborc's own `CMakeLists.txt` defaults `STOP_BUILD_ON_WARNING` to `ON`, appending
+    `-Werror` unconditionally; upstream's CI only ever builds x86/ARM/PPC, so this branch
+    is never compiled there and the warning-turned-error never surfaces upstream.
+    - **The wrapper's own env-var plumbing can silently defeat the usual
+      `CXXFLAGS=-Wno-error=...` escape hatch — check for it before assuming the fix is a
+      one-line `CIBW_ENVIRONMENT` addition.** pyorc's `setup.py` has a
+      `_get_build_envs()` helper that unconditionally does `env["CXXFLAGS"] = "-fPIC"`
+      (a bare assignment, not an append) right before invoking `cmake`, discarding
+      anything `CIBW_ENVIRONMENT` set. Gotcha 267's fix (append `-Wno-error=<diag>` to
+      the vendoring project's own `-DCMAKE_CXX_FLAGS`) still applies in spirit, but the
+      patchable surface has to be the wrapper's hardcoded `cmake_args` list, not the
+      environment.
+    - **A source patch is simpler here because the vendored source lands as plain
+      extracted files, not a packed blob** (contrast gotcha 267's `.tar.gz` vendored
+      inside the checkout, which `git apply` cannot reach). `setup.py` downloads and
+      extracts liborc's tarball itself at build time, so the fix patches `setup.py` to
+      add a few `str.replace()` calls on the two affected function bodies right after
+      its own `_download_source()` call — the same shape as the existing
+      `_patch_protobuf_version` fixup already in the file, just targeting a `.cc` file
+      instead of a `.cmake` one.
+    - **Confirm it's this class before writing anything**: the diagnostic names the
+      exact parameters (`simdLevel`, `hardwareFlags`, `ci`) and the exact line numbers,
+      and the failing function names (`ArchParseUserSimdLevel`,
+      `ArchVerifyCpuRequirements`) are the tell that this is the *architecture*
+      dispatch's fallback, not a SIMD gate (gotcha 71) or a dead code path (gotcha 267).
