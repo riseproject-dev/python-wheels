@@ -33,6 +33,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **303** — A "Python 2 only" classifier is a stop sign the project's own `setup.py` may
 - **311** — A transitive crate's `compile_error!` gated on `target_feature` (not
 - **318** — An explicit `python_requires` *upper* bound is a harder wall than an
+- **334** — A stdlib-absorbed backport can fail to build on a modern interpreter for a
 
 ---
 
@@ -1157,3 +1158,35 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       now-stdlib feature, gated to versions before that feature landed, is
       `parked` by construction — not because the port is hard, but because
       every interpreter capable of consuming the wheel doesn't need it.
+
+334. **A stdlib-absorbed backport can fail to build on a modern interpreter for a
+    concrete, reproducible reason, not just stale metadata (the pysha3 case).**
+    pysha3 backports `hashlib.sha3_*`/`shake_*` for Python < 3.6 by vendoring the
+    exact C sources CPython later shipped as its own `_sha3` module; `sha3.py`
+    only monkey-patches `hashlib` `if not hasattr(_hashlib, "sha3_512")` — a no-op
+    on every interpreter since 3.6. Unlike gotcha 318's pickle5, pysha3's
+    `setup.py` carries no `python_requires` upper bound and PyPI's classifiers
+    (2.7/3/3.4/3.5) are merely stale, so the metadata check alone doesn't settle
+    it — building is what does: `Modules/_sha3/backport.inc` does
+    `#include "pystrhex.h"` for Python >= 3.5, and `pystrhex.h` is (and always
+    was) a CPython-internal header under `Modules/`, never installed under
+    `Include/` alongside `Python.h` — confirmed by actually building the sdist
+    (`pip wheel . --no-deps --no-build-isolation`) against a real Python 3.12
+    venv: `fatal error: 'pystrhex.h' file not found`. Upstream itself settled the
+    question in November 2022 by deleting the entire tree down to a one-line
+    `README.md` — "pysha3 has reached its end of life ... please use SHA-3
+    functions from hashlib" — rather than leaving stale releases to bit-rot
+    quietly. `parked`, no worktree pushed.
+    - **A missing `python_requires` upper bound does not clear a backport** —
+      still check whether the backported feature is in the stdlib at this
+      repo's floor interpreter (gotcha 318), and if the metadata is ambiguous,
+      settle it by actually building the sdist against a locally cached modern
+      interpreter (`uv python list --only-installed`) before ruling either way.
+    - **`#include` of a header from CPython's `Modules/` tree (not `Include/`)
+      is a build-breaker on any standard `python3-dev`-style toolchain** — those
+      headers are internal to the CPython build itself and are never installed
+      for extension authors, regardless of interpreter version.
+    - **An upstream repo emptied to a single deprecation-notice file is a
+      stronger signal than an unmaintained-looking tag/issue tracker** — it's
+      the maintainer affirmatively telling downstream not to build this anymore,
+      not just silence.
