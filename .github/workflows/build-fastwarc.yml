@@ -1,0 +1,139 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-wheels` job of
+# https://github.com/chatnoir-eu/chatnoir-resiliparse/blob/v1.0.9/.github/workflows/build-packages.yml
+name: Build fastwarc wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'fastwarc version to build (git tag without leading v, e.g. 1.0.9)'
+        required: true
+        default: '1.0.9'
+  pull_request:
+    paths:
+      - '.github/workflows/build-fastwarc.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.0.9' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.0.9 there.
+  FASTWARC_VERSION: ${{ inputs.version || '1.0.9' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build fastwarc ${{ inputs.version || '1.0.9' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # Per-interpreter (not abi3): both the Cython legacy extensions and the
+        # pyo3 extension link the version-specific ABI.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      # fastwarc-py is a subdirectory of the chatnoir-resiliparse monorepo; its
+      # pytest suite reads fixtures from the sibling fastwarc-rs/tests/fixtures,
+      # so the checkout is at the workspace root, not fastwarc-py itself.
+      - name: Checkout chatnoir-resiliparse v${{ env.FASTWARC_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: chatnoir-eu/chatnoir-resiliparse
+          ref: v${{ env.FASTWARC_VERSION }}
+          persist-credentials: false
+
+      - name: Stage the LICENSE and the lz4-licence collector
+        # Upstream's wheel ships no LICENSE at all: setuptools' default
+        # license_files glob runs against fastwarc-py, not the repo root the
+        # Apache-2.0 file actually sits in (gotcha 86). The Cython legacy
+        # extension links lz4, which auditwheel vendors into the wheel (zlib
+        # stays external - it's on the manylinux allowlist, lz4 isn't), so
+        # collect the licence actually shipped by the build image's own
+        # package rather than hand-pinning an lz4 release tag (gotcha 137).
+        run: |
+          cp LICENSE fastwarc-py/
+          cat > collect-lz4-license.sh <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          project="${1:?usage: collect-lz4-license.sh <project-dir>}"
+          mapfile -t files < <(rpm -q --licensefiles lz4-libs 2>/dev/null || true)
+          if [ -z "${files[0]:-}" ]; then
+            dnf -y --disablerepo=extras reinstall --setopt=tsflags= lz4-libs
+            mapfile -t files < <(rpm -qd lz4-libs | grep -iE '/(LICEN[CS]E|COPYING)')
+          fi
+          cp "${files[0]}" "$project/LICENSE.lz4"
+          EOF
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: fastwarc-py
+          output-dir: wheelhouse/
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # zlib-devel resolves without EPEL; lz4-devel needs the extras
+          # mirror disabled (gotcha 51). The image ships no Rust toolchain for
+          # the setuptools-rust/pyo3 extension; rustup provisions a native
+          # riscv64gc-unknown-linux-gnu one (gotcha 10).
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf -y --disablerepo=extras install zlib-devel lz4-devel &&
+            bash {project}/collect-lz4-license.sh {project}/fastwarc-py &&
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # test-sources paths are relative to cibuildwheel's cwd (the checkout
+          # root), not to package-dir, and are staged at that same relative
+          # path (gotcha 104); fastwarc-pytest's own fixture lookup climbs two
+          # parents to fastwarc-rs/tests/fixtures, so that sibling has to be
+          # staged too.
+          CIBW_TEST_SOURCES: fastwarc-py/fastwarc-pytest fastwarc-rs/tests/fixtures
+          CIBW_TEST_COMMAND: python -m pytest -v fastwarc-py/fastwarc-pytest
+
+      - name: Check the extensions and the licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("fastwarc/_fastwarc") and n.endswith(".so") for n in names), whl
+              assert any(n.startswith("fastwarc/legacy/warc") and n.endswith(".so") for n in names), whl
+              licences = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+              assert {"LICENSE", "LICENSE.lz4"} <= licences, (whl, licences)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fastwarc-${{ env.FASTWARC_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish fastwarc ${{ inputs.version || '1.0.9' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: fastwarc-${{ inputs.version || '1.0.9' }}-*-manylinux_riscv64
