@@ -1,0 +1,163 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `publish-binaries` job of
+# https://github.com/orhun/git-cliff/blob/v2.13.1/.github/workflows/cd.yml
+name: Build git-cliff wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'git-cliff version to build (git tag without the leading v, e.g. 2.13.1)'
+        required: true
+        default: '2.13.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-git-cliff.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.13.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 2.13.1 there.
+  GIT_CLIFF_VERSION: ${{ inputs.version || '2.13.1' }}
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheel:
+    needs: [setup]
+    name: Build git-cliff ${{ inputs.version || '2.13.1' }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout git-cliff v${{ env.GIT_CLIFF_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: orhun/git-cliff
+          ref: v${{ env.GIT_CLIFF_VERSION }}
+          persist-credentials: false
+
+      # `working-directory: pypi` mirrors upstream's own cd.yml exactly: pypi/pyproject.toml
+      # ships in the tag and its `[tool.maturin] manifest-path = "../git-cliff/Cargo.toml"`
+      # resolves relative to that file.
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --locked --out dist
+          working-directory: pypi
+          manylinux: '2_39'
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: git-cliff-${{ env.GIT_CLIFF_VERSION }}-manylinux_riscv64
+          path: pypi/dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test git-cliff ${{ inputs.version || '2.13.1' }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    env:
+      # Without this uv would reuse the runner image's system CPython for 3.12
+      # and download a standalone build for the others.
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        # This repo's default interpreter matrix (gotcha in workflow-anatomy.md);
+        # the wheel is interpreter-agnostic (bindings = "bin"), so every
+        # interpreter -- including free-threaded -- exercises the same binary.
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: git-cliff-${{ env.GIT_CLIFF_VERSION }}-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . git-cliff
+
+      # No wheel-level test suite ships in the sdist (gotcha 187): git-cliff's own
+      # git-cliff-core/tests/integration_test.rs is a Rust test run by upstream's
+      # own `cargo test`, never packaged. Drive the real binaries instead.
+      #
+      # No `python -m git_cliff`: the wheel carries only .data/scripts/ binaries
+      # and no importable module (gotcha 224).
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          git-cliff --version
+          git-cliff --help >/dev/null
+
+          work=$(mktemp -d)
+          cd "$work"
+          git init -q
+          git config user.email test@example.com
+          git config user.name Test
+          echo hello > a.txt
+          git add a.txt
+          git commit -q -m "feat: add hello file"
+          echo fix > a.txt
+          git add a.txt
+          git commit -q -m "fix: correct hello content"
+          git tag v0.1.0
+          echo more >> a.txt
+          git add a.txt
+          git commit -q -m "feat: add more content"
+
+          out=$(git-cliff --tag v0.1.0 2>/dev/null)
+          echo "$out"
+          echo "$out" | grep -q 'Features'
+          echo "$out" | grep -q 'Add hello file'
+          echo "$out" | grep -q 'Bug Fixes'
+          echo "$out" | grep -q 'Correct hello content'
+
+          out=$(git-cliff --unreleased 2>/dev/null)
+          echo "$out"
+          echo "$out" | grep -q '\[unreleased\]'
+          echo "$out" | grep -q 'Add more content'
+
+          # git-cliff-completions and git-cliff-mangen require OUT_DIR (they are
+          # meant to be invoked at packaging time, not interactively).
+          gen=$(mktemp -d)
+          OUT_DIR="$gen" git-cliff-completions
+          [ -f "$gen/git-cliff.bash" ]
+          OUT_DIR="$gen" git-cliff-mangen
+          [ -f "$gen/git-cliff.1" ]
+
+          set +e
+          empty=$(mktemp -d)
+          (cd "$empty" && git-cliff --unreleased)
+          rc=$?
+          set -e
+          [ "$rc" -ne 0 ]
+
+  publish:
+    name: Publish git-cliff ${{ inputs.version || '2.13.1' }}
+    needs: [setup, build_wheel, test_wheel]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: git-cliff-${{ inputs.version || '2.13.1' }}-manylinux_riscv64
