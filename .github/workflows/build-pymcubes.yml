@@ -1,0 +1,105 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on: https://github.com/pmneila/PyMCubes/blob/v0.1.6/.github/workflows/mcubes-deployment.yml
+name: Build pymcubes wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pymcubes version to build (git tag without the leading v, e.g. 0.1.6)'
+        required: true
+        default: '0.1.6'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pymcubes.yml'
+      - 'patches/pymcubes/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.1.6' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYMCUBES_VERSION: ${{ inputs.version || '0.1.6' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pymcubes ${{ inputs.version || '0.1.6' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout PyMCubes v${{ env.PYMCUBES_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pmneila/PyMCubes
+          ref: v${{ env.PYMCUBES_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # pyproject.toml pins build-system.requires to "numpy~=2.0", which has
+          # no cp313/cp314 wheels at all (numpy 2.0 predates Python 3.13). Pin the
+          # same requires with the ceiling lifted and disable isolation so it holds.
+          CIBW_BEFORE_BUILD: pip install setuptools wheel Cython "numpy>=2.0,<3.0"
+          CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy
+          CIBW_TEST_REQUIRES: pytest
+          # test_mcubes.py/test_smoothing.py sit at the repo root beside the mcubes/
+          # source package; testing from {project} would import that source tree
+          # instead of the built wheel (gotcha 25).
+          CIBW_TEST_SOURCES: test_mcubes.py test_smoothing.py
+          CIBW_TEST_COMMAND: python -m pytest -v test_mcubes.py test_smoothing.py
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          exts = {n.split("/")[-1].split(".")[0] for n in names if n.endswith(".so")}
+          assert exts == {"_mcubes"}, exts
+          licences = {n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n} - {""}
+          assert licences == {"LICENSE"}, licences
+          EOF
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pymcubes-${{ env.PYMCUBES_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pymcubes ${{ inputs.version || '0.1.6' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pymcubes-${{ inputs.version || '0.1.6' }}-*-manylinux_riscv64
