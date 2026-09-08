@@ -813,3 +813,35 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       self-hosted riscv64 runners for hours to prove a known-slow path eventually
       finishes. Per this skill's own guidance, drop musllinux from the matrix
       (`build-stream-inflate.yml` ships manylinux-only) rather than keep paying for it.
+
+330. **A manylinux image's system library can be years newer than what upstream ever
+    tested against, and the resulting test failures are data-version drift (CLDR/
+    tzdata), not code bugs — deselect, don't patch (the pyicu-binary/ICU case; see
+    `build-pyicu-binary.yml`).** setup.py prints `ICU_MAX_MAJOR_VERSION = '69'` and the
+    bundled test suite's own `if ICU_VERSION < '68.0':` branches show upstream last
+    tested around ICU 69, but `manylinux_2_39_riscv64`'s `libicu-devel` (Rocky 10
+    AppStream) is 74.2 - five major ICU releases later, each carrying a newer CLDR/
+    tzdata snapshot. Four of the package's own tests assert exact locale-formatted
+    strings or a specific timezone transition and fail once linked against 74.2: a
+    French `SimpleDateFormat` pattern the test already branches on for ICU<68 vs
+    >=68 renders differently again at 74; an `en_US` time format gains CLDR's
+    narrow-no-break-space (` `) before AM/PM; a French long timezone name gains
+    a `nord-américain` qualifier; and `Pacific/Fiji`'s next DST transition after 2021
+    comes back `None` because 74's newer tzdata has no further scheduled transition
+    for it. None of this is riscv64-specific or a real defect in the wrapped code.
+    - **Confirm before deselecting by building against the *exact* system version the
+      manylinux image ships**, not whatever ICU a dev machine happens to have -
+      `dnf -q list libicu-devel` in the image (or `rockylinux/rockylinux:10
+      --platform linux/riscv64` per gotcha 51's cheap-image trick) gives the version;
+      a newer one still (e.g. a package manager's latest) can show *different*
+      drifted tests than CI will hit, and an older one can hide failures CI will see.
+      Building ICU4C from its own release tarball on any host settles it without a
+      container: `./runConfigureICU <platform> --prefix=<scratch>/install
+      --disable-tests --disable-samples && make -j && make install`, then point
+      `PYICU_INCLUDES`/`PYICU_CFLAGS`/`PYICU_LFLAGS` (or the equivalent env vars for
+      another ICU-linking project) at the scratch prefix.
+    - **Deselect by exact test id in `CIBW_TEST_COMMAND`**, not `-k`, and cite what
+      changed and why in a one-line comment - this is the same family as gotcha 304's
+      ULP-divergence and gotcha 282's pixel-diff cases (environment divergence isn't
+      a bug), except the axis here is the *library's own bundled data version*, not
+      architecture or timing.
