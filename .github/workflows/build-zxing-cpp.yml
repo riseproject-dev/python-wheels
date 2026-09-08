@@ -1,0 +1,90 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on upstream's own wheel build setup:
+#   https://github.com/zxing-cpp/zxing-cpp/blob/v3.1.1/.github/workflows/publish-python.yml
+#   https://github.com/zxing-cpp/zxing-cpp/blob/v3.1.1/wrappers/python/pyproject.toml
+name: Build zxing-cpp wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'zxing-cpp version/tag to build (git tag without leading v, e.g. 3.1.1)'
+        required: true
+        default: '3.1.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-zxing-cpp.yml'
+      - 'patches/zxing-cpp/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '3.1.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  ZXING_CPP_VERSION: ${{ inputs.version || '3.1.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build zxing-cpp ${{ inputs.version || '3.1.1' }} ${{ matrix.build }}
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        # wrappers/python/pyproject.toml builds a STABLE_ABI nanobind module tagged
+        # cp312-abi3, so one cp312 build covers cp312/cp313/cp314; only the
+        # FREE_THREADED cp314t build needs its own wheel (upstream's own build list is
+        # cp310-cp312 + cp313t/cp314t, collapsed the same way per gotcha 11).
+        build:
+          - "cp312-manylinux_riscv64"
+          - "cp314t-manylinux_riscv64"
+
+    steps:
+      - name: Checkout zxing-cpp v${{ env.ZXING_CPP_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: zxing-cpp/zxing-cpp
+          ref: v${{ env.ZXING_CPP_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply python-wheels/patches/zxing-cpp/${{ env.ZXING_CPP_VERSION }}/*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: wrappers/python
+          only: ${{ matrix.build }}
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: zxing-cpp-${{ env.ZXING_CPP_VERSION }}-${{ matrix.build }}
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish zxing-cpp ${{ inputs.version || '3.1.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: zxing-cpp-${{ inputs.version || '3.1.1' }}-*-manylinux_riscv64
