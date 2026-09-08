@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Wed, 10 Sep 2026 00:00:00 +0000
+Subject: [PATCH] tests: skip pybip39-dependent keypair tests when unavailable
+
+Upstream-Status: Inappropriate [pybip39's `ring` 0.16.20 transitive dependency has no riscv64 support; irrelevant off riscv64]
+
+tests/test_keypair.py imports `mnemonic`/`pybip39` at module level, so if
+either is missing the whole file fails collection, not just the two tests
+that actually use them (test_from_seed_and_derivation_path,
+test_from_seed_phrase_and_passphrase). pybip39 has no riscv64 wheel
+anywhere, and building it from source needs maturin, which needs the
+`ring` crate; `ring` 0.16.20's build.rs has no riscv64 target-detection
+branch and panics on `Option::unwrap()` when it doesn't recognize the
+target, so no index routing can make it installable here.
+
+Wrap the import in a try/except and skip only the two dependent tests,
+keeping the other 13 tests in the file running.
+
+diff --git a/tests/test_keypair.py b/tests/test_keypair.py
+index dd50030..85e757b 100644
+--- a/tests/test_keypair.py
++++ b/tests/test_keypair.py
+@@ -1,12 +1,18 @@
+ from operator import ge, gt, le, lt
+ from typing import Any, Callable
+
+-import mnemonic
+-from pybip39 import Mnemonic, Seed
++try:
++    import mnemonic
++    from pybip39 import Mnemonic, Seed
++
++    HAS_PYBIP39 = True
++except ImportError:
++    HAS_PYBIP39 = False
+ from pytest import mark, raises
+ from solders.keypair import Keypair
+
+
++@mark.skipif(not HAS_PYBIP39, reason="pybip39 unavailable")
+ def test_from_seed_and_derivation_path() -> None:
+     mnemo = mnemonic.Mnemonic("english")
+     seed = mnemo.to_seed(
+@@ -113,6 +119,7 @@ def test_from_seed() -> None:
+     assert excinfo.value.args[0] == "expected a sequence of length 32 (got 31)"
+
+
++@mark.skipif(not HAS_PYBIP39, reason="pybip39 unavailable")
+ def test_from_seed_phrase_and_passphrase() -> None:
+     mnemonic = Mnemonic()
+     passphrase = "42"
+--
+2.43.0

@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux-x86_64` job of
+# https://github.com/kevinheavey/solders/blob/0.29.0/.github/workflows/build.yml
+name: Build solders wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'solders version to build (git tag, e.g. 0.29.0)'
+        required: true
+        default: '0.29.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-solders.yml'
+      - 'patches/solders/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.29.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.29.0 there.
+  SOLDERS_VERSION: ${{ inputs.version || '0.29.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build solders ${{ inputs.version || '0.29.0' }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # pyo3's abi3-py310 feature is on unconditionally (Cargo.toml), so one
+          # abi3 wheel serves every GIL-ful interpreter up to cp314 (abi3 wheels
+          # are forward-compatible; only the cp310 build actually compiles).
+          # cp314t is dropped: an abi3-tagged wheel cannot serve a free-threaded
+          # interpreter, and there is no Cargo feature to opt out of abi3-py310
+          # without patching Cargo.toml (same shape as gotcha 322/326, but here
+          # because the ABI itself is fixed rather than a pyo3 version ceiling).
+          - tag: cp310-abi3
+            build: >-
+              cp310-manylinux_riscv64 cp311-manylinux_riscv64
+              cp312-manylinux_riscv64 cp313-manylinux_riscv64
+              cp314-manylinux_riscv64
+
+    steps:
+      - name: Checkout solders v${{ env.SOLDERS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: kevinheavey/solders
+          ref: ${{ env.SOLDERS_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply python-wheels/patches/solders/${{ env.SOLDERS_VERSION }}/*.patch
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # solders ships no [tool.cibuildwheel]; install the Rust toolchain its
+          # maturin backend needs (rustup honors the checkout's rust-toolchain.toml).
+          # perl (not just the image's default perl-interpreter) is needed because
+          # openssl-sys builds its vendored OpenSSL from source here (gotcha 46).
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf -y install perl &&
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          # based58/maturin have no riscv64 wheel on public PyPI, so pip falls back to
+          # building maturin from source (which itself needs a Rust toolchain in the
+          # test venv and fails); pull the prebuilt riscv64 wheels from our own
+          # registry instead.
+          CIBW_TEST_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # pybip39/mnemonic dropped from requires: pybip39 has no riscv64 wheel
+          # anywhere, and building it from source needs maturin, which needs `ring`
+          # 0.16.20 - an old pinned transitive dep whose build.rs has no riscv64
+          # target-detection branch at all (panics on `Option::unwrap()`), so no
+          # index routing can fix this. The patch above guards
+          # tests/test_keypair.py's two pybip39-dependent tests with skipif so the
+          # other 13 tests in that file still run.
+          CIBW_TEST_REQUIRES: pytest based58 typing-extensions jsonalias
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: >-
+            python -c "import solders.solders as m; assert m.__file__.endswith('.so'), m.__file__" &&
+            python -m pytest -v tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: solders-${{ env.SOLDERS_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish solders ${{ inputs.version || '0.29.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: solders-${{ inputs.version || '0.29.0' }}-*-manylinux_riscv64
