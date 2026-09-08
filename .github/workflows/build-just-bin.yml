@@ -1,0 +1,192 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# just-bin (https://github.com/justin-yan/pybin) repackages casey/just's own
+# release binaries into a pip-installable wheel; pybin's own tooling has no
+# riscv64 support (Architecture enum is x86_64/arm64 only), so this workflow
+# builds casey/just from source instead, following the same recipe this repo
+# already uses for other single-binary Rust CLIs (build-ripgrep.yml).
+name: Build just-bin wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'just-bin version to build (git tag of casey/just, e.g. 1.58.0)'
+        required: true
+        default: '1.58.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-just-bin.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.58.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.58.0 there.
+  JUST_BIN_VERSION: ${{ inputs.version || '1.58.0' }}
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheel:
+    needs: [setup]
+    name: Build just-bin ${{ inputs.version || '1.58.0' }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout just v${{ env.JUST_BIN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: casey/just
+          ref: ${{ env.JUST_BIN_VERSION }}
+          persist-credentials: false
+
+      # casey/just ships no pyproject.toml (it isn't self-published to PyPI;
+      # pybin's third-party wrapper is). Recreate one; the root Cargo.toml
+      # already defines the `just` binary, so no manifest-path override is
+      # needed. Fields mirror Cargo.toml's own metadata.
+      - name: Write pyproject.toml
+        run: |
+          cat > pyproject.toml <<'TOML'
+          [build-system]
+          build-backend = "maturin"
+          requires = [
+              "maturin>=1.7,<2.0",
+          ]
+
+          [project]
+          name = "just-bin"
+          description = "🤖 Just a command runner"
+          requires-python = ">=3.8"
+          authors = [
+              { name = "Casey Rodarmor", email = "casey@rodarmor.com" },
+          ]
+          keywords = [
+              "command-line",
+              "development",
+              "runner",
+              "task",
+              "utility",
+          ]
+          classifiers = [
+              "Programming Language :: Rust",
+              "Programming Language :: Python :: Implementation :: CPython",
+              "Programming Language :: Python :: Implementation :: PyPy",
+          ]
+          readme = "README.md"
+          license = "CC0-1.0"
+          dynamic = ["version"]
+
+          [project.urls]
+          Documentation = "https://github.com/casey/just"
+          Homepage = "https://github.com/casey/just"
+          Repository = "https://github.com/casey/just"
+
+          [tool.maturin]
+          bindings = "bin"
+          TOML
+
+      # `[tool.maturin] bindings = "bin"`: the wheel is one compiled executable
+      # with no ABI tag, so a single native build covers every interpreter.
+      # No musl target: rustup.rs ships no riscv64 musl toolchain (unlike
+      # casey/just's own release.yaml, which cross-compiles to
+      # riscv64gc-unknown-linux-musl from x86_64 with a system cross-gcc).
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --locked --out dist
+          manylinux: '2_39'
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: just-bin-${{ env.JUST_BIN_VERSION }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test just-bin ${{ inputs.version || '1.58.0' }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    env:
+      # Without this uv would reuse the runner image's system CPython for 3.12
+      # and download a standalone build for the others.
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        # This repo's default interpreter matrix (gotcha in workflow-anatomy.md);
+        # the wheel is interpreter-agnostic (bindings = "bin"), so every
+        # interpreter -- including free-threaded -- exercises the same binary.
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: just-bin-${{ env.JUST_BIN_VERSION }}-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . just-bin
+
+      # No wheel-level test suite ships in the sdist (gotcha 187, and just-bin
+      # has no sdist at all): casey/just's own tests/ is a Rust integration
+      # suite run by upstream's own `cargo test`, never packaged. Drive the
+      # real command runner against a real justfile instead of settling for a
+      # bare --version check.
+      #
+      # No `python -m just`: casey/just's own source tree ships no
+      # just/__init__.py shim, so the wheel carries only the
+      # .data/scripts/just binary and no importable module.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          just --version
+          just --help >/dev/null
+
+          work=$(mktemp -d)
+          cd "$work"
+          cat > justfile <<'JUSTFILE'
+          default:
+              @echo "hello from just"
+
+          greet name:
+              @echo "hello {{name}}"
+
+          add a b:
+              @echo $(({{a}} + {{b}}))
+          JUSTFILE
+
+          [ "$(just)" = "hello from just" ]
+          [ "$(just greet world)" = "hello world" ]
+          [ "$(just add 2 3)" = "5" ]
+
+          just --list | grep -q default
+          just --list | grep -q greet
+
+  publish:
+    name: Publish just-bin ${{ inputs.version || '1.58.0' }}
+    needs: [setup, build_wheel, test_wheel]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: just-bin-${{ inputs.version || '1.58.0' }}-manylinux_riscv64
