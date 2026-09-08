@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build:
+#   https://github.com/zhuyifei1999/guppy3/blob/v3.1.7/.github/workflows/workflow.yml
+name: Build guppy3 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'guppy3 version to build (git tag without leading v, e.g. 3.1.7)'
+        required: true
+        default: '3.1.7'
+  pull_request:
+    paths:
+      - '.github/workflows/build-guppy3.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '3.1.7' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  GUPPY3_VERSION: ${{ inputs.version || '3.1.7' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build guppy3 ${{ inputs.version || '3.1.7' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Matches upstream's own published matrix (cp310-cp314, no free-threaded).
+        # cp313t/cp314t are not attempted: rootstate.c's designated initializer
+        # `.ob_refcnt = 1` doesn't compile against the free-threaded PyObject
+        # header (no ob_refcnt field there), which is also why upstream ships no
+        # cp313t/cp314t wheel on PyPI.
+        python: ["cp310", "cp311", "cp312", "cp313", "cp314"]
+        libc: [manylinux, musllinux]
+
+    steps:
+      - name: Checkout guppy3 v${{ env.GUPPY3_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: zhuyifei1999/guppy3
+          ref: v${{ env.GUPPY3_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_COMMAND: python -c 'import guppy; guppy.hpy().test()'
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: guppy3-${{ env.GUPPY3_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish guppy3 ${{ inputs.version || '3.1.7' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: guppy3-${{ inputs.version || '3.1.7' }}-*riscv64
