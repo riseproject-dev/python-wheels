@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Tue, 8 Sep 2026 00:00:00 +0000
+Subject: [PATCH] FastText: fix numpy 2.x `copy=False` compatibility
+
+Upstream-Status: To upstream [facebookresearch/fastText archived (read-only) 2024-03-19, blocking new PRs]
+
+`np.array(obj, copy=False)` raised on numpy 1.x only when a copy could not be
+avoided but silently allowed one otherwise; numpy 2.0 made `copy=False` a hard
+requirement and raises `ValueError: Unable to avoid copy while creating an
+array as requested` whenever a copy is actually needed, which
+`_FastText.predict`, `_Meter.scores` and `_Meter.precision_recall_curve` hit on
+every call. This reproduces off riscv64 (confirmed on macOS/arm64): all four
+`test_supervised_predict_*` unit tests fail identically on any platform once
+numpy >= 2.0 is installed, which our registry serves as the only riscv64
+build. Switching to `np.asarray`, numpy's own documented migration fix,
+preserves numpy 1.x behaviour and fixes numpy 2.x.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ python/fasttext_module/fasttext/FastText.py | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/python/fasttext_module/fasttext/FastText.py b/python/fasttext_module/fasttext/FastText.py
+index 1234567..89abcde 100644
+--- a/python/fasttext_module/fasttext/FastText.py
++++ b/python/fasttext_module/fasttext/FastText.py
+@@ -43,7 +43,7 @@ class _Meter(object):
+         else:
+             y_scores, y_true = ([], ())
+
+-        return np.array(y_scores, copy=False), np.array(y_true, copy=False)
++        return np.asarray(y_scores), np.asarray(y_true)
+
+     def precision_recall_curve(self, label=None):
+         """Return precision/recall curve"""
+@@ -58,7 +58,7 @@ class _Meter(object):
+         else:
+             precision, recall = ([], ())
+
+-        return np.array(precision, copy=False), np.array(recall, copy=False)
++        return np.asarray(precision), np.asarray(recall)
+
+     def precision_at_recall(self, recall, label=None):
+         """Return precision for a given recall"""
+@@ -229,7 +229,7 @@ class _FastText(object):
+             else:
+                 probs, labels = ([], ())
+
+-            return labels, np.array(probs, copy=False)
++            return labels, np.asarray(probs)
+
+     def get_input_matrix(self):
+         """
