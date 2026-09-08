@@ -1,0 +1,145 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/lericson/pylibmc/blob/1.6.3/.github/workflows/cd.yml
+name: Build pylibmc wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pylibmc version to build (git tag, e.g. 1.6.3)'
+        required: true
+        default: '1.6.3'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pylibmc.yml'
+      - 'patches/pylibmc/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.6.3' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.6.3 there.
+  PYLIBMC_VERSION: ${{ inputs.version || '1.6.3' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Rocky 10's repos carry no libmemcached-devel at all (EPEL is absent on
+  # riscv64, gotcha 51, and it isn't in baseos/appstream/CRB either), unlike
+  # upstream's `yum install -y libmemcached-devel` on x86_64/aarch64. Original
+  # libmemcached 1.0.18 is largely unmaintained and not proven to build under
+  # the image's GCC 14; libmemcached-awesome is the community-maintained fork
+  # (used by PHP's own memcached extension for the same reason) that keeps the
+  # same public headers/API/SONAME, built from source instead.
+  LIBMEMCACHED_VERSION: '1.1.4'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pylibmc ${{ inputs.version || '1.6.3' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      - name: Checkout pylibmc ${{ env.PYLIBMC_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: lericson/pylibmc
+          ref: ${{ env.PYLIBMC_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pylibmc source
+        run: git apply python-wheels/patches/pylibmc/${{ env.PYLIBMC_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Mirrors upstream's install_libaec/install_hdf5-style before-all
+          # (build-h5py.yml): fetch, configure and install the dependency into
+          # the container instead of yum-installing a devel package. SASL and
+          # OpenSSL-crypto support are left at their (off) CMake defaults --
+          # pylibmc's own tests exercise neither, and upstream's official
+          # wheel pulls in a large Kerberos/GSSAPI stack for SASL that isn't
+          # worth the added scope for an untested feature.
+          CIBW_BEFORE_ALL_LINUX: |
+            set -ex
+            dnf -y install zlib-devel
+            mkdir -p /tmp/libmemcached
+            curl -fsSL "https://github.com/awesomized/libmemcached/archive/refs/tags/$LIBMEMCACHED_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/libmemcached
+            cmake -S /tmp/libmemcached -B /tmp/libmemcached/build \
+              -D CMAKE_BUILD_TYPE=Release \
+              -D CMAKE_INSTALL_PREFIX=/usr \
+              -D BUILD_TESTING=OFF \
+              -D ENABLE_HASH_HSIEH=ON \
+              -D ENABLE_HASH_FNV64=ON \
+              -D ENABLE_HASH_MURMUR=ON
+            cmake --build /tmp/libmemcached/build -j "$(nproc)"
+            cmake --install /tmp/libmemcached/build
+            ldconfig
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest
+          # Rocky 10's `memcached` package (appstream, no EPEL needed) stands
+          # in for upstream's CI service container; it refuses to start as
+          # root without an explicit -u.
+          CIBW_BEFORE_TEST_LINUX: |
+            dnf -y install memcached
+            memcached -d -u root
+          # src-layout checkout (package_dir={'': 'src'}) has no top-level
+          # pylibmc/ to shadow the installed wheel (gotcha territory:
+          # testing-and-shadowing.md), so testing straight from {project} is
+          # safe -- mirrors upstream's `runtests.py -v tests --with-doctest`.
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m;
+            f = sorted(p.name for p in m.files('pylibmc') if '.dist-info/licenses/' in str(p));
+            assert f == ['LICENSE', 'LICENSE.libmemcached'], f" &&
+            cd {project} && python -m pytest -v tests
+
+      - name: Check the wheel is a compiled extension
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("_pylibmc") and n.endswith(".so") for n in names), names
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pylibmc-${{ env.PYLIBMC_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pylibmc ${{ inputs.version || '1.6.3' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pylibmc-${{ inputs.version || '1.6.3' }}-*-manylinux_riscv64
