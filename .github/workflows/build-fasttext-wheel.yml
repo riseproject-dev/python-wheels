@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/messense/fasttext-wheel/blob/master/.github/workflows/Linux.yml
+name: Build fasttext-wheel wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'fasttext-wheel version to build (facebookresearch/fastText git tag, e.g. v0.9.2)'
+        required: true
+        default: 'v0.9.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-fasttext-wheel.yml'
+      - 'patches/fasttext-wheel/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || 'v0.9.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to v0.9.2 there.
+  FASTTEXT_WHEEL_VERSION: ${{ inputs.version || 'v0.9.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build fasttext-wheel ${{ inputs.version || 'v0.9.2' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        # Per-interpreter (not abi3): the pybind11 extension links the version-specific ABI.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      # facebookresearch/fastText is the actual source; fasttext-wheel (messense)
+      # is only a build/publish wrapper around it that renames the distribution.
+      - name: Checkout fastText ${{ env.FASTTEXT_WHEEL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: facebookresearch/fastText
+          ref: ${{ env.FASTTEXT_WHEEL_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch fastText source
+        run: git apply python-wheels/patches/fasttext-wheel/${{ env.FASTTEXT_WHEEL_VERSION }}/00*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # No pyproject.toml, so `python -m build`'s isolated venv has no pip;
+          # setup.py's get_pybind_include self-installs pybind11 via `pip install`
+          # there and fails with "No module named pip". Pre-install its
+          # install_requires (pybind11, setuptools, numpy) and skip isolation.
+          CIBW_BEFORE_BUILD: pip install pybind11 setuptools numpy
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          # runtests.py (upstream's `python_test.sh` entry point) lives outside the
+          # installed package, so run the same gen_unit_tests() suite it calls
+          # directly against the installed fasttext.tests subpackage instead.
+          CIBW_TEST_COMMAND: >-
+            python -c "import unittest, sys; from fasttext.tests.test_script import gen_unit_tests; r = unittest.TextTestRunner(verbosity=2).run(unittest.TestLoader().loadTestsFromTestCase(gen_unit_tests())); sys.exit(0 if r.wasSuccessful() else 1)"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fasttext-wheel-${{ inputs.version || 'v0.9.2' }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish fasttext-wheel ${{ inputs.version || 'v0.9.2' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: fasttext-wheel-${{ inputs.version || 'v0.9.2' }}-*-manylinux_riscv64
