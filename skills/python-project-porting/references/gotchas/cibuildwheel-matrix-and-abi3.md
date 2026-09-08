@@ -34,6 +34,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **281** — Gotcha 251 recurs even when the port's own notes cite gotcha 104 — a
 - **313** — A dynamic abi3 floor (`setup.py` tags whichever interpreter builds it) lets you
 - **324** — `{project}` is exactly the on-disk root of the checkout with no `path:` —
+- **331** — A platform-specific `[tool.cibuildwheel.<platform>].environment` table already
 
 ---
 
@@ -670,3 +671,26 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
      differs — spend one CI cycle on a throwaway `find {project} -maxdepth 2` (or
      `ls -la {project}`) in `CIBW_BEFORE_ALL_LINUX` to see the real tree**, then delete the
      diagnostic once the real path is confirmed.
+
+331. **A platform-specific `[tool.cibuildwheel.<platform>].environment` table already
+     replaces the global `[tool.cibuildwheel].environment` table on that platform, with no
+     env var needed to trigger it (refines gotcha 107; the ansible-pylibssh case; see
+     `build-ansible-pylibssh.yml`).** Gotcha 107 says `CIBW_ENVIRONMENT` replaces upstream's
+     `environment` table rather than merging into it. The same replace-not-merge rule
+     already applies *before* any env var is read: cibuildwheel's `_resolve_cascade`
+     (`options.py`) walks `default → default_platform → config (global table) → config_platform
+     (the platform-specific table) → overrides → CIBW_ENVIRONMENT → CIBW_ENVIRONMENT_<PLATFORM>`
+     and each non-null step **fully replaces** the running value unless that step's `inherit`
+     rule is APPEND/PREPEND — which a plain `[tool.cibuildwheel.linux.environment]` table
+     never carries (only a `[[tool.cibuildwheel.overrides]]` entry can opt into that). So a
+     project whose Linux table sets a couple of build-only keys (ansible-pylibssh's
+     `STATIC_DEPS_DIR`/`CFLAGS`/`LDFLAGS`, pointing at its own custom manylinux images) has
+     *already* dropped every key from its global table on Linux — `PIP_CONSTRAINT`, colour
+     toggles, whatever else — with no port-added `CIBW_ENVIRONMENT*` involved at all. Two
+     consequences: (1) don't assume a global-table value (e.g. a version pin) still applies
+     on a platform that has its own table — check `pyproject.toml` for a
+     `[tool.cibuildwheel.<platform>]` section before relying on the global one; (2) setting
+     `CIBW_ENVIRONMENT_LINUX` yourself to replace an unusable platform table (as
+     ansible-pylibssh does, to drop `STATIC_DEPS_DIR` paths that don't exist in the riscv64
+     container) costs nothing extra beyond what the platform table had already cost —
+     nothing from the global table survives to lose.
