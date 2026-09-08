@@ -31,6 +31,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
   leaving riscv64 to link non-PIC objects into a shared library.
 - **279** — Gotcha 272's zlib-ng `vsetvli` SIGILL recurs whenever a *second*, independent
 - **288** — Rocky/AlmaLinux 10 dropped the classic SDL2-devel package entirely, on every
+- **327** — A project's own `before-all`/`before-build` can already "fix" gotcha 138's
 
 ---
 
@@ -638,3 +639,19 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       `aarch64` tolerate certain non-PIC-into-.so link patterns that riscv64's linker
       does not for this particular relocation kind, which is exactly why an
       arch-allowlist written against only those two targets silently breaks on a third.
+
+327. **A project's own `before-all`/`before-build` can already "fix" gotcha 138's stale
+    `config.guess`/`config.sub` by downloading fresh copies from an external mirror at
+    build time — and that download can itself 404 from inside the riscv64 container even
+    though the identical URL succeeds from a laptop or any other network (the
+    python-mecab-ko case).** `scripts/install_mecab_ko.py` fetches
+    `http://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.guess;hb=HEAD`
+    with plain `urllib.request.urlopen` — no special headers, no proxy — and it 404s only
+    from the CI job (confirmed via `gh api .../jobs/<id>/logs --allow-escape-sequences`,
+    gotcha 144-style raw-log reading), while the same request from outside CI returns 200.
+    Like gotcha 243's IPv6 loopback, this is a container/runner network quirk that no
+    amount of local rehearsal on a dev machine will reproduce — only the actual job log
+    proves it. The fix is the one already in gotcha 138: patch the script to copy
+    `/usr/share/automake-*/config.guess`/`config.sub` (already current enough for
+    riscv64) instead of reaching the network at all, rather than trying to debug *why*
+    the external mirror is unreachable from that specific runner.
