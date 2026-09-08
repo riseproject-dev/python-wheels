@@ -1,0 +1,92 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/K0lb3/texture2ddecoder/blob/3ebc3b758bd6b1a3108b50148f7998ee34f058c6/.github/workflows/release.yml
+name: Build texture2ddecoder wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'texture2ddecoder version to build (e.g. 1.0.6)'
+        required: true
+        default: '1.0.6'
+  pull_request:
+    paths:
+      - '.github/workflows/build-texture2ddecoder.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.0.6' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.0.6 there.
+  TEXTURE2DDECODER_VERSION: ${{ inputs.version || '1.0.6' }}
+  # Upstream cuts releases without git tags, so pin the release commit: this is
+  # "feat: use Py_buffer, remove 3.7 support (cibuildwheel), make 3.11 use abi3",
+  # whose tree is byte-identical to the 1.0.6 PyPI sdist. Update it alongside
+  # TEXTURE2DDECODER_VERSION.
+  TEXTURE2DDECODER_REF: 3ebc3b758bd6b1a3108b50148f7998ee34f058c6
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build texture2ddecoder ${{ inputs.version || '1.0.6' }} cp311-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout texture2ddecoder ${{ env.TEXTURE2DDECODER_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: K0lb3/texture2ddecoder
+          ref: ${{ env.TEXTURE2DDECODER_REF }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          # setup.py's own bdist_wheel subclass tags every build cp311-abi3 when
+          # CIBUILDWHEEL is set and the interpreter is >=3.11 - no CIBW config
+          # needed to opt in. It has no Py_GIL_DISABLED guard, so a cp314t build
+          # would define Py_LIMITED_API under a free-threaded interpreter and hit
+          # CPython's own "limited API is not supported in the free-threaded
+          # build" #error; upstream doesn't publish a free-threaded wheel either
+          # (no Free Threading classifier), so cp314t is dropped rather than
+          # patched in.
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream's test.yml: `pip install .[tests]` + `pytest -vs ./tests`.
+          CIBW_TEST_EXTRAS: tests
+          CIBW_TEST_COMMAND: pytest {package}/tests -v
+          # The [tests] extra pulls in Pillow, which ships no riscv64 wheel on public
+          # PyPI; ours is what the test env installs. PIP_ONLY_BINARY keeps pip from
+          # falling back to a from-source build (it needs libjpeg headers we lack).
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=Pillow
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: texture2ddecoder-${{ env.TEXTURE2DDECODER_VERSION }}-cp311-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish texture2ddecoder ${{ inputs.version || '1.0.6' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: texture2ddecoder-${{ inputs.version || '1.0.6' }}-*-manylinux_riscv64
