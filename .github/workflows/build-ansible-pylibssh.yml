@@ -1,0 +1,116 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/ansible/pylibssh/blob/v1.4.0/.github/workflows/reusable-cibuildwheel.yml
+name: Build ansible-pylibssh wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'ansible-pylibssh version to build (git tag without leading v, e.g. 1.4.0)'
+        required: true
+        default: '1.4.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-ansible-pylibssh.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.4.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.4.0 there.
+  ANSIBLE_PYLIBSSH_VERSION: ${{ inputs.version || '1.4.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build ansible-pylibssh ${{ inputs.version || '1.4.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Upstream skips "*t-*" (free-threading not supported yet, see
+        # ansible/pylibssh#822); mirrored here rather than in `only:`, since
+        # `only:` overrides `skip` (gotcha 107) and would build it anyway.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+
+    steps:
+      - name: Checkout ansible-pylibssh v${{ env.ANSIBLE_PYLIBSSH_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ansible/pylibssh
+          ref: v${{ env.ANSIBLE_PYLIBSSH_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply -v python-wheels/patches/ansible-pylibssh/${{ env.ANSIBLE_PYLIBSSH_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream links a statically-built libssh baked into its own
+          # manylinux images; no riscv64 equivalent exists, so libssh-devel
+          # (0.12.0, matching upstream's pin) is installed from Rocky 10's
+          # AppStream repo instead - its headers/lib are on gcc's default
+          # search path, so pyproject.toml's own `-lssh` needs no CFLAGS/
+          # LDFLAGS help. `%license` (COPYING) survives the image's
+          # `tsflags=nodocs`; the bundled third-party `%doc` notice doesn't,
+          # hence the reinstall.
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf -y install libssh-devel &&
+            dnf -y reinstall --setopt=tsflags= libssh &&
+            cp /usr/share/licenses/libssh/COPYING /project/LICENSE.libssh &&
+            cp /usr/share/doc/libssh/BSD /project/LICENSE.libssh-bsd
+          # Replaces pyproject.toml's [tool.cibuildwheel.linux.environment]
+          # (STATIC_DEPS_DIR paths from upstream's images, unusable here).
+          # SETUPTOOLS_SCM_PRETEND_VERSION_FOR_ANSIBLE_PYLIBSSH: the `git apply`
+          # above dirties the tree, which setuptools_scm otherwise reports as
+          # a `.devN+g<sha>` version (gotcha 31/53).
+          CIBW_ENVIRONMENT_LINUX: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_ANSIBLE_PYLIBSSH=${{ env.ANSIBLE_PYLIBSSH_VERSION }}
+          CIBW_TEST_REQUIRES: pytest pytest-cov pytest-xdist
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m;
+            n={p.name for p in m.files('ansible-pylibssh') if '.dist-info/licenses/' in str(p)};
+            assert n == {'LICENSE.rst', 'LICENSE.libssh', 'LICENSE.libssh-bsd'}, n" &&
+            python -Im pytest -m smoke --no-cov {project}/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ansible-pylibssh-${{ env.ANSIBLE_PYLIBSSH_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish ansible-pylibssh ${{ inputs.version || '1.4.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: ansible-pylibssh-${{ inputs.version || '1.4.0' }}-*-manylinux_riscv64
