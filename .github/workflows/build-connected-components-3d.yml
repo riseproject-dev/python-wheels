@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on: https://github.com/seung-lab/connected-components-3d/blob/4.1.0/.github/workflows/build_wheel.yml
+name: Build connected-components-3d wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'connected-components-3d version to build (git tag, e.g. 4.1.0)'
+        required: true
+        default: '4.1.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-connected-components-3d.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '4.1.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  CC3D_VERSION: ${{ inputs.version || '4.1.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build connected-components-3d ${{ inputs.version || '4.1.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: cp312
+            scipy: scipy
+            k: not test_connected_components_stack
+          - python: cp313
+            scipy: scipy
+            k: not test_connected_components_stack
+          - python: cp314
+            scipy: scipy
+            k: not test_connected_components_stack
+          - python: cp314t
+            scipy: ''
+            k: not test_connected_components_stack and not test_compare_scipy
+
+    steps:
+      - name: Checkout connected-components-3d ${{ env.CC3D_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: seung-lab/connected-components-3d
+          ref: ${{ env.CC3D_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy is a build-time requirement (headers, via pyproject.toml's
+          # build-system.requires) and, despite not being declared as a
+          # runtime dependency by name in pyproject.toml, an implicit one too
+          # (the compiled extension calls numpy's C API at import time; it is
+          # declared in install_requires in setup.py). Only our registry has
+          # it for riscv64; only-binary keeps a newer PyPI release from
+          # winning the resolution and then compiling from sdist.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+          # fastremap has no riscv64 wheel on either index, so pip builds it
+          # from sdist; scipy has no cp314t wheel on any index/platform yet,
+          # so it and its tests are dropped on that leg only (gotcha 149).
+          CIBW_TEST_REQUIRES: pytest numpy fastremap ${{ matrix.scipy }}
+          # automated_test.py sits next to the unbuilt cc3d/ source package;
+          # staging only the test file keeps that directory out of test_cwd
+          # so `import cc3d` resolves to the installed wheel (gotcha 25).
+          CIBW_TEST_SOURCES: automated_test.py
+          # crackle-codec (the optional "stack" extra's codec) has no riscv64
+          # wheel anywhere, so test_connected_components_stack is deselected
+          # on every leg rather than building its pybind11/google_crc32c
+          # dependency chain from source for one optional extra.
+          CIBW_TEST_COMMAND: >-
+            python -m pytest -v automated_test.py -k "${{ matrix.k }}"
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          exts = {n.split("/")[-1].split(".")[0] for n in names if n.endswith(".so")}
+          assert exts == {"fastcc3d"}, exts
+          licences = {n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n} - {""}
+          assert licences == {"AUTHORS", "COPYING", "COPYING.LESSER"}, licences
+          EOF
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: connected-components-3d-${{ env.CC3D_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish connected-components-3d ${{ inputs.version || '4.1.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: connected-components-3d-${{ inputs.version || '4.1.0' }}-*-manylinux_riscv64
