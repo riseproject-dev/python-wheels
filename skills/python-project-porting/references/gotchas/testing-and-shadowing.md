@@ -23,6 +23,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
 - **229** — A test suite that calls GitPython's `Repo(..., search_parent_directories=True)`
 - **253** — A ctypes/dlopen GUI-toolkit wrapper with no upstream pytest suite at all still has
 - **296** — Upstream test fixtures checked in via git-lfs can't assume the self-hosted
+- **329** — A test suite that shells out to the package's own installed CLI binaries at a
 
 ---
 
@@ -462,3 +463,27 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
     Verify locally with a single `curl` before wiring it into the workflow — the
     pointer file's `size:` line is the real blob's byte count, so diffing `ls -l`
     against it confirms the fetch, not just a 200 status.
+
+329. **A test suite that shells out to the package's own installed CLI binaries at a
+    `__file__`-relative path needs the *installed* package staged back into `test_cwd`,
+    not just the test directory (the primer3-py case).** Gotcha 25's `CIBW_TEST_SOURCES:
+    tests` stops the checkout's uncompiled `primer3/` from shadowing the wheel's Cython
+    extension, but primer3-py's `tests/wrappers.py` cross-checks the compiled bindings
+    against the same primer3 C library built as standalone CLI tools (`ntthal`,
+    `primer3_core`, ...), installed by a custom `install_lib` command into
+    `<site-packages>/primer3/src/libprimer3/`. `wrappers.py` locates them as
+    `dirname(dirname(realpath(__file__))) + '/primer3/src/libprimer3/...'` — relative to
+    `tests/`'s own parent, never via `import primer3`. With only `tests/` staged that
+    parent is the empty `test_cwd`, and the binaries are simply missing:
+    `FileNotFoundError: primer3/src/libprimer3/ntthal`, not an import error, so gotcha
+    25's usual `.so`-import proof doesn't catch it. Gotcha 39's dulwich fix applies
+    directly even though nothing here is unittest-native: `cp -a "$(python -c 'import
+    primer3, os; print(os.path.dirname(primer3.__file__))')" primer3` before the test
+    command stages the *installed*, compiled package — Cython `.so` and CLI binaries
+    alike — at that same relative position, so both the import-based and the
+    subprocess-based checks exercise the actual wheel.
+    - Verify locally in seconds, no riscv64 needed: `pip wheel . && pip install *.whl`,
+      then from an empty dir `cp -a tests/ . && pytest tests/test_thermoanalysis.py -v`
+      fails with the `FileNotFoundError` above; adding the `cp -a primer3` step (copying
+      from the installed package's own `__file__`, not the checkout) makes it pass —
+      proof the staged copy, not something arch-specific, is what's needed.

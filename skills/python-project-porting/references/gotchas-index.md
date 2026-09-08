@@ -321,6 +321,7 @@ The porting gotchas (316 of them) live in [`references/gotchas/`](gotchas/), spl
 - **229** — A test suite that calls GitPython's `Repo(..., search_parent_directories=True)`
 - **253** — A ctypes/dlopen GUI-toolkit wrapper with no upstream pytest suite at all still has
 - **296** — Upstream test fixtures checked in via git-lfs can't assume the self-hosted
+- **329** — A test suite that shells out to the package's own installed CLI binaries at a
 
 ### Testing: pytest config, servers & test selection — [`gotchas/pytest-config-servers-and-selection.md`](gotchas/pytest-config-servers-and-selection.md)
 
