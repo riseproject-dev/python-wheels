@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Mirrors the `manylinux_x86_64` job of upstream's own
+# https://github.com/noirello/pyorc/blob/v0.11.0/azure-pipelines.yml: setup.py's build_ext
+# downloads and compiles Apache ORC's C++ core plus its bundled protobuf/lz4/zstd/zlib/snappy
+# from source (CMAKE_POLICY_VERSION_MINIMUM/PYORC_OVERRIDDEN_PROTOBUF_VERSION copied verbatim
+# from upstream's CIBW_ENVIRONMENT), so every interpreter rebuilds the whole C++ world just
+# like upstream's own per-interpreter cibuildwheel matrix does.
+name: Build pyorc wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pyorc version to build (git tag without the leading v, e.g. 0.11.0)'
+        required: true
+        default: '0.11.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pyorc.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.11.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.11.0 there.
+  PYORC_VERSION: ${{ inputs.version || '0.11.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Apache ORC C++ core release pyorc's setup.py downloads and builds; pins ORC's own
+  # bundled lz4/zstd for LICENSE.lz4/LICENSE.zstd below (cmake_modules/ThirdpartyToolchain.cmake).
+  ORC_LIB_TAG: rel/release-2.1.4
+  ORC_LZ4_TAG: v1.10.0
+  ORC_ZSTD_TAG: v1.5.7
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pyorc ${{ inputs.version || '0.11.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout noirello/pyorc v${{ env.PYORC_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: noirello/pyorc
+          ref: v${{ env.PYORC_VERSION }}
+          persist-credentials: false
+
+      - name: Stage the vendored Apache ORC/lz4/zstd licences
+        # setup.py downloads and compiles all three from source; none of their
+        # licence text ends up in the wheel otherwise (gotcha 53).
+        run: |
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/apache/orc/${{ env.ORC_LIB_TAG }}/LICENSE" -o LICENSE.orc
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/apache/orc/${{ env.ORC_LIB_TAG }}/NOTICE" -o NOTICE.orc
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/lz4/lz4/${{ env.ORC_LZ4_TAG }}/LICENSE" -o LICENSE.lz4
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/facebook/zstd/${{ env.ORC_ZSTD_TAG }}/LICENSE" -o LICENSE.zstd
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_BUILD: dnf install -y cmake
+          CIBW_ENVIRONMENT: CMAKE_POLICY_VERSION_MINIMUM=3.5 PYORC_OVERRIDDEN_PROTOBUF_VERSION=3.21.12
+          CIBW_TEST_REQUIRES: pytest
+          # tests/compare/*_cmp.py shell out to deps/bin/orc-{metadata,contents}, only built
+          # when PYORC_DEBUG=1 (upstream's separate test-stage build, not its wheel build).
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m; f = sorted(str(p).split('licenses/', 1)[1] for p in m.files('pyorc') if '.dist-info/licenses/' in str(p)); assert f == ['LICENSE', 'LICENSE.lz4', 'LICENSE.orc', 'LICENSE.zstd', 'NOTICE.orc'], f" &&
+            python -m pytest {project}/tests --ignore={project}/tests/compare
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyorc-${{ env.PYORC_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyorc ${{ inputs.version || '0.11.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pyorc-${{ inputs.version || '0.11.0' }}-*-manylinux_riscv64
