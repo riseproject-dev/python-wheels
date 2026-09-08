@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/polm/fugashi/blob/v1.5.2/.github/workflows/manylinux1.yml
+name: Build fugashi wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'fugashi version to build (git tag without leading v, e.g. 1.5.2)'
+        required: true
+        default: '1.5.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-fugashi.yml'
+      - 'patches/fugashi/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.5.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.5.2 there.
+  FUGASHI_VERSION: ${{ inputs.version || '1.5.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build fugashi ${{ inputs.version || '1.5.2' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp39", "cp310", "cp311", "cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout fugashi ${{ env.FUGASHI_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: polm/fugashi
+          ref: v${{ env.FUGASHI_VERSION }}
+          fetch-depth: 0  # setuptools_scm derives the version from the tag
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # fugashi's sdist carries no MeCab C++ sources -- setup.py always
+          # links a system libmecab via mecab-config (fugashi_util.py). Same
+          # shape as mecab-python3 (build-mecab-python3.yml), including that
+          # workflow's fix for gotcha 327: copy automake's current
+          # config.guess/config.sub instead of letting the build fetch stale
+          # ones from the network, which 404s from inside this runner.
+          CIBW_BEFORE_ALL_LINUX: |
+            set -eux
+            git clone --depth=1 https://github.com/taku910/mecab.git /tmp/mecab
+            cd /tmp/mecab/mecab
+            cp /usr/share/automake-*/config.guess /usr/share/automake-*/config.sub .
+            ./configure --enable-utf8-only
+            make -j"$(nproc)"
+            make install
+            ldconfig
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Mirrors upstream's test-manylinux.yml: unidic-lite and ipadic are
+          # small pure-Python dictionaries that let the suite (including
+          # fugashi/tests/test_ipadic.py) exercise real tokenization.
+          CIBW_TEST_REQUIRES: pytest unidic-lite ipadic
+          # fugashi/tests/ lives inside the fugashi/ package dir itself, so
+          # staging it as-is would put a bare "fugashi" namespace package
+          # (no __init__.py, no compiled extension) on sys.path and shadow
+          # the installed wheel. Rename it out of the way before testing.
+          CIBW_TEST_SOURCES: fugashi/tests
+          CIBW_TEST_COMMAND: >-
+            mv fugashi fugashi-tests-src &&
+            python -m pytest fugashi-tests-src/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fugashi-${{ env.FUGASHI_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish fugashi ${{ inputs.version || '1.5.2' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: fugashi-${{ inputs.version || '1.5.2' }}-*-manylinux_riscv64
