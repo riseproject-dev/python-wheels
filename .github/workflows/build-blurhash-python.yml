@@ -1,0 +1,90 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel builder (build.sh/container-build.sh):
+#   https://github.com/woltapp/blurhash-python/blob/v1.2.2/container-build.sh
+name: Build blurhash-python wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'blurhash-python version to build (git tag without leading v, e.g. 1.2.2)'
+        required: true
+        default: '1.2.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-blurhash-python.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.2.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.2.2 there.
+  BLURHASH_PYTHON_VERSION: ${{ inputs.version || '1.2.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build blurhash-python ${{ inputs.version || '1.2.2' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout blurhash-python v${{ env.BLURHASH_PYTHON_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: woltapp/blurhash-python
+          ref: v${{ env.BLURHASH_PYTHON_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # setup.py's setup_requires fetches cffi/setuptools-scm via
+          # easy_install, which doesn't see our registry; preinstall and
+          # build against them directly instead.
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          CIBW_BEFORE_BUILD: pip install cffi setuptools setuptools-scm wheel
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_BLURHASH_PYTHON=${{ env.BLURHASH_PYTHON_VERSION }}
+          CIBW_TEST_EXTRAS: testing
+          # test_invalid_image opens README.md as a non-image file; tests/
+          # loads its fixture PNGs by relative path, matching upstream's own
+          # `pytest` invocation from the repo root.
+          CIBW_TEST_SOURCES: tests README.md
+          CIBW_TEST_COMMAND: pytest tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: blurhash-python-${{ env.BLURHASH_PYTHON_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish blurhash-python ${{ inputs.version || '1.2.2' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: blurhash-python-${{ inputs.version || '1.2.2' }}-*-manylinux_riscv64
