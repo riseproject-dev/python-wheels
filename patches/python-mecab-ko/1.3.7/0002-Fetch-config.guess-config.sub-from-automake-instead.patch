@@ -1,0 +1,61 @@
+From b127a1cc8f9fd7d4cb93b4e0d42c3f9a390d0797 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Tue, 8 Sep 2026 04:21:14 +0200
+Subject: [PATCH] Fetch config.guess/config.sub from automake instead of
+ savannah.gnu.org
+
+scripts/install_mecab_ko.py downloads a fresh config.guess/config.sub from
+git.savannah.gnu.org's gitweb before configuring mecab-ko, since the pair
+bundled in the mecab-ko release tarball predates riscv64. That download
+404s from our riscv64 CI runners (CI job logs, PR #1486) even though the
+same URL succeeds from other networks -- an external resource this build
+cannot depend on reaching.
+
+The manylinux_2_39_riscv64 image already ships a current config.guess/
+config.sub via automake, which is a superset of what the download would
+have provided; copy those instead, mirroring how the mecab-python3 port in
+this same repo resolves the identical stale-config.guess problem for the
+sibling taku910/mecab core.
+
+Upstream-Status: Inappropriate [savannah.gnu.org is unreachable from our riscv64 CI runners; the manylinux image's own automake-provided config.guess/config.sub work just as well]
+---
+ scripts/install_mecab_ko.py | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/scripts/install_mecab_ko.py b/scripts/install_mecab_ko.py
+index f103b26..9f0076e 100755
+--- a/scripts/install_mecab_ko.py
++++ b/scripts/install_mecab_ko.py
+@@ -1,8 +1,10 @@
+ #!/usr/bin/env python3
+
+ import argparse
++import glob
+ import os
+ import platform
++import shutil
+ import subprocess
+ import sys
+ import time
+@@ -12,8 +14,6 @@ from tempfile import TemporaryDirectory
+ from typing import Optional
+
+ MECAB_KO_URL = "https://bitbucket.org/eunjeon/mecab-ko/downloads/mecab-{mecab_version}-ko-{mecab_ko_version}.tar.gz"
+-CONFIG_GUESS_URL = "http://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.guess;hb=HEAD"
+-CONFIG_SUB_URL = "http://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.sub;hb=HEAD"
+
+
+ def parse_arguments() -> argparse.Namespace:
+@@ -82,8 +82,8 @@ def fetch(url: str):
+     download(url, "mecab-ko.tar.gz")
+     subprocess.run(["tar", "-xz", "--strip-components=1", "-f", "mecab-ko.tar.gz"], check=True)
+
+-    download(CONFIG_GUESS_URL, "config.guess")
+-    download(CONFIG_SUB_URL, "config.sub")
++    shutil.copy(glob.glob("/usr/share/automake-*/config.guess")[0], "config.guess")
++    shutil.copy(glob.glob("/usr/share/automake-*/config.sub")[0], "config.sub")
+
+
+ def build(prefix: Optional[str] = None):
+--
+2.50.1 (Apple Git-155)
