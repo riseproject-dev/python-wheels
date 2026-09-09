@@ -1,0 +1,254 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# pagefind-bin has no sdist and ships only x86_64/aarch64 wheels, packaged by
+# pagefind/pagefind's own wrappers/python/scripts/build/binary_only_wheel.py
+# from binaries built by .github/workflows/release.yml (no riscv64 target,
+# and no riscv64 musl toolchain exists to match its musl builds either - see
+# build-ripgrep.yml). This workflow reproduces that pipeline for riscv64: an
+# arch-independent job builds the WASM/JS/UI assets release.yml's own "Build
+# WASM"/"Build Coupled JS"/"Build UI" steps produce (gotcha 4), then the
+# riscv64 job builds the `pagefind` binary from source and repackages it
+# using the checkout's own binary_only_wheel.py - not maturin bindings=bin
+# (build-ripgrep.yml/build-just-bin.yml), since the `pagefind` API package's
+# `from pagefind_bin import get_executable` depends on pagefind_bin's actual
+# wheel layout (binary at pagefind_bin/pagefind), which maturin's
+# bindings=bin/.data/scripts layout does not produce.
+name: Build pagefind-bin wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pagefind-bin version to build (git tag of pagefind/pagefind without the leading v, e.g. 1.5.2)'
+        required: true
+        default: '1.5.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pagefind-bin.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.5.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.5.2 there.
+  PAGEFIND_VERSION: ${{ inputs.version || '1.5.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_web_assets:
+    needs: [setup]
+    name: Build pagefind ${{ inputs.version || '1.5.2' }} web assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout pagefind v${{ env.PAGEFIND_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pagefind/pagefind
+          ref: v${{ env.PAGEFIND_VERSION }}
+          persist-credentials: false
+
+      # release.yml's own "Prepare Crates" step, minus the git commit (only
+      # needed there for `cargo publish`, which this workflow never runs) -
+      # the built JS/WASM asset filenames embed this version, and
+      # pagefind/Cargo.toml's CARGO_PKG_VERSION must match it for the
+      # `include_bytes!` paths in pagefind/src/output/mod.rs to resolve.
+      - name: Set crate/package versions
+        run: node ./.backstage/version.cjs
+        env:
+          GIT_VERSION: ${{ env.PAGEFIND_VERSION }}
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Build Coupled JS
+        working-directory: pagefind_web_js
+        run: npm i && npm run build-coupled
+
+      - name: Install Rust
+        run: rustup toolchain install nightly --component rust-src --target wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
+        with:
+          version: v0.14.0
+
+      - name: Build WASM
+        working-directory: pagefind_web
+        run: ./local_build.sh
+        env:
+          GIT_VERSION: ${{ env.PAGEFIND_VERSION }}
+
+      - name: Build UI
+        working-directory: pagefind_ui/default
+        run: npm i && npm run build
+
+      - name: Build Modular UI
+        working-directory: pagefind_ui/modular
+        run: npm i && npm run build
+
+      - name: Build Component UI
+        working-directory: pagefind_ui/component
+        run: npm i && npm run build
+
+      # pagefind/src/playground.rs include_str!s this unconditionally, even
+      # though the playground is a dev-only debugging UI unrelated to indexing.
+      - name: Build Playground
+        working-directory: pagefind_playground
+        run: npm i && npm run build
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pagefind-bin-${{ env.PAGEFIND_VERSION }}-vendor
+          path: pagefind/vendor
+          if-no-files-found: error
+
+  build_wheel:
+    needs: [setup, build_web_assets]
+    name: Build pagefind-bin ${{ inputs.version || '1.5.2' }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    steps:
+      - name: Checkout pagefind v${{ env.PAGEFIND_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pagefind/pagefind
+          ref: v${{ env.PAGEFIND_VERSION }}
+          persist-credentials: false
+
+      - name: Download web assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: pagefind-bin-${{ env.PAGEFIND_VERSION }}-vendor
+          path: pagefind/vendor
+
+      - name: Set pagefind crate version
+        run: sed -i "s/^version = \"0.0.0\"/version = \"${PAGEFIND_VERSION}\"/" pagefind/Cargo.toml
+
+      # Written to $RUNNER_TEMP and bind-mounted rather than checked in (gotcha
+      # 7 / CLAUDE.md): installs rustup inside the container (gotcha 10), builds
+      # the CLI natively for the container's own riscv64 glibc, then calls this
+      # checkout's own wrappers/python/scripts/build/binary_only_wheel.py to
+      # repackage it exactly as release.yml's "Prepare Python Packages" job
+      # does for every other platform.
+      - name: Write in-container build script
+        run: |
+          cat > "$RUNNER_TEMP/build.sh" <<'SCRIPT'
+          set -euxo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source "$HOME/.cargo/env"
+          rustup target add riscv64gc-unknown-linux-gnu
+          (cd pagefind && cargo build --release --target riscv64gc-unknown-linux-gnu)
+          pybin=/opt/python/cp312-cp312/bin
+          "$pybin/pip" install -q wheel
+          mkdir -p dist
+          PYTHONPATH=wrappers/python "$pybin/python3" - <<'PY'
+          import os
+          from pathlib import Path
+
+          from scripts.build.binary_only_wheel import write_pagefind_bin_only_wheel
+
+          write_pagefind_bin_only_wheel(
+              executable=Path("target/riscv64gc-unknown-linux-gnu/release/pagefind"),
+              output_dir=Path("dist"),
+              version=os.environ["PAGEFIND_VERSION"],
+              platform="manylinux_2_39_riscv64",
+          )
+          PY
+          SCRIPT
+
+      - name: Build wheel
+        run: |
+          docker run --rm \
+            -v "$(pwd)":/workspace \
+            -v "$RUNNER_TEMP/build.sh":/build.sh \
+            -w /workspace \
+            -e PAGEFIND_VERSION \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /build.sh
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pagefind-bin-${{ env.PAGEFIND_VERSION }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test pagefind-bin ${{ inputs.version || '1.5.2' }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    env:
+      # Without this uv would reuse the runner image's system CPython for 3.12
+      # and download a standalone build for the others.
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        # This repo's default interpreter matrix (gotcha in workflow-anatomy.md);
+        # the wheel is interpreter-agnostic (py3-none), so every interpreter --
+        # including free-threaded -- exercises the same binary.
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: pagefind-bin-${{ env.PAGEFIND_VERSION }}-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . pagefind_bin
+
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          python -m pagefind_bin --version
+          python -c "from pagefind_bin import get_executable; p = get_executable(); print(p); assert p.is_file()"
+
+          bin=$(python -c "from pagefind_bin import get_executable; print(get_executable())")
+          "$bin" --version
+          "$bin" --help >/dev/null
+
+          work=$(mktemp -d)
+          mkdir -p "$work/public"
+          cat > "$work/public/index.html" <<'HTML'
+          <!doctype html>
+          <html lang="en">
+          <body>
+          <main>
+          <h1>Hello Pagefind</h1>
+          <p>The quick brown fox jumps over the lazy dog.</p>
+          </main>
+          </body>
+          </html>
+          HTML
+
+          "$bin" --site "$work/public"
+          [ -f "$work/public/pagefind/pagefind.js" ]
+          [ -f "$work/public/pagefind/pagefind-entry.json" ]
+
+  publish:
+    name: Publish pagefind-bin ${{ inputs.version || '1.5.2' }}
+    needs: [setup, build_wheel, test_wheel]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pagefind-bin-${{ inputs.version || '1.5.2' }}-manylinux_riscv64
