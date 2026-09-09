@@ -1,0 +1,171 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build` job of
+# https://github.com/pydantic/monty/blob/v0.0.21/.github/workflows/ci.yml
+name: Build pydantic-monty-runtime wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pydantic-monty-runtime version to build (git tag, e.g. v0.0.21)'
+        required: true
+        default: 'v0.0.21'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pydantic-monty-runtime.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || 'v0.0.21' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to v0.0.21 there.
+  MONTY_VERSION: ${{ inputs.version || 'v0.0.21' }}
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheel:
+    needs: [setup]
+    name: Build pydantic-monty-runtime ${{ inputs.version || 'v0.0.21' }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout monty ${{ env.MONTY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pydantic/monty
+          ref: ${{ env.MONTY_VERSION }}
+          persist-credentials: false
+
+      # `crates/monty-runtime`'s pyproject.toml has no `license-files`, so
+      # maturin's default LICEN[CS]E* glob only looks next to it -- the repo's
+      # actual LICENSE lives at the workspace root (gotcha 146). Upstream's own
+      # published wheel has the same gap (no LICENSE in its dist-info); copy it
+      # in so ours doesn't.
+      - name: Copy LICENSE next to the crate's pyproject.toml
+        run: cp LICENSE crates/monty-runtime/LICENSE
+
+      # `[tool.maturin] bindings = "bin"`: the wheel is one compiled executable
+      # with no ABI tag (monty-runtime never links pyo3 -- monty-proto's pyo3
+      # dependency is gated behind a "python" feature this crate doesn't
+      # enable), so a single native build covers every interpreter.
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --locked --out dist
+          manylinux: '2_39'
+          working-directory: crates/monty-runtime
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pydantic-monty-runtime-${{ env.MONTY_VERSION }}-manylinux_riscv64
+          path: crates/monty-runtime/dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test pydantic-monty-runtime ${{ inputs.version || 'v0.0.21' }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    env:
+      # Without this uv would reuse the runner image's system CPython for 3.12
+      # and download a standalone build for the others.
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        # This repo's default interpreter matrix (gotcha in workflow-anatomy.md);
+        # the wheel is interpreter-agnostic (bindings = "bin"), so every
+        # interpreter -- including free-threaded -- exercises the same binary.
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: pydantic-monty-runtime-${{ env.MONTY_VERSION }}-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . pydantic-monty-runtime
+
+      # No wheel-level test suite ships in the sdist (gotcha 187): the CLI's
+      # own tests (crates/monty-runtime/tests/*.rs) are Rust integration tests
+      # run by upstream's own `cargo test`, never packaged. Drive the real
+      # sandboxed interpreter instead of settling for a bare --version check,
+      # mirroring upstream's own tests/mounts.rs cases (a mounted-path read, an
+      # unmounted-path PermissionError, and a write-limit OSError) rather than
+      # inventing an unmounted-write round trip upstream itself never asserts.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          monty --version
+          monty --help >/dev/null
+
+          [ "$(monty -c "print('hello world')")" = "hello world" ]
+
+          work=$(mktemp -d)
+          cat > "$work/script.py" <<'PY'
+          print(1 + 2)
+          PY
+          [ "$(monty "$work/script.py")" = "3" ]
+
+          host=$(mktemp -d)
+          echo 'hello from the host' > "$host/in.txt"
+          cat > "$work/mount.py" <<'PY'
+          from pathlib import Path
+
+          print(Path('/mnt/in.txt').read_text().strip())
+          PY
+          [ "$(monty -m "$host::/mnt" "$work/mount.py")" = "hello from the host" ]
+
+          cat > "$work/unmounted.py" <<'PY'
+          from pathlib import Path
+
+          Path('/outside.txt').read_text()
+          PY
+          set +e
+          err=$(monty -m "$host::/mnt" "$work/unmounted.py" 2>&1)
+          rc=$?
+          set -e
+          [ "$rc" -ne 0 ]
+          echo "$err" | grep -q "PermissionError: Permission denied: '/outside.txt'"
+
+          cat > "$work/write_limit.py" <<'PY'
+          from pathlib import Path
+
+          Path('/mnt/out.txt').write_text('hello from the sandbox')
+          PY
+          set +e
+          err=$(monty -m "$host::/mnt::rw::4" "$work/write_limit.py" 2>&1)
+          rc=$?
+          set -e
+          [ "$rc" -ne 0 ]
+          echo "$err" | grep -q "OSError: disk write limit of 4 bytes exceeded"
+
+  publish:
+    name: Publish pydantic-monty-runtime ${{ inputs.version || 'v0.0.21' }}
+    needs: [setup, build_wheel, test_wheel]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pydantic-monty-runtime-${{ inputs.version || 'v0.0.21' }}-manylinux_riscv64
