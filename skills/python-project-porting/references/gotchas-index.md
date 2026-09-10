@@ -74,6 +74,8 @@ The porting gotchas (330 of them) live in [`references/gotchas/`](gotchas/), spl
   a Rust FFI crate that itself only *downloads* a prebuilt native core, never builds it, can
   leave riscv64 with no build path at all even though the wrapper crate is pure Rust (the
   livekit case).
+- **341** — A build-time transpiler binary from a *third* language ecosystem can block a port
+  even when the extension itself is pure, portable C++ (the prophet/cmdstanpy/stanc3 case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

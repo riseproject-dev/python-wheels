@@ -38,6 +38,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **338** — A package whose real PyPI wheels are produced by a *packaging fork*, not its own
   source repo, can hard-depend at runtime on a sibling package from that same packaging
   ecosystem — and that sibling can itself be the actual blocker (the eigenpy/cmeel-boost case).
+- **341** — A build-time transpiler binary from a *third* language ecosystem can block a port
+  even when the extension itself is pure, portable C++ (the prophet/cmdstanpy/stanc3 case).
 - **340** — Gotcha 335 generalizes past deno_core/rusty_v8 to a second embedded-engine family:
   a Rust FFI crate that itself only *downloads* a prebuilt native core, never builds it, can
   leave riscv64 with no build path at all even though the wrapper crate is pure Rust (the
@@ -1331,3 +1333,60 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       `gh api` against `livekit/python-sdks` and `livekit/rust-sdks` (submodule pin
       `2d9f01ab1e933a86a8a5c53805ee29ee58b9be1b`) plus the real GitHub Releases asset list, no
       checkout required.
+
+341. **A build-time transpiler binary from a *third* language ecosystem can block a port even
+    when the extension itself is pure, portable C++ (the prophet/cmdstanpy/stanc3 case).**
+    prophet 1.4.0's `python/pyproject.toml` has no exotic build backend —
+    `build-backend = "setuptools.build_meta"`, `requires = [..., "cmdstanpy>=1.0.4"]` — and its
+    wheels are `py3-none-<platform>` (gotcha 81's shape: a real compiled artifact under a
+    no-ABI tag), not maturin/pyo3/Bazel. `python/setup.py`'s custom `build_py` command calls
+    `cmdstanpy.install_cmdstan(version="2.37.0", ...)` unconditionally at wheel-build time
+    (`STAN_BACKEND=CMDSTANPY` is the *only* supported backend since prophet ≥ 1.1 — the same
+    `setup.py` raises `ValueError` if `PYSTAN` is requested), then compiles `prophet.stan` into
+    `prophet_model.bin` using that freshly-installed CmdStan. CmdStan's own `make/stanc` rule
+    makes `build:` depend on `bin/stanc$(EXE)`, downloaded as a **prebuilt OCaml binary** from
+    `stan-dev/stanc3`'s GitHub Releases, keyed off `uname -m` via a fixed `ARCH_TAG` table
+    (`aarch64→-arm64`, `ppc64le→-ppc64el`, `s390x→-s390x`, `armv7l→-armel`/`-armhf`); `riscv64`
+    matches none of those branches, so `ARCH_TAG` stays empty and the makefile would fetch
+    plain `linux-stanc` — an x86_64 ELF that cannot execute on riscv64. Confirmed against both
+    the pinned `stan-dev/stanc3` release tag `v2.37.0` (cmdstan 2.37.0's `CMDSTAN_VERSION`) and
+    the current `nightly` release (checked 2026-09-10): asset list is
+    `linux-stanc`/`linux-arm64-stanc`/`linux-armel-stanc`/`linux-armhf-stanc`/
+    `linux-ppc64el-stanc`/`linux-s390x-stanc`/`mac-*`/`windows-stanc` — no riscv64 asset has
+    ever been published, on any release. Unlike the blocker, Stan Math's own vendored TBB
+    (`lib/tbb_2020.3`, a plain copy not a submodule, using the pre-oneAPI classic Makefile
+    build) is **not** the problem: `tbb_machine.h`'s `__linux__` branch checks
+    `TBB_USE_GCC_BUILTINS && __TBB_GCC_BUILTIN_ATOMICS_PRESENT` *before* any architecture
+    `#elif`, and `tbb_config.h` sets both unconditionally for `__TBB_GCC_VERSION >= 70000` —
+    so any GCC ≥ 7 build (riscv64 manylinux images included) takes the portable
+    `machine/gcc_generic.h` path, the exact same code already exercised by the existing
+    x86_64/aarch64 wheels; a compiled Stan Math program is genuinely architecture-agnostic
+    C++ here. The blocker is narrowly `stanc`: it is itself a nontrivial OCaml/`dune` project
+    (menhir, ppxlib, and similar opam dependencies) with **zero riscv64 CI or release history**
+    of its own — OCaml's compiler has had a riscv64 native-codegen backend since 4.12 and opam
+    lists a `host-arch-riscv64` package, but that only proves the *language* can target
+    riscv64 in principle; bootstrapping that toolchain from source and then building stanc3 —
+    a separate upstream project this repo cannot patch or file against — would mean standing
+    up a whole second, previously-untested build pipeline as a prerequisite, not narrowing an
+    existing one (skill goal 2: workflows should be "cheap to add" evidence for upstream, not
+    a novel cross-ecosystem bootstrap). `blocked-on-dependency`, no worktree/branch opened —
+    diagnosed read-only via `gh api` against `facebook/prophet` (`v1.4.0`), `stan-dev/cmdstan`
+    (`v2.37.0`), `stan-dev/stanc3` (`v2.37.0` and `nightly`), and `stan-dev/math` (the
+    `58ad15b...` submodule pin resolved through `stan-dev/stan`'s own pin), no checkout
+    required.
+    - **A `py3-none-<platform>` wheel that embeds a *toolchain-downloaded* transpiler binary
+      is a different risk shape than one that only embeds its own compiled C/C++** — grep the
+      build backend for anything that shells out to install a *second* project's release
+      asset (not just the package's own `Extension`/CMake/Bazel target), the same way gotcha
+      335/340 taught checking two crate layers down for Rust.
+    - **A vendored classic (pre-oneAPI) Intel TBB copy is not automatically an x86/ARM-only
+      blocker** — `tbb_machine.h`'s unmatched-architecture fallthrough to
+      `machine/gcc_generic.h`, gated only on a GCC-version check that's true for any modern
+      compiler, makes it portable to any architecture GCC's `__atomic` builtins support;
+      read the actual `#elif` chain before assuming a 2020-era vendored TBB needs a
+      per-architecture port.
+    - **"The language has a riscv64 backend" and "this specific project has ever been built
+      for riscv64" are different claims** — OCaml/opam supporting riscv64 as a *host*
+      architecture in the abstract doesn't mean stanc3's own dependency graph (menhir,
+      ppxlib, etc.) has ever been exercised there; treat an ecosystem-level "yes" as a
+      starting point for a feasibility spike, not as clearance to park the port on it.
