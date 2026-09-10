@@ -35,6 +35,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **318** — An explicit `python_requires` *upper* bound is a harder wall than an
 - **334** — A stdlib-absorbed backport can fail to build on a modern interpreter for a
 - **335** — Gotcha 273 generalizes: a pinned embedded-engine crate (deno_core/rusty_v8)
+- **338** — A package whose real PyPI wheels are produced by a *packaging fork*, not its own
+  source repo, can hard-depend at runtime on a sibling package from that same packaging
+  ecosystem — and that sibling can itself be the actual blocker (the eigenpy/cmeel-boost case).
 
 ---
 
@@ -1238,3 +1241,44 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       architecture support lags the Rust ecosystem by years, so check the
       engine crate's own per-target released-binary list before assuming
       "it's just cargo, it'll cross-compile."
+
+338. **A package whose real PyPI wheels are produced by a *packaging fork*, not its own
+    source repo, can hard-depend at runtime on a sibling package from that same packaging
+    ecosystem — and that sibling can itself be the actual blocker (the eigenpy case).**
+    `.queue.yml`'s `home`/`repo` for eigenpy point at `cmake-wheel/eigenpy`, not
+    `stack-of-tasks/eigenpy` — that is correct, not a queue error: `gh api
+    repos/cmake-wheel/eigenpy` shows it is a fork whose parent is `stack-of-tasks/eigenpy`,
+    and upstream's own checked-in `pyproject.toml` (at the released tag) carries no
+    `[build-system]` at all — it is a plain CMake project consumed via conda/robotpkg/apt,
+    not something `pip wheel` can build. The fork's `pyproject.toml` is what actually
+    produces the wheels PyPI publishes as `eigenpy`: `build-backend = "cmeel"`, and
+    `project.dependencies` is `["cmeel-boost ~= 1.90.0"]` — confirmed against the live
+    `info.requires_dist` on PyPI's JSON API, not just the fork's source. `cmeel-boost` is a
+    *runtime* dependency (eigenpy's compiled `.so` links its Boost.Python shared libraries),
+    not merely a build input, so `pip install eigenpy` cannot resolve on riscv64 until
+    `cmeel-boost` itself has a riscv64 wheel somewhere.
+    - **The "cmeel" ecosystem's own packages differ wildly in weight — check each one, don't
+      assume the family is uniformly light.** `cmeel` itself and `cmeel-eigen` (Eigen is
+      header-only) are both `py3-none-any` — zero riscv64 concern, already installable from
+      public PyPI as-is. `cmeel-boost` is the opposite extreme: its sdist is a 4 KB
+      `CMakeLists.txt` whose `ExternalProject_Add` downloads the *entire* upstream
+      `boost_1_90_0.tar.bz2` from `archives.boost.io` and runs `./bootstrap.sh && ./b2
+      link=shared python=3.X` with no `--with-libraries` filter — i.e. it compiles Boost's
+      whole default library set, not just Boost.Python, once per interpreter. That is a
+      build on the order of this repo's largest to date (libclang's from-scratch LLVM/Clang
+      compile, ~10h) — plausibly portable (no architectural riscv64 blocker; Boost is
+      ordinary cross-platform C++), but a full dedicated port of its own, which is exactly
+      why `cmeel-boost` already carries its own separate `.queue.yml` entry rather than being
+      something to inline into a dependent package's build.
+    - **Per gotcha 125, "no wheel anywhere" is not automatically a stop — but a pip-resolvable
+      sdist is not automatically a *reasonable* one either.** `cmeel-boost` would very likely
+      build from its sdist inside a cibuildwheel container (proving the CI job could go
+      green), but that same full-Boost compile would then re-run for every future end user's
+      `pip install eigenpy` on riscv64 (no riscv64 wheel to resolve to), which most users'
+      environments won't even have the toolchain for (CMake ≥ 4.0, a C++ compiler, numpy
+      headers) — defeating the "simple index to install riscv64 wheels from" goal even on a
+      green CI run. Treat this the same as gotcha 150's sibling-workflow check, inverted: a
+      hard runtime dep on another *queued* package sequences this port behind that package's
+      own, same as the k-means-constrained/ortools and cvxpy/sparsediffpy cases — status
+      `blocked-on-dependency`, no PR, no worktree needed when the blocker is confirmed fully
+      read-only (PyPI JSON + `gh api` + one sdist download, no checkout required).

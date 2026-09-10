@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (326 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (327 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -67,6 +67,9 @@ The porting gotchas (326 of them) live in [`references/gotchas/`](gotchas/), spl
 - **318** — An explicit `python_requires` *upper* bound is a harder wall than an
 - **334** — A stdlib-absorbed backport can fail to build on a modern interpreter for a
 - **335** — Gotcha 273 generalizes: a pinned embedded-engine crate (deno_core/rusty_v8)
+- **338** — A package whose real PyPI wheels are produced by a *packaging fork*, not its own
+  source repo, can hard-depend at runtime on a sibling package from that same packaging
+  ecosystem — and that sibling can itself be the actual blocker (the eigenpy/cmeel-boost case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
