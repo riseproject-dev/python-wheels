@@ -1,0 +1,103 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build at this tag:
+#   https://github.com/unicorn-engine/unicorn/blob/2.1.4/.github/workflows/build-wheels-publish.yml
+name: Build unicorn wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'unicorn version/tag to build (e.g. 2.1.4)'
+        required: true
+        default: '2.1.4'
+  pull_request:
+    paths:
+      - '.github/workflows/build-unicorn.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.1.4' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  UNICORN_VERSION: ${{ inputs.version || '2.1.4' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  # setup.py forces has_ext_modules + py_limited_api=cp37 (a bdist_wheel-option
+  # abi3 floor, gotcha 34), so one build serves cp312/cp313/cp314. setuptools
+  # itself raises under Py_GIL_DISABLED with py_limited_api set (no upstream
+  # guard), so upstream ships no cp314t wheel for any platform; we drop it too.
+  build_wheels:
+    needs: [setup]
+    name: Build unicorn ${{ inputs.version || '2.1.4' }} cp37-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout unicorn ${{ env.UNICORN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: unicorn-engine/unicorn
+          ref: ${{ env.UNICORN_VERSION }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Upstream's own wheel carries no licence file at all and pyproject.toml
+      # mislabels the project BSD; the root COPYING* is the real GPL-2.0/LGPL-2.0
+      # text (README: "Distributed under free software license GPLv2"). Landing
+      # them under bindings/python lets setuptools' default license_files glob
+      # pick them up with no packaging change.
+      - name: Stage upstream's licence files for the wheel
+        run: cp COPYING COPYING.LGPL2 COPYING_GLIB AUTHORS.TXT bindings/python/
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: bindings/python
+          output-dir: wheelhouse/
+        env:
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # setup.py shells out to `cmake` directly; it's not a declared build dep.
+          CIBW_BEFORE_BUILD: pip install cmake
+          CIBW_BUILD_FRONTEND: build
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # capstone==6.0.0a2 (upstream's test extra) has no riscv64 wheel anywhere;
+          # our registry carries 5.0.9, and the regress tests only use its stable
+          # Cs()/CS_ARCH_* surface.
+          CIBW_TEST_REQUIRES: capstone==5.0.9
+          CIBW_TEST_COMMAND: python -m unittest discover -v {project}/tests/regress "*.py"
+
+      - name: Check the licence files made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              licences = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+              assert licences == {"COPYING", "COPYING.LGPL2", "COPYING_GLIB", "AUTHORS.TXT"}, (whl, licences)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: unicorn-${{ env.UNICORN_VERSION }}-cp37-abi3-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish unicorn ${{ inputs.version || '2.1.4' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: unicorn-${{ inputs.version || '2.1.4' }}-*-manylinux_riscv64
