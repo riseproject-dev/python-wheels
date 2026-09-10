@@ -1,0 +1,196 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-wheels` job of
+# https://github.com/chatnoir-eu/chatnoir-resiliparse/blob/v1.0.9/.github/workflows/build-packages.yml
+name: Build resiliparse wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'resiliparse version to build (git tag without leading v, e.g. 1.0.9)'
+        required: true
+        default: '1.0.9'
+  pull_request:
+    paths:
+      - '.github/workflows/build-resiliparse.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.0.9' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.0.9 there.
+  RESILIPARSE_VERSION: ${{ inputs.version || '1.0.9' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # abseil-cpp version pinned by re2's MODULE.bazel at this tag (matches
+  # build-google-re2.yml, already proven on riscv64 in this repo).
+  ABSEIL_VERSION: '20250512.1'
+  RE2_VERSION: '2025-11-05'
+  # phoerious/lexbor fork pinned by upstream's own vcpkg overlay port
+  # (.vcpkg/ports/lexbor), which adds DOM node reference counting that
+  # resiliparse's Cython bindings depend on -- plain lexbor/lexbor is not a
+  # drop-in replacement.
+  LEXBOR_REF: '647a0b5cd5f35e1e575c20194595dc449abd0e7b'
+  UCHARDET_VERSION: '0.0.8'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build resiliparse ${{ inputs.version || '1.0.9' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Per-interpreter: the Cython extensions link the version-specific ABI.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      # resiliparse-py is a subdirectory of the chatnoir-resiliparse monorepo;
+      # its setup.py copies fastwarc's Cython headers from the sibling
+      # fastwarc-py/fastwarc/legacy at build time, and its pytest suite reads
+      # fixtures from the sibling tests/data, so the checkout is at the
+      # workspace root, not resiliparse-py itself.
+      - name: Checkout chatnoir-resiliparse v${{ env.RESILIPARSE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: chatnoir-eu/chatnoir-resiliparse
+          ref: v${{ env.RESILIPARSE_VERSION }}
+          persist-credentials: false
+
+      # Upstream's wheel ships no LICENSE at all: setuptools' default
+      # license_files glob runs against resiliparse-py, not the repo root the
+      # Apache-2.0 file actually sits in (gotcha 86).
+      - name: Stage the LICENSE
+        run: cp LICENSE resiliparse-py/
+
+      # resiliparse depends on fastwarc==1.0.9 at runtime (its Cython
+      # extensions cimport fastwarc.legacy.warc types), so build a matching
+      # fastwarc wheel here to test against. This workflow does not publish
+      # it -- fastwarc has its own build-fastwarc.yml.
+      - name: Build fastwarc wheel (test dependency only)
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: fastwarc-py
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf -y --disablerepo=extras install zlib-devel lz4-devel &&
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_TEST_SKIP: '*'
+
+      - name: Build resiliparse wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: resiliparse-py
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT_PASS_LINUX: ABSEIL_VERSION RE2_VERSION LEXBOR_REF UCHARDET_VERSION
+          # None of lexbor, re2 or uchardet are packaged for Rocky 10 on any
+          # arch (re2-devel only exists in EPEL, which riscv64 does not carry
+          # -- gotcha 51), so build all four from source, matching the
+          # versions upstream's own vcpkg.json/vcpkg-configuration.json pin
+          # for its Linux CI image. abseil-cpp is static-with-PIC so it ends
+          # up inside libre2.so, matching build-google-re2.yml. itertools.pyx
+          # cimports fastwarc's legacy.warc.pxd, which pulls lz4hc.h into the
+          # generated C++ even though this extension links no library.
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf -y --disablerepo=extras install zlib-devel lz4-devel &&
+            mkdir -p /tmp/lexbor /tmp/abseil-cpp /tmp/re2 /tmp/uchardet &&
+            curl -sSLf "https://github.com/phoerious/lexbor/archive/${LEXBOR_REF}.tar.gz"
+            | tar -xz -C /tmp/lexbor --strip-components=1 &&
+            cmake -S /tmp/lexbor -B /tmp/lexbor/build -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_INSTALL_LIBDIR=lib
+            -DLEXBOR_BUILD_STATIC=OFF -DLEXBOR_OPTIMIZATION_LEVEL=-O3 &&
+            cmake --build /tmp/lexbor/build --parallel --target install &&
+            curl -sSLf "https://github.com/abseil/abseil-cpp/archive/refs/tags/${ABSEIL_VERSION}.tar.gz"
+            | tar -xz -C /tmp/abseil-cpp --strip-components=1 &&
+            cmake -S /tmp/abseil-cpp -B /tmp/abseil-cpp/build -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CXX_STANDARD=17
+            -DABSL_PROPAGATE_CXX_STD=ON -DABSL_ENABLE_INSTALL=ON -DCMAKE_INSTALL_LIBDIR=lib &&
+            cmake --build /tmp/abseil-cpp/build --parallel --target install &&
+            curl -sSLf "https://github.com/google/re2/archive/refs/tags/${RE2_VERSION}.tar.gz"
+            | tar -xz -C /tmp/re2 --strip-components=1 &&
+            cmake -S /tmp/re2 -B /tmp/re2/build -DCMAKE_BUILD_TYPE=Release
+            -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_LIBDIR=lib &&
+            cmake --build /tmp/re2/build --parallel --target install &&
+            curl -sSLf "https://gitlab.freedesktop.org/uchardet/uchardet/-/archive/v${UCHARDET_VERSION}/uchardet-v${UCHARDET_VERSION}.tar.gz"
+            | tar -xz -C /tmp/uchardet --strip-components=1 &&
+            cmake -S /tmp/uchardet -B /tmp/uchardet/build -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_INSTALL_LIBDIR=lib
+            -DBUILD_BINARY=OFF -DBUILD_STATIC=OFF &&
+            cmake --build /tmp/uchardet/build --parallel --target install &&
+            ldconfig &&
+            cp /tmp/lexbor/LICENSE {package}/LICENSE.lexbor &&
+            cp /tmp/re2/LICENSE {package}/LICENSE.re2 &&
+            cp /tmp/abseil-cpp/LICENSE {package}/LICENSE.abseil-cpp &&
+            cp /tmp/uchardet/COPYING {package}/LICENSE.uchardet
+          CIBW_ENVIRONMENT: LIBRARY_PATH=/usr/local/lib LD_LIBRARY_PATH=/usr/local/lib
+          # pyproject.toml's own [tool.cibuildwheel] test-extras = ["all",
+          # "test"] would otherwise install resiliparse[all,test], pulling in
+          # the `beam` extra (apache_beam, boto3, elasticsearch): apache_beam
+          # has no riscv64 wheels and tests/resiliparse/beam imports it
+          # unconditionally at module level, so clear the cascade and install
+          # only what's needed: the fastwarc wheel built above (glob resolves
+          # the current matrix.python's ABI tag), the light `cli` extra, and
+          # pytest itself -- upstream's own CIBW_BEFORE_TEST for resiliparse.
+          CIBW_TEST_EXTRAS: ''
+          CIBW_BEFORE_TEST: >-
+            python -c "import glob, platform, re, sysconfig; open('fastwarc.txt', 'w').write(glob.glob('wheelhouse/fastwarc-*-cp*-cp' + re.match(r'^.*(?:cpython|cp)-?(3\d+t?)', sysconfig.get_config_var('EXT_SUFFIX'))[1] + '-*_' + platform.machine().lower() + '.whl')[0])" &&
+            python -m pip install -r fastwarc.txt click joblib tqdm pytest
+          CIBW_TEST_SOURCES: tests/resiliparse tests/data
+          # tests/resiliparse has the same name as the installed package, so
+          # pytest's rootdir insertion (test_cwd/tests carries no __init__.py
+          # once staged) puts test_cwd/tests on sys.path[0] and the test tree
+          # shadows the wheel; rename it first, matching fastparquet's own
+          # test_wheel.yaml fix for the identical collision.
+          CIBW_TEST_COMMAND: >-
+            mv tests/resiliparse tests/resiliparse-tests &&
+            python -m pytest -v tests/resiliparse-tests --ignore=tests/resiliparse-tests/beam
+
+      - name: Check the extensions and the licences made it into the wheel
+        run: |
+          python3 - wheelhouse/resiliparse-*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              for mod in ("itertools", "extract/html2text", "parse/encoding",
+                          "parse/html", "parse/http", "parse/lang", "process_guard"):
+                  assert any(n.startswith(f"resiliparse/{mod}") and n.endswith(".so") for n in names), (whl, mod)
+              licences = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+              assert {"LICENSE", "LICENSE.lexbor", "LICENSE.re2", "LICENSE.abseil-cpp", "LICENSE.uchardet"} <= licences, (whl, licences)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: resiliparse-${{ env.RESILIPARSE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/resiliparse-*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish resiliparse ${{ inputs.version || '1.0.9' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: resiliparse-${{ inputs.version || '1.0.9' }}-*-manylinux_riscv64
