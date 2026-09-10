@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/terrierteam/pytrec_eval/blob/v0.5.10/.github/workflows/publish-to-pypi.yml
+name: Build pytrec-eval-terrier wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pytrec-eval-terrier version to build (git tag without leading v, e.g. 0.5.10)'
+        required: true
+        default: '0.5.10'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pytrec-eval-terrier.yml'
+      - 'patches/pytrec-eval-terrier/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.5.10' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.5.10 there.
+  PYTREC_EVAL_TERRIER_VERSION: ${{ inputs.version || '0.5.10' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pytrec-eval-terrier ${{ inputs.version || '0.5.10' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Extension is a plain setuptools Extension (no limited-API build), so
+        # per-interpreter wheels like upstream's own (cp310..cp314, cp314t).
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout pytrec_eval v${{ env.PYTREC_EVAL_TERRIER_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: terrierteam/pytrec_eval
+          ref: v${{ env.PYTREC_EVAL_TERRIER_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pytrec_eval source
+        run: git apply python-wheels/patches/pytrec-eval-terrier/${{ env.PYTREC_EVAL_TERRIER_VERSION }}/*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy/scipy (install_requires) have no riscv64 wheels on public
+          # PyPI but are published on our own registry, needed both to build
+          # the test venv and to satisfy the wheel's own install_requires.
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Same suite upstream's push.yml runs (pytest tests/*.py); named
+          # explicitly since pytrec_eval_tests.py doesn't match pytest's
+          # default collection glob for a bare directory.
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: pytest {package}/tests/pytrec_eval_tests.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pytrec-eval-terrier-${{ env.PYTREC_EVAL_TERRIER_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pytrec-eval-terrier ${{ inputs.version || '0.5.10' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pytrec-eval-terrier-${{ inputs.version || '0.5.10' }}-*-manylinux_riscv64
