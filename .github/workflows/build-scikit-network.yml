@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the Linux job of
+# https://github.com/sknetwork-team/scikit-network/blob/v0.33.5/.github/workflows/release.yml
+name: Build scikit-network wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'scikit-network version to build (git tag without leading v, e.g. 0.33.5)'
+        required: true
+        default: '0.33.5'
+  pull_request:
+    paths:
+      - '.github/workflows/build-scikit-network.yml'
+      - 'patches/scikit-network/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.33.5' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  SCIKIT_NETWORK_VERSION: ${{ inputs.version || '0.33.5' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build scikit-network ${{ inputs.version || '0.33.5' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # No cp314t: upstream's own release.yml/wheels_build.yml CIBW_BUILD lists
+        # only cp310-cp314, and pyproject.toml pins cython <= 3.0.12 (3.1 breaks
+        # the C++ build), a series with no declared free-threading support.
+        python: ["cp312", "cp313", "cp314"]
+
+    steps:
+      - name: Checkout scikit-network v${{ env.SCIKIT_NETWORK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: sknetwork-team/scikit-network
+          ref: v${{ env.SCIKIT_NETWORK_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch scikit-network source
+        run: git apply python-wheels/patches/scikit-network/${{ env.SCIKIT_NETWORK_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: python -m pytest --pyargs sknetwork -q
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: scikit-network-${{ env.SCIKIT_NETWORK_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    name: Collect GPL sources (gcc) for scikit-network ${{ inputs.version || '0.33.5' }}
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The extensions build with -fopenmp, so auditwheel vendors the image's libgomp.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: scikit-network-${{ env.SCIKIT_NETWORK_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish scikit-network ${{ inputs.version || '0.33.5' }}
+    needs: [setup, build_wheels, gpl_sources]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: scikit-network-${{ inputs.version || '0.33.5' }}-*-manylinux_riscv64
+      gpl-sources-artifact: scikit-network-${{ inputs.version || '0.33.5' }}-gpl-sources
+      gpl-sources-description: gcc
