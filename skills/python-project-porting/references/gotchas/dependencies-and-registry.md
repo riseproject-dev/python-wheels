@@ -29,6 +29,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
 - **291** — A `CIBW_TEST_REQUIRES` package with no riscv64 wheel of its own can still need
   `PIP_ONLY_BINARY` for packages you never named, because *its* runtime deps are the ones
   that break (the moyopy/pymatgen case).
+- **336** — A custom `CIBW_BEFORE_TEST` does not cancel a project's own `test-extras`
+  cascade — the two install paths are independent, and `test-extras` runs regardless.
 
 ---
 
@@ -607,3 +609,26 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
         <dep>/` (gotcha 30) shows what's *published*, which is downstream of whatever
         matrix that dependency's own port workflow builds — check the workflow, not just
         the index, when a dependency is itself one of this repo's ports.
+
+336. **A custom `CIBW_BEFORE_TEST` does not cancel a project's own `test-extras` cascade
+    — the two install paths are independent, and `test-extras` runs regardless (the
+    resiliparse case).** Writing a `CIBW_BEFORE_TEST` that installs a hand-picked test
+    dependency set looks like it replaces upstream's own `[tool.cibuildwheel] test-extras`,
+    but cibuildwheel resolves `test-extras` from the option cascade separately and installs
+    `<wheel>[<extras>]` on top, independent of whatever `before-test` already did.
+    resiliparse's own `pyproject.toml` sets `test-extras = ["all", "test"]`, and `all` pulls
+    in the `beam` extra (`apache_beam[aws]`, `boto3`, `elasticsearch`) even though the
+    `before-test` step installs a deliberately smaller set (`fastwarc`, `click`, `joblib`,
+    `tqdm`, `pytest`) — the fix is `CIBW_TEST_EXTRAS: ''`, not a bigger `before-test`.
+    - **`ignore_empty` decides whether the blank override wins** (gotcha 51's mechanism,
+      here for `test-extras` instead of `before-build`): cibuildwheel's own `options.py`
+      calls `self.reader.get("test-extras", ...)` with no `ignore_empty=True`, so an
+      explicit empty string in `CIBW_TEST_EXTRAS` beats the pyproject table. Read the
+      option's own resolution call before assuming an empty string clears a cascade —
+      some options default `ignore_empty=True` and a blank override is silently dropped.
+    - **A heavy optional extra turns a fast local rehearsal into a many-minute dependency
+      resolution before the real failure is even reached.** An aarch64/local cibuildwheel
+      run installs the same extras `before-test` does, so the pip install log shows
+      `apache_beam`, `grpcio`, `pyarrow` and friends downloading well before the test
+      command runs — a giveaway that `test-extras` is still active, even though the
+      `before-test` override looks like it should have made them unnecessary.

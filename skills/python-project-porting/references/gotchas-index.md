@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (324 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (326 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -229,6 +229,7 @@ The porting gotchas (324 of them) live in [`references/gotchas/`](gotchas/), spl
 - **328** — A vendored SIMD library with no portable/generic implementation at all can
 - **332** — A SIMDe SSE-emulation port can compile clean, pass its own project's
 - **333** — A vendored C++ library's architecture-fallback stub can have a genuinely
+- **337** — lexbor, re2 and uchardet are absent from Rocky 10's baseos/appstream/crb on
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
@@ -286,6 +287,7 @@ The porting gotchas (324 of them) live in [`references/gotchas/`](gotchas/), spl
 - **240** — A registry-hosted wheel that builds and installs cleanly can still be missing an
 - **244** — `uv pip install` only honors `UV_*` env vars, never the `PIP_*` names — a step
 - **291** — A `CIBW_TEST_REQUIRES` package with no riscv64 wheel of its own can still need
+- **336** — A custom `CIBW_BEFORE_TEST` does not cancel a project's own `test-extras`
 
 ### Build-tool drift & pins — [`gotchas/build-tool-drift-and-pins.md`](gotchas/build-tool-drift-and-pins.md)
 

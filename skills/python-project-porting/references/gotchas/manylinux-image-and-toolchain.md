@@ -40,6 +40,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **333** — A vendored C++ library's architecture-fallback stub (unlike gotcha 267's
   dead `#warning` branch) can have a genuinely correct no-op body that still trips
   `-Werror=unused-parameter` on any architecture outside its named x86/ARM/PPC set.
+- **337** — lexbor, re2 and uchardet are absent from Rocky 10's baseos/appstream/crb on
+  every arch, and `re2-devel` only resolves from EPEL — which riscv64 does not carry.
 
 ---
 
@@ -841,3 +843,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       and the failing function names (`ArchParseUserSimdLevel`,
       `ArchVerifyCpuRequirements`) are the tell that this is the *architecture*
       dispatch's fallback, not a SIMD gate (gotcha 71) or a dead code path (gotcha 267).
+
+337. **lexbor, re2 and uchardet are absent from Rocky 10's baseos/appstream/crb on every
+    arch, and `re2-devel` only resolves from EPEL — which riscv64 does not carry (refines
+    gotcha 51; the resiliparse case).** `dnf -q list lexbor-devel re2-devel uchardet-devel`
+    against a bare `rockylinux/rockylinux:10` with CRB enabled finds nothing for the first
+    and third on any arch; `re2-devel` (Fedora's naming for Google's RE2) resolves only
+    after installing `epel-release`, and gotcha 51 already established EPEL is absent on
+    riscv64. The fix is the same shape as `build-google-re2.yml`'s abseil-cpp + re2
+    pattern: build all three from source in `CIBW_BEFORE_ALL_LINUX`, with
+    `-DCMAKE_INSTALL_LIBDIR=lib` on every one of them — GNUInstallDirs otherwise defaults
+    some of them to `lib64` on this image (gotcha in native-deps-and-linking.md), invisible
+    until the extension that needs that particular library fails to link — and
+    `LIBRARY_PATH`/`LD_LIBRARY_PATH=/usr/local/lib` in `CIBW_ENVIRONMENT`.
+    - **A project's own vcpkg overlay port can pin a fork, not upstream.** resiliparse's
+      `.vcpkg/ports/lexbor` builds `phoerious/lexbor` at a specific commit, not
+      `lexbor/lexbor`; the fork adds DOM node reference counting the Cython bindings
+      depend on, so building vanilla upstream lexbor compiles cleanly and only misbehaves
+      (or crashes) much later, with no configure-time error to point at the real cause.
+      Diff the fork against upstream (`gh api repos/<fork>/compare/<upstream-owner>:
+      <upstream-branch>...<fork-owner>:<ref>`) before assuming any lexbor checkout is
+      interchangeable — `status: diverged` plus a small, on-topic file list confirms it's
+      a deliberate patch set, not a stale mirror.
+    - **A monorepo sibling's `.pxd` can pull a header for a library the importing
+      extension never links.** resiliparse's `itertools.pyx` `cimport`s a type from
+      fastwarc's `legacy/warc.pxd` (copied in locally by `setup.py`, not pip-installed),
+      and that pxd's own `cdef extern from` chain reaches `<lz4hc.h>` — so the extension
+      needs `zlib-devel lz4-devel` even though its own `Extension(..., libraries=[])`
+      names neither. `dnf install`ing the same two packages the sibling package's own
+      build already needs, in this package's `before-all` too, is cheaper than tracing
+      which cimported header pulled which system library in a `fatal error: lz4hc.h: No
+      such file or directory` from deep inside a Cython-generated `.cpp` file.
