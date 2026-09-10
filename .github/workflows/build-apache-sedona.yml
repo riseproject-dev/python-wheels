@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build at this tag:
+#   https://github.com/apache/sedona/blob/sedona-1.9.1/.github/workflows/python-wheel.yml
+name: Build apache-sedona wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'apache-sedona version to build (git tag without leading sedona-, e.g. 1.9.1)'
+        required: true
+        default: '1.9.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-apache-sedona.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.9.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.9.1 there.
+  SEDONA_VERSION: ${{ inputs.version || '1.9.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build apache-sedona ${{ inputs.version || '1.9.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    # pyspark (a test-only dependency, pulled in via the "spark" extra) ships no
+    # wheel anywhere and is a ~400MB sdist; give the download/install room.
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # sedona.spark.utils.geomserde_speedup is a plain CPython C extension
+        # (not abi3), so every interpreter needs its own build, matching
+        # upstream's own per-version wheels. musllinux is skipped: shapely (a
+        # hard runtime dependency, pulled in when the wheel is installed) has
+        # no riscv64 musllinux wheel anywhere, only manylinux.
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout apache/sedona sedona-${{ env.SEDONA_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: apache/sedona
+          ref: sedona-${{ env.SEDONA_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # shapely (installed as a dependency of the built wheel) only has a
+          # riscv64 wheel on our own registry, not on public PyPI.
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # sedona.spark.utils (which the test below imports through) hard-requires
+          # pyspark to import at all, even though the base wheel doesn't declare it -
+          # only the "spark" extra does. pyspark itself ships no wheel on any arch
+          # (sdist only), but is pure Python + bundled jars, so it builds trivially.
+          # Importing sedona.spark also reaches sedona.spark.sql.functions, which
+          # imports pandas directly (undeclared anywhere in sedona's own metadata).
+          CIBW_TEST_EXTRAS: spark
+          CIBW_TEST_REQUIRES: pytest pandas
+          # pandas has no cp314t wheel on our registry yet, and it's needed
+          # transitively to even import the test module; skip testing that leg
+          # (the wheel itself still builds).
+          CIBW_TEST_SKIP: cp314t-*
+          # geomserde_speedup's own suite: exercises (de)serialization through the
+          # compiled extension without needing a JVM/Spark session, unlike the rest
+          # of the test tree (see .github/workflows/python-extension.yml upstream).
+          CIBW_TEST_SOURCES: python/tests/utils/test_geomserde_speedup.py
+          CIBW_TEST_COMMAND: python -m pytest python/tests/utils/test_geomserde_speedup.py -v
+
+      - name: Check the compiled extension made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith(".so") and "geomserde_speedup" in n for n in names), \
+                  f"no geomserde_speedup extension in {whl}"
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: apache-sedona-${{ env.SEDONA_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish apache-sedona ${{ inputs.version || '1.9.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: apache-sedona-${{ inputs.version || '1.9.1' }}-*-manylinux_riscv64
