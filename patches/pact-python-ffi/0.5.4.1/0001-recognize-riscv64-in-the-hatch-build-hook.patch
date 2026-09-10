@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 10 Sep 2026 00:00:00 +0000
+Subject: [PATCH] recognize riscv64 in the hatch build hook
+
+hatch_build.py downloads a prebuilt libpact_ffi from
+pact-foundation/pact-reference's GitHub releases and compiles the CFFI
+extension against it. `_lib_url` derives the target platform from
+`next(t.platform for t in packaging.tags.sys_tags())` and only
+recognizes `_aarch64`/`_x86_64` wheel-tag suffixes on a tag that starts
+with `"manylinux"`.
+
+Two things are wrong for riscv64, confirmed from the CI log (job
+102765101921: the from-source build finishes in 39m24s, then `python -m
+build` still raises `UnsupportedPlatformError: Unsupported platform
+linux_riscv64`):
+
+1. `packaging` 26.3 (an unpinned build dependency here, and the version
+   actually resolved in that job) reordered `sys_tags()` so the generic
+   `linux_<arch>` tag now comes before any `manylinux_*`/`musllinux_*`
+   tag (packaging changelog: "Native linux_* platform tags are now
+   ordered before manylinux and musllinux tags", packaging#160). So
+   `_sys_tag_platform()` returns `linux_riscv64`, not a
+   `manylinux_2_39_riscv64`-shaped tag - `startswith("manylinux")`
+   never matches, on any architecture, once a fresh isolated build
+   environment resolves `packaging>=26.3`.
+2. Even when the `manylinux` branch is reached, it has no riscv64 case.
+
+pact-reference publishes no riscv64 libpact_ffi asset (there is no
+prebuilt binary to download), so recognizing the platform alone does
+not make the download succeed. Paired with this patch, the riscv64 CI
+job builds libpact_ffi from the pact-reference source at the matching
+tag and stages the gzipped .so at the exact
+`src/pact_ffi/data/libpact_ffi-linux-riscv64.so.gz` path `_download()`
+already caches to, so it is picked up without a network request.
+
+Upstream-Status: To upstream [blocked: pact-reference publishes no riscv64 libpact_ffi release asset yet]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/pact-python-ffi/hatch_build.py b/pact-python-ffi/hatch_build.py
+index 0000000..0000000 100644
+--- a/pact-python-ffi/hatch_build.py
++++ b/pact-python-ffi/hatch_build.py
+@@ -209,6 +209,7 @@
+
+         aarch64 = ("_arm64", "_aarch64")
+         x86_64 = ("_x86_64", "_amd64")
++        riscv64 = ("_riscv64",)
+
+         # Simplified platform and architecture detection
+         if wheel_platform.startswith("macosx"):
+@@ -233,7 +234,7 @@
+             else:
+                 raise UnsupportedPlatformError(wheel_platform)
+
+-        elif wheel_platform.startswith("manylinux"):
++        elif wheel_platform.startswith(("manylinux", "linux")):
+             os, ext = "linux", "so.gz"
+             prefix = "lib"
+             suffix = ""
+@@ -241,6 +242,8 @@
+                 platform = "aarch64"
+             elif wheel_platform.endswith(x86_64):
+                 platform = "x86_64"
++            elif wheel_platform.endswith(riscv64):
++                platform = "riscv64"
+             else:
+                 raise UnsupportedPlatformError(wheel_platform)
+
+--
+2.51.0
