@@ -38,6 +38,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **338** — A package whose real PyPI wheels are produced by a *packaging fork*, not its own
   source repo, can hard-depend at runtime on a sibling package from that same packaging
   ecosystem — and that sibling can itself be the actual blocker (the eigenpy/cmeel-boost case).
+- **340** — Gotcha 335 generalizes past deno_core/rusty_v8 to a second embedded-engine family:
+  a Rust FFI crate that itself only *downloads* a prebuilt native core, never builds it, can
+  leave riscv64 with no build path at all even though the wrapper crate is pure Rust (the
+  livekit case).
 
 ---
 
@@ -1282,3 +1286,48 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       own, same as the k-means-constrained/ortools and cvxpy/sparsediffpy cases — status
       `blocked-on-dependency`, no PR, no worktree needed when the blocker is confirmed fully
       read-only (PyPI JSON + `gh api` + one sdist download, no checkout required).
+
+340. **Gotcha 335 generalizes past deno_core/rusty_v8 to a second embedded-engine family: a
+    Rust FFI crate that itself only *downloads* a prebuilt native core, never builds it, can
+    leave riscv64 with no build path at all even though the wrapper crate is pure Rust (the
+    livekit case).** `livekit` 1.1.16's real source is the `livekit-rtc` directory of the
+    `livekit/python-sdks` monorepo, not a maturin/pyo3 project — its `pyproject.toml` uses
+    `build-backend = "setuptools.build_meta"` and produces plain `py3-none-manylinux_*` wheels.
+    The tell is `[tool.cibuildwheel] before-build = "pip install requests && python
+    rust-sdks/download_ffi.py --output livekit/rtc/resources"`: `download_ffi.py` (in the
+    `livekit/rust-sdks` submodule) fetches a prebuilt `livekit-ffi` shared library straight
+    from GitHub Releases and never invokes `cargo build` at all — its own `--arch` argparse
+    `choices` are `["x86_64", "arm64", "armv7"]`, no riscv64 entry exists at any level. That
+    ffi library links `webrtc-sys`, whose `build.rs` does the same thing one layer down:
+    `webrtc_sys_build::download_webrtc()` fetches a prebuilt `libwebrtc.a` per
+    `{target_os}-{target_arch}-release` triple from the same repo's Releases (tag
+    `webrtc-89d790b`) — `gh api repos/livekit/rust-sdks/releases/tags/webrtc-89d790b` lists
+    only android-{arm,arm64,x64}, ios-{device,simulator}-arm64, linux-{arm64,x64},
+    mac-{arm64,x64}, win-{arm64,x64}; no riscv64 asset anywhere.
+    - **The `LK_CUSTOM_WEBRTC` escape hatch only relocates the problem, it doesn't solve it.**
+      Producing a riscv64 `libwebrtc.a` to point it at means running LiveKit's own
+      `.github/workflows/webrtc-builds.yml`, which drives `depot_tools`/`gn`/`ninja` against a
+      Chromium-derived checkout (a `.gclient` `target_os` step) — a second, Chromium-scale
+      build system, unlike anything else in this repo. That workflow's own matrix (checked at
+      the `rust-sdks` submodule pin `2d9f01ab1e933a86a8a5c53805ee29ee58b9be1b`) covers only
+      win/mac/linux/android/ios × {x64,arm64,arm} — LiveKit itself has never attempted a
+      riscv64 WebRTC build, which is a stronger signal than gotcha 335's rusty_v8 case (whose
+      `build.rs` at least *tried* to map an architecture and simply missed riscv64).
+    - **Even a hand-built `libwebrtc.a` would not be enough on its own** — `webrtc-sys/build.rs`'s
+      Linux-specific glue hardcodes exactly two architectures: `add_gio_headers()` panics
+      `"unsupported arch"` for anything but `arm64`/`x64`, and `add_lazy_load_so()`'s prebuilt
+      dlopen-shim objects (used for `libdrm`/`libva`/`libcuda` etc.) only exist under
+      `src/lazy_load_deps_for/*/{x86_64-linux-gnu,aarch64-linux-gnu}/` — so a riscv64 build
+      would also need new shim sources this crate has never shipped, on top of the WebRTC
+      static library itself.
+    - **A "just Rust" wrapper crate can still hide a Chromium-scale native dependency two
+      layers down.** `livekit-ffi` and `webrtc-sys` both look like ordinary crates.io-shaped
+      Rust — no `compile_error!`, no obviously exotic build step — until you read past their
+      `download_ffi.py`/`build.rs` to find the actual native artifact is fetched from a
+      GitHub Releases page whose asset list is the real portability ceiling, same lesson as
+      gotcha 335's closing note but one layer removed (crate → downloader script → releases
+      page, not crate → `build.rs` → releases page directly).
+    - `blocked-on-dependency`, no worktree/branch opened — fully diagnosed read-only via
+      `gh api` against `livekit/python-sdks` and `livekit/rust-sdks` (submodule pin
+      `2d9f01ab1e933a86a8a5c53805ee29ee58b9be1b`) plus the real GitHub Releases asset list, no
+      checkout required.
