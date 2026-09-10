@@ -1,0 +1,202 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/ImagingDataCommons/s5cmd-python-distributions/blob/0.3.3/.github/workflows/cd.yml
+name: Build s5cmd wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 's5cmd version to build (git tag of ImagingDataCommons/s5cmd-python-distributions, e.g. 0.3.3)'
+        required: true
+        default: '0.3.3'
+  pull_request:
+    paths:
+      - '.github/workflows/build-s5cmd.yml'
+      - 'patches/s5cmd/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.3.3' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.3.3 there.
+  S5CMD_VERSION: ${{ inputs.version || '0.3.3' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheel:
+    needs: [setup]
+    name: Build s5cmd ${{ inputs.version || '0.3.3' }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    outputs:
+      pinned-version: ${{ steps.pinned.outputs.version }}
+
+    steps:
+      - name: Checkout s5cmd-python-distributions v${{ env.S5CMD_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ImagingDataCommons/s5cmd-python-distributions
+          ref: ${{ env.S5CMD_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # s5cmdUrls.cmake has no riscv64 entry: peak/s5cmd's own goreleaser
+      # GOARCH list (386/amd64/arm/arm64/ppc64le) stops at ppc64le. See the patch.
+      - name: Patch s5cmd-python-distributions source
+        run: git apply python-wheels/patches/s5cmd/${{ env.S5CMD_VERSION }}/0001-*.patch
+
+      - name: Read pinned peak/s5cmd version
+        id: pinned
+        run: echo "version=$(grep -oP 'set\(version "\K[^"]+' s5cmdUrls.cmake)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout peak/s5cmd v${{ steps.pinned.outputs.version }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: peak/s5cmd
+          ref: v${{ steps.pinned.outputs.version }}
+          path: s5cmd-upstream
+          persist-credentials: false
+
+      # Not go-version-file: peak/s5cmd's go.mod declares `go 1.20`, and
+      # go.dev's official downloads have no linux/riscv64 binary before
+      # 1.21.0. A newer toolchain still builds a go-1.20-declared module fine.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: 'stable'
+
+      # Mirrors .goreleaser.yml's `s5cmd` build (CGO_ENABLED=0, same
+      # ldflags/version stamp), narrowed to riscv64 -- not in goreleaser's own
+      # goarch list (386/amd64/arm/arm64/ppc64le).
+      - name: Build the s5cmd binary
+        working-directory: s5cmd-upstream
+        run: |
+          mkdir -p ../s5cmd-riscv64-archive
+          CGO_ENABLED=0 GOOS=linux GOARCH=riscv64 go build -mod=vendor -trimpath \
+            -ldflags "-s -w -X github.com/peak/s5cmd/v2/version.Version=v${{ steps.pinned.outputs.version }} -X github.com/peak/s5cmd/v2/version.GitCommit=$(git rev-parse --short HEAD)" \
+            -o ../s5cmd-riscv64-archive/s5cmd .
+
+      # Repackages the self-built binary into the same tar.gz layout/naming as
+      # peak/s5cmd's own GitHub release assets (verified against the real
+      # s5cmd_2.3.0_Linux-64bit.tar.gz), so the patched s5cmdUrls.cmake needs
+      # only a URL swap and the unmodified CMakeLists.txt install() step,
+      # which reaches into the extracted archive for a top-level `s5cmd`
+      # file, keeps working unchanged.
+      - name: Archive the s5cmd binary
+        id: archive
+        run: |
+          set -euo pipefail
+          cp s5cmd-upstream/LICENSE s5cmd-upstream/README.md s5cmd-upstream/CHANGELOG.md s5cmd-riscv64-archive/
+          archive="s5cmd_${{ steps.pinned.outputs.version }}_Linux-riscv64.tar.gz"
+          tar czf "s5cmd-riscv64-archive/${archive}" -C s5cmd-riscv64-archive s5cmd LICENSE README.md CHANGELOG.md
+          echo "filename=${archive}" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "s5cmd-riscv64-archive/${archive}" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # scikit-build-core fetches cmake/ninja from PyPI when missing on
+          # PATH; the S5CMD_RISCV64_* variables feed the patched
+          # s5cmdUrls.cmake (archive path is relative to cibuildwheel's
+          # /project container mount). A `git apply`-dirtied tree makes
+          # setuptools_scm append a dev/dirty suffix to the version (gotcha
+          # 31); pin it explicitly instead.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_S5CMD=${{ env.S5CMD_VERSION }}
+            S5CMD_RISCV64_ARCHIVE_FILENAME=${{ steps.archive.outputs.filename }}
+            S5CMD_RISCV64_ARCHIVE_SHA256=${{ steps.archive.outputs.sha256 }}
+            S5CMD_RISCV64_ARCHIVE_DIR=/project/s5cmd-riscv64-archive
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: s5cmd-${{ env.S5CMD_VERSION }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test s5cmd ${{ inputs.version || '0.3.3' }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 15
+    env:
+      # Without this uv would reuse the runner image's system CPython for 3.12
+      # and download a standalone build for the others.
+      UV_PYTHON_PREFERENCE: only-managed
+      S5CMD_PINNED_VERSION: ${{ needs.build_wheel.outputs.pinned-version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # This repo's default interpreter matrix (gotcha in workflow-anatomy.md);
+        # the wheel is interpreter-agnostic (wheel.py-api = "py3"), so every
+        # interpreter -- including free-threaded -- exercises the same binary.
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: s5cmd-${{ env.S5CMD_VERSION }}-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . s5cmd
+
+      # Drives the wheel's own [project.scripts] launcher (s5cmd() in
+      # src/s5cmd/__init__.py, which locates the bundled s5cmd/bin/s5cmd via
+      # importlib.metadata) plus the underlying binary directly against real
+      # local-filesystem commands -- s5cmd's own e2e suite tests `ls` this
+      # way (TestListNestedLocalFolders) since it needs no S3 endpoint.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          s5cmd version
+          s5cmd --help >/dev/null
+
+          out=$(s5cmd version)
+          echo "$out"
+          [ "$(echo "$out" | head -1 | cut -d- -f1)" = "v${S5CMD_PINNED_VERSION}" ]
+
+          work=$(mktemp -d)
+          mkdir -p "$work/sub"
+          printf 'hello\n' > "$work/a.txt"
+          printf 'world\n' > "$work/sub/b.txt"
+
+          out=$(s5cmd ls "$work")
+          echo "$out"
+          echo "$out" | grep -q 'a.txt'
+          echo "$out" | grep -q 'sub/'
+
+  publish:
+    name: Publish s5cmd ${{ inputs.version || '0.3.3' }}
+    needs: [setup, build_wheel, test_wheel]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: s5cmd-${{ inputs.version || '0.3.3' }}-manylinux_riscv64
