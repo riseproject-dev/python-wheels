@@ -76,6 +76,8 @@ The porting gotchas (330 of them) live in [`references/gotchas/`](gotchas/), spl
   livekit case).
 - **341** — A build-time transpiler binary from a *third* language ecosystem can block a port
   even when the extension itself is pure, portable C++ (the prophet/cmdstanpy/stanc3 case).
+- **342** — A proprietary shared library downloaded and *linked* by `setup.py` itself fails
+  closed on an unrecognised arch instead of degrading (the ibm-db case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

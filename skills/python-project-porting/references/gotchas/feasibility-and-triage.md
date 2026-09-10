@@ -1390,3 +1390,39 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       architecture in the abstract doesn't mean stanc3's own dependency graph (menhir,
       ppxlib, etc.) has ever been exercised there; treat an ecosystem-level "yes" as a
       starting point for a feasibility spike, not as clearance to park the port on it.
+
+342. **A proprietary shared library downloaded and *linked* by `setup.py` itself — not merely
+    run after install (gotcha 157) or vendored as a git blob (gotcha 246) — fails closed on an
+    unrecognised arch instead of degrading (the ibm-db case).** `ibm-db` 3.3.0's `setup.py`
+    compiles a real C extension (`ibm_db.c`) against IBM's proprietary Db2 CLI driver
+    (`library = ['db2']`), which it downloads at build time from
+    `https://public.dhe.ibm.com/ibmdl/export/pub/software/data/db2/drivers/odbc_cli/<ver>/<cliFileName>`
+    (falling back to a GitHub mirror, `ibmdb/db2drivers`, on failure) — the driver is a
+    build-and-link-time dependency, not just a runtime one, so there is no "installs fine,
+    fails at call time" middle ground like claude-agent-sdk's. The download filename is picked
+    by an `if/elif` chain on `os.uname()[4]` (`ppc64le`, `ppc`/`ppc64`, `'86' in machine` for
+    x86/x86_64, `'390' in machine` for s390/s390x) with **no branch for `riscv64` or
+    `aarch64`** — on either arch none of the `elif`s match, so `cliFileName`/`arch_` are never
+    assigned and the next reference to them raises a bare `NameError`, not a clean
+    "unsupported platform" message. Confirmed no riscv64 asset exists at any layer: the
+    download server's top level and every one of its 9 versioned subdirectories
+    (`v11.1.4` … `v12.1.4`) list only `{aix,linuxia32,linuxx64,macarm64,macos64,nt,ntx64,
+    ppc32,ppc64,ppc64le,s390,s390x64,sun32,sun64,sunamd32,sunamd64}_odbc_cli.{tar.gz,zip}`,
+    and the GitHub mirror fallback matches that list exactly. There is also no Linux ARM
+    offering at all (only `linuxia32`/`linuxx64`), which is why PyPI's 3.3.0 wheels are
+    `manylinux_2_34_{i686,x86_64}` only — zero `aarch64`, confirming the clidriver's own arch
+    ceiling drives the published wheel matrix, not an unrelated packaging choice.
+    `not-feasible`/`parked`: no source is available for `db2`/IBM's CLI driver (closed,
+    IBM-distributed only) so gotcha 77's "build it yourself" escape hatch does not exist, and
+    there is no open-source Db2 driver `ibm_db.c` could be relinked against without forking
+    the C extension. No worktree/branch opened.
+    - **A build-time arch `if/elif` chain with no `else` is worth reading for its failure
+      mode, not just its coverage list** — a chain that silently leaves a variable unbound on
+      an unmatched arch (vs. one that calls `_printAndExit` with a clear message) still proves
+      the same "no riscv64 branch" fact, but is a much noisier first symptom if someone tries
+      the build blind without checking the vendor's asset index first.
+    - **When a wheel already exists for some architectures on PyPI but not others on the same
+      OS (here: Linux x86/i686 but no Linux aarch64), treat that gap as a hint to check the
+      *same* upstream-vendor blocker before assuming riscv64 is uniquely unserved** — it
+      often means the real ceiling is a proprietary dependency's own arch list, which riscv64
+      merely joins aarch64 in missing.
