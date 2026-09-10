@@ -1,0 +1,107 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# livekit-blingfire has no git tag for any release; PyPI's 1.1.0 wheels were
+# built from livekit/agents commit 3bea770e (its own build_blingfire job,
+# since removed after the package moved out of this monorepo):
+#   https://github.com/livekit/agents/blob/3bea770e545b7aa02c2c34cf8f8d8022e5fbd1ed/.github/workflows/build.yml
+name: Build livekit-blingfire wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'livekit-blingfire version to build, e.g. 1.1.0'
+        required: true
+        default: '1.1.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-livekit-blingfire.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.1.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  LIVEKIT_BLINGFIRE_VERSION: ${{ inputs.version || '1.1.0' }}
+  # No upstream tag exists for this version; move together with the version above.
+  LIVEKIT_BLINGFIRE_REF: 3bea770e545b7aa02c2c34cf8f8d8022e5fbd1ed
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build livekit-blingfire ${{ inputs.version || '1.1.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout livekit/agents @ ${{ env.LIVEKIT_BLINGFIRE_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: livekit/agents
+          ref: ${{ env.LIVEKIT_BLINGFIRE_REF }}
+          persist-credentials: false
+
+      # CMakeLists.txt FetchContent-pulls microsoft/BlingFire and statically
+      # links it; upstream's own wheel ships neither its own LICENSE nor
+      # BlingFire's. Stage both at package-dir root for setuptools' default
+      # LICEN[CS]E* glob to pick up.
+      - name: Stage the upstream LICENSE files
+        run: |
+          cp LICENSE livekit-plugins/livekit-blingfire/LICENSE
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/microsoft/BlingFire/master/LICENSE" -o livekit-plugins/livekit-blingfire/LICENSE.blingfire
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: livekit-plugins/livekit-blingfire
+          only: ${{ matrix.python }}-manylinux_riscv64
+          output-dir: wheelhouse/
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # {project} is the checkout root (monorepo) with package-dir set;
+          # test_import.py lives under {package} instead (gotcha 5).
+          CIBW_TEST_COMMAND: >-
+            python3 {package}/test_import.py &&
+            python3 -c "import lk_blingfire as m; assert m.__file__.endswith('.so'), m.__file__"
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          path = sys.argv[1]
+          names = zipfile.ZipFile(path).namelist()
+          libs = [n for n in names if n.endswith(".so")]
+          assert libs and all("lk_blingfire" in n for n in libs), libs
+          licences = {n.rsplit("/", 1)[-1] for n in names
+                      if "dist-info/" in n and n.rsplit("/", 1)[-1].startswith("LICENSE")}
+          assert licences == {"LICENSE", "LICENSE.blingfire"}, licences
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: livekit-blingfire-${{ env.LIVEKIT_BLINGFIRE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish livekit-blingfire ${{ inputs.version || '1.1.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: livekit-blingfire-${{ inputs.version || '1.1.0' }}-*-manylinux_riscv64
