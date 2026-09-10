@@ -34,6 +34,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **311** — A transitive crate's `compile_error!` gated on `target_feature` (not
 - **318** — An explicit `python_requires` *upper* bound is a harder wall than an
 - **334** — A stdlib-absorbed backport can fail to build on a modern interpreter for a
+- **335** — Gotcha 273 generalizes: a pinned embedded-engine crate (deno_core/rusty_v8)
 
 ---
 
@@ -1190,3 +1191,50 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       stronger signal than an unmaintained-looking tag/issue tracker** — it's
       the maintainer affirmatively telling downstream not to build this anymore,
       not just silence.
+
+335. **Gotcha 273 generalizes past `ring`'s missing-asm-backend case: a pinned
+    embedded-engine crate can have *zero* riscv64 story at all, and the fact
+    that a far newer release of the same crate has it doesn't help a version
+    this old (the vl-convert-python case).** vl-convert-python 1.9.0.post1
+    (source: the `vega/vl-convert` monorepo's `vl-convert-python` subdirectory
+    — `jonmmease/vl-convert` is a stale fork, last pushed 2025-01, kept alive
+    only as the crates.io homepage/repository metadata) wraps `vl-convert-rs`,
+    which drives Vega-Lite→SVG/PNG/PDF rendering through a real, embedded
+    Deno/V8 JS engine: `deno_core = "0.307.0"`, whose own `Cargo.toml` pins
+    `v8 = "0.105.0"` (caret-compatible, resolving to 0.105.1 in the checked-in
+    `Cargo.lock`). The GitHub Releases API for `denoland/rusty_v8` tag
+    `v0.105.1` lists prebuilt static-lib assets for exactly five targets —
+    `aarch64-apple-darwin`, `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`,
+    `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc` — no riscv64 asset at
+    all. Unlike gotcha 273's `ring`, there's no silent-fallback path: rusty_v8's
+    `build.rs` does support building V8 from source when no prebuilt binary
+    exists (`V8_FROM_SOURCE=1`), but its `target_cpu` GN-arg mapping in that
+    same file only handles `aarch64`/`arm`/`i686`/`x86_64` — riscv64 falls
+    through with no GN arg set at all, so the from-source path has nothing
+    correct to build against either (`denoland/rusty_v8#1476`, "Failed to build
+    V8 on riscv64", tracks this exact gap). Checking the *current* rusty_v8
+    releases (as of this check, 2026-09) shows riscv64 prebuilt binaries do
+    exist — but only from `v150.1.0` onward (published 2026-07-10), roughly 150
+    releases and two years past the `0.105.1` this package is pinned to; even
+    vl-convert's own unreleased `v2.0.0-rc5` is only at `deno_core = "0.411.0"`,
+    still short of that riscv64-capable line. Closing the gap would mean
+    bumping `deno_core`/`deno_runtime`/`deno_emit`/`deno_graph` across that
+    whole span and likely adapting `vl-convert-rs`'s own V8-facing source — a
+    fork-scale change to a third-party dependency chain, not a
+    `patches/<pkg>/<version>/` fix. `parked`, no worktree pushed.
+    - **"A newer release of the pinned crate supports riscv64" does not make
+      the *pinned* version portable** — Cargo's own semver resolution
+      (`^0.105.0` blocks `150.x`) means the fix has to land upstream in the
+      package's own dependency bump, not in anything we can carry as a patch.
+    - **When a crate ships prebuilt binaries per-target and also has a
+      from-source fallback, check *both* before ruling on the fallback** — a
+      `V8_FROM_SOURCE=1` escape hatch is not a real answer if the same
+      `build.rs` has no architecture mapping to invoke it correctly for your
+      target; grep the build script for the target's arch string, don't just
+      confirm the escape hatch environment variable exists.
+    - **An embedded JS/V8 engine (deno_core, boa, quickjs-ng's V8 rivals aside)
+      is a stronger red flag than a "just Rust" dependency tree** — it pulls in
+      an entire second build system (GN/ninja/depot_tools) whose own
+      architecture support lags the Rust ecosystem by years, so check the
+      engine crate's own per-target released-binary list before assuming
+      "it's just cargo, it'll cross-compile."
