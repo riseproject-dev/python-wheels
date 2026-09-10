@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `release` target of
+# https://github.com/wbolster/plyvel/blob/1.5.1/Makefile and
+# https://github.com/wbolster/plyvel/blob/1.5.1/scripts/cibuildwheel-before-build.sh
+name: Build plyvel wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'plyvel version to build (git tag, e.g. 1.5.1)'
+        required: true
+        default: '1.5.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-plyvel.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.5.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.5.1 there.
+  PLYVEL_VERSION: ${{ inputs.version || '1.5.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Versions upstream's own install-leveldb.sh/install-snappy.sh pin.
+  LEVELDB_VERSION: '1.22'
+  SNAPPY_VERSION: '1.1.9'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build plyvel ${{ inputs.version || '1.5.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      - name: Checkout plyvel ${{ env.PLYVEL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: wbolster/plyvel
+          ref: ${{ env.PLYVEL_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT_PASS_LINUX: LEVELDB_VERSION SNAPPY_VERSION
+          # setup.py links a system `leveldb`, which upstream's own manylinux Docker
+          # image builds from source via cmake (install-snappy.sh/install-leveldb.sh);
+          # reproduce that here since neither lib ships in the riscv64 image. The sed
+          # matches upstream's 1.1.9-0001-fix-inlining-failure.patch (newer GCC
+          # rejects always_inline across TUs); -DSNAPPY_BUILD_TESTS=OFF skips the
+          # googletest/benchmark submodules that patch's checkout also needs.
+          # CMAKE_POLICY_VERSION_MINIMUM works around snappy 1.1.9's
+          # cmake_minimum_required(3.1), which CMake 4 refuses outright (gotcha 207).
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl -sSLf "https://github.com/google/snappy/archive/refs/tags/${SNAPPY_VERSION}.tar.gz"
+            | tar -xz -C /tmp &&
+            sed -i '/#define SNAPPY_ATTRIBUTE_ALWAYS_INLINE __attribute__((always_inline))/s/.*/#define SNAPPY_ATTRIBUTE_ALWAYS_INLINE/'
+            /tmp/snappy-${SNAPPY_VERSION}/snappy-stubs-internal.h &&
+            cmake -S /tmp/snappy-${SNAPPY_VERSION} -B /tmp/snappy-${SNAPPY_VERSION}/build
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+            -DSNAPPY_BUILD_TESTS=OFF -DSNAPPY_BUILD_BENCHMARKS=OFF -DCMAKE_INSTALL_LIBDIR=lib
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 &&
+            cmake --build /tmp/snappy-${SNAPPY_VERSION}/build --parallel --target install &&
+            curl -sSLf "https://github.com/google/leveldb/archive/refs/tags/${LEVELDB_VERSION}.tar.gz"
+            | tar -xz -C /tmp &&
+            cmake -S /tmp/leveldb-${LEVELDB_VERSION} -B /tmp/leveldb-${LEVELDB_VERSION}/build
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+            -DLEVELDB_BUILD_TESTS=OFF -DLEVELDB_BUILD_BENCHMARKS=OFF -DCMAKE_INSTALL_LIBDIR=lib &&
+            cmake --build /tmp/leveldb-${LEVELDB_VERSION}/build --parallel --target install &&
+            ldconfig &&
+            cp /tmp/snappy-${SNAPPY_VERSION}/COPYING {project}/LICENSE.snappy &&
+            cp /tmp/leveldb-${LEVELDB_VERSION}/LICENSE {project}/LICENSE.leveldb
+          CIBW_ENVIRONMENT: LIBRARY_PATH=/usr/local/lib LD_LIBRARY_PATH=/usr/local/lib
+          # setup.py's sources are the .cpp Cython already generated upstream; make
+          # cython (upstream's own cibuildwheel-before-build.sh step) regenerates them.
+          CIBW_BEFORE_BUILD: pip install cython && make cython
+          CIBW_REPAIR_WHEEL_COMMAND: auditwheel repair --strip -w {dest_dir} {wheel}
+          # test/ is a package (test/__init__.py) sitting next to plyvel/ at the repo
+          # root, so running pytest from {project} would import the source tree
+          # instead of the wheel (gotcha 25); stage just the test suite instead.
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: test setup.cfg
+          # The test phase runs as root, which never sees the permission error
+          # test_open_read_only_dir asserts (gotcha 39); deselect it.
+          CIBW_TEST_COMMAND: pytest test --deselect test/test_plyvel.py::test_open_read_only_dir
+
+      - name: Check the extension and licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("plyvel/_plyvel.") and n.endswith(".so") for n in names), whl
+              assert any(n.endswith(".dist-info/licenses/LICENSE.rst") for n in names), whl
+              assert any(n.endswith("licenses/LICENSE.leveldb") for n in names), whl
+              assert any(n.endswith("licenses/LICENSE.snappy") for n in names), whl
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: plyvel-${{ env.PLYVEL_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish plyvel ${{ inputs.version || '1.5.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: plyvel-${{ inputs.version || '1.5.1' }}-*-manylinux_riscv64
