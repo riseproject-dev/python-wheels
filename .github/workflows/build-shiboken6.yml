@@ -25,6 +25,12 @@ permissions:
 env:
   SHIBOKEN_VERSION: ${{ inputs.version || '6.11.2' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Rocky 10's riscv64 repos ship no patchelf package (gotcha 95), and pip installing
+  # the `patchelf` PyPI package builds NixOS/patchelf from source, which runs its own
+  # `make check` and fails 8/48 tests on riscv64. pyside-setup's build_patchelf() just
+  # needs the binary on PATH, so fetch NixOS/patchelf's own riscv64 release instead.
+  PATCHELF_VERSION: '0.17.2'
+  PATCHELF_SHA256: '4b28f7bc890c42076b2955be2229ac1607aa9a6d4ee40e33d69517ef0c403a56'
 
 jobs:
   setup:
@@ -56,13 +62,20 @@ jobs:
         run: |
           docker run --rm -v "$(pwd):/work" -w /work \
             -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            -e PATCHELF_VERSION="${PATCHELF_VERSION}" \
+            -e PATCHELF_SHA256="${PATCHELF_SHA256}" \
             "${MANYLINUX_RISCV64_IMAGE}" bash -c '
             set -euxo pipefail
             dnf -y install clang-devel llvm-devel qt6-qtbase-devel
+            curl -fsSL -o /tmp/patchelf.tar.gz \
+              "https://github.com/NixOS/patchelf/releases/download/${PATCHELF_VERSION}/patchelf-${PATCHELF_VERSION}-riscv64.tar.gz"
+            echo "${PATCHELF_SHA256}  /tmp/patchelf.tar.gz" | sha256sum -c -
+            tar xzf /tmp/patchelf.tar.gz -C /usr/local
+            rm -f /tmp/patchelf.tar.gz
             pybin=/opt/python/cp312-cp312/bin
             "$pybin/pip" install -q \
               "setuptools==78.1.0" "packaging==24.2" "build==1.2.2.post1" \
-              "wheel==0.46.3" "distro==1.9.0" "patchelf==0.17.2"
+              "wheel==0.46.3" "distro==1.9.0"
             "$pybin/python3" setup.py bdist_wheel \
               --build-type=shiboken6-generator \
               --qtpaths=/usr/bin/qtpaths6 \
