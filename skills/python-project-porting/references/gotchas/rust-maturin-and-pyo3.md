@@ -55,6 +55,15 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
   CPython and still segfault the first time a string crosses the FFI boundary.
 - **325** — A maturin `[tool.maturin] include` list is scoped to the wheel, not the sdist,
   so omitting `tests/` there ships a tests-less sdist even though every port needs one.
+- **344** — `PyO3/maturin-action` reads the target crate's own `pyproject.toml`
+  `[build-system] requires` for its maturin version unless `maturin-version:` overrides it —
+  a stale pin (`maturin==0.14.17`, never actually exercised by upstream's own release job,
+  which calls the action directly) predates riscv64 release assets and 404s.
+- **345** — Inside a driven-yourself `before-script-linux`, `PyO3/maturin-action`'s own
+  hardcoded `PATH` addition for manylinux's per-interpreter console-scripts stops at cp312 —
+  a `pip`-installed plugin (e.g. `protoc-gen-mypy`) for cp313+ is invisible to a PATH-based
+  `which`/`shutil.which()` lookup even from that same interpreter; resolve its scripts
+  directory via `sysconfig.get_path("scripts")` instead.
 
 ---
 
@@ -981,3 +990,62 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       later pyo3 release) — a source-level API migration, not a patch-worthy one-liner.
       Dropping the interpreter (gotcha 322's fix) stays correct here; reach for a bump only
       when the local `cargo check` comes back clean.
+
+344. **`PyO3/maturin-action` does not always use the maturin version you'd expect from the
+    action's own defaults — its `findVersion()` reads the *target crate's* `pyproject.toml`
+    `[build-system] requires` for a `maturin==X.Y.Z`/`maturin>=X.Y.Z` entry first, and only
+    falls back to `latest` when there is none (the `valkey-glide` async client port).**
+    `python/glide-async/pyproject.toml` pins `requires = ["maturin==0.14.17"]` — a pin
+    upstream's own CI never actually exercises, because their release job calls
+    `PyO3/maturin-action` directly (bypassing PEP 517 / pip's build-system resolution
+    entirely), so the pin is stale dead config that looks harmless until something reads it
+    literally. `maturin-action` does read it literally: it resolves `v0.14.17`, builds a
+    download URL (`.../releases/download/v0.14.17/maturin-riscv64gc-unknown-linux-musl.tar.gz`),
+    and that release predates riscv64 having any release assets at all (maturin only started
+    publishing a `riscv64gc-unknown-linux-musl` asset around 1.x; 0.14.17 is a 2023-era
+    release). The download 404s, `curl | tar -xz` gets an HTML error page instead of a
+    gzip stream, and the job dies in the action's own "Install maturin" group with `gzip:
+    stdin: not in gzip format` — before your `before-script-linux` or `args` ever run, so
+    the failure looks unrelated to the crate at first glance.
+    - **The fix is a one-line override, not a source patch**: pass `maturin-version:
+      '1.15.0'` (or whatever current release you've confirmed ships a riscv64 asset) on
+      the `PyO3/maturin-action` step. `findVersion()` checks `core.getInput('maturin-
+      version')` before ever touching `pyproject.toml`, so this is a real override, not a
+      hint.
+    - **Two greps settle whether this applies before you hit it**: `grep -A3
+      '\[build-system\]' <manifest-dir>/pyproject.toml` for a `maturin==` (not `>=`,
+      `<2.0`, etc.) exact pin, and `curl -sI https://github.com/PyO3/maturin/releases/
+      download/v<pinned>/maturin-riscv64gc-unknown-linux-musl.tar.gz` for a 404. An
+      unpinned or range-pinned `requires` resolves through `findReleaseFromManifest`
+      against the actual release list and is far less likely to land on a pre-riscv64
+      version.
+
+345. **Driving `PyO3/maturin-action`'s `before-script-linux` yourself to build auxiliary
+    native artifacts (a separate cdylib, a second maturin-built extension) runs into a
+    PATH gap the action's own environment setup leaves behind: its hardcoded
+    `/opt/python/cp3XX-cp3XX/bin` additions stop at cp312 (the `valkey-glide` async
+    client's `glide-shared` companion extension build).** The async client bundles a
+    second pyo3 extension (`glide_shared._fast_response`, built by a separate `maturin
+    build` invocation inside `before-script-linux`, once per target interpreter) plus a
+    protobuf-codegen step needing a `mypy-protobuf`-provided `protoc-gen-mypy` plugin,
+    `pip install`ed with the same target interpreter. For cp312 this works — maturin-
+    action's own command list literally appends `/opt/python/cp312-cp312/bin` to `PATH`
+    before running the user script — but cp313/cp314/cp314t are never added, so a
+    `shutil.which("protoc-gen-mypy")` run from *that same interpreter* still returns
+    `None`: the console-script exists on disk (in that interpreter's own `bin/`) but isn't
+    on `PATH`. `protoc --plugin=protoc-gen-mypy=None ...` then fails with `None: program
+    not found or is not executable`, `--mypy_out: protoc-gen-mypy: Plugin failed with
+    status code 1` — three of four matrix legs died here identically while cp312 (the one
+    interpreter the hardcoded PATH covers) sailed through to a genuine multi-hour compile.
+    - **Fix: never resolve a same-interpreter console-script via `PATH`/`shutil.which()`
+      inside a manylinux `before-script-linux` — compute its directory directly.**
+      `"$PY_BIN" -c 'import sysconfig; print(sysconfig.get_path("scripts"))'` returns the
+      exact `bin/`-equivalent directory for whichever interpreter ran it, independent of
+      what any wrapper action has or hasn't added to `PATH`; append the script name to
+      that instead of shelling out to `which`.
+    - **The failure signature is a fast, clean one to misdiagnose as something else**: it
+      happens within the first couple of build-log lines after `pip install` succeeds, well
+      before any `cargo build` output, so it is easy to mistake for a protoc/protobuf
+      version problem rather than a PATH problem — check for a literal `None` in the error
+      text (the smoking gun that a Python-side path lookup silently failed) before
+      suspecting the protoc invocation itself.

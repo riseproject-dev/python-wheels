@@ -198,6 +198,16 @@ The porting gotchas (331 of them) live in [`references/gotchas/`](gotchas/), spl
   so a project whose list omits `tests/` ships a tests-less sdist; when the project's
   `Cargo.lock` is already committed (no gotcha 10 floating-deps risk), drop the sdist job
   and build straight from the git checkout instead of staging tests via gotcha 104.
+- **344** — `PyO3/maturin-action` reads the target crate's `pyproject.toml`
+  `[build-system] requires` for its maturin version unless `maturin-version:` overrides it;
+  a stale exact pin that upstream's own CI never exercises (it calls the action directly,
+  bypassing PEP 517) can predate riscv64 release assets and 404 the action's own "Install
+  maturin" step with `gzip: stdin: not in gzip format` before your build ever runs.
+- **345** — Inside a driven-yourself `before-script-linux`, `PyO3/maturin-action`'s own
+  hardcoded `PATH` additions for manylinux's per-interpreter `/opt/python/cp3XX-cp3XX/bin`
+  stop at cp312; a `pip`-installed console-script (e.g. `protoc-gen-mypy`) for cp313+ is
+  invisible to a PATH-based `which`/`shutil.which()` even from that same interpreter —
+  resolve its scripts directory via `sysconfig.get_path("scripts")` instead.
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
