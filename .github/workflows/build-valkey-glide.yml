@@ -1,0 +1,159 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `publish-binaries`/`publish-async-to-pypi` jobs of
+# https://github.com/valkey-io/valkey-glide/blob/v2.5.1/.github/workflows/pypi-cd.yml
+name: Build valkey-glide wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'valkey-glide version to build (git tag without the leading v, e.g. 2.5.1)'
+        required: true
+        default: '2.5.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-valkey-glide.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.5.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 2.5.1 there.
+  VALKEY_GLIDE_VERSION: ${{ inputs.version || '2.5.1' }}
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  # Limit parallel rustc invocations to avoid resource exhaustion on the
+  # riscv64 runner (build-daft.yml/build-lancedb.yml need the same).
+  CARGO_BUILD_JOBS: 2
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build valkey-glide ${{ inputs.version || '2.5.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        # glide-async's pyo3 dependency has a plain `features = ["extension-module"]`
+        # (no abi3-pyNN), so every interpreter needs its own build.
+        python: ['cp312', 'cp313', 'cp314', 'cp314t']
+
+    steps:
+      - name: Checkout valkey-glide v${{ env.VALKEY_GLIDE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: valkey-io/valkey-glide
+          ref: v${{ env.VALKEY_GLIDE_VERSION }}
+          persist-credentials: false
+
+      # The LICENSE is at the repo root, so maturin's licence glob finds nothing
+      # and upstream's own published wheel carries no licence text either.
+      - name: Stage the project licence beside pyproject.toml
+        run: cp LICENSE python/glide-async/LICENSE
+
+      # Cargo.toml carries no [package].version (Cargo defaults it to 0.0.0), so
+      # maturin needs the version from pyproject.toml's static field instead --
+      # upstream's own release job patches it in the same way.
+      - name: Set the package version
+        run: |
+          sed -i "s/^dynamic = \[\"version\"\]/version = \"${VALKEY_GLIDE_VERSION}\"/" python/glide-async/pyproject.toml
+          grep -qx "version = \"${VALKEY_GLIDE_VERSION}\"" python/glide-async/pyproject.toml
+          sed -i "s/GLIDE_VERSION = \"unknown\"/GLIDE_VERSION = \"${VALKEY_GLIDE_VERSION}\"/" python/glide-async/.cargo/config.toml
+
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          working-directory: python/glide-async
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --strip -i ${{ steps.interp.outputs.value }} --out dist
+          manylinux: '2_39'
+          # glide-async/pyproject.toml pins `maturin==0.14.17` in [build-system], which
+          # predates riscv64 release assets; the action reads that pin unless overridden.
+          maturin-version: '1.15.0'
+          # Mirrors upstream's own before-script-linux (pypi-cd.yml): build the FFI
+          # cdylib and the glide-shared native extension the async client's
+          # glide_shared subpackage bundles, then vendor glide-shared's Python
+          # sources in. Rocky 10's CRB repo (already enabled in the manylinux
+          # image) has protoc; upstream's own image bakes in a downloaded release
+          # build, which ships no riscv64 binary.
+          before-script-linux: |
+            set -euo pipefail
+            git config --global --add safe.directory "*"
+            yum install -y protobuf-compiler protobuf-devel unzip
+
+            PY_BIN=${{ steps.interp.outputs.value }}
+            "$PY_BIN" -m pip install --upgrade pip
+            "$PY_BIN" -m pip install mypy-protobuf maturin==1.15.0
+
+            # maturin-action's own before-script hardcodes PATH up to cp312's
+            # /opt/python bin dir only, so a PATH-based `which` misses the plugin
+            # for cp313+; resolve it via sysconfig instead.
+            MYPY_PLUGIN="$("$PY_BIN" -c 'import sysconfig; print(sysconfig.get_path("scripts"))')/protoc-gen-mypy"
+            protoc \
+              --plugin=protoc-gen-mypy="$MYPY_PLUGIN" \
+              -Iprotobuf=../../glide-core/src/protobuf \
+              --python_out=../glide-shared/glide_shared \
+              --mypy_out=../glide-shared/glide_shared \
+              ../../glide-core/src/protobuf/*.proto
+
+            cd ../../ffi && cargo build --release && cd ../python/glide-async
+            cp -r ../glide-shared/glide_shared python/
+            cp ../../ffi/target/release/libglide_ffi.so python/glide_shared/
+
+            cd ../glide-shared
+            "$PY_BIN" -m maturin build --release --out /tmp/glide_shared_wheels -i "$PY_BIN"
+            cd ../glide-async
+            for wheel in /tmp/glide_shared_wheels/*.whl; do
+              unzip -jo "$wheel" "glide_shared/_fast_response*.so" -d python/glide_shared/
+            done
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ steps.interp.outputs.value }}
+          activate-environment: true
+          enable-cache: false
+
+      # Mirrors upstream's own "Smoke test wheels" step (pypi-cd.yml): a plain
+      # import, not the full python.yml suite that needs a live Valkey server.
+      - name: Test wheel
+        env:
+          UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+          UV_INDEX_STRATEGY: unsafe-best-match
+        run: |
+          uv pip install --find-links python/glide-async/dist "valkey-glide==${VALKEY_GLIDE_VERSION}"
+          python -c "from glide import GlideClient; print('Async smoke test passed')"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: valkey-glide-${{ env.VALKEY_GLIDE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: python/glide-async/dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish valkey-glide ${{ inputs.version || '2.5.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: valkey-glide-${{ inputs.version || '2.5.1' }}-*-manylinux_riscv64
