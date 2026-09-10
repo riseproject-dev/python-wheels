@@ -1,0 +1,87 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/vispy/vispy/blob/v0.17.0/.github/workflows/wheels.yml
+name: Build vispy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'vispy version to build (git tag without leading v, e.g. 0.17.0)'
+        required: true
+        default: '0.17.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-vispy.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.17.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default there.
+  VISPY_VERSION: ${{ inputs.version || '0.17.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build vispy ${{ inputs.version || '0.17.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Per-interpreter (not abi3): the _sdf_cpu Cython extension links the
+        # version-specific ABI.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      - name: Checkout vispy v${{ env.VISPY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: vispy/vispy
+          ref: v${{ env.VISPY_VERSION }}
+          fetch-depth: 0  # hatch-vcs derives the version from `git describe`
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy is a build- and runtime dependency; only our registry has it
+          # for riscv64, and PIP_ONLY_BINARY keeps a newer PyPI release from
+          # winning the resolution and then compiling from sdist.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: vispy-${{ env.VISPY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish vispy ${{ inputs.version || '0.17.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: vispy-${{ inputs.version || '0.17.0' }}-*-manylinux_riscv64
