@@ -1,0 +1,141 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build` job of
+# https://github.com/delta-io/delta-sharing/blob/d0712f61b728670896fdd1fec5d4ed2967073c79/.github/workflows/build-kernel-wheels.yml
+name: Build delta-kernel-rust-sharing-wrapper wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'delta-kernel-rust-sharing-wrapper version to build (e.g. 0.3.3)'
+        required: true
+        default: '0.3.3'
+  pull_request:
+    paths:
+      - '.github/workflows/build-delta-kernel-rust-sharing-wrapper.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.3.3' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.3.3 there.
+  DELTA_KERNEL_RUST_SHARING_WRAPPER_VERSION: ${{ inputs.version || '0.3.3' }}
+  # This package lives in the delta-io/delta-sharing monorepo and is never
+  # tagged on its own, so pin the release commit: "Bump Rust wrapper version
+  # to 0.3.3 (#989)", whose python/delta-kernel-rust-sharing-wrapper tree is
+  # byte-identical to the 0.3.3 PyPI sdist. Update it alongside the version.
+  DELTA_KERNEL_RUST_SHARING_WRAPPER_REF: d0712f61b728670896fdd1fec5d4ed2967073c79
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build delta-kernel-rust-sharing-wrapper ${{ inputs.version || '0.3.3' }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # pyo3's abi3-py310 feature is on unconditionally (Cargo.toml), so
+          # one abi3 wheel serves every GIL-ful interpreter; pyo3 disables
+          # abi3 under Py_GIL_DISABLED, giving the free-threaded build its
+          # own wheel (matches build-primp.yml).
+          - tag: cp310-abi3
+            # Whatever interpreter builds it, the wheel carries the cp310-abi3
+            # tag the crate's Cargo.toml claims (gotcha 181), so this is built
+            # on cp312 -- our floor -- and re-tested on the newer ones via
+            # find_compatible_wheel; cp310/cp311 are not in our support matrix.
+            build: >-
+              cp312-manylinux_riscv64 cp313-manylinux_riscv64
+              cp314-manylinux_riscv64
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+
+    steps:
+      - name: Checkout delta-sharing ${{ env.DELTA_KERNEL_RUST_SHARING_WRAPPER_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: delta-io/delta-sharing
+          ref: ${{ env.DELTA_KERNEL_RUST_SHARING_WRAPPER_REF }}
+          persist-credentials: false
+
+      - name: Bundle LICENSE.txt into the wheel
+        # The crate's pyproject.toml has no [project] table -- metadata comes
+        # straight from Cargo.toml -- so maturin's dir-glob licence
+        # auto-discovery never runs (gotcha 146); only an explicit Cargo
+        # `license-file` key gets a licence file into dist-info/licenses/
+        # (same fix as build-minify-html.yml). The crate has no LICENSE of
+        # its own, so copy the repo-root one in.
+        run: |
+          cp LICENSE.txt python/delta-kernel-rust-sharing-wrapper/
+          sed -i '/^license = /a license-file = "LICENSE.txt"' python/delta-kernel-rust-sharing-wrapper/Cargo.toml
+          grep -qx 'license-file = "LICENSE.txt"' python/delta-kernel-rust-sharing-wrapper/Cargo.toml
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python/delta-kernel-rust-sharing-wrapper
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # The crate ships no [tool.cibuildwheel], so the Rust toolchain its
+          # maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$PATH:$HOME/.cargo/bin"'
+          # No test suite ships for this wrapper (upstream's own
+          # build-kernel-wheels.yml only builds and uploads, never tests it);
+          # exercise the URL-parsing/object_store construction path that
+          # every real caller goes through first (delta_sharing/reader.py).
+          CIBW_TEST_COMMAND: >-
+            python -c "import delta_kernel_rust_sharing_wrapper as m, tempfile;
+            assert m.delta_kernel_rust_sharing_wrapper.__file__.endswith('.so'), m.delta_kernel_rust_sharing_wrapper.__file__;
+            d = tempfile.mkdtemp();
+            location = f'file://{d}/';
+            table = m.Table(location);
+            engine = m.PythonInterface(location);
+            assert table is not None and engine is not None;
+            print('delta_kernel_rust_sharing_wrapper OK')"
+
+      - name: Check the extension and licence made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith(".abi3.so") or n.endswith(".so") for n in names
+                         if n.startswith("delta_kernel_rust_sharing_wrapper/")), names
+              assert any(n.endswith(".dist-info/licenses/LICENSE.txt") for n in names), names
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: delta-kernel-rust-sharing-wrapper-${{ env.DELTA_KERNEL_RUST_SHARING_WRAPPER_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish delta-kernel-rust-sharing-wrapper ${{ inputs.version || '0.3.3' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: delta-kernel-rust-sharing-wrapper-${{ inputs.version || '0.3.3' }}-*-manylinux_riscv64
