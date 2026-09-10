@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build_wheels` job of
+# https://github.com/faust-streaming/cChardet/blob/v3.2.0/.github/workflows/build-and-upload-to-pypi.yml
+name: Build faust-cchardet wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'faust-cchardet version to build (e.g. 3.2.0)'
+        required: true
+        default: '3.2.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-faust-cchardet.yml'
+      - 'patches/faust-cchardet/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '3.2.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  FAUST_CCHARDET_VERSION: ${{ inputs.version || '3.2.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build faust-cchardet ${{ inputs.version || '3.2.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout cChardet v${{ env.FAUST_CCHARDET_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: faust-streaming/cChardet
+          ref: v${{ env.FAUST_CCHARDET_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # pyproject.toml declares `license` but no `license-files`, and
+      # meson-python's build backend has no default COPYING/LICENSE glob, so
+      # every wheel upstream publishes ships with none. See
+      # patches/faust-cchardet/3.2.0 for details.
+      - name: Patch cChardet source
+        run: git apply python-wheels/patches/faust-cchardet/${{ env.FAUST_CCHARDET_VERSION }}/*.patch
+
+      - name: Build and test wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+
+      - name: Verify the wheel ships the compiled extension and licence
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("cchardet/_cchardet") and n.endswith(".so") for n in names), names
+              assert any(n.endswith(".dist-info/licenses/COPYING") for n in names), names
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: faust-cchardet-${{ env.FAUST_CCHARDET_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish faust-cchardet ${{ inputs.version || '3.2.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: faust-cchardet-${{ inputs.version || '3.2.0' }}-*-manylinux_riscv64
