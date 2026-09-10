@@ -1,0 +1,154 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build`/`run` jobs of
+# https://github.com/SarahWeiii/CoACD/blob/1.0.14/.github/workflows/wheel.yml
+name: Build coacd wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'coacd version to build (git tag, e.g. 1.0.14)'
+        required: true
+        default: '1.0.14'
+  pull_request:
+    paths:
+      - '.github/workflows/build-coacd.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.0.14' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  COACD_VERSION: ${{ inputs.version || '1.0.14' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build coacd ${{ inputs.version || '1.0.14' }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # setup.py's bdist_wheel_abi3.get_tag() tags the wheel abi3 at the
+          # building interpreter's version (matches upstream's published
+          # cp39-abi3 filename), so build once on cp39 and reuse+test the
+          # rest via find_compatible_wheel. cp314t is dropped: the override
+          # never guards Py_GIL_DISABLED, so a free-threaded build still
+          # tags plain abi3, and abi3 is absent from a free-threaded
+          # interpreter's own compatible-tag set, so pip could never install
+          # such a wheel there anyway.
+          - tag: cp39-abi3
+            build: >-
+              cp39-manylinux_riscv64 cp312-manylinux_riscv64
+              cp313-manylinux_riscv64 cp314-manylinux_riscv64
+
+    steps:
+      - name: Checkout CoACD ${{ env.COACD_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: SarahWeiii/CoACD
+          ref: ${{ env.COACD_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      # CMakeLists.txt FetchContent-pulls zlib/Boost/OpenVDB/oneTBB/spdlog
+      # from source and statically links them (BUILD_SHARED_LIBS=OFF);
+      # upstream's own wheel ships none of their licences, nor CDT's (a git
+      # submodule). Stage them all at the root for setuptools' default
+      # LICEN[CS]E* glob to pick up.
+      - name: Stage the vendored dependencies' licences
+        run: |
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/oneapi-src/oneTBB/v2022.0.0/LICENSE.txt" -o LICENSE.onetbb
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/AcademySoftwareFoundation/openvdb/v8.2.0/LICENSE" -o LICENSE.openvdb
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/boostorg/boost/boost-1.81.0/LICENSE_1_0.txt" -o LICENSE.boost
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/gabime/spdlog/v1.8.2/LICENSE" -o LICENSE.spdlog
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/madler/zlib/v1.2.11/zlib.h" | sed -n '4,23p' > LICENSE.zlib
+          cp 3rd/cdt/LICENSE LICENSE.cdt
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # setup.py links -static-libstdc++; the riscv64 image ships only
+          # the shared libstdc++.so (gotcha 77).
+          CIBW_BEFORE_ALL_LINUX: dnf -y install libstdc++-static
+          # numpy has no riscv64 wheel on public PyPI; needed both at build
+          # time (build-system.requires) and at install time.
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy
+          CIBW_TEST_REQUIRES: trimesh
+          CIBW_TEST_SOURCES: run_tests.py examples
+          CIBW_TEST_COMMAND: python run_tests.py -v
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          path = sys.argv[1]
+          names = zipfile.ZipFile(path).namelist()
+          libs = [n for n in names if n.endswith(".so")]
+          assert libs and all("lib_coacd" in n for n in libs), libs
+          licences = {n.rsplit("/", 1)[-1] for n in names
+                      if "dist-info/" in n and n.rsplit("/", 1)[-1].startswith("LICENSE")}
+          expected = {"LICENSE", "LICENSE.onetbb", "LICENSE.openvdb", "LICENSE.boost",
+                      "LICENSE.spdlog", "LICENSE.zlib", "LICENSE.cdt"}
+          assert licences == expected, licences
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: coacd-${{ env.COACD_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # setup.py passes -static-libgcc -static-libstdc++ on Linux, so
+      # auditwheel vendors the image's libgcc_s/libstdc++ into the wheel.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: coacd-${{ env.COACD_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish coacd ${{ inputs.version || '1.0.14' }}
+    needs: [setup, build_wheels, gpl_sources]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: coacd-${{ inputs.version || '1.0.14' }}-*-manylinux_riscv64
+      gpl-sources-artifact: coacd-${{ inputs.version || '1.0.14' }}-gpl-sources
+      gpl-sources-description: gcc
