@@ -333,6 +333,7 @@ The porting gotchas (331 of them) live in [`references/gotchas/`](gotchas/), spl
 - **256** — setuptools 81 dropped the `dry_run` keyword from its vendored
 - **269** — A project's own `build-system.requires` floor can be looser than what its
 - **277** — A CMake-backed `pyproject.toml` build dependency with no upper bound can still be
+- **346** — The `clang` PyPI package gained a `File.__eq__` with no matching `__hash__` in the
 
 ### Testing: test-sources & shadowing — [`gotchas/testing-and-shadowing.md`](gotchas/testing-and-shadowing.md)
 

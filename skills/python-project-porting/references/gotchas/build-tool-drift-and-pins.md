@@ -22,6 +22,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
 - **225** — `wheel>=0.44.0` dropped `wheel.bdist_wheel.get_platform` — a hand-rolled
 - **256** — setuptools 81 dropped the `dry_run` keyword from its vendored
 - **269** — A project's own `build-system.requires` floor can be looser than what its
+- **346** — The `clang` PyPI package (LLVM's own `cindex.py` bindings, repackaged per release)
 
 ---
 
@@ -513,3 +514,23 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
       confirmed by diffing against the real PyPI wheel, which ships the same single
       `LICENSE.txt` and nothing else. Both gaps only failed once the compile fix and
       the test skip let the build reach that far, one CI cycle apart.
+
+346. **The `clang` PyPI package (LLVM's own `cindex.py` bindings, repackaged per release)
+    gained a `File.__eq__` in the 21.x line with no matching `__hash__`, which makes
+    `File` instances unhashable and breaks any libclang-driven codegen that caches on
+    them** — Python's data model turns off the default identity-based `__hash__`
+    whenever a class defines `__eq__` without also defining `__hash__`. `pymupdfb`
+    1.24.10 (`build-pymupdfb.yml`) resolves the `clang` PyPI package unpinned via
+    `PYMUPDF_SETUP_LIBCLANG=clang` (the standard riscv64 workaround, since the
+    `libclang` wheel itself has no riscv64 build) to drive MuPDF's own
+    `scripts/wrap/parse.py`/`cpp.py`, which cache per-argument lookups keyed by a
+    `clang.cindex.File`; a build run in 2026 resolves `clang==21.1.7` and dies with
+    `TypeError: unhashable type: 'File'` in `parse.py:get_args()`, even though the
+    exact same workflow shape (`build-pymupdf.yml`, 1.28.2) has worked unpinned because
+    whatever `clang` version its isolated build env resolved at the time predates the
+    21.x line. Confirmed by diffing `clang/cindex.py` across LLVM release tags on
+    GitHub: no `File.__eq__` through `llvmorg-20.1.8`, present from `llvmorg-21.1.0`
+    onward. Fix: pin the override to the last clean major, e.g.
+    `PYMUPDF_SETUP_LIBCLANG=clang==20.1.5` — libclang's C API is stable across this gap,
+    so an older Python-side binding against the manylinux image's newer `libclang.so`
+    (installed for its `.so` only, via `dnf install clang-devel`) still works.
