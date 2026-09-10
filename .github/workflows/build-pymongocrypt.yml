@@ -1,0 +1,155 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# Mirrors upstream's own bindings/python release pipeline, narrowed to Linux
+# riscv64:
+#   https://github.com/mongodb/libmongocrypt/blob/pymongocrypt-1.19.0/.github/workflows/dist-python.yml
+#   https://github.com/mongodb/libmongocrypt/blob/pymongocrypt-1.19.0/bindings/python/scripts/release.sh
+# Upstream's release.sh downloads a prebuilt "-nocrypto" libmongocrypt shared
+# library (crypto hooks are always supplied from Python's own `cryptography`
+# package, see pymongocrypt/crypto.py) for each platform it publishes, then
+# packages it with hatchling and runs `auditwheel repair`. No riscv64 build is
+# published on the libmongocrypt release page, so this builds libmongocrypt
+# itself from the same tagged source tree with the equivalent CMake flags
+# before running the same hatchling + auditwheel steps.
+name: Build pymongocrypt wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pymongocrypt version to build (e.g. 1.19.0)'
+        required: true
+        default: '1.19.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pymongocrypt.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.19.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYMONGOCRYPT_VERSION: ${{ inputs.version || '1.19.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pymongocrypt ${{ inputs.version || '1.19.0' }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    steps:
+      - name: Checkout libmongocrypt pymongocrypt-${{ env.PYMONGOCRYPT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: mongodb/libmongocrypt
+          ref: pymongocrypt-${{ env.PYMONGOCRYPT_VERSION }}
+          persist-credentials: false
+
+      # Without an explicit BUILD_VERSION, CMakeLists.txt falls back to a
+      # git-tag-walking calc_release_version.py that needs full, unshallowed
+      # history and finds no match on this shallow single-ref checkout,
+      # silently producing "0.0.0" - which then fails pymongocrypt's own
+      # _MIN_LIBMONGOCRYPT_VERSION >= 1.8.0 check at import time. Pin it to
+      # the same libmongocrypt release this pymongocrypt tag builds against.
+      - name: Build libmongocrypt and package the pymongocrypt wheel
+        run: |
+          mkdir -p tmpwheelhouse wheelhouse
+          LIBMONGOCRYPT_VERSION=$(cat bindings/python/scripts/libmongocrypt-version.txt)
+          export LIBMONGOCRYPT_VERSION
+          docker run --rm \
+            -v "$(pwd)":/workspace \
+            --workdir /workspace \
+            -e LIBMONGOCRYPT_VERSION \
+            "${{ env.MANYLINUX_RISCV64_IMAGE }}" \
+            bash -c '
+              set -euo pipefail
+              cmake -B build -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+                -DBUILD_VERSION="$LIBMONGOCRYPT_VERSION" \
+                -DDISABLE_NATIVE_CRYPTO=ON -DENABLE_ONLINE_TESTS=OFF -DBUILD_TESTING=OFF \
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+              cmake --build build --target mongocrypt -j "$(nproc)"
+              cp "$(find build -name libmongocrypt.so)" bindings/python/pymongocrypt/libmongocrypt.so
+
+              PY=/opt/python/cp312-cp312/bin
+              "$PY"/pip install -q hatchling hatch-requirements-txt
+              cd bindings/python
+              "$PY"/pip wheel . --no-deps --no-build-isolation -w /workspace/tmpwheelhouse
+
+              cd /workspace
+              auditwheel repair --plat manylinux_2_39_riscv64 tmpwheelhouse/*.whl -w wheelhouse/
+            '
+
+      - name: Check the bundled library and licence made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith("pymongocrypt/libmongocrypt.so") for n in names), whl
+              assert any(".dist-info/licenses/LICENSE" in n for n in names), whl
+              print(whl, "ok")
+          EOF
+
+      # Mirrors release.sh's own test_dist(): the crypto hooks check also
+      # confirms our -DDISABLE_NATIVE_CRYPTO=ON build matches upstream's
+      # published "-nocrypto" libmongocrypt (hooks are required, not optional).
+      - name: Install the built wheel and exercise the bindings
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install -q --upgrade pip
+          # cffi/cryptography have no riscv64 wheel on public PyPI; the host
+          # runner lacks libffi-dev to build cffi from source, so pull our
+          # registry's prebuilt wheels instead.
+          PIP_ONLY_BINARY=cffi,cryptography PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            pip install -q wheelhouse/*.whl
+          LIBMONGOCRYPT_VERSION=$(cat bindings/python/scripts/libmongocrypt-version.txt) python3 -c "
+          import os
+          from pymongocrypt.binding import libmongocrypt_version, lib
+
+          assert libmongocrypt_version() == os.environ['LIBMONGOCRYPT_VERSION'], libmongocrypt_version()
+          assert not lib.mongocrypt_is_crypto_available(), 'expected a nocrypto build'
+          print('libmongocrypt version:', libmongocrypt_version())
+          "
+
+      # test_binding.py/test_crypto.py need only cffi/cryptography (already
+      # installed with the wheel) plus pytest; test_mongocrypt.py additionally
+      # needs pymongo[aws]/bson/httpx, which pull in pymongo-auth-aws - not
+      # yet on our registry - so it is left for a follow-up rather than
+      # widening this port's dependency surface. Copy test/ out of the
+      # checkout so pytest can't import the source pymongocrypt/ package
+      # (with its just-built libmongocrypt.so) instead of the installed wheel.
+      - name: Run upstream's binding and crypto unit tests against the wheel
+        run: |
+          . .venv/bin/activate
+          pip install -q pytest
+          mkdir -p /tmp/pymongocrypt-test/test
+          cp bindings/python/test/__init__.py bindings/python/test/test_binding.py bindings/python/test/test_crypto.py /tmp/pymongocrypt-test/test/
+          cd /tmp/pymongocrypt-test
+          python3 -m pytest -v test/test_binding.py test/test_crypto.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pymongocrypt-${{ env.PYMONGOCRYPT_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pymongocrypt ${{ inputs.version || '1.19.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pymongocrypt-${{ inputs.version || '1.19.0' }}-*-manylinux_riscv64
