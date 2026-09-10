@@ -1,0 +1,144 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Upstream's own release wheels (cd-wheel.yml) build against a portable "MPI ABI" stub
+# and merge mpich/openmpi variants into one wheel via conda-forge-provided MPI - conda-forge
+# ships no MPI packages for linux-riscv64. This instead uses mpi4py's other documented build
+# path (the error message in conf/mpidistutils.py's configure_mpi names it directly): link
+# against a real MPI found via `mpicc` on PATH, here Rocky 10's own openmpi-devel, and leave
+# it to the target system the same way a source build would (auditwheel excludes the whole
+# Open MPI/PMIx/libfabric/hwloc/libevent chain rather than vendoring a partial runtime that
+# would be missing Open MPI's own MCA component search path).
+name: Build mpi4py wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'mpi4py version to build (git tag, e.g. 4.1.2)'
+        required: true
+        default: '4.1.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-mpi4py.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '4.1.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MPI4PY_VERSION: ${{ inputs.version || '4.1.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build mpi4py ${{ inputs.version || '4.1.2' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      - name: Checkout mpi4py ${{ env.MPI4PY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: mpi4py/mpi4py
+          ref: ${{ env.MPI4PY_VERSION }}
+          persist-credentials: false
+
+      - name: Write repair script
+        run: |
+          cat > riscv64-repair.sh <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          wheel="$1"
+          dest_dir="$2"
+          tmpdir=$(mktemp -d)
+          trap 'rm -rf "$tmpdir"' EXIT
+          unzip -q "$wheel" -d "$tmpdir"
+          so=$(find "$tmpdir/mpi4py" -name 'MPI.*.so')
+          args=()
+          for lib in $(ldd "$so" | awk '{print $1}' | grep -E '^lib(mpi|open-pal|open-rte|event|hwloc|pmix|fabric)' | sort -u); do
+            args+=(--exclude "$lib")
+          done
+          auditwheel repair "${args[@]}" -w "$dest_dir" "$wheel"
+          EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: .
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Matches upstream's own ci-test.yml "Configure hostname" step: without a resolvable
+          # hostname, Open MPI's out-of-band TCP setup for a multi-process run can hang.
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf -y install openmpi-devel &&
+            echo "127.0.0.1 $(hostname)" >> /etc/hosts
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="/usr/lib64/openmpi/bin:$PATH"
+            LD_LIBRARY_PATH="/usr/lib64/openmpi/lib:${LD_LIBRARY_PATH:-}"
+          # Open MPI compiles its MCA components statically into libmpi/libopen-pal on this
+          # image (no lib/openmpi/*.so plugin tree), so excluding the whole chain here and
+          # requiring the target system's own Open MPI is safe - a partial vendor would
+          # otherwise ship a libmpi.so with no matching runtime.
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: bash {project}/riscv64-repair.sh {wheel} {dest_dir}
+          # The manylinux container runs as root, which Open MPI's mpiexec refuses by default.
+          CIBW_TEST_ENVIRONMENT_LINUX: >-
+            OMPI_ALLOW_RUN_AS_ROOT=1
+            OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
+          CIBW_TEST_SOURCES: test
+          # Dynamic process management (MPI_Comm_spawn, used by test_spawn/test_dynproc and
+          # mpi4py.futures' pool in test_util_pool) hangs PRTE's resource mapper in this
+          # container ("prte-rmaps-base:all-available-resources-used", then no progress) -
+          # deselect those modules; `timeout` turns any other hang into a fast failure
+          # instead of riding out the job timeout. `--oversubscribe` is needed because the
+          # riscv64 CI runner exposes fewer slots than the `-n 2` run requests, and PRTE
+          # refuses to oversubscribe by default.
+          CIBW_TEST_COMMAND: >-
+            python -m mpi4py --prefix &&
+            python -m mpi4py --mpi-library &&
+            timeout 600 mpiexec --oversubscribe -n 1 python test/main.py -v -e spawn -e dynproc -e util_pool &&
+            timeout 600 mpiexec --oversubscribe -n 2 python test/main.py -v -f -e spawn -e dynproc -e util_pool
+
+      - name: Check the wheel links Open MPI instead of vendoring it
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("mpi4py/MPI") and n.endswith(".so") for n in names), f"no C extension in {whl}"
+              assert not any(".libs/" in n or ".libs" == n.split("/")[0] for n in names), f"unexpected vendored libs in {whl}: {names}"
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mpi4py-${{ env.MPI4PY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish mpi4py ${{ inputs.version || '4.1.2' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: mpi4py-${{ inputs.version || '4.1.2' }}-*-manylinux_riscv64
