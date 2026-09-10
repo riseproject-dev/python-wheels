@@ -1,0 +1,140 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-wheels` job of
+# https://github.com/pact-foundation/pact-python/blob/pact-python-ffi/0.5.4.1/.github/workflows/release-ffi.yml
+name: Build pact-python-ffi wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pact-python-ffi version to build (git tag suffix, e.g. 0.5.4.1)'
+        required: true
+        default: '0.5.4.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pact-python-ffi.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.5.4.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.5.4.1 there.
+  PACT_PYTHON_FFI_VERSION: ${{ inputs.version || '0.5.4.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pact-python-ffi ${{ inputs.version || '0.5.4.1' }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # hatch_build.py tags the wheel cp<building-interpreter>-abi3, same as
+          # upstream's own release job (CIBW_BUILD: cp310-*); building on our
+          # registry's floor (cp312) covers cp312/cp313/cp314 through abi3.
+          # Upstream ships no free-threaded wheel for this package.
+          - tag: cp312-abi3
+            build: >-
+              cp312-manylinux_riscv64 cp313-manylinux_riscv64
+              cp314-manylinux_riscv64
+
+    steps:
+      - name: Checkout pact-python-ffi ${{ env.PACT_PYTHON_FFI_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pact-foundation/pact-python
+          ref: pact-python-ffi/${{ env.PACT_PYTHON_FFI_VERSION }}
+          persist-credentials: false
+
+      - name: Compute the matching pact-reference libpact_ffi tag
+        # hatch_build.py derives this from the first 3 components of its own
+        # version (pact-python-ffi versions itself {pact-reference version}.{N}).
+        id: pact-reference
+        run: echo "tag=libpact_ffi-v$(cut -d. -f1-3 <<< '${{ env.PACT_PYTHON_FFI_VERSION }}')" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pact-python-ffi source
+        run: git apply python-wheels/patches/pact-python-ffi/${{ env.PACT_PYTHON_FFI_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: pact-python-ffi
+          output-dir: wheelhouse/
+        env:
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          #
+          # hatch_build.py's build hook downloads a prebuilt libpact_ffi from
+          # pact-reference's GitHub releases, which has no riscv64 asset; build
+          # it from source instead (gotcha 77) and stage the gzipped .so +
+          # header at the exact path _download() already caches to, so the
+          # patched platform check is satisfied with no network request.
+          # aws-lc-sys (pulled in via pact-plugin-driver/pact_verifier's TLS
+          # stack) ships prebuilt riscv64gc bindings, and cmake is already in
+          # the manylinux image.
+          CIBW_BEFORE_ALL_LINUX: |
+            set -eux
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            git clone --depth 1 --branch ${{ steps.pact-reference.outputs.tag }} \
+              https://github.com/pact-foundation/pact-reference /tmp/pact-reference
+            cd /tmp/pact-reference/rust
+            "$HOME/.cargo/bin/cargo" build --release --locked -p pact_ffi
+            mkdir -p {package}/src/pact_ffi/data
+            gzip -c target/release/libpact_ffi.so \
+              > {package}/src/pact_ffi/data/libpact_ffi-linux-riscv64.so.gz
+            curl --proto '=https' --tlsv1.2 -sSfL \
+              -o {package}/src/pact_ffi/data/pact.h \
+              https://github.com/pact-foundation/pact-reference/releases/download/${{ steps.pact-reference.outputs.tag }}/pact.h
+          CIBW_BUILD_FRONTEND: build
+          # pyproject.toml's [tool.pytest] addopts always enables coverage
+          # (--cov=pact_ffi et al), which requires pytest-cov to be installed.
+          CIBW_TEST_REQUIRES: pytest pytest-cov
+          CIBW_TEST_SOURCES: pact-python-ffi/tests/test_init.py pact-python-ffi/pyproject.toml
+          # pact_ffi/__init__.py does `from pact_ffi.ffi import ffi, lib`, which
+          # shadows the `pact_ffi.ffi` package attribute with the imported `ffi`
+          # object (a cffi.FFI instance with no __file__) - go through
+          # sys.modules instead to check the compiled extension module itself.
+          CIBW_TEST_COMMAND: |
+            cd pact-python-ffi &&
+            python3 - <<'PYEOF' &&
+            import sys
+            import pact_ffi
+            m = sys.modules['pact_ffi.ffi']
+            assert m.__file__.endswith('.so'), m.__file__
+            PYEOF
+            python -m pytest -v tests/test_init.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pact-python-ffi-${{ env.PACT_PYTHON_FFI_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pact-python-ffi ${{ inputs.version || '0.5.4.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pact-python-ffi-${{ inputs.version || '0.5.4.1' }}-*-manylinux_riscv64
