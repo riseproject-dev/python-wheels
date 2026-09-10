@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/danielhrisca/asammdf/blob/8.8.25/.github/workflows/wheels.yml
+name: Build asammdf wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'asammdf version to build (git tag, e.g. 8.8.25)'
+        required: true
+        default: '8.8.25'
+  pull_request:
+    paths:
+      - '.github/workflows/build-asammdf.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '8.8.25' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 8.8.25 there.
+  ASAMMDF_VERSION: ${{ inputs.version || '8.8.25' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build asammdf ${{ inputs.version || '8.8.25' }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    steps:
+      - name: Checkout asammdf ${{ env.ASAMMDF_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: danielhrisca/asammdf
+          ref: ${{ env.ASAMMDF_VERSION }}
+          # libdeflate/lz4/zstd are vendored as git submodules and compiled in statically.
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # pyproject sets wheel.py-api = "cp310": one build is loadable on every
+          # 3.10+ interpreter. Building at our floor cp312 and listing cp313/cp314
+          # lets cibuildwheel compile once and reuse+test that wheel on each
+          # (find_compatible_wheel); cp314t/cp315 are skipped upstream too.
+          CIBW_BUILD: "cp312-* cp313-* cp314-*"
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_ENVIRONMENT: "PIP_ONLY_BINARY=:all:"
+          # Mirrors upstream's own wheels.yml, which excludes the Qt-based GUI
+          # suite (PySide6 has no riscv64 wheel anywhere).
+          CIBW_TEST_COMMAND: pytest {project}/test --ignore={project}/test/asammdf/gui
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: asammdf-${{ env.ASAMMDF_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish asammdf ${{ inputs.version || '8.8.25' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: asammdf-${{ inputs.version || '8.8.25' }}-*-manylinux_riscv64
