@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (330 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (331 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -78,6 +78,10 @@ The porting gotchas (330 of them) live in [`references/gotchas/`](gotchas/), spl
   even when the extension itself is pure, portable C++ (the prophet/cmdstanpy/stanc3 case).
 - **342** — A proprietary shared library downloaded and *linked* by `setup.py` itself fails
   closed on an unrecognised arch instead of degrading (the ibm-db case).
+- **343** — A Bazel-built package can clear every dependency-tree check (gotcha 132/214) and
+  still be blocked because its `WORKSPACE` links the extension directly against a *live,
+  pip-installed* sibling package's compiled library, not just its headers (the
+  tensorflow-io-gcs-filesystem case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

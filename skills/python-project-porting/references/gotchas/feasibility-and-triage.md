@@ -44,6 +44,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   a Rust FFI crate that itself only *downloads* a prebuilt native core, never builds it, can
   leave riscv64 with no build path at all even though the wrapper crate is pure Rust (the
   livekit case).
+- **343** — A Bazel-built package can clear every dependency-tree check (gotcha 132/214) and
+  still be blocked because its `WORKSPACE` links the extension directly against a *live,
+  pip-installed* sibling package's compiled library, not just its headers (the
+  tensorflow-io-gcs-filesystem case).
 
 ---
 
@@ -1426,3 +1430,42 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       *same* upstream-vendor blocker before assuming riscv64 is uniquely unserved** — it
       often means the real ceiling is a proprietary dependency's own arch list, which riscv64
       merely joins aarch64 in missing.
+
+343. **A Bazel-built package can clear every dependency-tree check and still be blocked
+    because its `WORKSPACE` links the extension directly against a *live, pip-installed*
+    sibling package's compiled library, not just its headers (the
+    tensorflow-io-gcs-filesystem case).** tensorflow-io-gcs-filesystem looked like gotcha
+    132's territory: its own `WORKSPACE` pulls abseil/protobuf/grpc/BoringSSL/google-cloud-cpp
+    as plain `http_archive` source builds, every one of which already has riscv64 precedent
+    elsewhere in this repo. But `tools/build/configure.py` does `import tensorflow` and reads
+    `tf.sysconfig.get_compile_flags()`/`get_link_flags()` from whatever `tensorflow` package
+    is pip-installed on the build host, then `WORKSPACE`'s `tf_configure` repository rule
+    (`third_party/toolchains/tf/tf_configure.bzl`) `cp -r`'s that package's *actual*
+    `libtensorflow_framework.so` into `@local_config_tf`, and
+    `tensorflow_io_gcs_filesystem/core/BUILD`'s `cc_library` lists that `.so` as a `srcs`
+    entry — so the final `cc_binary(linkshared = 1, ...)` links against it directly. The
+    symbols it needs (`TF_SetStatus`, `TF_Filesystem*Ops`, …) are real code in that library,
+    not header-only declarations, so the linker needs an ELF for the *target* architecture,
+    not just the text of a C header. Confirmed no riscv64 candidate exists at any layer: no
+    `tensorflow*` wheel on PyPI or on this repo's own registry ships riscv64 (this repo's own
+    `tensorflow` entry sits `parked`, undiagnosed, zero work started), and Google's official
+    standalone libtensorflow C-library tarball has no riscv64 build either
+    (`storage.googleapis.com/tensorflow/versions/<ver>/libtensorflow-cpu-linux-riscv64.tar.gz`
+    → 404, confirmed against the working `linux-x86_64` URL). Producing one means
+    bootstrapping full TensorFlow core via Bazel for riscv64 — a separate, much larger effort
+    than jaxlib (PR #526, parked), which shares the same XLA/TSL stack at a fraction of
+    TF-core's size and is itself still blocked on an upstream RISC-V codegen gap. Parked
+    (`.queue.yml` `blocked-on-dependency`) rather than hand-rolling a synthetic stub `.so`
+    with fabricated symbols: that would diverge completely from upstream's own build and
+    produce an artifact nothing on riscv64 can actually load or test. No worktree/branch
+    opened.
+    - **"Does the dependency tree have riscv64 precedent" and "does the build link against a
+      library that must already exist, compiled, for this exact architecture" are different
+      questions** — gotcha 132/214 answer the first; this is the second, and a project mixing
+      source-built third-party deps with a `pip install <sibling-project>`-sourced library
+      (common in the TF/XLA/TSL ecosystem, where sub-packages configure against the parent
+      framework's own build) can pass the first check cleanly and still fail the second.
+    - **Grep the `WORKSPACE`/`tf_configure`-equivalent for what a repository rule actually
+      copies (`cp`, `symlink`, genrule `srcs`) versus what it only reads as text** (header
+      trees are portable; a `.so`/`.a`/`.lib` it also copies is not) before concluding a
+      Google-ML-stack sibling package inherits gotcha 132's clean bill of health.
