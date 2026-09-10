@@ -1,0 +1,117 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# PyMuPDFb is pymupdf/PyMuPDF's own pipcl/setup.py build, run with
+# PYMUPDF_SETUP_FLAVOUR=bd instead of the default: a thin split-wheel of MuPDF's
+# shared libraries, built the same way scripts/gh_release.py builds it upstream.
+name: Build pymupdfb wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pymupdfb version (pymupdf/PyMuPDF git tag, e.g. 1.24.10)'
+        required: true
+        default: '1.24.10'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pymupdfb.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.24.10' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYMUPDFB_VERSION: ${{ inputs.version || '1.24.10' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pymupdfb ${{ inputs.version || '1.24.10' }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    # musllinux is skipped: it needs the same libclang-via-dnf workaround below,
+    # which build-pymupdf.yml also only exercises on manylinux.
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout pymupdf/PyMuPDF ${{ env.PYMUPDFB_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pymupdf/PyMuPDF
+          ref: ${{ env.PYMUPDFB_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # setup.py's get_requires_for_build_wheel() always adds swig/libclang
+          # regardless of flavour, and the resulting wheel is py3-none-*, so one
+          # CPython selector covers it.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # As in build-pymupdf.yml: the `libclang` PyPI wheel has no riscv64
+          # build, so use the image's own libclang.so via the pure-Python
+          # `clang` bindings instead (clang-devel supplies the unversioned
+          # symlink clang.cindex dlopens).
+          CIBW_BEFORE_ALL_LINUX: dnf install -y clang-devel
+          CIBW_ENVIRONMENT: >-
+            PYMUPDF_SETUP_FLAVOUR=bd
+            PYMUPDF_SETUP_LIBCLANG=clang
+            XCFLAGS=-D__LITTLE_ENDIAN__
+            XCXXFLAGS=-D__LITTLE_ENDIAN__
+          # Upstream's own gh_release.py disables repair for this flavour:
+          # auditwheel finds nothing to add and exits non-zero. setup.py's
+          # pipcl already tags the wheel from the image's own AUDITWHEEL_PLAT.
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: ''
+
+      - name: Check the wheel carries riscv64 MuPDF libraries
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          EM_RISCV = 243
+          expected_prefixes = ("pymupdf/libmupdf.so", "pymupdf/libmupdfcpp.so")
+
+          for whl in sys.argv[1:]:
+              with zipfile.ZipFile(whl) as zf:
+                  names = zf.namelist()
+                  found = {p: None for p in expected_prefixes}
+                  for name in names:
+                      for p in expected_prefixes:
+                          if name.startswith(p) and found[p] is None:
+                              found[p] = name
+                  assert all(found.values()), (whl, found, names)
+                  for p, name in found.items():
+                      blob = zf.read(name)
+                      assert blob[:4] == b"\x7fELF", (name, blob[:4])
+                      machine = int.from_bytes(blob[18:20], "little")
+                      assert machine == EM_RISCV, (name, machine)
+                      print(name, "riscv64 ELF")
+                  assert any(n.endswith(".dist-info/COPYING") for n in names), names
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pymupdfb-${{ env.PYMUPDFB_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pymupdfb ${{ inputs.version || '1.24.10' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pymupdfb-${{ inputs.version || '1.24.10' }}-*-manylinux_riscv64
