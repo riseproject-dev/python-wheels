@@ -53,16 +53,26 @@ jobs:
           ref: pymongocrypt-${{ env.PYMONGOCRYPT_VERSION }}
           persist-credentials: false
 
+      # Without an explicit BUILD_VERSION, CMakeLists.txt falls back to a
+      # git-tag-walking calc_release_version.py that needs full, unshallowed
+      # history and finds no match on this shallow single-ref checkout,
+      # silently producing "0.0.0" - which then fails pymongocrypt's own
+      # _MIN_LIBMONGOCRYPT_VERSION >= 1.8.0 check at import time. Pin it to
+      # the same libmongocrypt release this pymongocrypt tag builds against.
       - name: Build libmongocrypt and package the pymongocrypt wheel
         run: |
           mkdir -p tmpwheelhouse wheelhouse
+          LIBMONGOCRYPT_VERSION=$(cat bindings/python/scripts/libmongocrypt-version.txt)
+          export LIBMONGOCRYPT_VERSION
           docker run --rm \
             -v "$(pwd)":/workspace \
             --workdir /workspace \
+            -e LIBMONGOCRYPT_VERSION \
             "${{ env.MANYLINUX_RISCV64_IMAGE }}" \
             bash -c '
               set -euo pipefail
               cmake -B build -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+                -DBUILD_VERSION="$LIBMONGOCRYPT_VERSION" \
                 -DDISABLE_NATIVE_CRYPTO=ON -DENABLE_ONLINE_TESTS=OFF -DBUILD_TESTING=OFF \
                 -DCMAKE_POSITION_INDEPENDENT_CODE=ON
               cmake --build build --target mongocrypt -j "$(nproc)"
@@ -99,12 +109,30 @@ jobs:
           . .venv/bin/activate
           pip install -q --upgrade pip
           pip install -q wheelhouse/*.whl
-          python3 -c "
+          LIBMONGOCRYPT_VERSION=$(cat bindings/python/scripts/libmongocrypt-version.txt) python3 -c "
+          import os
           from pymongocrypt.binding import libmongocrypt_version, lib
 
-          print('libmongocrypt version:', libmongocrypt_version())
+          assert libmongocrypt_version() == os.environ['LIBMONGOCRYPT_VERSION'], libmongocrypt_version()
           assert not lib.mongocrypt_is_crypto_available(), 'expected a nocrypto build'
+          print('libmongocrypt version:', libmongocrypt_version())
           "
+
+      # test_binding.py/test_crypto.py need only cffi/cryptography (already
+      # installed with the wheel) plus pytest; test_mongocrypt.py additionally
+      # needs pymongo[aws]/bson/httpx, which pull in pymongo-auth-aws - not
+      # yet on our registry - so it is left for a follow-up rather than
+      # widening this port's dependency surface. Copy test/ out of the
+      # checkout so pytest can't import the source pymongocrypt/ package
+      # (with its just-built libmongocrypt.so) instead of the installed wheel.
+      - name: Run upstream's binding and crypto unit tests against the wheel
+        run: |
+          . .venv/bin/activate
+          pip install -q pytest
+          mkdir -p /tmp/pymongocrypt-test/test
+          cp bindings/python/test/__init__.py bindings/python/test/test_binding.py bindings/python/test/test_crypto.py /tmp/pymongocrypt-test/test/
+          cd /tmp/pymongocrypt-test
+          python3 -m pytest -v test/test_binding.py test/test_crypto.py
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
