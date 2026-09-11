@@ -1,0 +1,140 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/Yikai-Liao/symusic/blob/v0.6.0/.github/workflows/wheel.yml
+name: Build symusic wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'symusic version/tag to build (git tag without leading v, e.g. 0.6.0)'
+        required: true
+        default: '0.6.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-symusic.yml'
+      - 'patches/symusic/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.6.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.6.0 there.
+  SYMUSIC_VERSION: ${{ inputs.version || '0.6.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build symusic ${{ inputs.version || '0.6.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # Upstream's own wheel.yml does not build cp314t for symusic 0.6.0; no
+        # published wheel exists for it either, so it is left out here too.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+
+    steps:
+      - name: Checkout symusic v${{ env.SYMUSIC_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Yikai-Liao/symusic
+          ref: v${{ env.SYMUSIC_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply python-wheels/patches/symusic/${{ env.SYMUSIC_VERSION }}/*.patch
+
+      # 3rdparty/{fmt,minimidi,pdqsort,zpp_bits,nanobind} and prestosynth's own
+      # 3rdparty/{mio,libsamplerate,eigen,gcem} are compiled into
+      # symusic/core*.so; the wheel otherwise carries only symusic's own
+      # LICENSE. scikit-build-core's default license-files glob only looks at
+      # the project root, so stage each one under a matching name.
+      - name: Stage the vendored dependencies' licences
+        run: |
+          cp 3rdparty/fmt/LICENSE LICENSE.fmt
+          cp 3rdparty/minimidi/LICENSE LICENSE.minimidi
+          cp 3rdparty/pdqsort/license.txt LICENSE.pdqsort
+          cp 3rdparty/zpp_bits/LICENSE LICENSE.zpp_bits
+          cp 3rdparty/nanobind/LICENSE LICENSE.nanobind
+          cp 3rdparty/prestosynth/3rdparty/mio/LICENSE LICENSE.mio
+          cp 3rdparty/prestosynth/3rdparty/libsamplerate/COPYING LICENSE.libsamplerate
+          cp 3rdparty/prestosynth/3rdparty/eigen/COPYING.MPL2 LICENSE.eigen
+          cp 3rdparty/prestosynth/3rdparty/gcem/LICENSE LICENSE.gcem
+          cp 3rdparty/prestosynth/3rdparty/gcem/NOTICE.txt NOTICE.gcem
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # cmake ships in the image but ninja does not, so scikit-build-core
+          # pulls ninja from pip; our registry lags PyPI's latest for both, so
+          # pin pip to our riscv64 wheels rather than PyPI's newest sdist-only
+          # versions (gotcha 84).
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=cmake,ninja
+          CIBW_TEST_REQUIRES: pytest mypy pretty_midi
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: cd {project} && python -m pytest -v tests
+          # numpy has no riscv64 wheel on public PyPI; keep pip on our registry's copy.
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for path in sys.argv[1:]:
+              names = zipfile.ZipFile(path).namelist()
+              assert any(n.endswith(".so") for n in names), (path, names)
+              assert any(n.endswith("/bin/abc2midi") for n in names), (path, names)
+              assert any(n.endswith("/bin/midi2abc") for n in names), (path, names)
+              licences = {n.rsplit("/", 1)[-1] for n in names
+                          if ".dist-info/licenses/" in n} - {""}
+              expected = {
+                  "LICENSE", "LICENSE_pyvec", "LICENSE_abcmidi",
+                  "LICENSE.fmt", "LICENSE.minimidi", "LICENSE.pdqsort",
+                  "LICENSE.zpp_bits", "LICENSE.nanobind", "LICENSE.mio",
+                  "LICENSE.libsamplerate", "LICENSE.eigen", "LICENSE.gcem",
+                  "NOTICE.gcem",
+              }
+              assert licences == expected, (path, licences)
+              print(path, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: symusic-${{ env.SYMUSIC_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish symusic ${{ inputs.version || '0.6.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: symusic-${{ inputs.version || '0.6.0' }}-*-manylinux_riscv64
