@@ -45,6 +45,12 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **351** — A project's own build script can gate a *sibling* vendored library's SIMD
   macros on `platform.machine() != "ppc64le"`, silently assuming "not ppc64le" means
   "x86 or ARM" — the hdf5plugin/c-blosc2 case.
+- **358** — `dnf`/`apk` installing an older cmake to satisfy gotcha 257 doesn't
+  necessarily make it the one that runs: both manylinux and musllinux riscv64 images
+  carry a pipx-installed cmake >= 4 earlier on `PATH` by default.
+- **359** — A CMake project forked from old LLVM sources can validate the host
+  architecture through *two* independent mechanisms — the vendored `utils/llvm-build`
+  Python tool has its own separate check and its own escape hatch.
 
 ---
 
@@ -907,3 +913,48 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
     from the project's own `py-cpuinfo` build dependency) before touching CI proves the
     fix produces identical macros for x86_64/aarch64/ppc64le/armv7l and none for riscv64,
     with no manylinux image or QEMU rehearsal needed.
+
+358. **`dnf`/`apk` installing an older cmake to satisfy gotcha 257 doesn't necessarily make
+    it the one that runs: both manylinux and musllinux riscv64 images carry a
+    pipx-installed cmake >= 4 earlier on `PATH` by default (the keystone-engine case).**
+    `dnf install -y cmake` lands `cmake-3.31.8` at `/usr/bin/cmake`; `apk add --no-cache
+    cmake` lands `cmake-3.31.7` at the Alpine equivalent — both genuinely satisfy a
+    project whose vendored `CMakeLists.txt` calls `cmake_policy(SET CMP0051 OLD)` (whose
+    `OLD` behaviour CMake 4.0 removed outright, a harder failure than gotcha 257's
+    `cmake_minimum_required` floor — no `CMAKE_POLICY_VERSION_MINIMUM` env var rescues
+    it). But the CI log still shows the error coming from
+    `/opt/_internal/pipx/venvs/cmake/.../cmake-4.4/Modules/...` — the image's own
+    pre-baked cmake, installed via pipx into a directory the image puts ahead of
+    `/usr/bin` on `PATH` by design (so a plain `pip install cmake` inside `before-build`
+    hits the same shadow, not just the system package manager path).
+    - **The fix is a dedicated one-binary `PATH` entry, not `PATH=/usr/bin:$PATH`.**
+      `mkdir -p /tmp/x-cmake && ln -sf /usr/bin/cmake /tmp/x-cmake/cmake`, then
+      `CIBW_ENVIRONMENT: PATH=/tmp/x-cmake:$PATH`, shadows only `cmake` and leaves
+      cibuildwheel's own interpreter resolution alone. Prepending the whole of
+      `/usr/bin` instead breaks a *different* thing on musllinux specifically: Alpine's
+      `python3` package (a dependency of `automake`/other `apk add` packages, or already
+      present) also lands a `python` at `/usr/bin/python`, and cibuildwheel's own
+      pre-build self-check ("python available on PATH doesn't match our installed
+      instance") aborts the build before it reaches the actual compile — a failure mode
+      that never shows up on manylinux (Rocky's base image has no bare `/usr/bin/python`
+      to collide with), so it only appears once the musllinux leg of the same matrix runs.
+
+359. **A CMake project forked from old LLVM sources can validate the host architecture
+    through *two* independent mechanisms — the vendored `utils/llvm-build` Python tool
+    has its own separate check and its own escape hatch (the keystone-engine case).**
+    Patching `config-ix.cmake`'s `LLVM_NATIVE_ARCH` if/elseif chain to add a `riscv64`
+    branch (gotcha for the "Unknown architecture" `FATAL_ERROR` it throws otherwise) is
+    only half the fix. That chain's job is just picking a *placeholder* string — mapping
+    to any of the project's own target names (`X86`, `ARM`, ...) or an invented one like
+    `RISCV` passes config-ix.cmake fine, since `LLVM_NATIVE_ARCH`'s only other consumer
+    there is a `list(FIND LLVM_TARGETS_TO_BUILD ...)` membership check that treats "not
+    found" as a harmless "native JIT unavailable" message. But `llvm/CMakeLists.txt`
+    separately shells out to `utils/llvm-build/llvm-build --native-target
+    "${LLVM_NATIVE_ARCH}"`, a Python tool that validates the value against real
+    `LLVMBuild.txt`-declared components and hard-errors `invalid native target: 'RISCV'
+    (not in project)` for anything that isn't one — including an invented placeholder
+    that happened to satisfy the CMake-side check. Read `llvmbuild/main.py`'s own
+    argument handling before picking a value: it special-cases the literal string
+    `"Unknown"` to mean "no native target" (`native_target_name = None`, skipping the
+    component lookup entirely) — the same state a real absent architecture already
+    reaches, and the only value that satisfies both checks at once.

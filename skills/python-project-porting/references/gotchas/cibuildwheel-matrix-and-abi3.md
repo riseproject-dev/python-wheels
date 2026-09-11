@@ -36,6 +36,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **324** — `{project}` is exactly the on-disk root of the checkout with no `path:` —
 - **331** — A platform-specific `[tool.cibuildwheel.<platform>].environment` table already
 - **356** — A pybind11 3.x CMake build can silently target the wrong Python on cp314t.
+- **360** — A `setup.py`'s own `bdist_wheel --plat-name` insertion can hardcode
+  `manylinux1_` + `platform.machine()` regardless of the actual container libc, making
+  musllinux unbuildable no matter how the CMake/C++ side is patched.
 
 ---
 
@@ -728,3 +731,31 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
        any interpreter if a same-or-higher-versioned Python happens to be independently
        discoverable; cp314t is just where it surfaced here, because the image's bundled
        Python outranked every GIL-ful target's own version but not (correctly) itself.
+
+360. **A `setup.py`'s own `bdist_wheel --plat-name` insertion can hardcode `manylinux1_` +
+    `platform.machine()` regardless of the actual container libc, making musllinux
+    unbuildable no matter how the CMake/C++ side is patched (the keystone-engine case).**
+    Gotcha 34 covers a project's own `--plat-name` insertion as a *matrix-collapsing*
+    device; this is the same mechanism causing a *matrix-shrinking* failure instead.
+    keystone-engine's setup.py — written before musllinux (PEP 656) existed — does
+    `if 'linux' in get_platform(): sys.argv.insert(idx+1, 'manylinux1_' +
+    platform.machine())` unconditionally, so the wheel it hands to `auditwheel repair`
+    is always named `..._manylinux1_riscv64.whl`, even when the actual build ran inside
+    the musllinux image and produced a musl-linked `.so`. `auditwheel repair` trusts the
+    filename's plat tag as the *source* libc family, not the binary's actual linkage, and
+    refuses outright: `error: can't repair wheel ..._manylinux1_riscv64.whl with GLIBC
+    libc to a wheel targeting MUSL` — a red herring that reads like a real glibc/musl
+    toolchain mismatch but isn't one; the C++ build itself is unaffected and correctly
+    musl-linked.
+    - **Check whether a same-author sibling project already carries the fix before
+      writing a patch.** capstone-engine (keystone-engine's own sibling, same maintainer,
+      near-identical `bindings/python/setup.py` history) fixed this exact bug upstream
+      (capstone#2445) by dropping the hardcoded `manylinux1_` prefix entirely and just
+      using `get_platform().replace('.', '_').replace('-', '_')` — i.e. `linux_riscv64`,
+      a libc-neutral tag `auditwheel repair` can freely retarget to either family. A
+      pinned older release that predates a sibling's fix can't take it via upgrade, and
+      backporting the one-line diff via `patches/<pkg>/<version>/` is an option — but
+      dropping musllinux from the matrix entirely (matching upstream's own CI, which for
+      keystone-engine never built musllinux either — see gotcha 34's "the default four"
+      logic) is the lower-risk, upstream-faithful choice when this is caught on the first
+      port rather than treated as a regression to fix.

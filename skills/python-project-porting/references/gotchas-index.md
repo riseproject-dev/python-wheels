@@ -148,6 +148,9 @@ The porting gotchas (331 of them) live in [`references/gotchas/`](gotchas/), spl
 - **324** — `{project}` is exactly the on-disk root of the checkout with no `path:` —
 - **331** — A platform-specific `[tool.cibuildwheel.<platform>].environment` table already
 - **356** — A pybind11 3.x CMake build can silently target the wrong Python on cp314t —
+- **360** — A `setup.py`'s own `bdist_wheel --plat-name` insertion can hardcode
+  `manylinux1_` + `platform.machine()` regardless of the actual container libc, making
+  musllinux unbuildable no matter how the CMake/C++ side is patched.
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
@@ -260,6 +263,12 @@ The porting gotchas (331 of them) live in [`references/gotchas/`](gotchas/), spl
 - **337** — lexbor, re2 and uchardet are absent from Rocky 10's baseos/appstream/crb on
 - **351** — A project's own build script can gate a sibling vendored library's SIMD
   macros on `platform.machine() != "ppc64le"`, assuming "not ppc64le" means "x86 or ARM".
+- **358** — `dnf`/`apk` installing an older cmake to satisfy gotcha 257 doesn't necessarily
+  make it the one that runs: both manylinux and musllinux riscv64 images carry a
+  pipx-installed cmake >= 4 earlier on `PATH` by default.
+- **359** — A CMake project forked from old LLVM sources can validate the host
+  architecture through two independent mechanisms — the vendored `utils/llvm-build`
+  Python tool has its own separate check and its own escape hatch.
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
