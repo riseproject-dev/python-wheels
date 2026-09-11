@@ -17,6 +17,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
 - **163** — A maintainer hold that *names* a condition is an instruction to come back and
 - **173** — `gh pr list --state open --head <pkg>` does not see a *merged* PR, so a finished
 - **208** — A fresh `main` publish dispatch finishing green does not mean
+- **357** — A single combined-interpreter build job's artifact name needs to match the
 
 ---
 
@@ -273,3 +274,27 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
     gotcha 173's `HTTPError: 400 Bad Request` re-upload for no reason. Confirm the
     dispatch worked from the run's own conclusion and the release, not from the index;
     a `404` a few minutes old is not yet evidence of anything.
+
+357. **A single combined-interpreter build job's artifact name needs to match the
+    `publish` job's `artifact-pattern` exactly — the usual `-*-` wildcard assumes a
+    per-interpreter matrix and silently never matches a one-job build.** Most ports
+    matrix `cp312`/`cp313`/.../`cp314t` across separate jobs, each uploading its own
+    artifact tagged with the interpreter (`<pkg>-<version>-cp312-manylinux_riscv64`,
+    etc.), so `_publish-wheel.yml`'s `artifact-pattern: <pkg>-<version>-*-manylinux_riscv64`
+    globs across all of them. A port whose build genuinely can't be split per-interpreter
+    (skia-python's single Skia compile shared across all four Pythons in one job;
+    praat-parselmouth's ~1M-line vendored-Praat compile, same shape) uploads exactly
+    *one* artifact with no interpreter segment — `<pkg>-<version>-manylinux_riscv64` —
+    and the wildcard pattern never matches it. The build job itself goes green (wheels
+    built, tests passed); only the separate `publish` job fails, with
+    `SystemExit: No wheels found in dist` from `_publish-wheel.yml`'s own glob. Fix by
+    dropping the `-*-` from that port's `artifact-pattern` to match the single upload
+    name exactly, not by adding a fake wildcard segment to the upload. Hit identically
+    on skia-python and praat-parselmouth, both single-job multi-interpreter builds.
+    - **`gh run rerun --failed` will not validate this fix.** It replays the workflow
+      YAML as it existed at that run's original trigger, not the branch's current HEAD
+      — confirmed by inspecting a rerun's job log, which still showed the pre-fix
+      `artifact-pattern`. Dispatch a fresh run (`gh workflow run` or a new commit)
+      instead; for a multi-hour single-job build this means eating a full rebuild to
+      re-validate just the publish-job config, since the build and publish jobs are
+      not independently re-runnable once the artifact-pattern itself was wrong.
