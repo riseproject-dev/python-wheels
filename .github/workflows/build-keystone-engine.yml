@@ -64,18 +64,24 @@ jobs:
           # setup.py shells out to `cmake`/`make` directly (make-share.sh); neither is
           # a declared build dep. Installed from the image's own package manager rather
           # than pip: pypi.riseproject.dev carries no musllinux riscv64 cmake wheel at
-          # all, and lags PyPI's own latest cmake for manylinux too (gotcha 84).
+          # all, and lags PyPI's own latest cmake for manylinux too (gotcha 84) - and
+          # both give a cmake < 4, needed below. The vendored llvm/cmake/config.guess is
+          # stamped 2011, predates riscv64, and fails "unable to guess system type"; the
+          # automake package's copy already knows riscv64 (gotcha 138).
           CIBW_BEFORE_ALL_LINUX: |
             set -ex
             if command -v apk > /dev/null; then
-              apk add --no-cache cmake
+              apk add --no-cache cmake automake
             else
-              dnf install -y cmake
+              dnf install -y cmake automake
             fi
-          # The vendored LLVM 3.9-era CMakeLists.txt files declare
-          # cmake_minimum_required(VERSION 2.8.7); CMake >= 4.0 hard-errors on that
-          # floor unless told to accept it (gotcha 257).
-          CIBW_ENVIRONMENT: CMAKE_POLICY_VERSION_MINIMUM=3.5
+            cp /usr/share/automake-*/config.guess llvm/cmake/config.guess
+          # Both images also carry a newer cmake (>= 4) ahead on PATH by default; that
+          # version hard-rejects CMakeLists.txt's `cmake_policy(SET CMP0051 OLD)`
+          # ("no longer supports it"), where the one just installed above still can.
+          # CMAKE_POLICY_VERSION_MINIMUM=3.5 covers cmake_minimum_required(VERSION 2.8.7)
+          # similarly, should PATH resolution ever pick the newer cmake up again.
+          CIBW_ENVIRONMENT: CMAKE_POLICY_VERSION_MINIMUM=3.5 PATH=/usr/bin:$PATH
           CIBW_TEST_SOURCES: bindings/python/sample.py
           CIBW_TEST_COMMAND: python bindings/python/sample.py
 
