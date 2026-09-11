@@ -1469,3 +1469,44 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       copies (`cp`, `symlink`, genrule `srcs`) versus what it only reads as text** (header
       trees are portable; a `.so`/`.a`/`.lib` it also copies is not) before concluding a
       Google-ML-stack sibling package inherits gotcha 132's clean bill of health.
+
+366. **A genuinely-compilable CMake C++ library can still be `not-feasible` when its kernel
+    code is gated to specific SIMD ISAs with no portable/scalar fallback anywhere in the
+    build (the embreex/Embree case).** embreex itself is a thin Cython binding that builds
+    trivially; the blocker is the Embree ray-tracing kernel library it links against.
+    embreex's own `before-build` step (`package/fetch-embree.py`) downloads Embree's
+    prebuilt release archive, and RenderKit/embree's GitHub Releases publish
+    `x86_64-linux`, `x86_64`/`arm64`-`macos`, and `x64`-`windows` only (confirmed against
+    the real v4.4.0 release assets) — no riscv64, so building Embree from source is the
+    only route in. Embree's own `CMakeLists.txt` platform detection recognizes exactly two
+    families: `EMBREE_ARM` (Apple silicon, or `CMAKE_SYSTEM_PROCESSOR` == `aarch64`/`ARM64`)
+    or, for everything else, `EMBREE_MAX_ISA` defaulting through to `SSE2`
+    (`common/simd/sse.h` and friends use `__m128`/`_mm_*` intrinsics unconditionally outside
+    the ARM branch). There is no third "generic"/"portable"/"scalar" option — unlike gotcha
+    276's isal case, `EMBREE_MAX_ISA`'s own `STRINGS` property lists only
+    `NONE NEON NEON2X` (ARM) or `NONE SSE2 SSE4.2 AVX AVX2 AVX512 DEFAULT` (everything else).
+    riscv64 matches neither family, silently falls into the x86 SSE2 default, and fails to
+    compile (`xmmintrin.h` doesn't exist for a riscv64-targeted GCC). Confirmed no RISC-V
+    work exists anywhere upstream: `common/simd/` has an `arm/` shim
+    (`sse2neon.h`/`avx2neon.h`) but no riscv equivalent, a GitHub code search across
+    `RenderKit/embree` for "riscv" returns zero hits (both the v4.4.0 tag and current
+    `master`), and Embree's own project site documents support for x86 (Linux/macOS/Windows)
+    and ARM (macOS) CPUs plus Intel Arc GPUs only. Closing this gap would mean writing a full
+    SSE/AVX-to-RVV translation shim covering the hundreds of intrinsics Embree's kernels use
+    — a new engineering project for *upstream*, not a `patches/<pkg>/<version>/` fix — and it
+    would not "closely mirror upstream's own CI, narrowed to riscv64" (goal 2: upstream has
+    no riscv64 CI or code path to narrow). Parked (`.queue.yml`); no worktree/branch/PR
+    created — resolved read-only from the real v4.4.0 `pyproject.toml`/`setup.py`/
+    `package/fetch-embree.py`/`package/embree.json` (embreex) and the real
+    `CMakeLists.txt`/`common/simd/*` (Embree).
+    - **A CMake C++ port isn't cleared by "does it compile a real amount of code" (gotcha 41)
+      alone — check whether the kernel-level code is SIMD-ISA-gated with no scalar/portable
+      path**, the same way gotcha 276 checks a Makefile-driven library for a `base`/`generic`
+      fallback variable: read the platform-detection block of the top-level `CMakeLists.txt`
+      for an explicit non-x86/non-ARM branch, and check whatever cache variable selects the
+      ISA for a `NONE`/`generic`/`portable` value in its own allowed-`STRINGS` list, before
+      assuming "it's CMake, so it's portable".
+    - **A vendored dependency fetched via a prebuilt-binary `before-build` step (gotcha 35's
+      shape) can hide a *second*, deeper blocker even after deciding to build it from source
+      instead**: the source itself can carry the same architecture ceiling as the binaries it
+      normally downloads.

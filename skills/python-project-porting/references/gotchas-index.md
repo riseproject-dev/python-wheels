@@ -82,6 +82,9 @@ The porting gotchas (348 of them) live in [`references/gotchas/`](gotchas/), spl
   still be blocked because its `WORKSPACE` links the extension directly against a *live,
   pip-installed* sibling package's compiled library, not just its headers (the
   tensorflow-io-gcs-filesystem case).
+- **366** — A genuinely-compilable CMake C++ library can still be `not-feasible` when its
+  kernel code is gated to specific SIMD ISAs with no portable/scalar fallback anywhere in the
+  build (the embreex/Embree case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
