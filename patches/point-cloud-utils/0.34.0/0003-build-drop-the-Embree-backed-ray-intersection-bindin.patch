@@ -1,0 +1,486 @@
+From 21c9d4e8bad75724335195c63adf784cc098a36f Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 11 Sep 2026 16:48:28 +0200
+Subject: [PATCH 3/3] build: drop the Embree-backed ray-intersection bindings
+
+Embree's CMake ISA detection (EMBREE_MAX_ISA=DEFAULT) only recognizes
+x86 (SSE2..AVX512) and ARM (NEON/NEON2X) CMAKE_SYSTEM_PROCESSOR
+values; riscv64 has no Embree ISA at all (same finding as the riscv64
+libigl port, which carries the identical CMakeLists.txt shape and
+drops Embree via LIBIGL_EMBREE=OFF). Unlike libigl, Embree isn't behind
+a CMake option here -- it's unconditionally download_dep()'d and
+target_link_libraries()'d into _pcu_internal -- so removing it means
+removing every binding that calls into it:
+
+- src/ray_mesh_intersection.cpp (ray_mesh_intersection,
+  _RayMeshIntersectorInternal, and the RayMeshIntersector class'
+  internal helpers) is deleted outright; nothing else in the tree
+  references it.
+- src/ray_point_cloud_intersection.cpp keeps
+  point_cloud_splatting_geometry_internal_ (pure geometry generation,
+  no Embree, and imported at module scope by
+  point_cloud_utils/_point_cloud_geometry.py so the package must keep
+  importing cleanly) and drops the three Embree-backed functions plus
+  the now-unused trace_rays_point_cloud/validate_rays helpers.
+- point_cloud_utils/__init__.py drops the top-level
+  ray_mesh_intersection import (that symbol no longer exists in
+  _pcu_internal). RayMeshIntersector/RaySurfelIntersector/
+  ray_surfel_intersection stay importable -- their _pcu_internal
+  lookups are already lazy (inside __init__/call bodies), so only
+  calling them now raises ImportError naming the missing symbol,
+  matching how the rest of the package behaves when a feature isn't
+  built in.
+
+Ray-mesh/ray-surfel intersection is unavailable in the riscv64 wheel;
+everything else (sampling, normals, marching cubes, decimation, mesh
+IO, signed distance, KNN, Hausdorff/Chamfer distance, morton codes,
+voxelization, connected components, curvature, smoothing, winding
+numbers, Lloyd relaxation, adjacency lists, splat geometry) is
+unaffected.
+
+Upstream-Status: Inappropriate [riscv64-only build config; Embree works fine for every architecture upstream actually builds for (x86_64/aarch64/macOS/Windows), this narrows only the riscv64 wheel]
+---
+ CMakeLists.txt                       |  26 ----
+ point_cloud_utils/__init__.py        |   2 +-
+ src/ray_mesh_intersection.cpp        | 177 ---------------------------
+ src/ray_point_cloud_intersection.cpp | 147 ----------------------
+ 4 files changed, 1 insertion(+), 351 deletions(-)
+ delete mode 100644 src/ray_mesh_intersection.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1078118..3d050ad 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -109,27 +109,6 @@ endif()
+ #  target_compile_definitions(Eigen3::Eigen INTERFACE EIGEN_USE_MKL_ALL)
+ #endif(${EIGEN_WITH_MKL})
+ 
+-# Embree
+-set(EMBREE_DIR "${EXTERNAL_DEP_DIR}/embree")
+-if(NOT TARGET embree)
+-  download_dep(embree
+-               GIT_REPOSITORY https://github.com/embree/embree.git
+-               GIT_TAG        v4.3.3
+-  )
+-
+-  # Note: On macOS, building embree as a static lib can only be done with a single ISA target.
+-  set(EMBREE_MAX_ISA "DEFAULT" CACHE STRING "Selects highest ISA to support.")
+-  set(EMBREE_TESTING_INTENSITY 0 CACHE STRING "")
+-  set(EMBREE_ISPC_SUPPORT OFF CACHE BOOL " ")
+-  set(EMBREE_TASKING_SYSTEM "INTERNAL" CACHE BOOL " ")
+-  set(EMBREE_TUTORIALS OFF CACHE BOOL " ")
+-  set(EMBREE_STATIC_LIB ON CACHE BOOL " ")
+-  if(MSVC)
+-    set(EMBREE_STATIC_RUNTIME ON CACHE BOOL "Use the static version of the C/C++ runtime library.")
+-  endif()
+-
+-  add_subdirectory("${EMBREE_DIR}" "embree" EXCLUDE_FROM_ALL)
+-endif()
+ #compile_igl_module("embree")
+ #target_link_libraries(igl_embree INTERFACE embree)
+ #target_include_directories(igl_embree INTERFACE ${EMBREE_DIR}/include)
+@@ -172,7 +151,6 @@ set(PCU_BINDING_SOURCES
+   ${CMAKE_CURRENT_SOURCE_DIR}/src/signed_distance.cpp
+   ${CMAKE_CURRENT_SOURCE_DIR}/src/closest_point_on_mesh.cpp
+   ${CMAKE_CURRENT_SOURCE_DIR}/src/connected_components.cpp
+-  ${CMAKE_CURRENT_SOURCE_DIR}/src/ray_mesh_intersection.cpp
+   ${CMAKE_CURRENT_SOURCE_DIR}/src/ray_point_cloud_intersection.cpp
+   ${CMAKE_CURRENT_SOURCE_DIR}/src/smooth.cpp
+   ${CMAKE_CURRENT_SOURCE_DIR}/src/manifold.cpp
+@@ -199,13 +177,11 @@ npe_add_module(_pcu_internal
+   ${PCU_BINDING_SOURCES}
+   EXTRA_MODULE_FUNCTIONS
+   hack_extra_bindings
+-  hack_extra_ray_mesh_bindings
+ )
+ 
+ # TODO: Make common into its own library that we link statically
+ target_sources(_pcu_internal PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/common/morton_code.cpp)
+ target_sources(_pcu_internal PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/common/geogram_utils.cpp)
+-target_sources(_pcu_internal PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/common/embree_intersector.cpp)
+ # target_sources(_pcu_internal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/external/tinyply/source/tinyply.cpp)
+ target_include_directories(_pcu_internal PRIVATE ${EXTERNAL_DEP_DIR}/tinyply/source)
+ target_include_directories(_pcu_internal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+@@ -213,8 +189,6 @@ target_include_directories(_pcu_internal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/ext
+ target_include_directories(_pcu_internal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/external)
+ target_include_directories(_pcu_internal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/external/igl/include)
+ target_include_directories(_pcu_internal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/external/tinyobjloader)
+-target_include_directories(_pcu_internal PRIVATE ${EMBREE_DIR}/include)
+-target_link_libraries(_pcu_internal PRIVATE embree)
+ target_link_libraries(_pcu_internal PRIVATE geogram)
+ target_link_libraries(_pcu_internal PRIVATE manifold)
+ # target_link_libraries(_pcu_internal PRIVATE mls_utils)
+diff --git a/point_cloud_utils/__init__.py b/point_cloud_utils/__init__.py
+index 3838b4c..8e93d6b 100644
+--- a/point_cloud_utils/__init__.py
++++ b/point_cloud_utils/__init__.py
+@@ -8,7 +8,7 @@ from ._pcu_internal import sample_mesh_poisson_disk, sample_mesh_random, \
+     morton_encode, morton_decode, morton_knn, \
+     lloyd_2d, lloyd_3d, voronoi_centroids_unit_cube, sample_mesh_lloyd, \
+     deduplicate_point_cloud, deduplicate_mesh_vertices, signed_distance_to_mesh, \
+-    closest_points_on_mesh, connected_components, ray_mesh_intersection, laplacian_smooth_mesh, \
++    closest_points_on_mesh, connected_components, laplacian_smooth_mesh, \
+     make_mesh_watertight, \
+     morton_add, morton_subtract, point_cloud_fast_winding_number, \
+     sparse_voxel_grid_boundary, marching_cubes_sparse_voxel_grid, decimate_triangle_mesh, \
+diff --git a/src/ray_mesh_intersection.cpp b/src/ray_mesh_intersection.cpp
+deleted file mode 100644
+index 2d2065f..0000000
+--- a/src/ray_mesh_intersection.cpp
++++ /dev/null
+@@ -1,177 +0,0 @@
+-#include <npe.h>
+-#include <common/embree_intersector.h>
+-#include <tuple>
+-#include <numeric>
+-
+-#include "common/common.h"
+-
+-namespace py = pybind11;
+-
+-using Intersector = EmbreeIntersector;
+-void hack_extra_ray_mesh_bindings(pybind11::module& m) {
+-    py::class_<Intersector, std::shared_ptr<Intersector>>(m, "_RayMeshIntersectorInternal")
+-    .def(py::init([]() {
+-        return std::shared_ptr<Intersector>(new EmbreeIntersector());
+-    }));
+-}
+-
+-
+-npe_function(_populate_ray_intersector_internal)
+-npe_arg(v, dense_float, dense_double)
+-npe_arg(f, dense_int32, dense_int64, dense_uint32, dense_uint64)
+-npe_arg(isector, std::shared_ptr<EmbreeIntersector>)
+-npe_begin_code()
+-    EmbreeIntersector::PointMatrixType v_copy = v.template cast<float>();
+-    EmbreeIntersector::FaceMatrixType f_copy = f.template cast<int>();
+-    isector->init(v_copy, f_copy, true /*is_static*/);
+-npe_end_code()
+-
+-
+-npe_function(_intersect_ray_intersector_internal)
+-npe_arg(ray_o, dense_float, dense_double)
+-npe_arg(ray_d, npe_matches(ray_o))
+-npe_arg(isector, std::shared_ptr<Intersector>)
+-npe_default_arg(ray_near, double, 0.0)
+-npe_default_arg(ray_far, double, std::numeric_limits<double>::infinity())
+-npe_begin_code()
+-    bool use_single_ray_origin = false;
+-    if (ray_o.size() == 3) {
+-        use_single_ray_origin = true;
+-    } else {
+-        if (ray_o.rows() != ray_d.rows()) {
+-            throw pybind11::value_error("ray_o and ray_d must have the same number of rows (one ray origin per ray direction). "
+-                                        "(Note: ray_o can have one row to use the same origin for all directions)");
+-        }
+-    }
+-
+-    if (ray_o.cols() != 3 && !use_single_ray_origin) {
+-        throw pybind11::value_error("Invalid shape for ray_o must have shape (N, 3) but got (" +
+-                                    std::to_string(ray_o.rows()) + ", " + std::to_string(ray_o.cols()) + ").");
+-    }
+-    if (ray_d.cols() != 3) {
+-        throw pybind11::value_error("Invalid shape for ray_d must have shape (N, 3) but got (" +
+-                                    std::to_string(ray_d.rows()) + ", " + std::to_string(ray_d.cols()) + ").");
+-    }
+-
+-    EigenDense<int> ret_fid(ray_d.rows(), 1);
+-    npe_Matrix_ray_o ret_bc(ray_d.rows(), 3);
+-    npe_Matrix_ray_o ret_t(ray_d.rows(), 1);
+-    for (int i = 0; i < ray_d.rows(); i++) {
+-        Eigen::RowVector3f o_i;
+-        if (use_single_ray_origin) {
+-            o_i = Eigen::RowVector3f((float)ray_o(0, 0), (float)ray_o(1, 0), (float)ray_o(2, 0));
+-        } else {
+-            o_i = Eigen::RowVector3f((float)ray_o(i, 0), (float)ray_o(i, 1), (float)ray_o(i, 2));
+-        }
+-        Eigen::RowVector3f d_i((float)ray_d(i, 0), (float)ray_d(i, 1), (float)ray_d(i, 2));
+-        Hit hit;
+-
+-        bool is_hit = isector->intersectRay(o_i, d_i, hit, ray_near, ray_far);
+-        if (is_hit) {
+-            ret_fid(i, 0) = (int) hit.id;
+-            ret_bc(i, 0) = 1.0 - hit.u - hit.v;
+-            ret_bc(i, 1) = hit.u;
+-            ret_bc(i, 2) = hit.v;
+-            ret_t(i, 0) = hit.t;
+-        } else {
+-            ret_fid(i, 0) = -1;
+-            ret_t(i, 0) = std::numeric_limits<npe_Scalar_ray_o>::infinity();
+-            ret_bc(i, 0) = 0.0;
+-            ret_bc(i, 1) = 0.0;
+-            ret_bc(i, 2) = 0.0;
+-        }
+-
+-    }
+-
+-    return std::make_tuple(npe::move(ret_fid), npe::move(ret_bc), npe::move(ret_t));
+-npe_end_code()
+-
+-
+-
+-const char* ray_mesh_intersection_doc = R"Qu8mg5v7(
+-Compute intersection between a set of rays and a triangle mesh
+-
+-Args:
+-    v : \#v by 3 array of vertex positions (each row is a vertex)
+-    f : \#f by 3 Matrix of face (triangle) indices
+-    ray_o : array of shape (#rays, 3) of ray origins (one per row) or a single array of shape (3,) to use
+-    ray_d : array of shape (#rays, 3) of ray directions (one per row)
+-    ray_near : an optional floating point value indicating the distance along each ray to start searching (default 0.0)
+-    ray_far : an optional floating point value indicating the maximum distance along each ray to search (default inf)
+-
+-Returns:
+-    f_id : an array of shape (#rays,) representing the face id hit by each ray
+-    bc : an array of shape (#rays, 3) where each row is the barycentric coordinates within each face of the ray intersection
+-    t : the distance along each ray to the intersection
+-)Qu8mg5v7";
+-npe_function(ray_mesh_intersection)
+-npe_arg(v, dense_float, dense_double)
+-npe_arg(f, dense_int32, dense_int64, dense_uint32, dense_uint64)
+-npe_arg(ray_o, npe_matches(v))
+-npe_arg(ray_d, npe_matches(v))
+-npe_default_arg(ray_near, double, 0.0)
+-npe_default_arg(ray_far, double, std::numeric_limits<double>::infinity())
+-npe_doc(ray_mesh_intersection_doc)
+-npe_begin_code()
+-{
+-    bool use_single_ray_origin = false;
+-    if (ray_o.size() == 3) {
+-        use_single_ray_origin = true;
+-    } else {
+-        if (ray_o.rows() != ray_d.rows()) {
+-            throw pybind11::value_error("ray_o and ray_d must have the same number of rows (one ray origin per ray direction). "
+-                                        "(Note: ray_o can have one row to use the same origin for all directions)");
+-        }
+-    }
+-
+-    if (ray_o.cols() != 3 && !use_single_ray_origin) {
+-        throw pybind11::value_error("Invalid shape for ray_o must have shape (N, 3) but got (" +
+-                                    std::to_string(ray_o.rows()) + ", " + std::to_string(ray_o.cols()) + ").");
+-    }
+-    if (ray_d.cols() != 3) {
+-        throw pybind11::value_error("Invalid shape for ray_d must have shape (N, 3) but got (" +
+-                                    std::to_string(ray_d.rows()) + ", " + std::to_string(ray_d.cols()) + ").");
+-    }
+-    validate_mesh(v, f);
+-
+-
+-    EmbreeIntersector isector;
+-
+-    EmbreeIntersector::PointMatrixType v_copy = v.template cast<float>();
+-    EmbreeIntersector::FaceMatrixType f_copy = f.template cast<int>();
+-    isector.init(v_copy, f_copy, true /*is_static*/);
+-
+-    npe_Matrix_f ret_fid(ray_d.rows(), 1);
+-    npe_Matrix_v ret_bc(ray_d.rows(), 3);
+-    npe_Matrix_v ret_t(ray_d.rows(), 1);
+-    for (int i = 0; i < ray_d.rows(); i++) {
+-        Eigen::RowVector3f o_i;
+-        if (use_single_ray_origin) {
+-            o_i = Eigen::RowVector3f((float)ray_o(0, 0), (float)ray_o(1, 0), (float)ray_o(2, 0));
+-        } else {
+-            o_i = Eigen::RowVector3f((float)ray_o(i, 0), (float)ray_o(i, 1), (float)ray_o(i, 2));
+-        }
+-        Eigen::RowVector3f d_i((float)ray_d(i, 0), (float)ray_d(i, 1), (float)ray_d(i, 2));
+-        Hit hit;
+-
+-        bool is_hit = isector.intersectRay(o_i, d_i, hit, ray_near, ray_far);
+-        if (is_hit) {
+-            ret_fid(i, 0) = (npe_Scalar_f) hit.id;
+-            ret_bc(i, 0) = 1.0 - hit.u - hit.v;
+-            ret_bc(i, 1) = hit.u;
+-            ret_bc(i, 2) = hit.v;
+-            ret_t(i, 0) = hit.t;
+-        } else {
+-            ret_fid(i, 0) = -1;
+-            ret_t(i, 0) = std::numeric_limits<npe_Scalar_v>::infinity();
+-            ret_bc(i, 0) = 0.0;
+-            ret_bc(i, 1) = 0.0;
+-            ret_bc(i, 2) = 0.0;
+-        }
+-
+-    }
+-
+-    return std::make_tuple(npe::move(ret_fid), npe::move(ret_bc), npe::move(ret_t));
+-
+-}
+-npe_end_code()
+diff --git a/src/ray_point_cloud_intersection.cpp b/src/ray_point_cloud_intersection.cpp
+index b9fff2e..1ea9d1e 100644
+--- a/src/ray_point_cloud_intersection.cpp
++++ b/src/ray_point_cloud_intersection.cpp
+@@ -1,5 +1,4 @@
+ #include <npe.h>
+-#include <common/embree_intersector.h>
+ #include <tuple>
+ #include <numeric>
+ 
+@@ -24,28 +23,6 @@ namespace {
+         }
+     }
+ 
+-    template <typename T1, typename T2>
+-    bool validate_rays(T1 ray_o, T2 ray_d) {
+-        bool use_single_ray_origin = false;
+-        if (ray_o.size() == 3) {
+-            use_single_ray_origin = true;
+-        } else {
+-            if (ray_o.rows() != ray_d.rows()) {
+-                throw pybind11::value_error("ray_o and ray_d must have the same number of rows (one ray origin per ray direction). "
+-                                            "(Note: ray_o can have one row to use the same origin for all directions)");
+-            }
+-        }
+-        if (ray_o.cols() != 3 && !use_single_ray_origin) {
+-            throw pybind11::value_error("Invalid shape for ray_o must have shape (N, 3) but got (" +
+-                                        std::to_string(ray_o.rows()) + ", " + std::to_string(ray_o.cols()) + ").");
+-        }
+-        if (ray_d.cols() != 3) {
+-            throw pybind11::value_error("Invalid shape for ray_d must have shape (N, 3) but got (" +
+-                                        std::to_string(ray_d.rows()) + ", " + std::to_string(ray_d.cols()) + ").");
+-        }
+-        return use_single_ray_origin;
+-    }
+-
+     template <typename T1, typename T2, typename T3>
+     GeometryType validate_point_geometry(T1 v, T2 n, T3 geometry_radius, int geometry_subdivisions_1, int geometry_subdivisions_2, std::string geometry_type) {
+         validate_point_cloud_normals(v, n);
+@@ -236,87 +213,7 @@ namespace {
+         return num_faces_per_geom;
+     }
+ 
+-    template <typename TRO, typename TRD>
+-    void trace_rays_point_cloud(const TRO& ray_o, const TRD& ray_d, double ray_near, double ray_far,
+-                                bool use_single_ray_origin,
+-                                int num_faces_per_geometry,
+-                                const EmbreeIntersector& isector,
+-                                Eigen::Matrix<typename TRO::Scalar, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>& out_t,
+-                                Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>& out_pid) {
+-        for (int i = 0; i < ray_d.rows(); i++) {
+-            Eigen::RowVector3f o_i;
+-            if (use_single_ray_origin) {
+-                o_i = Eigen::RowVector3f((float) ray_o(0, 0), (float) ray_o(1, 0), (float) ray_o(2, 0));
+-            } else {
+-                o_i = Eigen::RowVector3f((float) ray_o(i, 0), (float) ray_o(i, 1), (float) ray_o(i, 2));
+-            }
+-            Eigen::RowVector3f d_i((float) ray_d(i, 0), (float) ray_d(i, 1), (float) ray_d(i, 2));
+-            Hit hit;
+-
+-            bool is_hit = isector.intersectRay(o_i, d_i, hit, ray_near, ray_far);
+-            if (is_hit) {
+-                out_pid(i, 0) = (int) hit.id / num_faces_per_geometry;
+-                out_t(i, 0) = (typename TRO::Scalar) hit.t;
+-            } else {
+-                out_pid(i, 0) = -1;
+-                out_t(i, 0) = std::numeric_limits<typename TRO::Scalar>::infinity();
+-            }
+-        }
+-    }
+-}
+-
+-npe_function(_populate_ray_point_cloud_intersector_internal)
+-npe_arg(v, dense_float, dense_double)
+-npe_arg(n, npe_matches(v))
+-npe_arg(geometry_type, std::string)
+-npe_arg(geometry_radius, npe_matches(v))
+-npe_default_arg(geometry_subdivisions_1, int, 4)
+-npe_default_arg(geometry_subdivisions_2, int, 4)
+-npe_arg(isector, std::shared_ptr<EmbreeIntersector>)
+-npe_begin_code()
+-    using MatrixI = Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+-    using MatrixF = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+-
+-    GeometryType geom_type = validate_point_geometry(v, n, geometry_radius,
+-                                                     geometry_subdivisions_1,
+-                                                     geometry_subdivisions_2,
+-                                                     geometry_type);
+-    MatrixF geom_vertices;
+-    MatrixI geom_faces;
+-
+-    int num_faces_per_geometry = generate_splat_geometry(geom_type, geometry_subdivisions_1, geometry_subdivisions_2,
+-                                                         v, n, geometry_radius, geom_vertices, geom_faces);
+-    isector->init(geom_vertices, geom_faces, true /*is_static*/);
+-
+-    return num_faces_per_geometry;
+-npe_end_code()
+-
+-
+-npe_function(_intersect_ray_point_cloud_intersector_internal)
+-npe_arg(ray_o, dense_float, dense_double)
+-npe_arg(ray_d, npe_matches(ray_o))
+-npe_arg(isector, std::shared_ptr<EmbreeIntersector>)
+-npe_arg(num_faces_per_geometry, int)
+-npe_default_arg(ray_near, double, 0.0)
+-npe_default_arg(ray_far, double, std::numeric_limits<double>::infinity())
+-npe_begin_code()
+-{
+-    using MatrixI = Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+-    using MatrixFOut = Eigen::Matrix<npe_Scalar_ray_o, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+-
+-    bool use_single_ray_origin = validate_rays(ray_o, ray_d);
+-
+-    MatrixI ret_pid(ray_d.rows(), 1);
+-    MatrixFOut ret_t(ray_d.rows(), 1);
+-
+-    trace_rays_point_cloud(ray_o, ray_d, ray_near, ray_far,
+-                           use_single_ray_origin, num_faces_per_geometry,
+-                           *isector, ret_t, ret_pid);
+-
+-    return std::make_tuple(npe::move(ret_pid), npe::move(ret_t));
+ }
+-npe_end_code()
+-
+ 
+ npe_function(point_cloud_splatting_geometry_internal_)
+ npe_arg(v, dense_float, dense_double)
+@@ -338,47 +235,3 @@ npe_begin_code()
+     return std::make_tuple(npe::move(geom_vertices), npe::move(geom_faces));
+ }
+ npe_end_code()
+-
+-
+-npe_function(ray_point_cloud_intersection_internal_)
+-npe_arg(v, dense_float, dense_double)
+-npe_arg(n, npe_matches(v))
+-npe_arg(ray_o, npe_matches(v))
+-npe_arg(ray_d, npe_matches(v))
+-npe_arg(geometry_type, std::string)
+-npe_arg(geometry_radius, npe_matches(v))
+-npe_default_arg(geometry_subdivisions_1, int, 4)
+-npe_default_arg(geometry_subdivisions_2, int, 4)
+-npe_default_arg(ray_near, double, 0.0)
+-npe_default_arg(ray_far, double, std::numeric_limits<double>::infinity())
+-npe_begin_code()
+-    {
+-        using MatrixI = Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+-        using MatrixF = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+-        using MatrixFOut = Eigen::Matrix<npe_Scalar_v, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+-
+-        bool use_single_ray_origin = validate_rays(ray_o, ray_d);
+-        GeometryType geom_type = validate_point_geometry(v, n, geometry_radius,
+-                                                         geometry_subdivisions_1,
+-                                                         geometry_subdivisions_2,
+-                                                         geometry_type);
+-
+-        MatrixF geom_vertices;
+-        MatrixI geom_faces;
+-
+-        int num_faces_per_geometry = generate_splat_geometry(geom_type, geometry_subdivisions_1, geometry_subdivisions_2,
+-                                                             v, n, geometry_radius, geom_vertices, geom_faces);
+-
+-        EmbreeIntersector isector;
+-        isector.init(geom_vertices, geom_faces, true /*is_static*/);
+-
+-        MatrixI ret_pid(ray_d.rows(), 1);
+-        MatrixFOut ret_t(ray_d.rows(), 1);
+-
+-        trace_rays_point_cloud(ray_o, ray_d, ray_near, ray_far,
+-                               use_single_ray_origin, num_faces_per_geometry,
+-                               isector, ret_t, ret_pid);
+-
+-        return std::make_tuple(npe::move(ret_pid), npe::move(ret_t));
+-}
+-npe_end_code()
+-- 
+2.50.1 (Apple Git-155)
+
