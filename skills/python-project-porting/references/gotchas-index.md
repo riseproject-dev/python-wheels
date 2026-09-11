@@ -317,6 +317,12 @@ The porting gotchas (331 of them) live in [`references/gotchas/`](gotchas/), spl
 - **244** — `uv pip install` only honors `UV_*` env vars, never the `PIP_*` names — a step
 - **291** — A `CIBW_TEST_REQUIRES` package with no riscv64 wheel of its own can still need
 - **336** — A custom `CIBW_BEFORE_TEST` does not cancel a project's own `test-extras`
+- **353** — Gotcha 30's registry check has moved off redirects: unhosted packages now
+  answer plain `404`, not `302` — the check logic is unaffected, but scripts written
+  against the old behavior may misread it.
+- **354** — `PIP_PREFER_BINARY` (not `PIP_ONLY_BINARY`) is the fix when our registry
+  hosts a wheel for only *some* matrix interpreters and an unpinned test dependency
+  keeps resolving to a newer, wheel-less release.
 
 ### Build-tool drift & pins — [`gotchas/build-tool-drift-and-pins.md`](gotchas/build-tool-drift-and-pins.md)
 
@@ -387,6 +393,8 @@ The porting gotchas (331 of them) live in [`references/gotchas/`](gotchas/), spl
 - **321** — When the excluded boundary is a whole submodule reachable by name, stub its
 - **339** — An unpinned `pytest` in `CIBW_TEST_REQUIRES` can resolve to a pytest new enough
 - **350** — A suite's own `try: import X except ImportError: X = None` plus
+- **355** — Gotcha 339 generalizes past `pytest` to any unpinned runtime dependency whose
+  own heuristic changed across a major version — pin it for the test venv only.
 
 ### Test failures, flakes & arch-specific bugs — [`gotchas/test-failures-and-flakes.md`](gotchas/test-failures-and-flakes.md)
 

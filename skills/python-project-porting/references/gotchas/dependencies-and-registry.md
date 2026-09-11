@@ -31,6 +31,12 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
   that break (the moyopy/pymatgen case).
 - **336** — A custom `CIBW_BEFORE_TEST` does not cancel a project's own `test-extras`
   cascade — the two install paths are independent, and `test-extras` runs regardless.
+- **353** — Gotcha 30's registry check has moved off redirects: unhosted packages now
+  answer plain `404`, not `302` — the check logic is unaffected, but scripts written
+  against the old behavior may misread it.
+- **354** — `PIP_PREFER_BINARY` (not `PIP_ONLY_BINARY`) is the fix when our registry
+  hosts a wheel for only *some* matrix interpreters and an unpinned test dependency
+  keeps resolving to a newer, wheel-less release.
 
 ---
 
@@ -632,3 +638,28 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       `apache_beam`, `grpcio`, `pyarrow` and friends downloading well before the test
       command runs — a giveaway that `test-extras` is still active, even though the
       `before-test` override looks like it should have made them unnecessary.
+
+353. **Gotcha 30's registry check has moved off redirects: `pypi.riseproject.dev/simple/<dep>/`
+    now answers plain `404` for anything it doesn't host, not a `302` to pypi.org.**
+    `curl -s -o /dev/null -w '%{http_code}' https://pypi.riseproject.dev/simple/<dep>/`
+    against `chardet` and `requests` (both genuinely unhosted) both returned `404`, headers
+    `server: GitHub.com` on hit and miss alike — the registry now looks like a static
+    GitHub Pages index rather than a redirecting proxy. The check itself is unaffected
+    (any non-`200` still means "we don't host it"), but a script or muscle-memory `curl -D -
+    --max-redirs 0` check written against the old "expect a 302" behavior will read a 404
+    as an error rather than the answer.
+
+354. **`PIP_PREFER_BINARY` (not gotcha 12/30's `PIP_ONLY_BINARY`) is the fix when our
+    registry hosts a wheel for *some* interpreters in the matrix but not others, and an
+    unpinned test dependency keeps resolving to a newer, wheel-less release.** clevercsv's
+    `CIBW_TEST_REQUIRES: pandas` picked PyPI's newest pandas release on every leg — our
+    registry only publishes riscv64 pandas for cp312/cp313/cp314, and gotcha 30's "the
+    version has to line up" bit for it exactly: PyPI's latest was newer than what we host,
+    so pip took that and built it from source, costing ~45 minutes per job (and cp314t has
+    no registry wheel at any pandas version, so it always builds from source regardless).
+    `CIBW_TEST_ENVIRONMENT: PIP_PREFER_BINARY=1` (test-phase only, per gotcha 12) tells pip
+    to prefer an *older* wheel-backed version over a newer sdist-only one — it dropped
+    cp312/cp313/cp314 to a few seconds (the registry wheel resolves) while leaving cp314t's
+    from-source fallback intact, which had already been confirmed to build cleanly, just
+    slowly. `PIP_ONLY_BINARY` would have been wrong here — it hard-fails cp314t instead of
+    letting it fall back to source.

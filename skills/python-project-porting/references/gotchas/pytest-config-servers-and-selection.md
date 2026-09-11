@@ -30,6 +30,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
 - **339** — An unpinned `pytest` in `CIBW_TEST_REQUIRES` can resolve to a pytest new enough
 - **350** — A suite's own `try: import X except ImportError: X = None` plus
   `@pytest.mark.skipif(not X)` guard turns an omitted `CIBW_TEST_REQUIRES` entry into a
+- **355** — Gotcha 339 generalizes past `pytest` to any unpinned runtime dependency whose
+  own heuristic changed across a major version — pin it for the test venv only.
 
 ---
 
@@ -610,6 +612,21 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
     config first). Match that ceiling in `CIBW_TEST_REQUIRES` rather than patching the
     test or reaching for an `addopts`/`-p no:...` override — it's not a riscv64-specific
     failure, and it reproduces identically on x86_64 with the same unpinned `pytest`.
+
+355. **Gotcha 339 generalizes past `pytest` to any unpinned runtime dependency whose own
+    heuristic changed across a major version — pin it for the test venv only, verify the
+    breakage off-arch before touching the workflow.** clevercsv's `test_console.py`
+    hardcodes two accepted encodings (`ISO-8859-1`/`WINDOWS-1252`) for one fixture, labeled
+    in the test's own comments as "for chardet" and "for cChardet" — a snapshot of what
+    those two detectors returned at the time the test was written. `chardet` is an unpinned
+    `install_requires` (not just a test dependency), and cibuildwheel resolves it fresh on
+    every job; `chardet>=6.0` returns a third, untested guess (`KOI8-R`) for the same byte
+    sequence, failing the assertion on every interpreter identically. Confirmed
+    architecture-independent by installing `chardet==7.6.0` in a plain macOS venv and
+    reproducing the identical failure, then bisecting versions (`<=5.2.0` passes,
+    `>=6.0.0` fails) to find the pin. Fix went in `CIBW_TEST_REQUIRES: 'chardet<6 ...'` —
+    scoped to the test venv, not the wheel's own `install_requires`, which stays unpinned
+    and matches upstream.
 
 350. **A suite's own `try: import X except ImportError: X = None` plus
     `@pytest.mark.skipif(not X)` guard turns an omitted `CIBW_TEST_REQUIRES` entry into a
