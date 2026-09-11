@@ -20,6 +20,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
 - **206** — A C++ ML/inference engine that gates its fast BLAS backend to x86 usually
 - **220** — BLST (Ethereum's vendored elliptic-curve library, pulled in by ckzg/c-kzg-4844
 - **231** — A vendored C library's own CMake can carry a genuine, tested riscv64 branch —
+- **363** — A `libraries=[...]` entry can go missing from the link line with *no* error —
 
 ---
 
@@ -428,3 +429,37 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
     vectorized code with `#if defined(__x86_64__) ... #elif defined(__aarch64__)` and
     falls through to a plain `libm`-calling scalar implementation for every other arch,
     confirmed by reading the file rather than assuming.)
+
+363. **A `libraries=[...]` entry can go missing from the link line with *no* error —
+    check whether `setup.py` builds `library_dirs` from an environment variable that is
+    merely *present*, not necessarily non-empty (the python-fcl case).** A `setup.py`
+    helper doing `if "LD_LIBRARY_PATH" in os.environ: lib_dirs +=
+    os.environ["LD_LIBRARY_PATH"].split(":")` looks like a no-op when the variable is
+    unset, but our manylinux images (and some cibuildwheel container setups) export
+    `LD_LIBRARY_PATH=""` — present, empty. `"".split(":")` returns `['']`, so an empty
+    string lands in `library_dirs`, and distutils turns *every* dir into its own `-L<dir>`
+    token — including a bare `-L` with nothing after it. GNU ld/gcc then parse that bare
+    `-L` as taking the *next* argv as its path, silently swallowing the following `-l<dep>`
+    as a (nonsensical) search-directory name instead of a link request. The dependency
+    that happens to sit right after the empty dir in `libraries=[...]` vanishes from the
+    link with **zero warnings or errors** — the build succeeds, the `.so` loads (its other
+    deps still resolve), and the failure only surfaces later as `undefined symbol` for
+    whatever the missing library alone provided (`typeinfo for fcl::CollisionGeometry<double>`
+    here, since everything else in FCL is header-only/inline and needed no external
+    symbol). A later `-l` in the same list is unaffected, producing a confusing asymmetry
+    where sibling libraries (`octomap`) link and vendor fine while the first one (`fcl`)
+    does not.
+    - **Diagnose from the actual `-o *.so` link command, not from cibuildwheel's output.**
+      `auditwheel repair`'s log (no "Grafting"/copying lines for the missing lib) and
+      `readelf -d <ext>.so | grep NEEDED` (the dependency absent entirely, not just
+      unvendored) are the tell; the definitive proof is the printed compiler invocation
+      itself — grep the build log for ` -o build/lib*/**/*.so` and read the `-L`/`-l`
+      sequence left to right for a bare `-L` with no path token before the next `-l`.
+    - **`-Wl,--no-as-needed` does not fix this and is a useful negative test.** `--as-needed`
+      only drops a `-l` that *was* parsed but resolved nothing; here the `-l` was never
+      parsed as a `-l` at all (it was consumed as `-L`'s argument), so forcing
+      `--no-as-needed` on has no effect — confirming the bug is upstream of linker
+      behavior, in argument construction.
+    - **Fix upstream's helper to treat empty as unset**: `os.environ.get("VAR", "")` plus
+      an `if value:` truthiness check (not `"VAR" in os.environ`), and filter empty
+      elements out of the `.split(":")` result in case of a trailing/doubled separator too.
