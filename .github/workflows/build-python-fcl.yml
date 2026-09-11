@@ -83,9 +83,20 @@ jobs:
           # numpy: our registry is one patch release behind PyPI's latest (gotcha 84).
           # cmake: install_linux.sh pip-installs an exact-pinned cmake==3.31.6, which
           # our registry also carries; PIP_ONLY_BINARY keeps it off a source bootstrap.
+          # DEBUG: the extension links cleanly against liboctomap (also in setup.py's
+          # `libraries=`) but libfcl.so is entirely absent from the extension's own
+          # NEEDED list even though fcl.pyx has genuine unresolved references into it
+          # (confirmed: nm -D --undefined-only on the built .so lists exactly the
+          # CollisionGeometry<double> ctor/dtor/typeinfo/vtable symbols that only
+          # exist via fcl's `extern template ... FCL_EXPORT CollisionGeometry<double>`,
+          # and libfcl.so itself DOES export them, weak+global, per before-build's
+          # nm -D --defined-only). The image's default linker behaves as --as-needed;
+          # force it off so every requested -l lands in NEEDED regardless of ld's own
+          # (seemingly wrong here) per-library usage analysis.
           CIBW_ENVIRONMENT: >-
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             PIP_ONLY_BINARY=cmake,numpy
+            LDFLAGS=-Wl,--no-as-needed
           # DEBUG: dump libfcl.so's own dynamic symbol table to confirm whether the
           # explicit `template class CollisionGeometry<double>;` instantiation
           # (src/geometry/collision_geometry.cpp) is actually exported, before
