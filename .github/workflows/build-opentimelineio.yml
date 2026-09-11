@@ -1,0 +1,140 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `package_sdist`/`package_wheels` jobs of
+# https://github.com/AcademySoftwareFoundation/OpenTimelineIO/blob/v0.18.1/.github/workflows/python-package.yml
+name: Build opentimelineio wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'opentimelineio version to build (git tag without leading v, e.g. 0.18.1)'
+        required: true
+        default: '0.18.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-opentimelineio.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.18.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.18.1 there.
+  OPENTIMELINEIO_VERSION: ${{ inputs.version || '0.18.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_sdist:
+    needs: [setup]
+    # The sdist packages the source tree plus the vendored Imath/rapidjson/pybind11
+    # sources (git submodules) and is architecture-independent, so build it once on
+    # x86 instead of burning a scarce riscv runner (CLAUDE.md gotcha 4).
+    name: Build opentimelineio ${{ inputs.version || '0.18.1' }} sdist
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
+      package_version: ${{ steps.sdist.outputs.package_version }}
+    steps:
+      - name: Checkout opentimelineio v${{ env.OPENTIMELINEIO_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: AcademySoftwareFoundation/OpenTimelineIO
+          ref: v${{ env.OPENTIMELINEIO_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      # Imath, rapidjson and pybind11 are statically compiled in via git submodules,
+      # but the upstream wheel ships only LICENSE.txt/NOTICE.txt, so their licences
+      # never reach dist-info. Stage them at the root where setuptools' default
+      # `LICEN[CS]E*` discovery picks them up.
+      - name: Stage vendored licences
+        run: |
+          cp src/deps/Imath/LICENSE.md LICENSE.imath
+          cp src/deps/rapidjson/license.txt LICENSE.rapidjson
+          cp src/deps/pybind11/LICENSE LICENSE.pybind11
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build sdist
+        id: sdist
+        run: |
+          uv pip install build twine
+          python -m build --sdist
+          twine check --strict dist/*.tar.gz
+          sdists=(dist/*.tar.gz)
+          echo "sdist_name=$(basename "${sdists[0]}")" >> "$GITHUB_OUTPUT"
+          echo "package_version=$(basename "${sdists[0]}" | sed -En 's/opentimelineio-(.+)\.tar\.gz/\1/p')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: opentimelineio-${{ env.OPENTIMELINEIO_VERSION }}-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_sdist]
+    name: Build opentimelineio ${{ inputs.version || '0.18.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: opentimelineio-${{ env.OPENTIMELINEIO_VERSION }}-sdist
+          path: dist/
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}
+          output-dir: wheelhouse/
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-*
+          CIBW_ARCHS: riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_SOURCES: tests examples
+          # docs/ is pruned from the sdist (MANIFEST.in), so the schema-vs-docs
+          # diff test has nothing to compare against.
+          CIBW_TEST_ENVIRONMENT: OTIO_DISABLE_SERIALIZED_SCHEMA_TEST=1
+          CIBW_TEST_COMMAND: >-
+            python -c "import opentimelineio._otio as o, opentimelineio._opentime as t; assert o.__file__.endswith('.so'), o.__file__; assert t.__file__.endswith('.so'), t.__file__" &&
+            python -m unittest discover -s {project}/tests -t {project}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: opentimelineio-${{ env.OPENTIMELINEIO_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish opentimelineio ${{ inputs.version || '0.18.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: opentimelineio-${{ inputs.version || '0.18.1' }}-*-manylinux_riscv64
