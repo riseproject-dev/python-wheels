@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 11 Sep 2026 10:02:30 +0200
+Subject: [PATCH] Gate blosc2's shuffle SIMD macros on the actual host
+ architecture
+
+_get_blosc2_plugin() force-enables SHUFFLE_SSE2_ENABLED,
+SHUFFLE_AVX2_ENABLED, SHUFFLE_AVX512_ENABLED and SHUFFLE_NEON_ENABLED
+for every architecture except ppc64le, on the implicit assumption that
+"not ppc64le" means "x86 or ARM". On riscv64 this breaks the build:
+
+c-blosc2's blosc/shuffle.c picks its CPU-detection branch purely from
+these ENABLED macros (independently of whether the corresponding
+per-ISA .c file actually compiled any code, which is separately gated
+on the compiler's own __SSE2__/__AVX2__/__ARM_NEON__ macros). With
+SHUFFLE_SSE2_ENABLED/AVX2_ENABLED/AVX512_ENABLED defined but no x86
+target, the `#if ... && (defined(__i386__) || defined(__x86_64__) ...)`
+branch is skipped, so shuffle.c falls through to
+`#elif defined(SHUFFLE_NEON_ENABLED)` -- also force-defined here -- and
+compiles blosc_get_cpu_features() against `getauxval(AT_HWCAP) &
+HWCAP_ARM_NEON`, an ARM-only hwcap constant that doesn't exist on
+riscv64 (confirmed against glibc's riscv64 <bits/hwcap.h>): a hard
+compile error. Even if that branch were skipped too, the AVX512 sources
+included at file scope for any non-ppc64le target reference
+`is_shuffle_avx2`/`is_bshuf_AVX512`, symbols that shuffle-avx2.c never
+defines when __AVX2__ isn't set -- an undefined-reference link error.
+
+Use HostConfig.ARCH (already used a few lines below in this same
+function for the ARM_7/ARM_8 -flax-vector-conversions case) to gate
+each SIMD family on the architecture it actually targets: PPC_64 ->
+Altivec, ARM_7/ARM_8 -> NEON, X86_32/X86_64 -> SSE2/AVX2/AVX512. Every
+other architecture (riscv64 included) now defines none of these
+macros, so shuffle.c takes its "no hardware acceleration" branch and
+c-blosc2 falls back to shuffle-generic.c/bitshuffle-generic.c, exactly
+as blosc (v1)'s own _get_blosc_plugin() already does today via its
+sse2=/avx2= HDF5PluginExtension kwargs (only populated when
+HostConfig.has_sse2()/has_avx2() are true, which are unconditionally
+false off X86_32/X86_64).
+
+Upstream-Status: To upstream [not submitted: no cross-repo issue/PR contributions from this port]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ setup.py | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/setup.py b/setup.py
+index e943ae5..3f28895 100644
+--- a/setup.py
++++ b/setup.py
+@@ -1181,14 +1181,15 @@ def _get_blosc2_plugin():
+         f"{blosc2_dir}/include",
+     ]
+     define_macros = [("HAVE_PLUGINS", 1)]
+-    if platform.machine() == "ppc64le":
++    if HostConfig.ARCH == "PPC_64":
+         define_macros.append(("SHUFFLE_ALTIVEC_ENABLED", 1))
+         define_macros.append(("NO_WARN_X86_INTRINSICS", None))
+-    else:
++    elif HostConfig.ARCH in ("ARM_7", "ARM_8"):
++        define_macros.append(("SHUFFLE_NEON_ENABLED", 1))
++    elif HostConfig.ARCH in ("X86_32", "X86_64"):
+         define_macros.append(("SHUFFLE_SSE2_ENABLED", 1))
+         define_macros.append(("SHUFFLE_AVX2_ENABLED", 1))
+         define_macros.append(("SHUFFLE_AVX512_ENABLED", 1))
+-        define_macros.append(("SHUFFLE_NEON_ENABLED", 1))
+ 
+     # Add ZFP instead of using static library since compilation options are different
+     sources += glob("lib/c-blosc2-zfp/src/*.c")
