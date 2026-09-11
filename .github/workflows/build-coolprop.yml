@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Mirrors the Linux leg of upstream's .github/workflows/python_cibuildwheel.yml (called
+# from python_buildwheels.yml's set-matrix job): v8 is a nanobind/scikit-build-core/CMake
+# build, with CPM.cmake fetching Eigen/fmt/nlohmann_json/msgpack-c/valijson/IF97/
+# REFPROP-headers/boost-headers at configure time and statically compiling them in.
+# Upstream's full-wheels matrix is py_versions=[39, 310, 311, 312] — the cp312 build is
+# abi3-tagged (COOLPROP_NANOBIND=ON turns on both the nanobind core and, on Python >= 3.12,
+# the cp312-abi3 wheel tag) and covers 3.13/3.14 too, so those are dropped to avoid
+# duplicate abi3 wheels; 3.9-3.11 stay per-version. musllinux is skipped upstream too
+# (`skip = "*-musllinux_*"` in pyproject.toml).
+name: Build coolprop wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'coolprop version to build (git tag is v<version>)'
+        required: true
+        default: '8.0.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-coolprop.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '8.0.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  COOLPROP_VERSION: ${{ inputs.version || '8.0.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build coolprop ${{ inputs.version || '8.0.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp39", "cp310", "cp311", "cp312"]
+
+    steps:
+      - name: Checkout CoolProp/CoolProp v${{ env.COOLPROP_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: CoolProp/CoolProp
+          ref: v${{ env.COOLPROP_VERSION }}
+          persist-credentials: false
+
+      # Statically-linked CPM deps (cmake/dependencies.cmake) ship no licence in upstream's
+      # own wheel; stage them at the root so scikit-build-core's default PEP 639 licence
+      # glob (LICEN[CS]E*, root only — confirmed by diffing upstream's published wheel,
+      # which carries only its own root LICENSE) picks them all up. miniz/incbin are
+      # committed under externals/ already; the rest are pinned in dependencies.cmake.
+      - name: Stage vendored dependency licences
+        run: |
+          set -euxo pipefail
+          curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/5.0.1/COPYING.MPL2" -o LICENSE.eigen
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/msgpack/msgpack-c/919908742b4fdbc575e77fe1a8657e70c9573c44/LICENSE_1_0.txt" -o LICENSE.msgpack-c
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/nlohmann/json/v3.12.0/LICENSE.MIT" -o LICENSE.nlohmann-json
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/tristanpenman/valijson/v1.0.6/LICENSE" -o LICENSE.valijson
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/CoolProp/IF97/7aaced024a702f0985474bf293cdaae9c8d06521/LICENSE" -o LICENSE.if97
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/CoolProp/REFPROP-headers/b4faab1b73911c32c4b69c526c7e92f74edb67de/LICENSE" -o LICENSE.refprop-headers
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/CoolProp/boost-headers/c68104660ca4bd80d0d5cb34c4eba0cf5bab3f73/LICENSE" -o LICENSE.boost-headers
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/fmtlib/fmt/12.0.0/LICENSE" -o LICENSE.fmt
+          cp externals/miniz-3.1.1/LICENSE LICENSE.miniz
+          cp externals/incbin/UNLICENSE LICENSE.incbin
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_BUILD_LINUX: pip install ninja && git config --global --add safe.directory "*"
+          CIBW_ENVIRONMENT: COOLPROP_NANOBIND=ON PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy
+          CIBW_TEST_COMMAND: >-
+            python -c "import CoolProp; from CoolProp.CoolProp import PropsSI; from CoolProp.State import State;
+            assert '?' not in CoolProp.__gitrevision__; assert isinstance(PropsSI('T','P',101325,'Q',0,'Water'), float)"
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          path = sys.argv[1]
+          names = zipfile.ZipFile(path).namelist()
+          exts = [n for n in names if n.endswith(".so")]
+          assert exts and all(n.split("/")[-1].split(".")[0] in ("CoolProp", "State", "_constants") for n in exts), exts
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          expected = {"LICENSE", "LICENSE.eigen", "LICENSE.msgpack-c", "LICENSE.nlohmann-json",
+                      "LICENSE.valijson", "LICENSE.if97", "LICENSE.refprop-headers",
+                      "LICENSE.boost-headers", "LICENSE.fmt", "LICENSE.miniz", "LICENSE.incbin"}
+          assert licences == expected, licences
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: coolprop-${{ env.COOLPROP_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish coolprop ${{ inputs.version || '8.0.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: coolprop-${{ inputs.version || '8.0.0' }}-*-manylinux_riscv64
