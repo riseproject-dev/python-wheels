@@ -214,6 +214,17 @@ The porting gotchas (348 of them) live in [`references/gotchas/`](gotchas/), spl
   stop at cp312; a `pip`-installed console-script (e.g. `protoc-gen-mypy`) for cp313+ is
   invisible to a PATH-based `which`/`shutil.which()` even from that same interpreter —
   resolve its scripts directory via `sysconfig.get_path("scripts")` instead.
+- **364** — Patching a checked-out workspace `Cargo.toml`'s placeholder version (to match
+  a static `pyproject.toml` version) stales `Cargo.lock`'s local-package entries, so
+  `PyO3/maturin-action`'s `--locked` fails `cargo metadata` before any build starts; drop
+  `--locked` instead (matches upstream's own release workflow, which never sets it either
+  when it patches the version the same way).
+- **365** — A `bindings = "bin"` project with a heavy dependency tree (async runtime + TLS
+  + LSP framework) can stall on the riscv64 self-hosted runner for hours past the default
+  360-minute `timeout-minutes` with no new log output, then get cancelled with no
+  diagnostic — while an otherwise-identical retry finishes in under an hour; set a
+  generous timeout margin (1440, matching other heavy Rust ports) as insurance rather than
+  relying on the happy-path duration.
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 

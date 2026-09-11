@@ -40,6 +40,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
   nested inside the referencing workspace's own directory tree confuses cargo's
   workspace-boundary detection; the crate's own crates.io tarball (already flattened,
   no `[workspace]`) sidesteps it.
+- **364** — Patching a workspace `Cargo.toml`'s placeholder version stales `Cargo.lock`'s
+  local-package entries, breaking `PyO3/maturin-action`'s `--locked`.
+- **365** — A heavy `bindings = "bin"` dependency tree can stall for hours on the riscv64
+  runner past the default timeout, with a retry alone finishing in under an hour.
 - **306** — A pyo3 release that predates a newer CPython by years does not necessarily
   fail to build against it — `pyo3-build-config` only floors the supported version, it
   has no ceiling.
@@ -1049,3 +1053,44 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       version problem rather than a PATH problem — check for a literal `None` in the error
       text (the smoking gun that a Python-side path lookup silently failed) before
       suspecting the protoc invocation itself.
+
+364. **Patching a checked-out workspace `Cargo.toml`'s placeholder version (to match a
+    static, non-`dynamic` `pyproject.toml` `[project] version`, e.g. `tombi`) makes the
+    committed `Cargo.lock` stale for every *local* workspace-member package, and
+    `PyO3/maturin-action`'s `args: --locked` then fails before any compilation starts.**
+    `tombi`'s root `pyproject.toml`/`Cargo.toml` both ship the literal placeholder
+    `version = "0.0.0-dev"` (upstream's own `cargo xtask set-version` rewrites both from
+    `GITHUB_REF` at release time — see gotcha 239's sibling case); sedding just those two
+    lines to the real version leaves `Cargo.lock`'s per-crate `version = "0.0.0-dev"`
+    entries for `tombi-cli` and its ~20 in-workspace path dependencies mismatched against
+    the new `Cargo.toml`. `cargo metadata` (which `maturin build` runs first) detects the
+    drift and needs to rewrite the lock file to fix it up; `--locked` forbids exactly that
+    and the job dies immediately in "Build wheel": `error: cannot update the lock file
+    ... because --locked was passed to prevent this`, `Caused by: Cargo metadata failed`.
+    - **Fix: drop `--locked`, don't patch `Cargo.lock`.** This matches upstream's own
+      `release_pypi.yml` maturin-action `args`, which never passes `--locked` either — for
+      the same reason: it runs the identical `cargo xtask set-version` version-patch step
+      immediately beforehand. `build-taplo.yml`/`build-git-cliff.yml` keep `--locked`
+      safely only because neither one touches `Cargo.toml` at all.
+    - **Check before copying `--locked` from another `bindings = "bin"` port**: `grep -n
+      "0.0.0-dev\|dynamic.*version" pyproject.toml Cargo.toml` in the upstream checkout —
+      a static placeholder version needing a patch is incompatible with `--locked`.
+
+365. **A `bindings = "bin"` project whose Cargo dependency tree is unusually heavy (an
+    async runtime + TLS stack + LSP framework, not just a CLI-argument-parsing binary)
+    can stall on the riscv64 self-hosted runner for hours past the default 360-minute
+    `timeout-minutes` with zero new log output, then get killed at the timeout with no
+    diagnostic beyond `The operation was canceled` — while an otherwise-identical retry
+    (same commit, just a longer timeout) can complete in under an hour.** `tombi-cli`
+    pulls in `tokio` (full), `reqwest`+`rustls`+`ring`, `tower-lsp`, and `rayon` on top of
+    ~20 in-workspace crates; one run's build log went silent for over five hours right
+    after the last dependency ("Compiling env_logger") with `tombi-cli`'s own final
+    compile+link never printing, then hit `timeout-minutes: 360` and was cancelled — the
+    very next run of the same commit (only `timeout-minutes: 1440` changed) finished the
+    same `build_wheel` job in under an hour. This reads as riscv64 self-hosted runner
+    contention/flakiness, not a genuine multi-hour compile requirement, but a retry alone
+    is not a reliable fix since the same stall could recur.
+    - **Fix: set a generous `timeout-minutes` margin (1440, matching
+      `build-daft.yml`/other heavy Rust ports) rather than sizing it to the happy-path
+      duration** — the cost of an idle timeout is cheap compared to a job dying at 359
+      minutes into a build that would have finished at 361.
