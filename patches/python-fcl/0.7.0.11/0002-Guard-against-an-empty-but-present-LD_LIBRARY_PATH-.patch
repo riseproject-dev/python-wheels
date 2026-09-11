@@ -1,0 +1,68 @@
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 11 Sep 2026 14:20:00 +0000
+Subject: [PATCH] Guard against an empty-but-present LD_LIBRARY_PATH/CPATH in setup.py
+
+get_libraries_dir() checks `"LD_LIBRARY_PATH" in os.environ` and, if
+true, appends `os.environ["LD_LIBRARY_PATH"].split(":")` to
+library_dirs regardless of whether the value is actually empty. Our
+build container exports LD_LIBRARY_PATH="" (present, empty), so
+"".split(":") yields [''], and that empty string becomes a bare `-L`
+with no path argument on the link command line:
+
+  g++ ... -L/usr/lib -L/usr/local/lib -L/usr/lib64 -L/usr/local/lib64 -L -lfcl -loctomap -o fcl.cpython-312-riscv64-linux-gnu.so
+
+`-L` with no following value swallows the *next* argv as its path
+(ld/gcc treat "-L -lfcl" as one directory-search option whose value is
+the literal string "-lfcl"), so -lfcl is consumed there instead of
+being parsed as a request to link libfcl. -loctomap, being the last
+argument, is unaffected and links normally - which is exactly the
+asymmetry seen in the wheel's dynamic section (liboctomap present,
+libfcl entirely absent from NEEDED, confirmed via readelf -d), and
+why the built extension carries unresolved references into libfcl.so
+(e.g. typeinfo for fcl::CollisionGeometry<double>) that nothing ever
+supplies, surfacing as an ImportError: undefined symbol at import
+time. Confirmed to reproduce identically with -Wl,--no-as-needed
+forced on - the flag has nothing to act on, since -lfcl was never
+parsed as a library request in the first place.
+
+get_include_dirs()'s CPATH check has the identical pattern; guarded
+the same way for consistency, though our environment did not exhibit
+a matching CPATH-triggered bug.
+
+Upstream-Status: To upstream [not yet submitted; only reproduces when LD_LIBRARY_PATH is exported empty, which our manylinux_riscv64 build container does but upstream's own CI apparently does not]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ setup.py | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/setup.py b/setup.py
+index 9ebe01f..9d52455 100644
+--- a/setup.py
++++ b/setup.py
+@@ -23,8 +23,9 @@ def get_include_dirs():
+             "/usr/local/include/eigen3",
+         ]
+
+-        if "CPATH" in os.environ:
+-            include_dirs += os.environ["CPATH"].split(":")
++        cpath = os.environ.get("CPATH", "")
++        if cpath:
++            include_dirs += [p for p in cpath.split(":") if p]
+
+     elif sys.platform == "win32":
+         include_dirs = [
+@@ -45,8 +46,9 @@ def get_libraries_dir():
+     if is_nix_platform(sys.platform):
+         lib_dirs = ["/usr/lib", "/usr/local/lib", "/usr/lib64", "/usr/local/lib64"]
+
+-        if "LD_LIBRARY_PATH" in os.environ:
+-            lib_dirs += os.environ["LD_LIBRARY_PATH"].split(":")
++        ld_library_path = os.environ.get("LD_LIBRARY_PATH", "")
++        if ld_library_path:
++            lib_dirs += [p for p in ld_library_path.split(":") if p]
+         return lib_dirs
+     if sys.platform == "win32":
+         return [f"{INSTALL_PREFIX_WIN}\\lib"]
+--
+2.50.1

@@ -42,6 +42,9 @@ jobs:
       matrix:
         python:
           - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
 
     steps:
       - name: Checkout python-fcl v${{ env.PYTHON_FCL_VERSION }}
@@ -70,10 +73,8 @@ jobs:
           # build_dependencies/install_linux.sh builds eigen/libccd/octomap/fcl from
           # source; the license copies are appended here since CIBW_BEFORE_ALL_LINUX
           # fully replaces pyproject.toml's own before-all rather than extending it.
-          # DEBUG: -DBUILD_TESTING=OFF skips fcl's own ~25min test-binary build (not
-          # shipped in the wheel either way) to speed up iteration while diagnosing
-          # the riscv64-only "undefined symbol: typeinfo for fcl::CollisionGeometry<double>"
-          # failure seen on PR #1770 (all 4 legs, same symbol every time).
+          # -DBUILD_TESTING=OFF skips fcl's own test-binary build (not shipped in the
+          # wheel either way, and it otherwise adds ~25min per interpreter).
           CIBW_BEFORE_ALL_LINUX: >-
             sed -i '/^cd fcl$/,/^cd \.\.$/ s/^\$CMAKE \.[[:space:]]*$/$CMAKE . -DBUILD_TESTING=OFF/' build_dependencies/install_linux.sh &&
             bash build_dependencies/install_linux.sh &&
@@ -83,50 +84,14 @@ jobs:
           # numpy: our registry is one patch release behind PyPI's latest (gotcha 84).
           # cmake: install_linux.sh pip-installs an exact-pinned cmake==3.31.6, which
           # our registry also carries; PIP_ONLY_BINARY keeps it off a source bootstrap.
-          # DEBUG: the extension links cleanly against liboctomap (also in setup.py's
-          # `libraries=`) but libfcl.so is entirely absent from the extension's own
-          # NEEDED list even though fcl.pyx has genuine unresolved references into it
-          # (confirmed: nm -D --undefined-only on the built .so lists exactly the
-          # CollisionGeometry<double> ctor/dtor/typeinfo/vtable symbols that only
-          # exist via fcl's `extern template ... FCL_EXPORT CollisionGeometry<double>`,
-          # and libfcl.so itself DOES export them, weak+global, per before-build's
-          # nm -D --defined-only). The image's default linker behaves as --as-needed;
-          # force it off so every requested -l lands in NEEDED regardless of ld's own
-          # (seemingly wrong here) per-library usage analysis.
           CIBW_ENVIRONMENT: >-
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             PIP_ONLY_BINARY=cmake,numpy
-            LDFLAGS=-Wl,--no-as-needed
-          # DEBUG: dump libfcl.so's own dynamic symbol table to confirm whether the
-          # explicit `template class CollisionGeometry<double>;` instantiation
-          # (src/geometry/collision_geometry.cpp) is actually exported, before
-          # setup.py links the Cython extension against it.
-          CIBW_BEFORE_BUILD: >-
-            echo ---LDD--- ;
-            ldd /usr/local/lib64/libfcl.so ;
-            echo ---DEFINED--- ;
-            nm -D --defined-only /usr/local/lib64/libfcl.so | grep -i CollisionGeometry ;
-            echo ---DONE--- ;
-            true
           CIBW_TEST_REQUIRES: pytest
-          # DEBUG: libfcl.so itself exports _ZTIN3fcl17CollisionGeometryIdEE (weak,
-          # global, confirmed via before-build's nm -D) so the gap is between the
-          # installed extension and that export. `find_spec('fcl.fcl')` still runs
-          # fcl/__init__.py (imports the parent package first) and trips the same
-          # crash with zero diagnostic output, so locate the .so via dist-info
-          # RECORD metadata instead, which needs no import at all.
           CIBW_TEST_COMMAND: >-
-            SO=$(python -c "import importlib.metadata as m;
-            d=m.distribution('python-fcl'); files=list(d.files);
-            lic={str(f).rsplit('/',1)[-1] for f in files if '.dist-info/licenses/' in str(f)};
-            assert lic=={'LICENSE','LICENSE.fcl','LICENSE.libccd','LICENSE.octomap'}, lic;
-            so=[f for f in files if str(f).endswith('.so')]; assert len(so)==1, so;
-            print(d.locate_file(so[0]))") &&
-            echo ---SO-PATH--- && echo $SO &&
-            echo ---LDD--- && ldd $SO &&
-            echo ---NEEDED--- && readelf -d $SO | grep -i NEEDED &&
-            echo ---RUNPATH--- && readelf -d $SO | grep -i PATH &&
-            echo ---UNDEFINED--- && nm -D --undefined-only $SO | grep -i CollisionGeometry ;
+            python -c "import importlib.metadata as m;
+            n={p.name for p in m.files('python-fcl') if '.dist-info/licenses/' in str(p)};
+            assert n == {'LICENSE', 'LICENSE.fcl', 'LICENSE.libccd', 'LICENSE.octomap'}, n" &&
             pytest {project}/tests
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
