@@ -42,6 +42,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
   `-Werror=unused-parameter` on any architecture outside its named x86/ARM/PPC set.
 - **337** — lexbor, re2 and uchardet are absent from Rocky 10's baseos/appstream/crb on
   every arch, and `re2-devel` only resolves from EPEL — which riscv64 does not carry.
+- **351** — A project's own build script can gate a *sibling* vendored library's SIMD
+  macros on `platform.machine() != "ppc64le"`, silently assuming "not ppc64le" means
+  "x86 or ARM" — the hdf5plugin/c-blosc2 case.
 
 ---
 
@@ -874,3 +877,33 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       build already needs, in this package's `before-all` too, is cheaper than tracing
       which cimported header pulled which system library in a `fatal error: lz4hc.h: No
       such file or directory` from deep inside a Cython-generated `.cpp` file.
+
+351. **A project's own build script can gate a *sibling* vendored library's SIMD macros
+    on `platform.machine() != "ppc64le"`, silently assuming "not ppc64le" means "x86 or
+    ARM" — the hdf5plugin/c-blosc2 case.** Gotcha 71 covers a vendored library gating
+    riscv64 SIMD on the *parent build's* variable; this is a step removed: hdf5plugin's
+    own `setup.py` (not c-blosc2's CMake, which gates cleanly on its own) has an
+    `if platform.machine() == "ppc64le": ... else: define_macros.append(("SHUFFLE_SSE2_
+    ENABLED", 1)) ... SHUFFLE_AVX2_ENABLED ... SHUFFLE_AVX512_ENABLED ... SHUFFLE_NEON_
+    ENABLED` block that force-enables every one of c-blosc2's shuffle SIMD backends for
+    any architecture that isn't ppc64le. Each per-ISA `.c` file (`shuffle-sse2.c`,
+    `shuffle-avx2.c`, `shuffle-neon.c`) is itself correctly gated on the *compiler's*
+    `__SSE2__`/`__AVX2__`/`__ARM_NEON__` macros and compiles to an empty translation unit
+    on riscv64 — but `shuffle.c`'s CPU-dispatch code reads only the `SHUFFLE_*_ENABLED`
+    macros, independent of whether the paired `.c` file compiled anything. With
+    `SHUFFLE_NEON_ENABLED` force-defined, `shuffle.c`'s `#elif defined(SHUFFLE_NEON_
+    ENABLED)` branch compiles `blosc_get_cpu_features()` against `getauxval(AT_HWCAP) &
+    HWCAP_ARM_NEON` — an ARM-only glibc hwcap constant undeclared on riscv64 — a hard
+    compile error; even past that, `SHUFFLE_AVX512_ENABLED`/`AVX2_ENABLED` pull in
+    `is_shuffle_avx2`/`is_bshuf_AVX512` externs that `shuffle-avx2.c` never defines
+    without `__AVX2__`, an undefined-reference link error. Fix: gate on the actual
+    detected architecture (`HostConfig.ARCH` in this project, already used two lines
+    below in the same function for an `ARM_7`/`ARM_8`-only compile flag) rather than on
+    the absence of one named architecture — `PPC_64` → Altivec, `ARM_7`/`ARM_8` → NEON,
+    `X86_32`/`X86_64` → SSE2/AVX2/AVX512, everything else (riscv64 included) → none of
+    these macros, falling back to `shuffle-generic.c`/`bitshuffle-generic.c` exactly as
+    the project's own non-force-enabled v1 blosc plugin already does. Simulating the
+    parsed architecture string against the exact dispatch logic (`_parse_arch("riscv64")`
+    from the project's own `py-cpuinfo` build dependency) before touching CI proves the
+    fix produces identical macros for x86_64/aarch64/ppc64le/armv7l and none for riscv64,
+    with no manylinux image or QEMU rehearsal needed.

@@ -18,6 +18,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
 - **135** — A version placeholder that upstream's *release script* stamps is a fourth way to
 - **154** — A PyPI `project_urls` repository link can 404 — search for the live repo before
 - **156** — An upstream that exists only as a PyPI sdist is still an ordinary port — but
+- **352** — A gitlink with no `.gitmodules` entry breaks `actions/checkout`'s own
+  persist-credentials cleanup, not the checkout itself.
 - **213** — Gotcha 103's timestamp-proximity trick can point at the wrong commit when
 - **242** — A third-party tree-sitter grammar's release tag can omit the generated
 - **258** — A hardcoded download URL in a project's own build script can 403 automated
@@ -561,3 +563,27 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
     a handful of commits, and gotcha 103's proof step (diff the built wheel/sdist
     byte-for-byte against the one PyPI hosts) confirms it before pinning the SHA over the
     tag, same as `<PKG>_REF`/`<PKG>_VERSION` for a no-tag upstream.
+
+352. **A gitlink with no `.gitmodules` entry breaks `actions/checkout`'s own
+    persist-credentials cleanup, not the checkout itself (the hdf5plugin case, second
+    occurrence after espeakng-loader's espeak-ng submodule).** `actions/checkout@v7`
+    fetches and checks out the ref fine even with `submodules: false` — the failure comes
+    later, in a step the log labels "Removing auth": its cleanup runs `git submodule
+    foreach --recursive sh -c "... git config --local --unset-all 'core.sshCommand' ..."`
+    unconditionally, which walks every `160000`-mode tree entry (gitlink) regardless of
+    whether `.gitmodules` mentions it, and dies with `fatal: No url found for submodule
+    path '<path>' in .gitmodules` the moment it hits one that doesn't. hdf5plugin 7.0.0
+    carries three such gitlinks committed straight into the tree with no `.gitmodules`
+    file at all (`lib/bitshuffle/zstd`, `lib/snappy/third_party/{benchmark,googletest}`);
+    `git ls-tree -r HEAD | awk '$1=="160000"'` finds them, and a plain `git clone` of the
+    same tag succeeds locally because plain git never runs this submodule-cleanup pass.
+    None of the three are needed by the actual build (bitshuffle's plugin uses the
+    project's own shared `zstd` clib, not its vendored copy; snappy's `third_party/` only
+    holds its own test/benchmark deps) — checking whether the build even reaches them is
+    the first thing to confirm before treating this as anything more than a checkout-step
+    nuisance. Fix (same shape as `build-espeakng-loader.yml`'s `git init`/`git remote
+    add`/`git fetch --depth=1`/`git checkout FETCH_HEAD` sequence): replace
+    `actions/checkout` for the *upstream* repo with plain git commands, which never invoke
+    the submodule-cleanup routine in the first place — no patch to the upstream tree
+    needed, and `persist-credentials: false`'s only purpose (not leaking the checkout
+    token into the built artifact) is moot for plain, unauthenticated `git clone`/`fetch`.

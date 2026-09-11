@@ -113,6 +113,8 @@ The porting gotchas (331 of them) live in [`references/gotchas/`](gotchas/), spl
   it instead.
 - **319** — A release tag can exist, be reachable, and check out cleanly, yet still be the
   wrong commit — check `git merge-base --is-ancestor <tag> origin/main` before trusting it.
+- **352** — A gitlink with no `.gitmodules` entry breaks `actions/checkout`'s own
+  persist-credentials cleanup, not the checkout itself.
 
 ### cibuildwheel mechanics, the matrix & abi3 — [`gotchas/cibuildwheel-matrix-and-abi3.md`](gotchas/cibuildwheel-matrix-and-abi3.md)
 
@@ -255,6 +257,8 @@ The porting gotchas (331 of them) live in [`references/gotchas/`](gotchas/), spl
 - **332** — A SIMDe SSE-emulation port can compile clean, pass its own project's
 - **333** — A vendored C++ library's architecture-fallback stub can have a genuinely
 - **337** — lexbor, re2 and uchardet are absent from Rocky 10's baseos/appstream/crb on
+- **351** — A project's own build script can gate a sibling vendored library's SIMD
+  macros on `platform.machine() != "ppc64le"`, assuming "not ppc64le" means "x86 or ARM".
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
