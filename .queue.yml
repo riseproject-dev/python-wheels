@@ -738,7 +738,7 @@ packages:
   version: 6.11.2
   home: https://pyside.org
   repo: https://code.qt.io/cgit/pyside/pyside-setup.git/
-  status: in-review
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1696
   notes: '2 Linux wheels upstream (abi: cp310-abi3); no riscv64 on PyPI or pypi.riseproject.dev. No sdist on PyPI (pyside-setup has no per-component sdist); build-from-checkout of pyside/pyside-setup at git tag 6.11.2 via its own setup.py (not PEP517/cibuildwheel-compatible - custom --build-type flag), docker-run-yourself shape like build-libclang.yml. Initial concern was that ApiExtractor (shiboken6-generators C++ parser) needs libclang, expected to require the same from-scratch multi-hour LLVM/Clang compile as build-libclang.yml (PR #866, ~10h). Not the case here: Rocky 10 riscv64s AppStream repo (the manylinux_2_39_riscv64 base) already ships prebuilt clang-devel/llvm-devel 21.1.8 with ClangConfig.cmake/LLVMConfig.cmake/libclang.so/headers (confirmed via the real repodata at dl.rockylinux.org, no container needed) - setup_clang()s find_package(Clang CONFIG REQUIRED) finds it with no LLVM_INSTALL_DIR override needed. Second dependency, also unexpected: sources/shiboken6/cmake/ShibokenSetup.cmake does find_package(Qt6 REQUIRED COMPONENTS Core) even for a shiboken6-only (non-PySide) build - also covered by Rocky 10 AppStream (qt6-qtbase-devel, confirmed in the same repodata, includes qtpaths6 and Qt6Config.cmake). Third wrinkle: shiboken6s own bindings (shibokenmodule) are self-generated - shibokenmodule/CMakeLists.txt runs the already-built Shiboken6::shiboken6 tool against typesystem_shiboken.xml, so shiboken6-generator (the 49-56MB wheel that bundles libclang.so, confirmed via requires_dist/wheel sizes on PyPI) has to be built and pip-installed into the build venv first, even though it is never published (out of scope per this tasks brief; see pyside6-essentials note below for what a future generator/pyside6 port would reuse). The final shiboken6 wheel (libshiboken.so + Shiboken*.so, ~270KB on aarch64) links only libpython - no Qt/Clang/GPL code ships in it, so no gpl_sources job. Worktree at .claude/worktrees/shiboken6, branch shiboken6. PR #1696, CI green (setup/build/publish dry-run all passed). Four manylinux-container-specific fixups were needed beyond the first-pass dnf/CLI-flag guess: (1) pip building the `patchelf` PyPI package from source runs its own `make check`, which fails 8/48 tests on riscv64 - fetch NixOS/patchelf''s own riscv64 release binary instead (Rocky 10''s riscv64 repos ship no patchelf package either, gotcha 95). (2) pyside-setup defaults to the Ninja CMake generator on Linux but the image ships none - pip install ninja (PyPI has a riscv64 wheel) and put $pybin on PATH so cmake''s generator search finds it. (3) manylinux''s CPython is --disable-shared and finalize.sh strips every libpython*.a from lib/ to save space (archiving them first into /opt/_internal/static-libs-for-embedding-only.tar.xz) - extract that tarball back so build_info_collector.py''s LIBDIR search finds shiboken6-generator''s embedding library. (4) --plat-name on setup.py bdist_wheel crashes on a native (non-cross-compiling, non-macOS) Linux build, since PysideBuild.finalize_options only fakes os.name to dodge distutils'' Windows-only check when cross-compiling or on darwin - drop the flag from both bdist_wheel invocations and let auditwheel repair retag the wheel; also install shiboken6-generator with --no-deps since its wheel declares a shiboken6==6.11.2 runtime dependency that does not exist yet at that point in the build.'
 - pkg: bitstruct
@@ -829,7 +829,7 @@ packages:
   version: 0.13.1
   home: http://github.com/aliyun/aliyun-odps-python-sdk
   repo: http://github.com/aliyun/aliyun-odps-python-sdk
-  status: ci-running
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1729
   notes: '18 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp37,cp38,cp39); no riscv64 on PyPI or pypi.riseproject.dev. Matrix narrowed to cp312-cp314t: pyarrow (hard runtime dep) has no riscv64 wheel below cp312 anywhere.'
 - pkg: mssql-python
@@ -899,7 +899,7 @@ packages:
   version: 0.1.13
   home: https://github.com/tile-ai/tilelang
   repo: https://github.com/tile-ai/tilelang
-  status: ci-running
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1730
   notes: '4 Linux/macOS/Windows wheels upstream (abi: cp38-abi3); no riscv64 on PyPI or pypi.riseproject.dev. Upstream (tile-ai/tilelang, built on a vendored TVM fork submodule) is a GPU tile-programming DSL but genuinely supports a documented CPU/LLVM-only build: CMakeLists.txt exposes USE_CUDA/USE_ROCM/USE_METAL/USE_LLVM toggles (USE_CUDA defaults off when no CUDA toolkit is found), and docs/get_started/Installation.md says outright "USE_CUDA: ... set to OFF to build a CPU version" and "USE_LLVM: enable LLVM backend for CPU codegen, LLVM 15+ required" -- a real upstream-supported mode, not an internal escape hatch, even though upstream''s own dist.yml only ever ships CUDA (Linux/Windows) and Metal (macOS) wheels. LLVM is linked via llvm-config (USE_LLVM=ON auto-detects it), not compiled from source, so this is closer in scale to a normal LLVM-linking port than build-libclang.yml''s from-scratch LLVM/Clang compile. Runtime deps checked against pypi.riseproject.dev: torch (2.13/2.14+cpu, cp312-cp314t), apache-tvm-ffi (0.1.12 satisfies tilelang''s >=0.1.11,<0.1.13 pin, cp312-abi3/cp314t), z3-solver (4.15.4.0 satisfies >=4.13,<4.15.5), ml-dtypes/numpy/psutil all have riscv64 wheels; cloudpickle/tqdm/typing-extensions/scikit-build-core are pure py3-none-any. Build-time cython>=3.1.0 (registry has 3.3.0) and patchelf>=0.17.2 both have riscv64 wheels. One real gap: the optional torch-c-dlpack-ext (marker python_version < "3.14") dependency has no riscv64 wheel anywhere (tracked separately as the parked torch-c-dlpack-ext entry); upstream''s own docs call it a soft/JIT-fallback dependency ("Without it, TVM FFI may require JIT compilation on first import"), so the plan is to patch the marker to also exclude riscv64 (Upstream-Status: Inappropriate) rather than block on it. Because apache-tvm-ffi''s own riscv64 wheel is cp312-abi3 + cp314-cp314t only, the realistic interpreter matrix mirrors build-apache-tvm-ffi.yml''s cp312/cp314t split. The vendored 3rdparty/tvm (TileLang/tvm fork) is a substantial C++ tensor-compiler tree -- a genuinely large compile, plausibly among this repo''s largest, but with no from-scratch LLVM build in the loop. Worktree/branch created at .claude/worktrees/tilelang. PR #1730 opened; first riscv64 CI attempt confirmed the full vendored TVM compile succeeds (~5h, USE_LLVM auto-detected the CRB llvm-devel package fine), but tilelang_cython_wrapper failed: Cython 3.3.0 (the only riscv64 wheel on the registry, and PyPI''s current latest -- no upper bound in build-system.requires) added a hard #error in Cython/Utility/ModuleSetupCode.c requiring the Limited API target to be >=3.9, while tilelang''s wheel.py-api="cp38" targets 3.8 -- a cross-platform regression, not riscv64-specific, since any resolver picking cython>=3.3 against tilelang''s existing cp38 SABI target breaks the same way. Added a second patch capping cython to <3.3 (Upstream-Status: To upstream) and re-triggered.'
 - pkg: tree-sitter-kotlin
@@ -1144,7 +1144,7 @@ packages:
   version: 1.1.0
   home: https://github.com/livekit/agents
   repo: https://github.com/livekit/agents
-  status: in-review
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1731
   notes: 'Not the livekit-rtc/webrtc codebase (gotcha 340) - a small pybind11 binding over microsoft/BlingFire, built from livekit/agents (monorepo, livekit-plugins/livekit-blingfire), no separate repo. No git tag for 1.1.0; pinned to commit 3bea770e545b7aa02c2c34cf8f8d8022e5fbd1ed, which bumped the version and whose timestamp (2025-12-16T00:47:32Z) matches the published wheels upload time (2025-12-16T00:48:xxZ) to the second. CMakeLists.txt FetchContent-pulls microsoft/BlingFire (MIT) unpinned and links it statically; upstream ships no licence file at all in the wheel (neither its own Apache-2.0 nor BlingFire MIT), so the workflow stages both. PR #1731.'
 - pkg: mssql-python-odbc
@@ -1242,7 +1242,7 @@ packages:
   version: 0.25.0
   home: https://github.com/SciTools/cartopy
   repo: https://github.com/SciTools/cartopy
-  status: ci-running
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1732
   notes: '4 Linux wheels upstream (abi: cp310,cp311,cp312,cp313); no riscv64 on PyPI or pypi.riseproject.dev. Single Cython/C++ extension (cartopy.trace) that only calls shapely/pyproj at the Python level -- no GEOS/PROJ devel headers or CIBW_BEFORE_ALL needed, confirmed by a clean local `pip wheel` build with no GEOS/PROJ on the host. Matrix trimmed to cp312/cp313/cp314/cp314t (repo standard): shapely and pyproj, cartopy''s hard runtime deps, only have riscv64 wheels on pypi.riseproject.dev for those interpreters. Test command mirrors upstream''s own hermetic no-network job (ci-testing.yml) verbatim, minus --mpl (upstream''s own no-network job also skips it; image-comparison baselines are font-rendering sensitive). Locally verified the full CIBW_TEST_COMMAND against a wheel built from the sdist: with the latest PyPI pyproj (3.8.0/PROJ 9.8.1) 33 tests failed on stale PROJ-projection reference values (not riscv64-specific -- a newer-PROJ test-fixture drift); pinning to pyproj 3.7.2/PROJ 9.5.1 (matching what pypi.riseproject.dev actually serves, which is what CI will resolve) gave 661 passed, 11 skipped, 2 xfailed, 0 failed. PR #1732 opened, CI running.'
 - pkg: hdbscan
@@ -2462,7 +2462,7 @@ packages:
   version: 2.5.1
   home: https://github.com/valkey-io/valkey-glide
   repo: https://github.com/valkey-io/valkey-glide
-  status: in-review
+  status: publishing
   pr: 1678
   notes: '14 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp39,pp311); no riscv64 on PyPI or pypi.riseproject.dev. PyPI records no project URL; locate upstream during research.'
 - pkg: eigenpy
@@ -2560,7 +2560,7 @@ packages:
   version: 2.48.0.26
   home: https://confluence.ecmwf.int/display/ECC/ecCodes+Home
   repo: https://github.com/ecmwf/eccodes
-  status: ci-running
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1694
   notes: 'Binary wrapper wheel (ECMWF python_wrapper convention): compiled ecCodes C library only, no Python bindings of its own. Upstream builds it via a private wheelmaker tool (ecmwf/eccodes python_wrapper/), not a public workflow; content is Python-ABI-independent (cp310..cp314 wheels are byte-identical), so porting as a single py3-none wheel. Upstream links eckit (ENABLE_ECKIT_GEO=1, hard Requires-Dist: eckitlib) which has no riscv64 build yet (eckitlib itself queued, unported); building with ENABLE_ECKIT_GEO=0 (eccodes CMake default) drops that dependency, keeping core GRIB/BUFR support. PR #1694 open, CI running.'
 - pkg: mecab-python3
@@ -10883,6 +10883,6 @@ packages:
   version: 2.75.0
   home: https://beam.apache.org
   repo: https://github.com/apache/beam
-  status: in-review
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1726
   notes: '10 Linux wheels upstream (abi cp310-cp314, x86_64+aarch64), sdist present; no riscv64 anywhere. sdks/python/setup.py confirms a genuinely small native surface: 6 .pyx files plus a handful of setup.py-cythonized .py modules under coders/metrics/runners/transforms/utils, producing 17 .so files total - no Bazel/large-C++ build, a normal cibuildwheel candidate. Validated end-to-end locally (macOS arm64, ~2.5min): `pip wheel <sdist> --no-deps --no-build-isolation` with only cython>=3.2.5,<4 + numpy preinstalled succeeds and produces a real 17-.so wheel. pyproject.toml''s build-system.requires pins grpcio-tools==1.62.1 (py<=3.12) / 1.71.0 (py>=3.13), which has no riscv64 wheel, but it''s unused for the riscv64 bdist: the released sdist ships pre-generated apache_beam/portability/api/*_pb2.py with zero .proto sources alongside them (confirmed against the real PyPI sdist), so gen_protos.py''s "no proto files, reuse existing output" branch never imports grpc_tools - fixed with --no-build-isolation (gotcha 76) instead of patching the pin. Matrix cp312/cp313/cp314 (cp314t dropped: upstream''s own build_wheels.yml matrix never builds a free-threaded wheel for Beam); numpy<2.5.0 and cython riscv64 wheels both cover this range on our registry. Upstream''s own released sdist ships with no LICENSE at all (verified against the real PyPI tarball) even though sdks/python/MANIFEST.in already lists NOTICE/LICENSE/LICENSE.python - they live at the repo root, not sdks/python - so the sdist-build step copies them in first, same gap/fix shape as build-ctranslate2.yml. Testing mirrors upstream exactly (no CIBW_TEST_COMMAND): upstream''s own build_wheels.yml runs zero wheel tests itself (real Beam test suites live in separate massive PostCommit/PreCommit workflows, out of scope). Known caveat for future maintainers: Beam''s mandatory (non-extra) install_requires caps pyarrow<24.0.0 and protobuf<7.0.0.dev0, but pypi.riseproject.dev currently hosts exactly one riscv64 version of each (pyarrow 25.0.1, protobuf 7.35.1), both incompatible with those bounds - so `pip install apache-beam` will not fully resolve on riscv64 today regardless of this port; that''s a downstream ecosystem gap (would need an additional pyarrow<24/protobuf<7 riscv64 build), not a defect in this workflow. PR #1726 all checks green: sdist build, cp312/cp313/cp314 riscv64 bdist builds, check_commit_messages, check_patches, and publish dry-run all passed - dry-run log confirms the three expected wheels (apache_beam-2.75.0-cp31{2,3,4}-cp31{2,3,4}-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl). Awaiting maintainer review.'
