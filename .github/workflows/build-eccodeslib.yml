@@ -1,0 +1,241 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Upstream builds eccodeslib via a private tool (ecmwf-actions/reusable-workflows'
+# python-wrapper-wheel.yml + the "wheelmaker" image), not a public workflow, so this
+# replays ecmwf/eccodes's own python_wrapper/buildconfig CMAKE_PARAMS directly. The
+# built libeccodes.so is byte-identical across upstream's cp310..cp314 wheels (no
+# Python C-API use), so this builds one py3-none wheel instead of a per-interpreter
+# matrix. ENABLE_ECKIT_GEO is set to its CMake default (OFF; upstream forces it ON)
+# since eckit has no riscv64 build yet; this only drops the optional geo-iterator
+# backend, not core GRIB/BUFR support.
+name: Build eccodeslib wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'eccodeslib version to build (e.g. 2.48.0.26); the eccodes git tag is this with the trailing build-counter component dropped'
+        required: true
+        default: '2.48.0.26'
+  pull_request:
+    paths:
+      - '.github/workflows/build-eccodeslib.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.48.0.26' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PACKAGE_VERSION: ${{ inputs.version || '2.48.0.26' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  ECBUILD_VERSION: '3.15.2'
+  OPENJPEG_VERSION: '2.5.2'
+  LIBAEC_VERSION: '1.1.4'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build eccodeslib ${{ inputs.version || '2.48.0.26' }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 420
+    steps:
+      - name: Derive the eccodes git tag from the package version
+        run: echo "ECCODES_VERSION=$(echo "$PACKAGE_VERSION" | sed -E 's/\.[0-9]+$//')" >> "$GITHUB_ENV"
+
+      - name: Checkout eccodes ${{ env.ECCODES_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ecmwf/eccodes
+          ref: ${{ env.ECCODES_VERSION }}
+          persist-credentials: false
+
+      - name: Record the resolved commit
+        run: echo "ECCODES_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Write the wheel packaging script
+        run: |
+          cat > build_wheel.py <<'PY'
+          import hashlib
+          import os
+          import sys
+          import zipfile
+          from base64 import urlsafe_b64encode
+
+          PKG = "eccodeslib"
+          VERSION, PLATFORM_TAG, INSTALL_DIR, LICENSES_DIR, OUT_DIR = sys.argv[1:6]
+
+          WHEEL_TAG = f"py3-none-{PLATFORM_TAG}"
+          DIST_INFO = f"{PKG}-{VERSION}.dist-info"
+
+          METADATA = f"""Metadata-Version: 2.4
+          Name: {PKG}
+          Version: {VERSION}
+          Summary: Compiled ecCodes C library (GRIB/BUFR decoding and encoding), no Python bindings
+          Home-page: https://confluence.ecmwf.int/display/ECC/ecCodes+Home
+          Project-URL: Source, https://github.com/ecmwf/eccodes
+          License-Expression: Apache-2.0
+          """
+
+          WHEEL = f"""Wheel-Version: 1.0
+          Generator: python-wheels-riscv64-port
+          Root-Is-Purelib: false
+          Tag: {WHEEL_TAG}
+          """
+
+          os.makedirs(OUT_DIR, exist_ok=True)
+          wheel_path = os.path.join(OUT_DIR, f"{PKG}-{VERSION}-{WHEEL_TAG}.whl")
+          records = []
+
+          def write_file(zf, arcname, path):
+              with open(path, "rb") as f:
+                  data = f.read()
+              info = zipfile.ZipInfo(arcname)
+              info.external_attr = (os.stat(path).st_mode & 0xFFFF) << 16
+              zf.writestr(info, data, zipfile.ZIP_DEFLATED)
+              digest = urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+              records.append(f"{arcname},sha256={digest},{len(data)}")
+
+          def write_bytes(zf, arcname, data):
+              zf.writestr(arcname, data)
+              digest = urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+              records.append(f"{arcname},sha256={digest},{len(data)}")
+
+          with zipfile.ZipFile(wheel_path, "w", zipfile.ZIP_DEFLATED) as zf:
+              for root, _dirs, files in os.walk(INSTALL_DIR):
+                  for name in sorted(files):
+                      path = os.path.join(root, name)
+                      rel = os.path.relpath(path, INSTALL_DIR)
+                      write_file(zf, f"{PKG}/{rel}", path)
+
+              for name in sorted(os.listdir(LICENSES_DIR)):
+                  write_file(zf, f"{DIST_INFO}/licenses/{name}", os.path.join(LICENSES_DIR, name))
+
+              write_bytes(zf, f"{DIST_INFO}/METADATA", METADATA.encode())
+              write_bytes(zf, f"{DIST_INFO}/WHEEL", WHEEL.encode())
+              write_bytes(zf, f"{DIST_INFO}/top_level.txt", f"{PKG}\n".encode())
+
+              record_name = f"{DIST_INFO}/RECORD"
+              zf.writestr(record_name, "\n".join(records + [f"{record_name},,"]) + "\n")
+
+          print(wheel_path)
+          PY
+
+      - name: Build eccodes and its vendored codecs, then package the wheel
+        run: |
+          docker run --rm \
+            -v "$(pwd)":/workspace \
+            --workdir /workspace \
+            -e PACKAGE_VERSION="$PACKAGE_VERSION" \
+            -e ECCODES_COMMIT="$ECCODES_COMMIT" \
+            -e ECBUILD_VERSION="$ECBUILD_VERSION" \
+            -e OPENJPEG_VERSION="$OPENJPEG_VERSION" \
+            -e LIBAEC_VERSION="$LIBAEC_VERSION" \
+            "$MANYLINUX_RISCV64_IMAGE" \
+            bash -c '
+              set -euo pipefail
+              dnf -y -q install libpng-devel
+              mkdir -p /tmp/deps /tmp/build /tmp/install/eccodeslib /tmp/licenses
+
+              curl -fsSL "https://github.com/ecmwf/ecbuild/archive/refs/tags/$ECBUILD_VERSION.tar.gz" | tar xz -C /tmp/build
+              cmake -S "/tmp/build/ecbuild-$ECBUILD_VERSION" -B /tmp/build/ecbuild-build -D CMAKE_INSTALL_PREFIX=/tmp/deps
+              cmake --build /tmp/build/ecbuild-build -j "$(nproc)"
+              cmake --install /tmp/build/ecbuild-build
+
+              mkdir -p /tmp/build/libaec-src
+              curl -fsSL "https://github.com/Deutsches-Klimarechenzentrum/libaec/releases/download/v$LIBAEC_VERSION/libaec-$LIBAEC_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/build/libaec-src
+              cmake -S /tmp/build/libaec-src -B /tmp/build/libaec-build \
+                -D CMAKE_BUILD_TYPE=Release -D CMAKE_INSTALL_PREFIX=/tmp/deps -D CMAKE_INSTALL_LIBDIR=lib \
+                -D BUILD_STATIC_LIBS=OFF -D BUILD_TESTING=OFF
+              cmake --build /tmp/build/libaec-build -j "$(nproc)"
+              cmake --install /tmp/build/libaec-build
+
+              mkdir -p /tmp/build/openjpeg-src
+              curl -fsSL "https://github.com/uclouvain/openjpeg/archive/refs/tags/v$OPENJPEG_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/build/openjpeg-src
+              cmake -S /tmp/build/openjpeg-src -B /tmp/build/openjpeg-build \
+                -D CMAKE_BUILD_TYPE=RelWithDebInfo -D CMAKE_INSTALL_PREFIX=/tmp/deps -D CMAKE_INSTALL_LIBDIR=lib \
+                -D BUILD_CODEC=OFF
+              cmake --build /tmp/build/openjpeg-build -j "$(nproc)"
+              cmake --install /tmp/build/openjpeg-build
+
+              cmake -S . -B /tmp/build/eccodes-build \
+                -D CMAKE_BUILD_TYPE=RelWithDebInfo \
+                -D CMAKE_PREFIX_PATH=/tmp/deps \
+                -D CMAKE_INSTALL_PREFIX=/tmp/install/eccodeslib \
+                -D CMAKE_INSTALL_LIBDIR=lib64 \
+                -D Python3_EXECUTABLE=/opt/python/cp312-cp312/bin/python3 \
+                -D ENABLE_PNG=1 \
+                -D ENABLE_JPG=1 -D ENABLE_JPG_LIBJASPER=0 -D ENABLE_JPG_LIBOPENJPEG=1 -D OPENJPEG_DIR=/tmp/deps \
+                -D ENABLE_NETCDF=0 -D ENABLE_FORTRAN=0 \
+                -D ENABLE_EXAMPLES=0 -D ENABLE_BUILD_TOOLS=1 \
+                -D ENABLE_INSTALL_ECCODES_DEFINITIONS=0 -D ENABLE_INSTALL_ECCODES_SAMPLES=0 \
+                -D ENABLE_ECCODES_THREADS=1 -D ENABLE_MEMFS=1 -D ENABLE_ECKIT_GEO=0 \
+                -D ENABLE_AEC=1
+              cmake --build /tmp/build/eccodes-build -j "$(nproc)"
+              cmake --install /tmp/build/eccodes-build
+
+              cp /tmp/deps/lib/libopenjp2.so* /tmp/install/eccodeslib/lib64/
+              cp /tmp/deps/lib/libaec.so* /tmp/install/eccodeslib/lib64/
+              cp "$(find /usr/lib* -name "libpng16.so.16*" | head -1)" /tmp/install/eccodeslib/lib64/
+
+              cp LICENSE /tmp/licenses/eccodes.txt
+              cp AUTHORS /tmp/licenses/
+              curl -fsSL "https://raw.githubusercontent.com/uclouvain/openjpeg/v$OPENJPEG_VERSION/LICENSE" -o /tmp/licenses/openjpeg.txt
+              curl -fsSL "https://raw.githubusercontent.com/MathisRosenhauer/libaec/v$LIBAEC_VERSION/LICENSE.txt" -o /tmp/licenses/libaec.txt
+              cp /usr/share/licenses/libpng/LICENSE /tmp/licenses/libpng.txt
+
+              printf "__version__ = \"%s\"\n__commit_hash__ = \"%s\"\nfindlibs_dependencies = []\n" "$PACKAGE_VERSION" "$ECCODES_COMMIT" > /tmp/install/eccodeslib/__init__.py
+
+              python3 build_wheel.py "$PACKAGE_VERSION" manylinux_2_39_riscv64 /tmp/install/eccodeslib /tmp/licenses wheelhouse
+            '
+
+      - name: Check the wheel ships the extensions and the bundled licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert any(n.endswith("lib64/libeccodes.so") for n in names), names
+          for licence in ("eccodes.txt", "openjpeg.txt", "libaec.txt", "libpng.txt"):
+              assert any(
+                  n.endswith(f".dist-info/licenses/{licence}") for n in names
+              ), (licence, names)
+          EOF
+
+      - name: Smoke-test the built library
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          # gotcha 234: stock Ubuntu 24.04 apt pip (24.0) has zero manylinux_*_riscv64
+          # tags, so it rejects the riscv64 wheel outright without upgrading first.
+          pip install -q --upgrade pip
+          pip install -q findlibs wheelhouse/*.whl
+          python3 -c "
+          import findlibs
+          lib = findlibs.load('eccodes')
+          print(lib)
+          "
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: eccodeslib-${{ inputs.version || '2.48.0.26' }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish eccodeslib ${{ inputs.version || '2.48.0.26' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: eccodeslib-${{ inputs.version || '2.48.0.26' }}-*-manylinux_riscv64
