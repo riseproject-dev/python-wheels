@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on:
+# https://github.com/aliyun/aliyun-odps-python-sdk/blob/v0.13.1/.github/workflows/pypi-cd.yml
+name: Build pyodps wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pyodps version to build (git tag without leading v, e.g. 0.13.1)'
+        required: true
+        default: '0.13.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pyodps.yml'
+      - 'patches/pyodps/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.13.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.13.1 there.
+  PYODPS_VERSION: ${{ inputs.version || '0.13.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pyodps ${{ inputs.version || '0.13.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # Per-interpreter (not abi3): the Cython extensions link the version-specific ABI.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      - name: Checkout pyodps v${{ env.PYODPS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: aliyun/aliyun-odps-python-sdk
+          ref: v${{ env.PYODPS_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pyodps source
+        run: git apply python-wheels/patches/pyodps/${{ env.PYODPS_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy (a build requirement) and pyarrow (a hard runtime requirement) are
+          # only on our registry for riscv64; only-binary keeps a newer PyPI release
+          # from winning the resolution and then compiling from sdist.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,pyarrow
+          # No live MaxCompute account is available in CI (upstream's own wheel
+          # workflow runs no test-command either); prove the wheel installs with
+          # its real runtime deps and that the Cython tunnel codec is correct.
+          CIBW_TEST_COMMAND: >-
+            python -c "import odps; from odps.src.crc32c_c import Crc32c;
+            c = Crc32c(); c.update(bytearray(b'123456789'));
+            assert c.getvalue() == 0xe3069283, hex(c.getvalue());
+            print('pyodps', odps.__version__, 'OK')"
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          path = sys.argv[1]
+          names = zipfile.ZipFile(path).namelist()
+          exts = {n.rsplit("/", 1)[1].split(".", 1)[0] for n in names if n.endswith(".so")}
+          assert exts == {
+              "types_c", "crc32c_c", "utils_c", "encoder_c", "decoder_c",
+              "writer_c", "reader_c", "checksum_c", "hasher_c",
+          }, exts
+          licenses = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          assert licenses == {"LICENSE"}, licenses
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyodps-${{ env.PYODPS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyodps ${{ inputs.version || '0.13.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pyodps-${{ inputs.version || '0.13.1' }}-*-manylinux_riscv64
