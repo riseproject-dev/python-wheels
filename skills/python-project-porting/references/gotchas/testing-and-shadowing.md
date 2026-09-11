@@ -24,6 +24,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
 - **253** — A ctypes/dlopen GUI-toolkit wrapper with no upstream pytest suite at all still has
 - **296** — Upstream test fixtures checked in via git-lfs can't assume the self-hosted
 - **329** — A test suite that shells out to the package's own installed CLI binaries at a
+- **347** — A test that asserts "you're running against an editable/in-place install" can
+- **348** — A `glcontext`-based package's `create_context(standalone=True)` defaults to the
 
 ---
 
@@ -487,3 +489,30 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
       fails with the `FileNotFoundError` above; adding the `cp -a primer3` step (copying
       from the installed package's own `__file__`, not the checkout) makes it pass —
       proof the staged copy, not something arch-specific, is what's needed.
+
+347. **A test that asserts "you're running against an editable/in-place install" can
+    never pass against a cibuildwheel-tested wheel, and deselecting it is correct, not
+    a workaround (the moderngl case; see `build-moderngl.yml`).** moderngl's
+    `tests/test_local.py::test_local` compares `dirname(dirname(moderngl.__file__))`
+    against `dirname(dirname(abspath(__file__)))` and asserts they match — a canary
+    for a developer forgetting to rebuild, valid only because upstream's own
+    Containerfile runs `setup.py build_ext --inplace` first, making the compiled `.so`
+    and the test file genuine siblings. Under cibuildwheel the wheel installs into an
+    isolated venv's `site-packages` while `{project}/tests` still points at the
+    checkout — the two paths are *supposed* to differ, since that divergence is what
+    proves the suite is exercising the built wheel rather than shadowed source
+    (gotcha 25's goal, reached correctly here). `-k "not test_local"` is the fix; the
+    other 359 of moderngl's 360 tests pass unmodified.
+
+348. **A `glcontext`-based package's `create_context(standalone=True)` defaults to the
+    platform's display backend (x11 on Linux), not EGL, so it fails with
+    `XOpenDisplay: cannot open display` on a headless runner unless the EGL backend is
+    requested explicitly (the moderngl case).** moderngl's own `create_context()`
+    calls `glcontext.default_backend()` whenever no `context=` kwarg is given; on
+    Linux that resolves to `x11`, which needs a real display even in
+    standalone/offscreen mode. Upstream's own test suite (`tests/conftest.py`) never
+    calls the bare form — it always passes `context=glcontext.egl.create_context(
+    glversion=330, mode="standalone")`. Any CIBW_TEST_COMMAND smoke test written
+    without copying that same `context=` argument passes on a workstation with a
+    display and fails only in CI; grep the checkout's own conftest/test helpers for
+    `egl` before writing a headless smoke test from scratch.

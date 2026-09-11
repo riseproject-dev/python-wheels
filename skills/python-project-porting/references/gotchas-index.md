@@ -355,6 +355,8 @@ The porting gotchas (331 of them) live in [`references/gotchas/`](gotchas/), spl
 - **253** — A ctypes/dlopen GUI-toolkit wrapper with no upstream pytest suite at all still has
 - **296** — Upstream test fixtures checked in via git-lfs can't assume the self-hosted
 - **329** — A test suite that shells out to the package's own installed CLI binaries at a
+- **347** — A test that asserts "you're running against an editable/in-place install" can
+- **348** — A `glcontext`-based package's `create_context(standalone=True)` defaults to the
 
 ### Testing: pytest config, servers & test selection — [`gotchas/pytest-config-servers-and-selection.md`](gotchas/pytest-config-servers-and-selection.md)
 
