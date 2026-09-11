@@ -27,21 +27,24 @@ permissions:
 env:
   KEYSTONE_ENGINE_VERSION: ${{ inputs.version || '0.9.2' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
 
+  # setup.py ships no ext_modules (the C library is loaded via ctypes) and setup.cfg
+  # sets bdist_wheel universal=1, so setuptools tags the wheel py2.py3-none and one
+  # build serves every interpreter - matching upstream's own manylinux1-only Linux
+  # matrix (python-publish.yml never builds musllinux). It couldn't here either: the
+  # bdist_wheel --plat-name it inserts is hardcoded 'manylinux1_' + platform.machine()
+  # regardless of actual libc (a since-fixed bug in the near-identical bindings/python
+  # setup.py of capstone, this project's sibling - see capstone#2445), so auditwheel
+  # refuses to repair that GLIBC-tagged wheel into a musllinux one.
   build_wheels:
     needs: [setup]
-    name: Build keystone-engine ${{ inputs.version || '0.9.2' }} py2.py3-none-${{ matrix.libc }}_riscv64
+    name: Build keystone-engine ${{ inputs.version || '0.9.2' }} py2.py3-none-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        libc: [manylinux, musllinux]
 
     steps:
       - name: Checkout keystone ${{ env.KEYSTONE_ENGINE_VERSION }}
@@ -64,34 +67,25 @@ jobs:
         with:
           package-dir: bindings/python
           output-dir: wheelhouse/
-          # setup.py ships no ext_modules (the C library is loaded via ctypes) and
-          # setup.cfg sets bdist_wheel universal=1, so setuptools tags the wheel
-          # py2.py3-none and one build serves every interpreter.
-          only: cp312-${{ matrix.libc }}_riscv64
+          only: cp312-manylinux_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
           # setup.py shells out to `cmake`/`make` directly (make-share.sh); neither is
           # a declared build dep. Installed from the image's own package manager rather
-          # than pip: pypi.riseproject.dev carries no musllinux riscv64 cmake wheel at
-          # all, and lags PyPI's own latest cmake for manylinux too (gotcha 84) - and
-          # both give a cmake < 4, needed below. The vendored llvm/cmake/config.guess is
+          # than pip: pypi.riseproject.dev lags PyPI's own latest cmake (gotcha 84), and
+          # this gives a cmake < 4, needed below. The vendored llvm/cmake/config.guess is
           # stamped 2011, predates riscv64, and fails "unable to guess system type"; the
           # automake package's copy already knows riscv64 (gotcha 138).
           CIBW_BEFORE_ALL_LINUX: |
             set -ex
-            if command -v apk > /dev/null; then
-              apk add --no-cache cmake automake
-            else
-              dnf install -y cmake automake
-            fi
+            dnf install -y cmake automake
             cp /usr/share/automake-*/config.guess llvm/cmake/config.guess
-            # Both images also carry a newer cmake (>= 4) ahead on PATH by default; that
+            # The image also carries a newer cmake (>= 4) ahead on PATH by default; that
             # version hard-rejects CMakeLists.txt's `cmake_policy(SET CMP0051 OLD)` ("no
             # longer supports it"), where the one just installed above (< 4) still can.
-            # Shadow only `cmake` via a dedicated PATH entry rather than the whole of
-            # /usr/bin, which also carries a `python` that trips cibuildwheel's own
-            # "python on PATH must match its managed interpreter" self-check on musllinux.
+            # Shadow only `cmake` via a dedicated PATH entry, not all of /usr/bin, so
+            # nothing else (notably `python`) resolves somewhere cibuildwheel doesn't
+            # expect.
             mkdir -p /tmp/keystone-cmake
             ln -sf /usr/bin/cmake /tmp/keystone-cmake/cmake
           # CMAKE_POLICY_VERSION_MINIMUM=3.5 covers cmake_minimum_required(VERSION 2.8.7)
@@ -137,7 +131,7 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: keystone-engine-${{ env.KEYSTONE_ENGINE_VERSION }}-py2.py3-none-${{ matrix.libc }}_riscv64
+          name: keystone-engine-${{ env.KEYSTONE_ENGINE_VERSION }}-py2.py3-none-manylinux_riscv64
           path: wheelhouse/*.whl
           if-no-files-found: error
 
