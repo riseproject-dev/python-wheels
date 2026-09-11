@@ -1,0 +1,75 @@
+From d1cf8a782d921f42fdb4afe4785b62d741f0179a Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sat, 12 Sep 2026 01:27:31 +0200
+Subject: [PATCH] setup: add a riscv64 (Rocky 10 / pypi.riseproject.dev) build
+ customization
+
+setup.py's customize_build dispatch relies on importing
+imagecodecs_distributor_setup, but that module is not reliably
+importable from inside cibuildwheel's isolated `python -m build`
+subprocess (build isolation does not put the project directory on
+sys.path), so the build silently falls back to customize_build_default
+-- which still tries to compile the jpegxr extension against jxrlib,
+a library Rocky 10 does not package for riscv64 at all.
+
+Add customize_build_riscv64, selected via an IMAGECODECS_RISCV64 env
+var checked directly in the dispatch chain (no import needed), so it
+does not depend on that mechanism working. It trims EXTENSIONS to the
+codecs backed by Rocky 10 appstream/crb dnf packages (plus lzf, which
+bundles its own source and needs no system library), drops jpegxr
+(like upstream's own customize_build_macports already does when
+jxrlib is unavailable) and wavpack (Rocky 10 packages WavPack 5.6.0,
+which predates the worker_threads/OPEN_THREADS_SHFT multithreaded-
+encoding API imagecodecs' _wavpack.pyx calls unconditionally), and
+clears the jpeg8 legacy sources so it builds against libjpeg-turbo 3
+(matching every other customize_build_* preset that runs on a modern
+libjpeg-turbo).
+
+Upstream-Status: Inappropriate [riscv64/pypi.riseproject.dev-specific build customization]
+---
+ setup.py | 22 +++++++++++++++++++++-
+ 1 file changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/setup.py b/setup.py
+index 3a91795..30e4e56 100644
+--- a/setup.py
++++ b/setup.py
+@@ -677,6 +677,24 @@ def customize_build_cibuildwheel(
+         extensions.pop('jpegxl', None)
+ 
+ 
++def customize_build_riscv64(
++    extensions: dict[str, Any],
++    options: dict[str, Any],
++) -> None:
++    """Customize build for Rocky 10 riscv64 (pypi.riseproject.dev)."""
++    keep = {
++        'shared', 'imcd', 'bmp', 'brotli', 'bz2', 'ccitt', 'cms', 'czi',
++        'deflate', 'gif', 'jpeg2k', 'jpeg8', 'lerc', 'ljpeg', 'lz4', 'lzf',
++        'lzma', 'pixarlog', 'png', 'snappy', 'tiff', 'webp', 'zlib', 'zstd',
++    }
++    del options['shared_utility_qualified_name']
++    extensions['jpeg2k']['include_dirs'].append('/usr/include/openjpeg-2.5')
++    extensions['jpeg8']['sources'] = []  # use libjpeg-turbo 3
++    for name in list(extensions):
++        if name not in keep:
++            extensions.pop(name)
++
++
+ def customize_build_condaforge(
+     extensions: dict[str, Any],
+     options: dict[str, Any],
+@@ -872,7 +890,9 @@ if 'sdist' not in sys.argv:
+     try:
+         from imagecodecs_distributor_setup import customize_build
+     except ImportError:
+-        if os.environ.get('PYODIDE', ''):
++        if os.environ.get('IMAGECODECS_RISCV64', ''):
++            customize_build = customize_build_riscv64
++        elif os.environ.get('PYODIDE', ''):
+             customize_build = customize_build_pyodide
+         elif os.environ.get('COMPUTERNAME', '').startswith('CG-'):
+             customize_build = customize_build_cgohlke
+-- 
+2.50.1 (Apple Git-155)
+
