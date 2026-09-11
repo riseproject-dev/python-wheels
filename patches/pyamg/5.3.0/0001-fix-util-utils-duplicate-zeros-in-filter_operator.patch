@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 11 Sep 2026 15:30:00 +0200
+Subject: [PATCH] fix(util/utils): duplicate zeros in filter_operator
+
+The explicit zeros filter_operator adds to A wherever C is nonzero can
+duplicate an existing (row, col) entry already present in A. scipy's
+sparse tocsr() only merges such duplicates when the intermediate coo
+array's has_canonical_format flag is False; as of scipy 1.17, the coo
+array produced by A.multiply(C) for these small test matrices is
+already marked canonical, and pyamg's subsequent direct assignment to
+A.data/A.row/A.col does not clear that stale flag. tocsr() then trusts
+it and skips the merge, leaving two stored entries at the same
+position. amg_core.satisfy_constraints_helper updates each stored
+entry independently, so the update is applied twice once the array is
+densified/summed - filter_operator(csr_array([[1.2]]), csr_array([[1.]]),
+[[0.5]], [[1.5]]) returns 4.8 instead of 3.0 with scipy>=1.17.
+
+Backported onto v5.3.0 unchanged; upstream carries it on main only, so
+no 5.x release contains it yet.
+
+Upstream-Status: Backport [https://github.com/pyamg/pyamg/commit/9f8299bcf1141e627503c3f208eda413bc1e28e6]
+---
+ pyamg/util/utils.py | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/pyamg/util/utils.py b/pyamg/util/utils.py
+index ae65ed4..c00c62e 100644
+--- a/pyamg/util/utils.py
++++ b/pyamg/util/utils.py
+@@ -1242,7 +1242,7 @@ def filter_operator(A, C, B, Bf, BtBinv=None):
+     C = C.copy()
+     C.data[:] = 1
+     A = A.multiply(C)
+-    # add explicit zeros to A wherever C is nonzero, but A is zero
++    # add explicit zeros to A wherever C is nonzero
+     A = A.tocoo()
+     C = C.tocoo()
+     A.data = np.hstack((np.zeros(C.data.shape, dtype=A.dtype), A.data))
+@@ -1252,6 +1252,8 @@ def filter_operator(A, C, B, Bf, BtBinv=None):
+         A = A.tobsr((rows_per_block, cols_per_block))
+     else:
+         A = A.tocsr()
++    # eliminate redundant zeros created by the above
++    A.sum_duplicates()
+
+     # Calculate difference between A @ B and Bf
+     diff = A @ B - Bf
+--
+2.50.1
