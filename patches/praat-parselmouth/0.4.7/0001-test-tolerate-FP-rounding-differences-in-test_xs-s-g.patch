@@ -1,0 +1,44 @@
+From fe441a9a966150645b0ec88f0bc62b7c22f4b797 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 11 Sep 2026 12:13:56 +0200
+Subject: [PATCH] test: tolerate FP rounding differences in test_xs's
+ grid-formula recomputation
+
+Upstream-Status: To upstream [not submitted; this port's automation may not open issues or PRs on repos other than riseproject-dev/python-wheels]
+
+test_xs re-derives each Sampled's x grid in Python (x1 + dx * arange(nx))
+and compares it to the C++-computed xs()/x_grid()/x_bins() with strict
+floating-point equality. On riscv64 the two independently-computed
+expressions differ in their last bit or two (compiler FMA fusion
+differences between GCC's riscv64 codegen and numpy's separate
+multiply-then-add), so the exact-equality assert fails even though the
+values agree to machine precision. Reproduces on riscv64 only; not seen
+on the x86_64/aarch64/arm64/windows runners upstream's own CI covers.
+
+Switch the three assertions to np.allclose with a tolerance far above
+double-precision rounding error but far below any real functional
+divergence.
+---
+ tests/test_sampled.py | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/tests/test_sampled.py b/tests/test_sampled.py
+index fc4c141..7b7cc93 100644
+--- a/tests/test_sampled.py
++++ b/tests/test_sampled.py
+@@ -21,9 +21,9 @@ import numpy as np
+ 
+ 
+ def test_xs(sampled):
+-	assert np.all(sampled.xs() == sampled.x1 + sampled.dx * np.arange(sampled.nx))
+-	assert np.all(sampled.x_grid() == sampled.x1 + sampled.dx * (np.arange(sampled.nx + 1) - 0.5))
+-	assert np.all(sampled.x_bins() == np.vstack((sampled.x_grid()[:-1], sampled.x_grid()[1:])).T)
++	assert np.allclose(sampled.xs(), sampled.x1 + sampled.dx * np.arange(sampled.nx), rtol=1e-9, atol=1e-12)
++	assert np.allclose(sampled.x_grid(), sampled.x1 + sampled.dx * (np.arange(sampled.nx + 1) - 0.5), rtol=1e-9, atol=1e-12)
++	assert np.allclose(sampled.x_bins(), np.vstack((sampled.x_grid()[:-1], sampled.x_grid()[1:])).T, rtol=1e-9, atol=1e-12)
+ 
+ 
+ def test_len(sampled):
+-- 
+2.50.1 (Apple Git-155)
+
