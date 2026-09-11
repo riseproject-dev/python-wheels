@@ -26,6 +26,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
 - **301** — Gotcha 146's licence auto-glob only fires for a `pyproject.toml` with a `[project]`
 - **309** — A wrapper's own permissive licence (LGPL, MIT, ...) does not launder a vendored
 - **320** — gotcha 123's PEP 639 default license glob is not implemented by meson-python —
+- **349** — The legacy `[project.license]` table form (`{file = "..."}`) not only suppresses
 
 ---
 
@@ -560,3 +561,33 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
     the key alone — for a meson-python project, treat `license-files` as *always*
     required, never assume the PEP 639 default covers you. Settle it in one command rather
     than reading backend source: `uv build --wheel && unzip -l dist/*.whl | grep -i licen`.
+
+349. **The legacy `[project.license]` table form (`{file = "..."}`) not only suppresses
+    setuptools' PEP 639 default glob (gotcha 105/123) — combining it with an explicit
+    `license-files` key is a hard error on recent setuptools (the pyopengl-accelerate
+    case).** pyopengl-accelerate's `pyproject.toml` sets `license = {file =
+    "license.txt"}`; a wheel built from it as-is ships no `dist-info/licenses/` file at
+    all — confirmed against the real published PyPI wheel too, same gap — because
+    setuptools folds the table form's file content straight into the `License:`
+    METADATA field instead of copying it as a licence file, the pre-639 behaviour.
+    Adding `license-files = ["license.txt"]` *alongside* the unchanged `license =
+    {file = ...}` line does not layer the two: setuptools 82 raises
+    `InvalidConfigError: project.license must be string` at metadata-generation time,
+    because a `license-files` key requires `project.license` to already be the PEP 639
+    SPDX string form. The fix is gotcha 44's one-line patch plus a second edit:
+    `license = "BSD-3-Clause"` (pick the identifier the licence text actually matches,
+    not the loose `License :: OSI Approved :: ...` classifier) and drop that classifier
+    — setuptools also rejects an OSI licence classifier once `project.license` is an
+    SPDX expression (`License classifiers have been superseded by license expressions`).
+    Verify by building locally (`pip wheel . --no-deps --no-build-isolation` from the
+    patched checkout) and asserting `dist-info/licenses/<file>` is present before
+    trusting a CI cycle to catch it — same self-verifying spirit as gotcha 44's
+    `importlib.metadata.files()` check, cheaper as a plain `zipfile.namelist()` scan
+    since the build already ran locally.
+    - **The zip's own directory entry can poison a naive `dist-info/licenses/`
+      check.** A `n.rsplit("/", 1)[1]` scan without excluding entries ending in `/`
+      picks up the `dist-info/licenses/` directory listing itself alongside the real
+      file, splitting to an empty string and turning `{"license.txt"}` into
+      `{"", "license.txt"}`. cibuildwheel's Linux build produces that directory entry;
+      a local macOS/`--no-build-isolation` build did not, so this only surfaced in CI.
+      Filter with `and not n.endswith("/")` before comparing the set.
