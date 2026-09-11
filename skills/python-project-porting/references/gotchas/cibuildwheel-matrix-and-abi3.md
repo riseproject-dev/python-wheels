@@ -35,6 +35,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **313** — A dynamic abi3 floor (`setup.py` tags whichever interpreter builds it) lets you
 - **324** — `{project}` is exactly the on-disk root of the checkout with no `path:` —
 - **331** — A platform-specific `[tool.cibuildwheel.<platform>].environment` table already
+- **356** — A pybind11 3.x CMake build can silently target the wrong Python on cp314t.
 
 ---
 
@@ -694,3 +695,36 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
      ansible-pylibssh does, to drop `STATIC_DEPS_DIR` paths that don't exist in the riscv64
      container) costs nothing extra beyond what the platform table had already cost —
      nothing from the global table survives to lose.
+
+356. **A pybind11 3.x CMake build can silently target the wrong Python on cp314t —
+     `find_package(Python ...)` ignores a `setup.py`'s legacy `-DPYTHON_EXECUTABLE` hint, and
+     free-threaded is the one build where that goes unnoticed until import, not configure
+     (the kaldi-native-fbank case; see `build-kaldi-native-fbank.yml`).**
+     `cmake/cmake_extension.py` passes `-DPYTHON_EXECUTABLE={sys.executable}` (the
+     pre-modern `FindPythonInterp` variable name) into its own `cmake`+`make install`
+     invocation; pybind11 3.0.0's CMake has moved entirely to `find_package(Python ...)`,
+     which reads `Python_EXECUTABLE` (capital P) and silently drops the old name instead of
+     erroring. On cp312/cp313/cp314 this goes unnoticed because CMake's own PATH/venv search
+     happens to land on the right interpreter anyway; on cp314t it instead resolved an
+     unrelated `/usr/local/bin/python3.15` present in the manylinux_riscv64 image, configured
+     pybind11 against it, and linked `_kaldi_native_fbank.cpython-315-riscv64-linux-gnu.so` —
+     a file the actual cp314t interpreter can never import. The job "succeeds" through
+     `make install` and wheel repair; only cibuildwheel's own test phase catches it, with
+     `ModuleNotFoundError: No module named '_kaldi_native_fbank'` on every test file, which
+     reads like a packaging bug rather than the real ABI mismatch.
+     - **Confirm from the configure log, not from the import failure alone**: grep for
+       `-- Found Python:` and compare the reported path/version against the interpreter
+       cibuildwheel actually selected for that matrix entry — a path outside the build venv,
+       or a version one above the target, is the tell.
+     - **Fix through the project's own override, no patch needed, when one exists**:
+       kaldi-native-fbank's `cmake_extension.py` reads `KALDI_NATIVE_FBANK_CMAKE_ARGS` from
+       the environment and skips its own `-DPYTHON_EXECUTABLE=`/`-DCMAKE_BUILD_TYPE=Release`
+       defaults whenever that var is set at all, so the replacement has to repeat both:
+       `CIBW_ENVIRONMENT: KALDI_NATIVE_FBANK_CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release
+       -DPython_EXECUTABLE=$(command -v python)"`. A project with no such env-var escape
+       hatch needs the same `-DPython_EXECUTABLE=` flag added as a patch instead.
+     - **Not inherently free-threading-specific** — any `setup.py` still speaking the legacy
+       `PYTHON_EXECUTABLE` name to a modern-CMake pybind11/nanobind build could hit this on
+       any interpreter if a same-or-higher-versioned Python happens to be independently
+       discoverable; cp314t is just where it surfaced here, because the image's bundled
+       Python outranked every GIL-ful target's own version but not (correctly) itself.

@@ -147,6 +147,7 @@ The porting gotchas (331 of them) live in [`references/gotchas/`](gotchas/), spl
 - **313** — A dynamic abi3 floor (`setup.py` tags whichever interpreter builds it) lets you
 - **324** — `{project}` is exactly the on-disk root of the checkout with no `path:` —
 - **331** — A platform-specific `[tool.cibuildwheel.<platform>].environment` table already
+- **356** — A pybind11 3.x CMake build can silently target the wrong Python on cp314t —
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
