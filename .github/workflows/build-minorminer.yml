@@ -1,0 +1,151 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on upstream's own wheel build setup:
+#   https://github.com/dwavesystems/minorminer/blob/0.2.22/pyproject.toml
+#   https://github.com/dwavesystems/minorminer/blob/0.2.22/.circleci/config.yml
+name: Build minorminer wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'minorminer version to build (PyPI version, e.g. 0.2.22)'
+        required: true
+        default: '0.2.22'
+  pull_request:
+    paths:
+      - '.github/workflows/build-minorminer.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.2.22' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.2.22 there.
+  MINORMINER_VERSION: ${{ inputs.version || '0.2.22' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_sdist:
+    needs: [setup]
+    # The sdist packages the source tree plus the vendored glasgow-subgraph-solver and
+    # portable-snippets headers (git submodules). It's architecture-independent, so
+    # build it once on x86 instead of burning a scarce riscv runner (CLAUDE.md gotcha 4).
+    name: Build minorminer ${{ inputs.version || '0.2.22' }} sdist
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
+      package_version: ${{ steps.sdist.outputs.package_version }}
+    steps:
+      # .gitmodules pins submodules via git@github.com: SSH URLs; no deploy key is
+      # configured on our runners, so rewrite to HTTPS before actions/checkout resolves them.
+      - name: Use HTTPS for submodule fetches
+        run: git config --global url."https://github.com/".insteadOf "git@github.com:"
+
+      - name: Checkout minorminer v${{ env.MINORMINER_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: dwavesystems/minorminer
+          ref: ${{ env.MINORMINER_VERSION }}
+          submodules: recursive
+          path: minorminer
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        working-directory: minorminer
+        run: git apply -v ../python-wheels/patches/minorminer/${{ env.MINORMINER_VERSION }}/*.patch
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build sdist
+        id: sdist
+        working-directory: minorminer
+        run: |
+          uv pip install build twine
+          python -m build --sdist
+          twine check --strict dist/*.tar.gz
+          sdists=(dist/*.tar.gz)
+          echo "sdist_name=$(basename "${sdists[0]}")" >> "$GITHUB_OUTPUT"
+          echo "package_version=$(basename "${sdists[0]}" | sed -En 's/minorminer-(.+)\.tar\.gz/\1/p')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: minorminer-${{ env.MINORMINER_VERSION }}-sdist
+          path: minorminer/dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_sdist]
+    name: Build minorminer ${{ inputs.version || '0.2.22' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: minorminer-${{ env.MINORMINER_VERSION }}-sdist
+          path: dist/
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-*
+          CIBW_ARCHS: riscv64
+          # Upstream itself skips musllinux (`skip = "pp* *musllinux*"` in pyproject.toml);
+          # CIBW_BUILD overrides that config wholesale, so repeat the musllinux skip here.
+          CIBW_SKIP: '*-musllinux_*'
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_ONLY_BINARY=numpy,scipy
+            PIP_PREFER_BINARY=1
+            UV_ONLY_BINARY=numpy,scipy
+            UV_PREFER_BINARY=1
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            UV_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            UV_INDEX_STRATEGY=unsafe-best-match
+            CIRCLECI=true
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: minorminer-${{ env.MINORMINER_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish minorminer ${{ inputs.version || '0.2.22' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: minorminer-${{ inputs.version || '0.2.22' }}-*-manylinux_riscv64
