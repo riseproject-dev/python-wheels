@@ -1,0 +1,146 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# PyPI's tcmlib wheel is Intel's own prebuilt x86_64/win_amd64-only binary under a closed
+# redistribution licence with no sdist; this builds the Apache-2.0 TCM source instead (same
+# shape as the tbb port, see build-tbb.yml). TCM lives inside the oneTBB repo as a
+# git-subtree-merged subdirectory, not a separate project, and is versioned independently of
+# oneTBB itself, so there is no oneTBB tag for a given TCM release - pin the commit instead.
+# Based on: https://github.com/uxlfoundation/oneTBB/tree/master/thread_composability_manager
+# (no upstream CI builds this wheel)
+name: Build tcmlib wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'tcmlib version to build'
+        required: true
+        default: '1.5.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-tcmlib.yml'
+      - 'patches/tcmlib/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.5.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  TCM_VERSION: ${{ inputs.version || '1.5.0' }}
+  # oneTBB commit that introduced TCM at version 1.5.0 (git-subtree merge of TCM's own
+  # history, one day before the matching PyPI upload). Update alongside TCM_VERSION.
+  TCM_REF: 7bc8577403df32b69b25157caad45677a8552861
+  HWLOC_VERSION: 2.14.0
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build tcmlib ${{ inputs.version || '1.5.0' }} py2.py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout oneTBB @ TCM ${{ env.TCM_VERSION }} (thread_composability_manager)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: uxlfoundation/oneTBB
+          ref: ${{ env.TCM_REF }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # TCM's own cmake/compilers/GNU.cmake applies -fcf-protection=full (x86 CET
+      # hardening) unconditionally, unlike oneTBB's own copy of the same file, which
+      # gates it to x86 - GCC rejects the flag outright on other architectures.
+      - name: Patch TCM source
+        run: git apply python-wheels/patches/tcmlib/${{ env.TCM_VERSION }}/*.patch
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
+
+      # TCM requires HWLOC >= 2.5 to build (find_package(HWLOC REQUIRED)); it isn't
+      # manylinux-portable as a system dependency (same fact that made tbb drop its
+      # optional libtbbbind), so build it from source and bundle it alongside libtcm.so,
+      # exactly like Intel's own wheel does. TCM_TEST=OFF skips its test suite,
+      # TCM_STRICT=OFF avoids upstream's warnings-as-errors on a newer GCC than they test.
+      - name: Build HWLOC, TCM, and the wheel
+        run: |
+          docker run --rm -v "$(pwd):/work" -w /work -e TCM_VERSION -e HWLOC_VERSION "${MANYLINUX_RISCV64_IMAGE}" bash -c '
+            set -euxo pipefail
+            curl -fsSL -o hwloc.tar.gz "https://download.open-mpi.org/release/hwloc/v${HWLOC_VERSION%.*}/hwloc-${HWLOC_VERSION}.tar.gz"
+            tar xzf hwloc.tar.gz
+            (cd "hwloc-${HWLOC_VERSION}" && ./configure --prefix=/work/hwloc-install --disable-static && make -j"$(nproc)" && make install)
+            export HWLOCROOT=/work/hwloc-install
+            cmake -S thread_composability_manager -B build -DCMAKE_BUILD_TYPE=Release -DTCM_TEST=OFF -DTCM_STRICT=OFF -DCMAKE_INSTALL_LIBDIR=lib
+            cmake --build build -j"$(nproc)"
+            cmake --install build --prefix /work/install
+            mkdir -p dist_libs
+            cp -L install/lib/libtcm.so* hwloc-install/lib/libhwloc.so* dist_libs/
+            for f in dist_libs/libtcm.so*; do patchelf --set-rpath "\$ORIGIN" "$f"; done
+            strip dist_libs/*.so*
+            file dist_libs/*.so*
+            ldd dist_libs/libtcm.so.1
+            cp thread_composability_manager/licensing/LICENSE.txt LICENSE.txt
+            cp "hwloc-${HWLOC_VERSION}/COPYING" LICENSE-hwloc.txt
+            cat > setup.py <<PYEOF
+          import glob
+          import os
+          from setuptools import setup
+          setup(
+              name="tcmlib",
+              version=os.environ["TCM_VERSION"],
+              description="Thread Composability Manager",
+              long_description="Thread Composability Manager (TCM) riscv64 dynamic library for Linux, built from the Apache-2.0 licensed oneTBB source, bundling a BSD-3-Clause HWLOC build it depends on.",
+              url="https://github.com/uxlfoundation/oneTBB/tree/master/thread_composability_manager",
+              license="Apache-2.0",
+              license_files=["LICENSE.txt", "LICENSE-hwloc.txt"],
+              classifiers=[
+                  "Operating System :: POSIX :: Linux",
+                  "Topic :: Software Development :: Libraries",
+              ],
+              data_files=[("lib", sorted(glob.glob("dist_libs/*.so*")))],
+          )
+          PYEOF
+            pybin=/opt/python/cp312-cp312/bin
+            "$pybin/pip" install -q -U setuptools wheel
+            "$pybin/python3" setup.py bdist_wheel --python-tag py2.py3 --plat-name manylinux_2_39_riscv64
+            "$pybin/pip" install -q dist/*.whl
+            "$pybin/python3" - <<PYEOF
+          import ctypes, os, sysconfig
+          libdir = os.path.join(sysconfig.get_path("data"), "lib")
+          tcm = ctypes.CDLL(os.path.join(libdir, "libtcm.so.1"))
+          tcm.tcmGetVersion.restype = ctypes.c_uint
+          version = tcm.tcmGetVersion()
+          major, minor, patch = (int(p) for p in os.environ["TCM_VERSION"].split("."))
+          assert version == 10000 * major + 100 * minor + patch, version
+          print("smoke test OK: tcmGetVersion() =", version)
+          PYEOF
+          '
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tcmlib-${{ env.TCM_VERSION }}-py2.py3-none-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish tcmlib ${{ inputs.version || '1.5.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: tcmlib-${{ inputs.version || '1.5.0' }}-*-manylinux_riscv64
