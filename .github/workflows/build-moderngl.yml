@@ -60,16 +60,14 @@ jobs:
           CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
           CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ LIBGL_ALWAYS_SOFTWARE=1
           # Upstream's own pytest suite (tests/, via a standalone EGL context -
-          # see tests/conftest.py) needs numpy/scipy/PyOpenGL, and it is the real
-          # test of the compiled extension - moderngl.mgl has zero build-time
-          # native deps (src/moderngl.cpp only calls GL through function pointers
-          # loaded by glcontext, our own riscv64 registry package), so nothing
-          # else exercises it. numpy/scipy have no musllinux riscv64 wheel on
-          # either PyPI or our registry (same gap as gotcha 253's kind), so
-          # musllinux gets the lighter EGL-context smoke test glcontext's own
-          # port already validated instead of the full suite.
+          # see tests/conftest.py) needs numpy/scipy/PyOpenGL, which have no
+          # musllinux riscv64 wheel on either PyPI or our registry, so musllinux
+          # gets the lighter EGL-context smoke test instead of the full suite.
+          # test_local.py asserts the tests dir sits next to an editable install
+          # (upstream's own Containerfile runs `setup.py build_ext --inplace`
+          # first); it never holds for a wheel installed into its own venv.
           CIBW_TEST_REQUIRES: ${{ matrix.libc == 'manylinux' && 'pytest numpy scipy PyOpenGL' || '' }}
-          CIBW_TEST_COMMAND: ${{ matrix.libc == 'manylinux' && 'python -m pytest {project}/tests -v' || 'python3 -c "import moderngl; ctx = moderngl.create_context(standalone=True); print(ctx.info); ctx.release()"' }}
+          CIBW_TEST_COMMAND: ${{ matrix.libc == 'manylinux' && 'python -m pytest {project}/tests -v -k "not test_local"' || 'python3 -c ''from glcontext import egl; import moderngl; ctx = moderngl.create_context(standalone=True, context=egl.create_context(glversion=330, mode="standalone")); print(ctx.info); ctx.release()''' }}
 
       - name: Check the compiled extension made it into the wheel
         run: |
