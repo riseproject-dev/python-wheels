@@ -23,6 +23,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
 - **256** — setuptools 81 dropped the `dry_run` keyword from its vendored
 - **269** — A project's own `build-system.requires` floor can be looser than what its
 - **346** — The `clang` PyPI package (LLVM's own `cindex.py` bindings, repackaged per release)
+- **361** — Gotcha 29's `pkg_resources` removal also bites `CIBW_TEST_REQUIRES`, not just a
 
 ---
 
@@ -534,3 +535,15 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
     `PYMUPDF_SETUP_LIBCLANG=clang==20.1.5` — libclang's C API is stable across this gap,
     so an older Python-side binding against the manylinux image's newer `libclang.so`
     (installed for its `.so` only, via `dnf install clang-devel`) still works.
+
+361. **Gotcha 29's `pkg_resources` removal also bites `CIBW_TEST_REQUIRES`, not just a
+    build-time `setup.py` — and cibuildwheel's test venv starts with no setuptools at
+    all (the pymavlink case; see `build-pymavlink.yml`).** pymavlink's own `tests/`
+    (not its build backend) import `pkg_resources` at module level in two files. cibuildwheel
+    builds the test venv with `virtualenv --no-setuptools`, so unlike the build-isolation
+    env gotcha 29 covers, `pkg_resources` is absent even before considering the removal —
+    plain `CIBW_TEST_REQUIRES: pytest numpy setuptools` still resolves setuptools
+    unpinned, landing on 82+ and reproducing the exact same `ModuleNotFoundError: No
+    module named 'pkg_resources'`, just at test-collection time instead of build time.
+    Fix is the same pin, applied to the other knob: `CIBW_TEST_REQUIRES: pytest numpy
+    "setuptools<82"`.

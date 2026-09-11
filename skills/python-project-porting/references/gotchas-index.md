@@ -354,6 +354,7 @@ The porting gotchas (331 of them) live in [`references/gotchas/`](gotchas/), spl
 - **269** — A project's own `build-system.requires` floor can be looser than what its
 - **277** — A CMake-backed `pyproject.toml` build dependency with no upper bound can still be
 - **346** — The `clang` PyPI package gained a `File.__eq__` with no matching `__hash__` in the
+- **361** — Gotcha 29's `pkg_resources` removal also bites `CIBW_TEST_REQUIRES`, not just a
 
 ### Testing: test-sources & shadowing — [`gotchas/testing-and-shadowing.md`](gotchas/testing-and-shadowing.md)
 
