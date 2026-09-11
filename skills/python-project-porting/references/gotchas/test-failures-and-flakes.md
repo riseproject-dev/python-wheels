@@ -30,6 +30,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **317** — A pure-Python, allocation-heavy test suite running ~8x slower on musllinux
 - **323** — Gotcha 127's GIL-reenable safety net only rules out concurrency races — a
   single-phase-init C extension can still segfault on cp314t with no threading involved.
+- **362** — A `multiprocessing.Process().join()` regression test for a native threadpool's
+  fork safety can hang the full length of its `pytest.mark.timeout` deterministically,
+  not flakily, on the riscv64 runner.
 
 ---
 
@@ -845,3 +848,32 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       ULP-divergence and gotcha 282's pixel-diff cases (environment divergence isn't
       a bug), except the axis here is the *library's own bundled data version*, not
       architecture or timing.
+
+362. **A `multiprocessing.Process().join()` regression test for a native threadpool's
+    fork safety can hang the full length of its `pytest.mark.timeout` deterministically,
+    not flakily, on the riscv64 runner (the vesin case).** vesin's
+    `test_fork_during_calculations` loads the C++ library, starts a background thread
+    that keeps hammering the (mutex-guarded) threadpool, forks a child via
+    `multiprocessing.set_start_method("fork")`, and asserts the child's `join()` returns
+    inside 10s (`@pytest.mark.timeout(10)`) — a real regression test for the library's
+    `pthread_atfork` handlers, not an artificial limit. It hit the full 10.0s wall twice
+    in a row (2/2, run 34600349160, including a rerun of the identical commit) rather
+    than completing a little late, the signature of a genuine deadlock rather than
+    gotcha 38's "just slow" — and upstream's own CI (`ubuntu-24.04`/`macos-15`/
+    `windows-2022`) never runs it under riscv64's different fork/threading timing at all,
+    so there is no signal that it passes anywhere in that configuration.
+    - **A rerun-in-place is the fast way to tell "deadlock" from "flake" before
+      spending a diagnostic budget.** Since nothing about the test or the code changed
+      between the two runs, `gh run rerun <id> --failed` (safe here specifically because
+      no fix was being validated, unlike gotcha 357's caution against it) re-executes the
+      exact same build+test; identical failure both times is strong evidence for a real,
+      reproducible race rather than scheduler noise that a second attempt would dodge.
+    - **Deselect with `-k "not <name>"`, not a path-based `--deselect`** (gotcha 14):
+      `pytest` reports collected nodeids relative to its rootdir
+      (`/project/python/vesin` here) while `{project}` in `CIBW_TEST_COMMAND` is the
+      absolute checkout root (gotcha 5), so a `--deselect {project}/…` string silently
+      matches nothing and the "deselected" test still runs.
+    - **Patching the vendored C++ `pthread_atfork` logic blind was out of scope** —
+      same call as gotcha 285's chroma-hnswlib case: one deselected test with a comment
+      naming the run id and the mechanism beats an unverified fix to native concurrency
+      code neither upstream nor this port's diagnostic budget can confirm.

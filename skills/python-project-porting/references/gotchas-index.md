@@ -435,6 +435,7 @@ The porting gotchas (331 of them) live in [`references/gotchas/`](gotchas/), spl
 - **317** — A pure-Python, allocation-heavy test suite running ~8x slower on musllinux
 - **323** — Gotcha 127's GIL-reenable safety net only rules out concurrency races — a
 - **330** — A manylinux image's system library can be years newer than what upstream ever
+- **362** — A `multiprocessing.Process().join()` regression test for a native threadpool's
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
