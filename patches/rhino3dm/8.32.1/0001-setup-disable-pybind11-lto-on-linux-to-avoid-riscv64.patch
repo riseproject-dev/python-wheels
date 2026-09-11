@@ -1,0 +1,40 @@
+From 0022ff5129a3eb6ae448dd141d2003a2e4e62f21 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 11 Sep 2026 20:42:24 +0200
+Subject: [PATCH] setup: disable pybind11 LTO on Linux to avoid riscv64
+ relocation overflow
+
+pybind11_add_module links pybind11::lto (-flto=auto -fno-fat-lto-objects)
+whenever CMAKE_INTERPROCEDURAL_OPTIMIZATION is unset. GCC's riscv64 LTO
+codegen overflows R_RISCV_PCREL_HI20 relocations when linking a
+translation unit this large (opennurbs + draco + bindings combined by
+LTO), failing with 'relocation truncated to fit'. Disable
+CMAKE_INTERPROCEDURAL_OPTIMIZATION on Linux to avoid pybind11's default
+LTO; x86_64/aarch64 do not hit this relocation limit so this only
+matters for riscv64.
+
+Upstream-Status: Inappropriate [riscv64 GCC LTO relocation-overflow workaround; x86_64/aarch64 don't hit this]
+---
+ setup.py | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/setup.py b/setup.py
+index 11c0385..b6829d3 100644
+--- a/setup.py
++++ b/setup.py
+@@ -85,6 +85,12 @@ class CMakeBuild(build_ext):
+             cmake_args += ['-DCMAKE_BUILD_TYPE=' + cfg]
+             if platform.system() == "Darwin":
+                 cmake_args += ['-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64']
++            if platform.system() == "Linux":
++                # pybind11_add_module links pybind11::lto (-flto=auto) whenever
++                # CMAKE_INTERPROCEDURAL_OPTIMIZATION is unset; GCC's riscv64 LTO
++                # codegen overflows R_RISCV_PCREL_HI20 relocations linking a
++                # translation unit this large (opennurbs + draco + bindings).
++                cmake_args += ['-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF']
+             build_args += ['--', f'-j{max(1,os.cpu_count()-1)}']
+ 
+         env = os.environ.copy()
+-- 
+2.50.1 (Apple Git-155)
+
