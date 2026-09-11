@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/SciTools/cartopy/blob/v0.25.0/.github/workflows/release.yml
+name: Build cartopy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'cartopy version to build (git tag without leading v, e.g. 0.25.0)'
+        required: true
+        default: '0.25.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-cartopy.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.25.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default there.
+  CARTOPY_VERSION: ${{ inputs.version || '0.25.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build cartopy ${{ inputs.version || '0.25.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Per-interpreter (not abi3): the cartopy.trace Cython/C++ extension links the
+        # version-specific ABI. Trimmed to cp312/cp313/cp314/cp314t (repo standard):
+        # shapely and pyproj, cartopy's hard runtime dependencies, only have riscv64
+        # wheels on pypi.riseproject.dev for those interpreters.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      - name: Checkout cartopy v${{ env.CARTOPY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: SciTools/cartopy
+          ref: v${{ env.CARTOPY_VERSION }}
+          fetch-depth: 0  # setuptools_scm derives the version from the tag history
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy is a build dependency; matplotlib/shapely/pyproj are runtime
+          # dependencies and scipy a test-only one, all pulled in for the test install.
+          # Only our registry has riscv64 wheels for them, and PIP_ONLY_BINARY keeps a
+          # newer PyPI release from winning the resolution and then compiling from sdist.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,matplotlib,shapely,pyproj,scipy
+          # Building from a checkout (no PKG-INFO) makes setup.py cythonize trace.pyx
+          # fresh, unlike a PyPI sdist build which ships a pre-cythonized trace.cpp and
+          # skips this entirely. Cython 3.3.0 (unbounded in pyproject.toml's
+          # build-system requires) regressed its own generated std::list-to-Python-list
+          # conversion for trace.pyx's C++ iteration, so build isolation must not be
+          # allowed to pick it.
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          CIBW_BEFORE_BUILD: pip install "cython<3.3" numpy setuptools setuptools_scm wheel
+          CIBW_TEST_REQUIRES: pytest pytest-mpl pytest-xdist scipy
+          # Mirrors upstream's own hermetic job (ci-testing.yml's "No Network Tests"
+          # step: `pytest ... -m "not natural_earth and not network"`), which also
+          # runs without --mpl; image-comparison baselines are font-rendering
+          # sensitive and not something upstream itself trusts cross-platform. Tests
+          # are excluded from the wheel (packages.find excludes cartopy.tests), so
+          # copy them out of the checkout first, as pyproj's workflow does.
+          CIBW_TEST_COMMAND: >-
+            python -c "import cartopy; import cartopy.crs as ccrs; import shapely.geometry as sgeom; r = ccrs.Robinson().project_geometry(sgeom.LineString([(-10, 10), (10, 50)]), ccrs.PlateCarree()); assert not r.is_empty; print('cartopy.trace OK')" &&
+            cp -r {package}/lib/cartopy/tests cartopy_tests &&
+            python -m pytest cartopy_tests -rfEsX -n 4 -m "not natural_earth and not network"
+
+      - name: Check the wheel ships the licence and the compiled extension
+        run: |
+          python3 - <<'EOF'
+          import glob, zipfile
+
+          names = zipfile.ZipFile(glob.glob("wheelhouse/*.whl")[0]).namelist()
+          assert any(n.endswith("dist-info/licenses/LICENSE") for n in names), names
+          assert any(n.startswith("cartopy/trace.") and n.endswith(".so") for n in names), names
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cartopy-${{ env.CARTOPY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cartopy ${{ inputs.version || '0.25.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: cartopy-${{ inputs.version || '0.25.0' }}-*-manylinux_riscv64
