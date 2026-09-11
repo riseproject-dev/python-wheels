@@ -1,0 +1,129 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on: https://code.qt.io/cgit/pyside/pyside-setup.git/tree/build_scripts/main.py?h=6.11.2
+name: Build shiboken6 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'shiboken6/pyside-setup tag to build (e.g. 6.11.2)'
+        required: true
+        default: '6.11.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-shiboken6.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '6.11.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  SHIBOKEN_VERSION: ${{ inputs.version || '6.11.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Rocky 10's riscv64 repos ship no patchelf package (gotcha 95), and pip installing
+  # the `patchelf` PyPI package builds NixOS/patchelf from source, which runs its own
+  # `make check` and fails 8/48 tests on riscv64. pyside-setup's build_patchelf() just
+  # needs the binary on PATH, so fetch NixOS/patchelf's own riscv64 release instead.
+  PATCHELF_VERSION: '0.17.2'
+  PATCHELF_SHA256: '4b28f7bc890c42076b2955be2229ac1607aa9a6d4ee40e33d69517ef0c403a56'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build shiboken6 ${{ inputs.version || '6.11.2' }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout pyside-setup ${{ env.SHIBOKEN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pyside/pyside-setup
+          ref: ${{ env.SHIBOKEN_VERSION }}
+          persist-credentials: false
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
+
+      # shiboken6's own Python bindings are self-generated: shiboken6-generator (needs
+      # Qt6Core + libclang, both in Rocky 10's AppStream repo already) must be built and
+      # pip-installed first so `--build-type=shiboken6` can invoke it against
+      # typesystem_shiboken.xml. The generator wheel itself is never published (out of
+      # scope - see pyside6-essentials' queue entry).
+      - name: Build shiboken6-generator, then shiboken6
+        run: |
+          docker run --rm -v "$(pwd):/work" -w /work \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            -e PATCHELF_VERSION="${PATCHELF_VERSION}" \
+            -e PATCHELF_SHA256="${PATCHELF_SHA256}" \
+            "${MANYLINUX_RISCV64_IMAGE}" bash -c '
+            set -euxo pipefail
+            dnf -y install clang-devel llvm-devel qt6-qtbase-devel
+            curl -fsSL -o /tmp/patchelf.tar.gz \
+              "https://github.com/NixOS/patchelf/releases/download/${PATCHELF_VERSION}/patchelf-${PATCHELF_VERSION}-riscv64.tar.gz"
+            echo "${PATCHELF_SHA256}  /tmp/patchelf.tar.gz" | sha256sum -c -
+            tar xzf /tmp/patchelf.tar.gz -C /usr/local
+            rm -f /tmp/patchelf.tar.gz
+            pybin=/opt/python/cp312-cp312/bin
+            export PATH="$pybin:$PATH"
+            # pyside-setup defaults to -G Ninja on Linux; PATH needs $pybin so the
+            # cmake subprocess can find the pip-installed ninja binary.
+            "$pybin/pip" install -q \
+              "setuptools==78.1.0" "packaging==24.2" "build==1.2.2.post1" \
+              "wheel==0.46.3" "distro==1.9.0" "ninja==1.13.2"
+            # manylinux finalize.sh strips every libpython*.a to save space, after
+            # archiving them into this tarball; shiboken6-generator embeds CPython and
+            # needs one back, at the flat LIBDIR path build_info_collector.py searches first.
+            tar xJf /opt/_internal/static-libs-for-embedding-only.tar.xz -C /opt/_internal
+            # --plat-name is only safe on Windows or macOS builds (PysideBuild finalize_options
+            # os-name hack does not cover native, non-cross-compiling Linux); auditwheel repair
+            # below retags the wheel to manylinux_2_39_riscv64 regardless.
+            "$pybin/python3" setup.py bdist_wheel \
+              --build-type=shiboken6-generator \
+              --qtpaths=/usr/bin/qtpaths6 \
+              --cmake=/usr/bin/cmake \
+              --parallel="$(nproc)" \
+              --skip-docs \
+              --limited-api=yes
+            # shiboken6_generator declares a shiboken6==6.11.2 runtime dependency, which is
+            # not built yet (that is the next step); --no-deps breaks that build cycle.
+            "$pybin/pip" install -q --no-deps dist/shiboken6_generator-*.whl
+            "$pybin/python3" setup.py bdist_wheel \
+              --build-type=shiboken6 \
+              --qtpaths=/usr/bin/qtpaths6 \
+              --cmake=/usr/bin/cmake \
+              --parallel="$(nproc)" \
+              --skip-docs \
+              --limited-api=yes
+            "$pybin/pip" install -q auditwheel
+            "$pybin/python3" -m auditwheel repair --plat manylinux_2_39_riscv64 \
+              -w audited dist/shiboken6-*.whl
+            rm -f dist/shiboken6-*.whl
+            mv audited/*.whl dist/
+            "$pybin/pip" install -q dist/shiboken6-*.whl
+            "$pybin/python3" -c "import shiboken6; print(\"shiboken6 import OK\")"
+          '
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: shiboken6-${{ env.SHIBOKEN_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: dist/shiboken6-*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish shiboken6 ${{ inputs.version || '6.11.2' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: shiboken6-${{ inputs.version || '6.11.2' }}-*-manylinux_riscv64
