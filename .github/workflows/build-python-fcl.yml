@@ -42,9 +42,6 @@ jobs:
       matrix:
         python:
           - "cp312"
-          - "cp313"
-          - "cp314"
-          - "cp314t"
 
     steps:
       - name: Checkout python-fcl v${{ env.PYTHON_FCL_VERSION }}
@@ -73,7 +70,12 @@ jobs:
           # build_dependencies/install_linux.sh builds eigen/libccd/octomap/fcl from
           # source; the license copies are appended here since CIBW_BEFORE_ALL_LINUX
           # fully replaces pyproject.toml's own before-all rather than extending it.
+          # DEBUG: -DBUILD_TESTING=OFF skips fcl's own ~25min test-binary build (not
+          # shipped in the wheel either way) to speed up iteration while diagnosing
+          # the riscv64-only "undefined symbol: typeinfo for fcl::CollisionGeometry<double>"
+          # failure seen on PR #1770 (all 4 legs, same symbol every time).
           CIBW_BEFORE_ALL_LINUX: >-
+            sed -i '/^cd fcl$/,/^cd \.\.$/ s/^\$CMAKE \.[[:space:]]*$/$CMAKE . -DBUILD_TESTING=OFF/' build_dependencies/install_linux.sh &&
             bash build_dependencies/install_linux.sh &&
             cp deps/fcl/LICENSE /project/LICENSE.fcl &&
             cp deps/libccd/BSD-LICENSE /project/LICENSE.libccd &&
@@ -84,6 +86,17 @@ jobs:
           CIBW_ENVIRONMENT: >-
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             PIP_ONLY_BINARY=cmake,numpy
+          # DEBUG: dump libfcl.so's own dynamic symbol table to confirm whether the
+          # explicit `template class CollisionGeometry<double>;` instantiation
+          # (src/geometry/collision_geometry.cpp) is actually exported, before
+          # setup.py links the Cython extension against it.
+          CIBW_BEFORE_BUILD: >-
+            echo ---LDD--- ;
+            ldd /usr/local/lib64/libfcl.so ;
+            echo ---DEFINED--- ;
+            nm -D --defined-only /usr/local/lib64/libfcl.so | grep -i CollisionGeometry ;
+            echo ---DONE--- ;
+            true
           CIBW_TEST_REQUIRES: pytest
           CIBW_TEST_COMMAND: >-
             python -c "import importlib.metadata as m;
