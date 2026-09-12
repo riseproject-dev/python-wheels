@@ -1,0 +1,122 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's Linux wheel job, which drives cibuildwheel straight from
+# the python/ subdirectory with no manual cmake invocation:
+#   https://github.com/dmlc/treelite/blob/4.7.2/.github/workflows/wheel-builder.yml
+name: Build treelite wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'treelite version to build (git tag, e.g. 4.7.2)'
+        required: true
+        default: '4.7.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-treelite.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '4.7.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  TREELITE_VERSION: ${{ inputs.version || '4.7.2' }}
+  # Pinned explicitly so the gpl_sources job pulls the same image the wheel's
+  # vendored libgomp came from.
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build treelite ${{ inputs.version || '4.7.2' }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout treelite ${{ env.TREELITE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: dmlc/treelite
+          ref: ${{ env.TREELITE_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # pyproject.toml has no license-files key, and python/ (unlike the repo
+      # root and cpp_src/) has no LICENSE for scikit-build-core's default glob
+      # to find, so every upstream wheel ships none.
+      - name: Patch treelite source
+        run: git apply python-wheels/patches/treelite/${{ env.TREELITE_VERSION }}/0001-*.patch
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python
+          output-dir: wheelhouse/
+          # wheel.py-api = "py3", so one build serves every interpreter.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,scipy,pandas,scikit-learn
+
+      - name: Check the wheel carries libtreelite and a vendored libgomp
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          for want in ("treelite/lib/libtreelite.so", "libgomp"):
+              if not any(want in n for n in names):
+                  raise SystemExit(f"error: {want} missing from {sys.argv[1]}")
+          print("\n".join(n for n in names if ".so" in n))
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: treelite-${{ env.TREELITE_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    name: Collect GPL sources (gcc) for treelite ${{ inputs.version || '4.7.2' }}
+    runs-on: ubuntu-24.04-riscv
+    steps:
+      # auditwheel vendors the image's libgomp.so.1 into the wheel.
+      - name: Collect gcc source RPM from manylinux_riscv64
+        uses: riseproject-dev/python-wheels/actions/collect-gpl-sources@main
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: treelite-${{ env.TREELITE_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish treelite ${{ inputs.version || '4.7.2' }}
+    needs: [setup, build_wheels, gpl_sources]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: treelite-${{ inputs.version || '4.7.2' }}-*-manylinux_riscv64
+      gpl-sources-artifact: treelite-${{ inputs.version || '4.7.2' }}-gpl-sources
+      gpl-sources-description: gcc
