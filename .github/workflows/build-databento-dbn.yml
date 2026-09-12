@@ -1,0 +1,130 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `x86_64-build`/`aarch64-build` jobs of
+# https://github.com/databento/dbn/blob/v0.68.0/.github/workflows/build.yaml
+name: Build databento-dbn wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'databento-dbn version to build (git tag, e.g. 0.68.0)'
+        required: true
+        default: '0.68.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-databento-dbn.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.68.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.68.0 there.
+  DATABENTO_DBN_VERSION: ${{ inputs.version || '0.68.0' }}
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build databento-dbn ${{ inputs.version || '0.68.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        # `pyo3.workspace = true` in python/Cargo.toml carries no abi3 feature,
+        # so every interpreter needs its own build; matches upstream's own
+        # build.yaml matrix (no cp314t: upstream ships none).
+        python: ['cp310', 'cp311', 'cp312', 'cp313', 'cp314']
+
+    steps:
+      - name: Checkout databento-dbn v${{ env.DATABENTO_DBN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: databento/dbn
+          ref: v${{ env.DATABENTO_DBN_VERSION }}
+          persist-credentials: false
+
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --locked --manifest-path python/Cargo.toml -i ${{ steps.interp.outputs.value }} --out dist
+          manylinux: '2_39'
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - name: Verify the wheel ships the compiled extension
+        run: |
+          set -euo pipefail
+          python3 - dist/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = [n for n in names if n.endswith(".so")]
+          assert any(n.startswith("databento_dbn/_lib") for n in sos), sos
+          print(sys.argv[1], "->", sos)
+          EOF
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ steps.interp.outputs.value }}
+          activate-environment: true
+          enable-cache: false
+
+      # No Python test suite ships upstream (scripts/test.sh is `cargo test`
+      # only); exercise the compiled extension directly, mirroring the kind
+      # of round-trip upstream's own Rust tests perform.
+      - name: Test wheel
+        run: |
+          uv pip install --reinstall dist/*.whl
+          python3 <<'EOF'
+          import databento_dbn as db
+
+          assert isinstance(db.DBN_VERSION, int)
+          assert db.Schema.TRADES.name == "TRADES"
+
+          msg = db.TradeMsg(
+              publisher_id=1,
+              instrument_id=100,
+              ts_event=1700000000000000000,
+              price=1000000000,
+              size=10,
+              action=db.Action.TRADE,
+              side=db.Side.BID,
+              depth=0,
+              ts_recv=1700000000000000000,
+          )
+          assert msg.record_size() > 0
+          assert len(bytes(msg)) == msg.record_size()
+          print("smoke test passed")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: databento_dbn-${{ env.DATABENTO_DBN_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish databento-dbn ${{ inputs.version || '0.68.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: databento_dbn-${{ inputs.version || '0.68.0' }}-*-manylinux_riscv64
