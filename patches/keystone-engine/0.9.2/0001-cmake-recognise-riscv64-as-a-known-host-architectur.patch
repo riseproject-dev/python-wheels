@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 11 Sep 2026 13:37:35 +0200
+Subject: [PATCH] cmake: recognise riscv64 as a known host architecture
+
+config-ix.cmake's LLVM_NATIVE_ARCH detection predates RISC-V's addition
+to upstream LLVM by several years and has no riscv64 case, so
+`cmake` on a riscv64 host dies with "Unknown architecture riscv64"
+before ever reaching target selection.
+
+Map it to "Unknown", the sentinel this same tree's own
+utils/llvm-build/llvmbuild/main.py already special-cases to mean "no
+native target" - the same state any other host arch absent from
+keystone's own LLVM_TARGETS_TO_BUILD (Arm, Arm64, Hexagon, Mips,
+PowerPC, Sparc, SystemZ, X86) already ends up in. That only leaves the
+native JIT (lli) unavailable, which keystone's own code
+(ks.cpp/EVMMapping.cpp) never uses.
+
+Upstream-Status: Inappropriate [this LLVM 3.9-era MC-layer snapshot predates RISC-V support in LLVM itself by years; the gap is in host-triple detection at configure time, not in any target keystone builds]
+---
+ llvm/cmake/config-ix.cmake | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/llvm/cmake/config-ix.cmake b/llvm/cmake/config-ix.cmake
+index 88bb66a..9cba389 100755
+--- a/llvm/cmake/config-ix.cmake
++++ b/llvm/cmake/config-ix.cmake
+@@ -333,6 +333,15 @@ elseif (LLVM_NATIVE_ARCH MATCHES "wasm32")
+   set(LLVM_NATIVE_ARCH WebAssembly)
+ elseif (LLVM_NATIVE_ARCH MATCHES "wasm64")
+   set(LLVM_NATIVE_ARCH WebAssembly)
++elseif (LLVM_NATIVE_ARCH MATCHES "riscv64")
++  # This LLVM fork predates upstream LLVM's own RISC-V backend (added years
++  # after this MC-layer snapshot was taken), so there is no RISCV target
++  # component for it to select below. "Unknown" is the sentinel this same
++  # tree's own utils/llvm-build/llvmbuild/main.py already special-cases to
++  # "no native target" (native_target_name = None) for exactly this case;
++  # it only means "host" target replacement and the native JIT (lli) stay
++  # unavailable, neither of which keystone's own code uses.
++  set(LLVM_NATIVE_ARCH Unknown)
+ else ()
+   message(FATAL_ERROR "Unknown architecture ${LLVM_NATIVE_ARCH}")
+ endif ()
+--
+2.50.1 (Apple Git-155)

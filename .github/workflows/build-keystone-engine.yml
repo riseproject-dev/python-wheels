@@ -1,0 +1,146 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build at this tag:
+#   https://github.com/keystone-engine/keystone/blob/0.9.2/.github/workflows/python-publish.yml
+name: Build keystone-engine wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'keystone-engine version/tag to build (e.g. 0.9.2)'
+        required: true
+        default: '0.9.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-keystone-engine.yml'
+      - 'patches/keystone-engine/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.9.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  KEYSTONE_ENGINE_VERSION: ${{ inputs.version || '0.9.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  # setup.py ships no ext_modules (the C library is loaded via ctypes) and setup.cfg
+  # sets bdist_wheel universal=1, so setuptools tags the wheel py2.py3-none and one
+  # build serves every interpreter - matching upstream's own manylinux1-only Linux
+  # matrix (python-publish.yml never builds musllinux). It couldn't here either: the
+  # bdist_wheel --plat-name it inserts is hardcoded 'manylinux1_' + platform.machine()
+  # regardless of actual libc (a since-fixed bug in the near-identical bindings/python
+  # setup.py of capstone, this project's sibling - see capstone#2445), so auditwheel
+  # refuses to repair that GLIBC-tagged wheel into a musllinux one.
+  build_wheels:
+    needs: [setup]
+    name: Build keystone-engine ${{ inputs.version || '0.9.2' }} py2.py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout keystone ${{ env.KEYSTONE_ENGINE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: keystone-engine/keystone
+          ref: ${{ env.KEYSTONE_ENGINE_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch keystone source
+        run: git apply python-wheels/patches/keystone-engine/${{ env.KEYSTONE_ENGINE_VERSION }}/*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: bindings/python
+          output-dir: wheelhouse/
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # setup.py shells out to `cmake`/`make` directly (make-share.sh); neither is
+          # a declared build dep. Installed from the image's own package manager rather
+          # than pip: pypi.riseproject.dev lags PyPI's own latest cmake (gotcha 84), and
+          # this gives a cmake < 4, needed below. The vendored llvm/cmake/config.guess is
+          # stamped 2011, predates riscv64, and fails "unable to guess system type"; the
+          # automake package's copy already knows riscv64 (gotcha 138).
+          CIBW_BEFORE_ALL_LINUX: |
+            set -ex
+            dnf install -y cmake automake
+            cp /usr/share/automake-*/config.guess llvm/cmake/config.guess
+            # The image also carries a newer cmake (>= 4) ahead on PATH by default; that
+            # version hard-rejects CMakeLists.txt's `cmake_policy(SET CMP0051 OLD)` ("no
+            # longer supports it"), where the one just installed above (< 4) still can.
+            # Shadow only `cmake` via a dedicated PATH entry, not all of /usr/bin, so
+            # nothing else (notably `python`) resolves somewhere cibuildwheel doesn't
+            # expect.
+            mkdir -p /tmp/keystone-cmake
+            ln -sf /usr/bin/cmake /tmp/keystone-cmake/cmake
+          # CMAKE_POLICY_VERSION_MINIMUM=3.5 covers cmake_minimum_required(VERSION 2.8.7)
+          # the same way, should PATH resolution ever pick a >= 4 cmake up regardless.
+          CIBW_ENVIRONMENT: CMAKE_POLICY_VERSION_MINIMUM=3.5 PATH=/tmp/keystone-cmake:$PATH
+          # Upstream's CI builds wheels but runs no tests at all. bindings/python/sample.py
+          # is the closest thing to a test upstream ships, but one of its own calls -
+          # b"add eax, 15h" with the default (non-RADIX16) syntax option - raises
+          # KS_ERR_ASM_INVALIDOPERAND independent of any target this build produces (a
+          # numeric-literal parsing quirk in the demo script, not riscv64-specific), so
+          # this inlines the rest of sample.py's calls instead of running it as-is.
+          CIBW_TEST_COMMAND: |
+            python -c "
+            import keystone as ks
+
+            def asm(arch, mode, code):
+                encoding, count = ks.Ks(arch, mode).asm(code)
+                assert count > 0, (arch, mode, code)
+
+            asm(ks.KS_ARCH_X86, ks.KS_MODE_64, b'add rax, rcx')
+            asm(ks.KS_ARCH_ARM, ks.KS_MODE_ARM, b'sub r1, r2, r5')
+            asm(ks.KS_ARCH_ARM64, ks.KS_MODE_LITTLE_ENDIAN, b'ldr w1, [sp, #0x8]')
+            asm(ks.KS_ARCH_HEXAGON, ks.KS_MODE_BIG_ENDIAN, b'v23.w=vavg(v11.w,v2.w):rnd')
+            asm(ks.KS_ARCH_MIPS, ks.KS_MODE_MIPS32, b'and \$9, \$6, \$7')
+            asm(ks.KS_ARCH_PPC, ks.KS_MODE_PPC32 + ks.KS_MODE_BIG_ENDIAN, b'add 1, 2, 3')
+            asm(ks.KS_ARCH_SPARC, ks.KS_MODE_SPARC32 + ks.KS_MODE_LITTLE_ENDIAN, b'add %g1, %g2, %g3')
+            asm(ks.KS_ARCH_SYSTEMZ, ks.KS_MODE_BIG_ENDIAN, b'a %r0, 4095(%r15,%r1)')
+            print('all asm ok')
+            "
+
+      - name: Check the wheel carries libkeystone and its licence
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith("keystone/libkeystone.so") for n in names), whl
+              licences = {n.rsplit("/", 1)[-1] for n in names if "dist-info/" in n and "LICENSE" in n}
+              assert licences == {"LICENSE.TXT"}, (whl, licences)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: keystone-engine-${{ env.KEYSTONE_ENGINE_VERSION }}-py2.py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish keystone-engine ${{ inputs.version || '0.9.2' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: keystone-engine-${{ inputs.version || '0.9.2' }}-*riscv64
