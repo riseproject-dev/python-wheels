@@ -1,0 +1,126 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_py_manylinux` job of
+# https://github.com/mcneel/rhino3dm/blob/8.32.2/.github/workflows/workflow_release.yml
+name: Build rhino3dm wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'rhino3dm version to build (e.g. 8.32.1)'
+        required: true
+        default: '8.32.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-rhino3dm.yml'
+      - 'patches/rhino3dm/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '8.32.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 8.32.1 there.
+  RHINO3DM_VERSION: ${{ inputs.version || '8.32.1' }}
+  # rhino3dm.py 8.32.1 was never tagged in git (8.32.0 and 8.32.2 were); this is
+  # the commit whose setup.py/src tree is byte-identical to the released sdist.
+  RHINO3DM_REF: 56daf09ab774cc02b69a1de2e17a1c8746550778
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build rhino3dm ${{ inputs.version || '8.32.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout rhino3dm ${{ env.RHINO3DM_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: mcneel/rhino3dm
+          ref: ${{ env.RHINO3DM_REF }}
+          # opennurbs, draco and pybind11 are submodules, statically linked
+          # into the _rhino3dm extension.
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # GCC's riscv64 LTO codegen overflows a relocation linking the
+      # merged opennurbs+draco+bindings translation unit; see the patch.
+      - name: Patch rhino3dm source
+        run: git apply python-wheels/patches/rhino3dm/${{ env.RHINO3DM_VERSION }}/00*.patch
+
+      # opennurbs, draco and pybind11 are compiled into the wheel, but
+      # upstream's own MANIFEST.in only ships rhino3dm's own LICENSE.
+      # setuptools' default license_files glob (LICEN[CS]E*) picks up files
+      # named this way at the root with no setup.py change.
+      - name: Stage the vendored dependencies' licences
+        run: |
+          cp src/lib/opennurbs/LICENSE LICENSE.opennurbs
+          cp src/lib/draco/LICENSE LICENSE.draco
+          cp src/lib/pybind11/LICENSE LICENSE.pybind11
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # setup.py shells out to `cmake` directly; it is not a declared
+          # build requirement anywhere upstream, so it has to be on PATH
+          # before setup.py runs.
+          CIBW_BEFORE_BUILD: pip install "cmake>=3.16"
+          # cmake's riscv64 wheel on our registry lags PyPI's latest, which
+          # has none; PIP_ONLY_BINARY keeps pip from trying to build the
+          # newer sdist from source.
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=cmake
+          CIBW_TEST_COMMAND: cd {project}/tests/python && python -m unittest discover .
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for path in sys.argv[1:]:
+              names = zipfile.ZipFile(path).namelist()
+              assert any(n.endswith(".so") for n in names), (path, names)
+              licences = {n.rsplit("/", 1)[-1] for n in names
+                          if ".dist-info/licenses/" in n} - {""}
+              expected = {"LICENSE", "LICENSE.opennurbs", "LICENSE.draco", "LICENSE.pybind11"}
+              assert licences == expected, (path, licences)
+              print(path, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rhino3dm-${{ env.RHINO3DM_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish rhino3dm ${{ inputs.version || '8.32.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: rhino3dm-${{ inputs.version || '8.32.1' }}-*-manylinux_riscv64
