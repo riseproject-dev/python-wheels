@@ -1,0 +1,95 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/cmake-wheel/cmeel-boost/blob/v1.90.0.c0/.github/workflows/release.yml
+name: Build cmeel-boost wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'cmeel-boost version to build (e.g. 1.90.0); checks out git tag v<version>.c0'
+        required: true
+        default: '1.90.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-cmeel-boost.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.90.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  CMEEL_BOOST_VERSION: ${{ inputs.version || '1.90.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build cmeel-boost ${{ inputs.version || '1.90.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 480
+    strategy:
+      fail-fast: false
+      matrix:
+        # Per-interpreter (not abi3): boost_python/boost_numpy link against the
+        # version-specific CPython ABI. Upstream doesn't build cp314t either.
+        python: ["cp312", "cp313", "cp314"]
+
+    steps:
+      # cmeel-boost's own release tags carry a trailing packaging-revision
+      # suffix (.c0) that isn't part of the wheel's own version.
+      - name: Checkout cmeel-boost v${{ env.CMEEL_BOOST_VERSION }}.c0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: cmake-wheel/cmeel-boost
+          ref: v${{ env.CMEEL_BOOST_VERSION }}.c0
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy has no riscv64 wheel on public PyPI; needed both at build time
+          # (build-system.requires) and at install time.
+          CIBW_ENVIRONMENT: CMEEL_LOG_LEVEL=DEBUG PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Boost's shared libs already carry a hardcoded $ORIGIN RPATH
+          # (CMakeLists.txt's hardcode-dll-paths=true); repair would only
+          # re-tag them, so skip it as upstream's own release.yml does.
+          CIBW_REPAIR_WHEEL_COMMAND: ""
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          path = sys.argv[1]
+          names = zipfile.ZipFile(path).namelist()
+          libs = [n for n in names if n.startswith("cmeel.prefix/lib/") and n.endswith(".so")]
+          assert any("libboost_python" in n for n in libs), libs
+          assert any("libboost_numpy" in n for n in libs), libs
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cmeel-boost-${{ env.CMEEL_BOOST_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cmeel-boost ${{ inputs.version || '1.90.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: cmeel-boost-${{ inputs.version || '1.90.0' }}-*-manylinux_riscv64
