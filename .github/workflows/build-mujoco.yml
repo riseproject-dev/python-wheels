@@ -1,0 +1,207 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Upstream builds the core C++ library and the Python bindings as two separate CMake
+# stages rather than via cibuildwheel (.github/workflows/build.yml + build_steps.sh:
+# configure_mujoco/build_mujoco/install_mujoco, then build_python_bindings against
+# MUJOCO_PATH); this workflow follows the same two-stage shape inside the riscv64
+# manylinux image. Studio (Filament/dear_imgui/implot GUI) and OpenUSD support are
+# dropped: Filament needs Vulkan/Metal-oriented tooling with no riscv64 story and
+# OpenUSD is a heavy separate build; the core physics engine and the classic GLFW
+# viewer (mujoco.viewer) are unaffected. All native deps (ccd, qhull, tinyxml2,
+# tinyobjloader, lodepng, miniz, pybind11, glfw) are fetched from source via CMake
+# FetchContent, so nothing here is a prebuilt binary.
+name: Build mujoco wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'mujoco version to build (git tag, e.g. 3.12.0)'
+        required: true
+        default: '3.12.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-mujoco.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '3.12.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MUJOCO_VERSION: ${{ inputs.version || '3.12.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build mujoco ${{ inputs.version || '3.12.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        python: [cp312-cp312, cp313-cp313, cp314-cp314, cp314-cp314t]
+
+    steps:
+      - name: Checkout google-deepmind/mujoco ${{ env.MUJOCO_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: google-deepmind/mujoco
+          ref: ${{ env.MUJOCO_VERSION }}
+          path: mujoco
+          persist-credentials: false
+
+      - name: Build mujoco core, sdist and the Python wheel
+        run: |
+          mkdir -p output "$HOME/.cache/mujoco-ccache"
+          docker run -i --rm \
+            -v "$PWD/mujoco:/mujoco" \
+            -v "$PWD/output:/output" \
+            -v "$HOME/.cache/mujoco-ccache:/ccache" \
+            -e CCACHE_DIR=/ccache \
+            -e MUJOCO_VERSION \
+            -e PIP_EXTRA_INDEX_URL \
+            "$MANYLINUX_RISCV64_IMAGE" bash -s <<'MUJOCO_BUILD_EOF'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+
+          MUJOCO_VERSION="${MUJOCO_VERSION:?must be set, e.g. 3.12.0}"
+          PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL:?riscv64 wheel registry index URL}"
+          PYBIN=/opt/python/${{ matrix.python }}/bin
+
+          # ninja/git aren't in the base image; the X11/Wayland headers are the same
+          # set the glfw port (build-glfw.yml) already validated on this image.
+          dnf install -y --setopt=install_weak_deps=False \
+            ninja-build git \
+            libXinerama-devel libXrandr-devel libXcursor-devel libXi-devel \
+            wayland-devel libxkbcommon-devel wayland-protocols-devel
+
+          CCACHE_ARGS=""
+          command -v ccache >/dev/null 2>&1 && \
+            CCACHE_ARGS="-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
+
+          INSTALL=/tmp/mujoco_install
+          cmake -S /mujoco -B /tmp/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
+            -DCMAKE_INSTALL_PREFIX="$INSTALL" \
+            -DMUJOCO_BUILD_EXAMPLES=OFF \
+            -DMUJOCO_BUILD_TESTS=OFF \
+            -DMUJOCO_TEST_PYTHON_UTIL=OFF \
+            -DMUJOCO_BUILD_SIMULATE=ON \
+            -DMUJOCO_BUILD_STUDIO=OFF \
+            -DMUJOCO_WITH_USD=OFF \
+            -DMUJOCO_USE_FILAMENT=OFF \
+            -DBUILD_TESTING=OFF \
+            ${CCACHE_ARGS}
+          cmake --build /tmp/build -j "$(nproc)"
+          cmake --install /tmp/build
+
+          mkdir -p "$INSTALL/mujoco_plugin"
+          for lib in actuator elasticity sensor sdf_plugin; do
+            find /tmp/build -name "lib${lib}.*" -exec cp {} "$INSTALL/mujoco_plugin/" \;
+          done
+
+          "$PYBIN/python3" -m venv /tmp/venv
+          source /tmp/venv/bin/activate
+
+          cd /mujoco/python
+          ./make_sdist.sh
+          cd dist
+
+          MUJOCO_PATH="$INSTALL" \
+          MUJOCO_PLUGIN_PATH="$INSTALL/mujoco_plugin" \
+          MUJOCO_CMAKE_ARGS="-DCMAKE_INTERPROCEDURAL_OPTIMIZATION:BOOL=OFF ${CCACHE_ARGS}" \
+          pip wheel -v --no-deps mujoco-*.tar.gz
+
+          pip install -U auditwheel
+          mkdir -p /output
+          # Excluding libmujoco.so mirrors the real PyPI wheel (which never grafts it
+          # either): the plugin .so's under mujoco/plugin/ dlopen() at import time and
+          # need to resolve libmujoco.so.<ver> to the SAME already-loaded instance the
+          # main extension modules use (via matching SONAME), for MuJoCo's global
+          # plugin registry to be shared. auditwheel would otherwise graft its own
+          # renamed copy into mujoco.libs/ for the plugins only (their RPATH doesn't
+          # already resolve libmujoco.so the way $ORIGIN does for the extensions in
+          # mujoco/), splitting the process into two independent libmujoco instances
+          # and silently breaking plugin registration ("plugin ... not found").
+          auditwheel repair --exclude 'libmujoco.so.*' --strip mujoco-*.whl -w /output
+          ls -la /output
+          MUJOCO_BUILD_EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mujoco-${{ env.MUJOCO_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: output/*.whl
+          if-no-files-found: error
+
+      - name: Test mujoco wheel
+        run: |
+          # MUJOCO_GL=disable mirrors upstream's own "Test Python bindings" CI step
+          # (build.yml): without it, mujoco.GLContext falls back to GLFW, and a second
+          # GLContext (render_test.py's per-test setUp) hangs forever on this headless
+          # runner instead of failing - it isn't a slow build, cp312/cp313/cp314t all
+          # sat idle at that exact point until the 360m job timeout killed them.
+          docker run -i --rm \
+            -v "$PWD/mujoco:/mujoco" \
+            -v "$PWD/output:/output" \
+            -e PIP_EXTRA_INDEX_URL \
+            -e MUJOCO_GL=disable \
+            "$MANYLINUX_RISCV64_IMAGE" bash -s <<'MUJOCO_TEST_EOF'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+
+          PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL:?riscv64 wheel registry index URL}"
+          PYBIN=/opt/python/${{ matrix.python }}/bin
+
+          # mujoco.sysid.tests (collected by `pytest --pyargs mujoco`) imports the whole
+          # `[sysid]` extra upstream declares in pyproject.toml; installing it explicitly
+          # here avoids discovering its deps one ModuleNotFoundError at a time.
+          "$PYBIN/pip" install -U --extra-index-url "$PIP_EXTRA_INDEX_URL" \
+            --only-binary=numpy,glfw,scipy,matplotlib,pyyaml \
+            "numpy>=2.0" glfw scipy matplotlib pyyaml
+          "$PYBIN/pip" install -U pytest absl-py "etils[epath]" pyopengl \
+            colorama imageio jinja2 plotly tabulate typing_extensions
+          "$PYBIN/pip" install /output/mujoco-*.whl
+
+          "$PYBIN/python3" -c "import mujoco; print(mujoco.__version__)"
+          "$PYBIN/python3" -c "
+          import mujoco
+          model = mujoco.MjModel.from_xml_string('<mujoco><worldbody><body><geom type=\"sphere\" size=\"1\"/></body></worldbody></mujoco>')
+          data = mujoco.MjData(model)
+          mujoco.mj_step(model, data)
+          print('mj_step OK, time =', data.time)
+          "
+
+          # mujoco/__init__.py extends its __path__ via pkgutil.extend_path (so
+          # mujoco-mjx can contribute to the same namespace package), and `python -m
+          # pytest` prepends cwd to sys.path. cd-ing into /mujoco/python before pytest
+          # made it resolve `mujoco` to the checkout's package dir (found ahead of
+          # site-packages on sys.path) instead of the installed wheel: same compiled
+          # extensions still worked via the merged path, but PLUGINS_DIR (derived from
+          # that __file__) pointed at a python/mujoco/plugin/ that doesn't exist in the
+          # checkout, so zero bundled plugins loaded and every plugin XML test failed
+          # with "plugin ... not found". Upstream's own CI (build_steps.sh
+          # test_python_bindings) never cds into python/ for this step for the same
+          # reason - run from the repo root here too.
+          cd /mujoco
+          "$PYBIN/python3" -m pytest -v --pyargs mujoco
+          MUJOCO_TEST_EOF
+
+  publish:
+    name: Publish mujoco ${{ inputs.version || '3.12.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: mujoco-${{ inputs.version || '3.12.0' }}-*-manylinux_riscv64
