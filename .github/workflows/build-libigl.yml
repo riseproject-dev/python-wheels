@@ -1,0 +1,145 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/libigl/libigl-python-bindings/blob/2.6.3/.github/workflows/wheels.yml
+name: Build libigl wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'libigl version to build (git tag, e.g. 2.6.3)'
+        required: true
+        default: '2.6.3'
+  pull_request:
+    paths:
+      - '.github/workflows/build-libigl.yml'
+      - 'patches/libigl/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.6.3' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  LIBIGL_VERSION: ${{ inputs.version || '2.6.3' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build libigl ${{ inputs.version || '2.6.3' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        # pyproject sets wheel.py-api = "cp312" (nanobind STABLE_ABI), so the
+        # single cp312 build is loadable on 3.12/3.13/3.14; only the
+        # free-threaded cp314t build needs its own wheel (build-apache-tvm-ffi.yml
+        # is the same shape).
+        python: [cp312, cp314t]
+
+    steps:
+      - name: Checkout libigl-python-bindings ${{ env.LIBIGL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: libigl/libigl-python-bindings
+          ref: ${{ env.LIBIGL_VERSION }}
+          persist-credentials: false
+
+      # CMakeLists.txt FetchContent-pulls nanobind/Eigen/libigl-core/CGAL/Boost/
+      # TetGen/Triangle/Spectra/libigl-predicates/cyCodeBase and compiles them
+      # into the wheel; upstream's own wheel ships only its own LICENSE.MPL2/
+      # LICENSE.GPL. Stage each dependency's own licence at the root for
+      # scikit-build-core's default wheel.license-files glob (see build-xatlas.yml).
+      - name: Stage the vendored dependencies' licences
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/wjakob/nanobind/v2.7.0/LICENSE" -o LICENSE.nanobind
+          {
+            curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/3.4.0/COPYING.README"
+            curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/3.4.0/COPYING.MPL2"
+            curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/3.4.0/COPYING.BSD"
+            curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/3.4.0/COPYING.LGPL"
+          } > LICENSE.eigen
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/CGAL/cgal/v6.0.1/LICENSE.md" -o LICENSE.cgal
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/boostorg/boost/boost-1.86.0/LICENSE_1_0.txt" -o LICENSE.boost
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/libigl/tetgen/e05aca7df74e3f531bc35733ed87d36d437266c5/LICENSE" -o LICENSE.tetgen
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/alecjacobson/spectra/bbdc521b70a733c52ebfc0ac1484c82e13c3d140/LICENSE" -o LICENSE.spectra
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/cemyuksel/cyCodeBase/e36f3cffca65eb12a8a071f0443128b7de6ed75d/LICENSE" -o LICENSE.cycodebase
+          # Triangle carries no LICENSE file; its copyright + redistribution
+          # notice lives in its README instead.
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/libigl/triangle/62f02db9ab4ff4b62d5ff82a77c8ea458c84c23a/README" | sed -n '9,47p' > LICENSE.triangle
+          # libigl-predicates carries no LICENSE file either; predicates.c's
+          # own header states it was placed in the public domain.
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/libigl/libigl-predicates/decb7bc1260e689cbe008109e3cc5d3a5a433aea/predicates.c" | sed -n '1,16p' > LICENSE.predicates
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply python-wheels/patches/libigl/${{ env.LIBIGL_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Embree's CMake ISA detection only knows x86 (SSE2..AVX512) and ARM
+          # (NEON/NEON2X); it has no riscv64 support at all, so it's the one
+          # optional module disabled here (every other one -- CGAL, TetGen,
+          # Triangle, Spectra, predicates, cyCodeBase -- is portable C/C++).
+          # Clang matches upstream's own CHANGELOG.md-documented CI choice.
+          CIBW_BEFORE_ALL_LINUX: dnf install -y clang
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy,cmake,ninja
+            CMAKE_ARGS=-DLIBIGL_EMBREE=OFF
+            CC=clang
+            CXX=clang++
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          path = sys.argv[1]
+          names = zipfile.ZipFile(path).namelist()
+          libs = [n for n in names if n.endswith(".so")]
+          assert libs, names
+          assert not any("embree" in n for n in names), names
+          licences = {n.rsplit("/", 1)[-1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          expected = {"LICENSE.MPL2", "LICENSE.GPL", "LICENSE.nanobind", "LICENSE.eigen",
+                      "LICENSE.cgal", "LICENSE.boost", "LICENSE.tetgen", "LICENSE.triangle",
+                      "LICENSE.spectra", "LICENSE.cycodebase", "LICENSE.predicates"}
+          assert licences == expected, licences
+          print(path, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: libigl-${{ env.LIBIGL_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish libigl ${{ inputs.version || '2.6.3' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: libigl-${{ inputs.version || '2.6.3' }}-*-manylinux_riscv64
