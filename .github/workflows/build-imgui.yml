@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow builds the extension modules the way pyimgui's own
+# [tool.cibuildwheel] table in pyproject.toml describes, narrowed to riscv64.
+name: Build imgui wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'imgui version to build (git tag, e.g. 2.0.0)'
+        required: true
+        default: '2.0.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-imgui.yml'
+      - 'patches/imgui/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.0.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  IMGUI_VERSION: ${{ inputs.version || '2.0.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build imgui ${{ inputs.version || '2.0.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        # 2.0.0 pins `Cython>=0.24,<0.30` (pyproject.toml [build-system]), and
+        # Cython 0.29 emits calls to the pre-3.13 `_PyLong_AsByteArray`
+        # signature, so cp313+ cannot compile: upstream itself stops
+        # publishing wheels at cp311 for this release. A Cython>=3 rebuild
+        # was tried locally and fails independently, with a compiler crash
+        # cimporting the overloaded C++ `CollapsingHeader`/
+        # `GetTreeNodeToLabelSpacing` bindings, so this is a real source
+        # incompatibility, not just an untested pin. cp312 is included
+        # because it builds and imports fine against the pinned Cython
+        # 0.29.37, verified locally.
+        python: ["cp310", "cp311", "cp312"]
+
+    steps:
+      - name: Checkout pyimgui ${{ env.IMGUI_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pyimgui/pyimgui
+          ref: ${{ env.IMGUI_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch imgui source
+        run: git apply python-wheels/patches/imgui/${{ env.IMGUI_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: imgui-${{ env.IMGUI_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish imgui ${{ inputs.version || '2.0.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: imgui-${{ inputs.version || '2.0.0' }}-*-manylinux_riscv64
