@@ -1,0 +1,135 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/pavlin-policar/openTSNE/blob/v1.0.4/azure-pipelines-release.yml
+name: Build opentsne wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'openTSNE version to build (git tag without leading v, e.g. 1.0.4)'
+        required: true
+        default: '1.0.4'
+  pull_request:
+    paths:
+      - '.github/workflows/build-opentsne.yml'
+      - 'patches/opentsne/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.0.4' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.0.4 there.
+  OPENTSNE_VERSION: ${{ inputs.version || '1.0.4' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build opentsne ${{ inputs.version || '1.0.4' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # Per-interpreter (not abi3): the Cython/C++ extensions link the
+        # version-specific ABI.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      - name: Checkout openTSNE v${{ env.OPENTSNE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pavlin-policar/openTSNE
+          ref: v${{ env.OPENTSNE_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch openTSNE source
+        run: git apply python-wheels/patches/opentsne/${{ env.OPENTSNE_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # setup.py's has_c_library("fftw3") probe finds no FFTW3 headers in the
+          # manylinux image (upstream's own Linux release job doesn't install them
+          # either, per azure-pipelines-release.yml's CIBW_BUILD step), so this
+          # falls back to the numpy FFT implementation, same as upstream's own
+          # manylinux wheels.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy,scikit-learn
+          # Mirrors upstream's own pytest invocation (azure-pipelines-release.yml).
+          # hnswlib/pynndescent are optional extras with no riscv64 wheels on our
+          # registry; their tests self-skip via unittest.skipIf when not installed.
+          # test-sources (gotcha 25): the openTSNE package sits at the repo root
+          # next to tests/, so running pytest from {project} shadows the installed
+          # wheel with the uncompiled source tree; stage just tests/ + pyproject.toml
+          # into an empty cwd instead.
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests pyproject.toml
+          CIBW_TEST_COMMAND: pytest -v tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: opentsne-${{ env.OPENTSNE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # setup.py adds -fopenmp to every extension when has_c_library("omp"), so
+      # auditwheel vendors the image's libgomp into opentsne.libs/.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: opentsne-${{ env.OPENTSNE_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish opentsne ${{ inputs.version || '1.0.4' }}
+    needs: [setup, build_wheels, gpl_sources]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: opentsne-${{ inputs.version || '1.0.4' }}-*-manylinux_riscv64
+      gpl-sources-artifact: opentsne-${{ inputs.version || '1.0.4' }}-gpl-sources
+      gpl-sources-description: gcc
