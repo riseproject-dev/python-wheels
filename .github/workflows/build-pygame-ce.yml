@@ -1,0 +1,235 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build` job of
+# https://github.com/pygame-community/pygame-ce/blob/2.5.8/.github/workflows/build-manylinux.yml
+name: Build pygame-ce wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pygame-ce version to build (git tag, e.g. 2.5.8)'
+        required: true
+        default: '2.5.8'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pygame-ce.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.5.8' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYGAME_CE_VERSION: ${{ inputs.version || '2.5.8' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pygame-ce ${{ inputs.version || '2.5.8' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 600
+    strategy:
+      fail-fast: false
+      matrix:
+        # Upstream also builds pp311, but PyPy has no riscv64 support in this
+        # repo (build-cryptography.yml drops the same row).
+        python: ["cp310", "cp311", "cp312", "cp313", "cp314", "cp315"]
+
+    steps:
+      - name: Checkout pygame-ce ${{ env.PYGAME_CE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pygame-community/pygame-ce
+          ref: ${{ env.PYGAME_CE_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream builds its own SDL2 stack from source in a ghcr.io docker_base
+          # image (buildconfig/manylinux-build/docker_base) it doesn't publish for
+          # riscv64. This rebuilds only the pieces that image's dnf repos can't
+          # provide, at the same versions/CMake flags as its sdl_libs/portmidi
+          # build scripts (no riscv64 SDL2-devel package exists at all: Rocky 10
+          # dropped it for sdl2-compat, a headless SDL3-backed shim -- see
+          # build-pygame.yml / gotcha 288). libpng, libjpeg-turbo, freetype,
+          # libwebp, libtiff, mpg123, flac, libvorbis+libogg and opus come from
+          # Rocky 10's own repos, same as build-pygame.yml.
+          CIBW_BEFORE_ALL: |
+            dnf install -y -q \
+              libpng-devel libjpeg-turbo-devel freetype-devel libwebp-devel libtiff-devel \
+              mpg123-devel flac-devel libvorbis-devel libogg-devel opus-devel \
+              libX11-devel libXext-devel libXcursor-devel libXi-devel libXrandr-devel \
+              libXinerama-devel libXxf86vm-devel libxkbcommon-devel \
+              wayland-devel wayland-protocols-devel dbus-devel dbus-tools \
+              alsa-lib-devel pulseaudio-libs-devel dejavu-sans-fonts
+
+            export MAKEFLAGS="-j$(nproc)"
+            mkdir -p /tmp/pg-deps && cd /tmp/pg-deps
+            mkdir -p /usr/local/share/pg-licenses
+
+            curl -fsSL --retry 5 -o portmidi.tar.gz https://github.com/PortMidi/portmidi/archive/refs/tags/v2.0.7.tar.gz
+            tar xzf portmidi.tar.gz
+            (cd portmidi-2.0.7 && cmake . -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR:PATH=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON && make && make install)
+            cp portmidi-2.0.7/license.txt /usr/local/share/pg-licenses/LICENSE.portmidi.txt
+
+            curl -fsSL --retry 5 -o SDL2.tar.gz https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-2.32.10.tar.gz
+            tar xzf SDL2.tar.gz
+            (cd SDL2-2.32.10 && mkdir builddir && cd builddir && cmake -S .. -B . -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR:PATH=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DSDL_VULKAN=0 && make && make install)
+            cp SDL2-2.32.10/LICENSE.txt /usr/local/share/pg-licenses/LICENSE.sdl2.txt
+
+            curl -fsSL --retry 5 -o SDL2_image.tar.gz https://github.com/libsdl-org/SDL_image/releases/download/release-2.8.12/SDL2_image-2.8.12.tar.gz
+            tar xzf SDL2_image.tar.gz
+            (cd SDL2_image-2.8.12 && mkdir builddir && cd builddir && cmake -S .. -B . -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR:PATH=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+                -DSDL2IMAGE_DEPS_SHARED=0 -DSDL2IMAGE_VENDORED=0 -DSDL2IMAGE_BACKEND_STB=0 -DSDL2IMAGE_AVIF=0 -DSDL2IMAGE_JXL=0 -DSDL2IMAGE_TIF=1 -DSDL2IMAGE_WEBP=1 \
+              && make && make install)
+            cp SDL2_image-2.8.12/LICENSE.txt /usr/local/share/pg-licenses/LICENSE.sdl2_image.txt
+
+            # SDL2TTF_HARFBUZZ left at its default (off): no riscv64 harfbuzz-devel
+            # to link (gotcha 288), so this uses SDL_ttf's vendored freetype+no-harfbuzz
+            # copy instead, same trim build-pygame.yml made; pygame-ce's own
+            # _freetype module still links Rocky 10's system freetype-devel.
+            curl -fsSL --retry 5 -o SDL2_ttf.tar.gz https://github.com/libsdl-org/SDL_ttf/releases/download/release-2.24.0/SDL2_ttf-2.24.0.tar.gz
+            tar xzf SDL2_ttf.tar.gz
+            (cd SDL2_ttf-2.24.0 && mkdir builddir && cd builddir && cmake -S .. -B . -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR:PATH=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON && make && make install)
+            cp SDL2_ttf-2.24.0/LICENSE.txt /usr/local/share/pg-licenses/LICENSE.sdl2_ttf.txt
+
+            # MOD/MIDI_FLUIDSYNTH/WAVPACK need libxmp(-lite)/modplug, fluidsynth
+            # and wavpack, all EPEL-only (gotcha 51, EPEL is empty on riscv64);
+            # dropped like build-pygame.yml drops the same two backends, and
+            # pyproject.toml's own test-command already excludes "music" tests.
+            # OPUS auto-detects on finding libopus (opus-devel, installed above
+            # for real Vorbis/opus codec use elsewhere) but actually needs the
+            # separate libopusfile project for file decoding; upstream's own
+            # manylinux build compiles opusfile from source (xiph.org tarball)
+            # to get it, which isn't worth doing here for an untested backend.
+            # MOD needs an explicit -0 too: CMakeLists.txt fatal-errors if enabled
+            # with no backend (unlike autotools' independent --disable-* flags).
+            curl -fsSL --retry 5 -o SDL2_mixer.tar.gz https://github.com/libsdl-org/SDL_mixer/releases/download/release-2.8.2/SDL2_mixer-2.8.2.tar.gz
+            tar xzf SDL2_mixer.tar.gz
+            (cd SDL2_mixer-2.8.2 && mkdir builddir && cd builddir && cmake -S .. -B . -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR:PATH=lib -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+                -DSDL2MIXER_DEPS_SHARED=0 -DSDL2MIXER_VENDORED=0 \
+                -DSDL2MIXER_FLAC_LIBFLAC=1 -DSDL2MIXER_FLAC_DRFLAC=0 \
+                -DSDL2MIXER_MP3_MPG123=1 -DSDL2MIXER_MP3_MINIMP3=0 \
+                -DSDL2MIXER_VORBIS=VORBISFILE \
+                -DSDL2MIXER_MOD=0 -DSDL2MIXER_MIDI_FLUIDSYNTH=0 -DSDL2MIXER_WAVPACK=0 \
+                -DSDL2MIXER_OPUS=0 \
+              && make && make install)
+            cp SDL2_mixer-2.8.2/LICENSE.txt /usr/local/share/pg-licenses/LICENSE.sdl2_mixer.txt
+
+            ldconfig
+          CIBW_ENVIRONMENT: >-
+            SDL_VIDEODRIVER=dummy
+            SDL_AUDIODRIVER=disk
+            PATH=/usr/local/bin:$PATH
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+          CIBW_BEFORE_BUILD: |
+            # docs/reST/conf.py's extensions list also needs sphinx-autoapi
+            # (the "autoapi.extension" entry); upstream's own build-wheels.sh
+            # only installs Sphinx itself, relying on something else in their
+            # manylinux image (not found in their own Dockerfiles) to supply
+            # it -- installing it explicitly here instead.
+            python3 -m pip install Sphinx sphinx-autoapi
+            python3 buildconfig/make_docs.py
+            cp /usr/local/share/pg-licenses/LICENSE.*.txt docs/licenses/LICENSE.sdl_gfx.txt docs/generated/
+            cp /usr/share/licenses/libpng/LICENSE docs/generated/LICENSE.png.txt
+            cp /usr/share/licenses/freetype/FTL.TXT docs/generated/LICENSE.freetype.txt
+            cp /usr/share/licenses/libjpeg-turbo/LICENSE.md docs/generated/LICENSE.jpeg.txt
+            cp /usr/share/licenses/libwebp/COPYING docs/generated/LICENSE.webp.txt
+            cp /usr/share/licenses/libtiff/LICENSE.md docs/generated/LICENSE.tiff.txt
+            cp /usr/share/licenses/mpg123-libs/COPYING docs/generated/LICENSE.mpg123.txt
+            cp /usr/share/licenses/flac-libs/COPYING.Xiph docs/generated/LICENSE.FLAC.txt
+            cp /usr/share/licenses/libvorbis/COPYING docs/generated/LICENSE.ogg-vorbis.txt
+            cp /usr/share/licenses/opus/COPYING docs/generated/LICENSE.opus.txt
+            cp /usr/share/licenses/alsa-lib/COPYING docs/generated/LICENSE.alsa.txt
+            cp /usr/share/licenses/bzip2-libs/LICENSE docs/generated/LICENSE.bzip2.txt
+            cp /usr/share/licenses/libzstd/LICENSE docs/generated/LICENSE.zstd.txt
+            cp /usr/share/licenses/jbigkit-libs/COPYING docs/generated/LICENSE.jbig.txt
+            cp /usr/share/licenses/libbrotli/LICENSE docs/generated/LICENSE.brotli.txt
+            cp /usr/share/licenses/liblerc/LICENSE docs/generated/LICENSE.lerc.txt
+          # Same dbus fix as build-pygame.yml:
+          #   >>> process 338: D-Bus library appears to be incorrectly set up; failed to read
+          #   machine uuid: Failed to open "/var/lib/dbus/machine-id": No such file or directory
+          CIBW_BEFORE_TEST: |
+            mkdir -p /var/lib/dbus
+            if [ ! -f /var/lib/dbus/machine-id ]; then
+                dbus-uuidgen > /var/lib/dbus/machine-id
+            fi
+
+      - name: Check the vendored licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          expected = {"LICENSE.sdl2.txt", "LICENSE.sdl2_image.txt", "LICENSE.sdl2_ttf.txt",
+                      "LICENSE.sdl2_mixer.txt", "LICENSE.portmidi.txt",
+                      "LICENSE.freetype.txt", "LICENSE.jpeg.txt", "LICENSE.png.txt",
+                      "LICENSE.webp.txt", "LICENSE.tiff.txt", "LICENSE.mpg123.txt",
+                      "LICENSE.FLAC.txt", "LICENSE.ogg-vorbis.txt", "LICENSE.opus.txt",
+                      "LICENSE.alsa.txt", "LICENSE.bzip2.txt", "LICENSE.zstd.txt",
+                      "LICENSE.jbig.txt", "LICENSE.brotli.txt", "LICENSE.lerc.txt",
+                      "LICENSE.sdl_gfx.txt"}
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              found = {n.rsplit("/", 1)[1] for n in names if "pygame/docs/generated/LICENSE." in n}
+              assert expected <= found, f"{whl}: missing {expected - found}"
+              assert any(n == "pygame/docs/generated/LGPL.txt" for n in names), whl
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pygame-ce-${{ env.PYGAME_CE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    name: Collect GPL sources for pygame-ce ${{ inputs.version || '2.5.8' }}
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Every copyleft library auditwheel vendors out of the build image (mpg123 and
+      # jbigkit-libs are GPL; flac-libs, libzstd, freetype are dual/mixed licensed
+      # and dnf resolves them to their copyleft option here), same set as
+      # build-pygame.yml minus graphite2 (harfbuzz isn't built for this port).
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: alsa-lib flac-libs freetype jbigkit-libs libzstd mpg123-libs
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pygame-ce-${{ env.PYGAME_CE_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish pygame-ce ${{ inputs.version || '2.5.8' }}
+    needs: [setup, build_wheels, gpl_sources]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pygame-ce-${{ inputs.version || '2.5.8' }}-*-manylinux_riscv64
+      gpl-sources-artifact: pygame-ce-${{ inputs.version || '2.5.8' }}-gpl-sources
+      gpl-sources-description: the copyleft libraries bundled in the wheel
