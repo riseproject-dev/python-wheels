@@ -1,0 +1,98 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/biocore/biom-format/blob/2.1.17/.github/workflows/wheels.yml
+name: Build biom-format wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'biom-format version to build (git tag, e.g. 2.1.17)'
+        required: true
+        default: '2.1.17'
+  pull_request:
+    paths:
+      - '.github/workflows/build-biom-format.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.1.17' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 2.1.17 there.
+  BIOM_FORMAT_VERSION: ${{ inputs.version || '2.1.17' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build biom-format ${{ inputs.version || '2.1.17' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        include:
+          # pandas (a hard runtime requirement) publishes no cp314t wheel on
+          # any platform or index, so the wheel itself builds fine but can't
+          # be installed for testing under cp314t; skip only the test phase.
+          - python: "cp314t"
+            test_skip: "*"
+
+    steps:
+      - name: Checkout biom-format ${{ env.BIOM_FORMAT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: biocore/biom-format
+          ref: ${{ env.BIOM_FORMAT_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply -v python-wheels/patches/biom-format/${{ env.BIOM_FORMAT_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy/scipy/pandas/h5py are build/runtime deps we ship on the
+          # registry; pin resolution to our wheels so pip doesn't instead pick
+          # PyPI's newer sdist-only releases (gotcha 84). cython has no
+          # riscv64 wheel on the registry but compiles from sdist in seconds,
+          # so it's left free to build.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy,pandas,h5py
+          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: biom-format-${{ env.BIOM_FORMAT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish biom-format ${{ inputs.version || '2.1.17' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: biom-format-${{ inputs.version || '2.1.17' }}-*-manylinux_riscv64
