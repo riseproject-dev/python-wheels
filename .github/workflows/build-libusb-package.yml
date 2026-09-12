@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/pyocd/libusb-package/blob/v1.0.30.0/.github/workflows/build-wheels.yml
+name: Build libusb-package wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'libusb-package version to build (git tag without leading v, e.g. 1.0.30.0)'
+        required: true
+        default: '1.0.30.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-libusb-package.yml'
+      - 'patches/libusb-package/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.0.30.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  LIBUSB_PACKAGE_VERSION: ${{ inputs.version || '1.0.30.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build libusb-package ${{ inputs.version || '1.0.30.0' }} cp312-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        libc: [manylinux, musllinux]
+
+    steps:
+      - name: Checkout libusb-package v${{ env.LIBUSB_PACKAGE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pyocd/libusb-package
+          ref: v${{ env.LIBUSB_PACKAGE_VERSION }}
+          # The vendored libusb sources live in the src/libusb submodule.
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # Ships libusb's own LGPL-2.1 COPYING alongside the package's Apache-2.0 LICENSE;
+      # every libusb-package wheel on PyPI is missing it (see the patch commit message).
+      - name: Patch libusb-package source
+        run: |
+          git apply python-wheels/patches/libusb-package/${{ env.LIBUSB_PACKAGE_VERSION }}/00*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: cp312-${{ matrix.libc }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # Reproduce upstream's own before-build; musllinux's Alpine base needs the
+          # autotools packages that the manylinux image already ships (gotcha 46).
+          # The patch above dirties the tree, so pin the setuptools_scm version (gotcha 31).
+          CIBW_ENVIRONMENT: >-
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LIBUSB_PACKAGE=${{ env.LIBUSB_PACKAGE_VERSION }}
+          CIBW_BEFORE_BUILD: >-
+            (command -v apk >/dev/null && apk add --no-cache autoconf automake libtool m4) || true &&
+            python -m pip install --upgrade pip wheel setuptools setuptools_scm
+          # setup.py's libusb_build_ext hard-fails under CIBUILDWHEEL=1 if libusb fails to
+          # build, so a green build already proves the .so compiled; get_library_path()
+          # also proves the wheel actually bundles it, and the license check proves the
+          # patch above still applies cleanly to this tag's dist-info metadata.
+          CIBW_TEST_COMMAND: >-
+            python -c "
+            import importlib.metadata as md;
+            import libusb_package as m;
+            p = m.get_library_path();
+            assert p is not None and p.is_file(), p;
+            licenses = {str(f) for f in md.files('libusb-package') if '.dist-info/licenses/' in str(f)};
+            assert any(l.endswith('/LICENSE') for l in licenses), licenses;
+            assert any(l.endswith('src/libusb/COPYING') for l in licenses), licenses
+            "
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: libusb-package-${{ inputs.version || '1.0.30.0' }}-cp312-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish libusb-package ${{ inputs.version || '1.0.30.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: libusb-package-${{ inputs.version || '1.0.30.0' }}-*-riscv64
