@@ -1,0 +1,222 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow mirrors the CMake flags VTK's own wheel CI passes in
+# https://gitlab.kitware.com/vtk/vtk/-/blob/v9.7.0/.gitlab/ci/configure_wheel.cmake
+# and the build recipe in .gitlab/os-linux.yml's .cmake_build_wheel_linux /
+# .cmake_test_wheel_linux job templates (CMake + setup.py bdist_wheel, not
+# cibuildwheel or scikit-build).
+name: Build vtk wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'vtk version to build (git tag without leading v, e.g. 9.7.0)'
+        required: true
+        default: '9.7.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-vtk.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '9.7.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  VTK_VERSION: ${{ inputs.version || '9.7.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build vtk ${{ inputs.version || '9.7.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 2880  # 48h: these runners have 4 cores, and a prior attempt was only
+                            # ~42% through the ninja build (5095/12192 steps) after 7.5h -
+                            # not hung, just a very large tree at this core count (same
+                            # reasoning as build-nodejs-wheel-binaries.yml's 48h).
+    strategy:
+      fail-fast: false
+      matrix:
+        # VTK is not abi3 (VTK_WRAP_PYTHON links directly against Python.h): upstream
+        # publishes one wheel per interpreter, rebuilding the whole tree each time.
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout VTK v${{ env.VTK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Kitware/VTK
+          ref: v${{ env.VTK_VERSION }}
+          submodules: false
+          persist-credentials: false
+
+      # Same OOM guard build-deltalake.yml/build-polars-runtime.yml need on these
+      # 4-core runners for other comparably large builds.
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 10
+
+      - name: Write container script
+        run: |
+          mkdir -p build
+          cat > riscv64-build-and-test.sh <<'EOF'
+          #!/bin/bash
+          set -e -x
+
+          case "${PYTHON_TAG}" in
+            *t) python_dir="/opt/python/${PYTHON_TAG%t}-${PYTHON_TAG}/bin" ;;
+            *) python_dir="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin" ;;
+          esac
+          python_exe="${python_dir}/python"
+
+          case "$1" in
+          build)
+            dnf install -y --setopt=install_weak_deps=False ninja-build libX11-devel libXcursor-devel
+
+            # Mirrors .gitlab/ci/configure_wheel.cmake's own -D flags directly rather than
+            # including its configure_common.cmake tail: that file is upstream's *stock CI*
+            # config (VTK_BUILD_TESTING, VTK_LINKER_FATAL_WARNINGS ON, ...) meant to catch
+            # regressions on platforms Kitware already supports, not something that should
+            # decide whether a first-ever riscv64 build succeeds. VTK_BUILD_ALL_MODULES=ON
+            # is kept: it's what makes the built tree match the real, full "vtk" wheel.
+            cmake_args=(
+              -DCMAKE_BUILD_TYPE=Release
+              -DCMAKE_INSTALL_PREFIX=/build/install
+              -DCMAKE_SKIP_INSTALL_ALL_DEPENDENCY=ON
+              -DVTK_BUILD_ALL_MODULES=ON
+              -DVTK_BUILD_TESTING=OFF
+              -DVTK_BUILD_EXAMPLES=OFF
+              -DVTK_WHEEL_BUILD=ON
+              -DVTK_INSTALL_SDK=ON
+              -DVTK_ENABLE_REMOTE_MODULES=OFF
+              -DVTK_DEBUG_LEAKS=OFF
+              -DVTK_BUILD_PYI_FILES=ON
+              -DVTK_USE_PCH=OFF
+              -DVTK_GROUP_ENABLE_Qt=NO
+              -DVTK_MODULE_ENABLE_VTK_CommonArchive=NO
+              -DVTK_MODULE_ENABLE_VTK_DomainsMicroscopy=NO
+              -DVTK_MODULE_ENABLE_VTK_FiltersONNX=NO
+              -DVTK_MODULE_ENABLE_VTK_FiltersOpenTURNS=NO
+              -DVTK_MODULE_ENABLE_VTK_FiltersReebGraph=NO
+              -DVTK_MODULE_ENABLE_VTK_IOADIOS2=NO
+              -DVTK_MODULE_ENABLE_VTK_IOAlembic=NO
+              -DVTK_MODULE_ENABLE_VTK_IOFFMPEG=NO
+              -DVTK_MODULE_ENABLE_VTK_IOGDAL=NO
+              -DVTK_MODULE_ENABLE_VTK_IOLAS=NO
+              -DVTK_MODULE_ENABLE_VTK_IOMySQL=NO
+              -DVTK_MODULE_ENABLE_VTK_IONanoVDB=NO
+              -DVTK_MODULE_ENABLE_VTK_IOODBC=NO
+              -DVTK_MODULE_ENABLE_VTK_IOOpenVDB=NO
+              -DVTK_MODULE_ENABLE_VTK_IOPDAL=NO
+              -DVTK_MODULE_ENABLE_VTK_IOPostgreSQL=NO
+              -DVTK_MODULE_ENABLE_VTK_InfovisBoost=NO
+              -DVTK_MODULE_ENABLE_VTK_InfovisBoostGraphAlgorithms=NO
+              -DVTK_MODULE_ENABLE_VTK_RenderingFreeTypeFontConfig=NO
+              -DVTK_MODULE_ENABLE_VTK_RenderingOpenVR=NO
+              -DVTK_MODULE_ENABLE_VTK_RenderingOpenXR=NO
+              -DVTK_MODULE_ENABLE_VTK_RenderingZSpace=NO
+              # configure_options.cmake (pulled in by the configure_common.cmake tail we
+              # skip) resolves both of these to NO unless CMAKE_CONFIGURATION contains
+              # "ospray"/"helide" - true for upstream's real wheel jobs too, but ENABLE
+              # defaults to YES under VTK_BUILD_ALL_MODULES and hard-fails configure
+              # when the external anari/ospray package isn't found.
+              -DVTK_MODULE_ENABLE_VTK_RenderingAnari=NO
+              -DVTK_MODULE_ENABLE_VTK_RenderingRayTracing=NO
+              -DVTK_MODULE_ENABLE_VTK_conduit=NO
+              -DVTK_MODULE_ENABLE_VTK_fides=NO
+              -DVTK_MODULE_ENABLE_VTK_xdmf3=NO
+              -DVTK_MODULE_ENABLE_VTK_IOOCCT=NO
+              -DVTK_MODULE_ENABLE_VTK_IOIFC=NO
+              -DVTK_MODULE_ENABLE_VTK_IOUSD=NO
+              -DVTK_ENABLE_CATALYST=OFF
+              # riscv64 has no SIMD kernel in vendored libjpeg-turbo (ThirdParty/jpeg);
+              # upstream's default ON hard-fails configure when SIMD compilation
+              # isn't available for CMAKE_SYSTEM_PROCESSOR.
+              -DVTK_JPEG_ENABLE_SIMD=OFF
+              -DPython3_EXECUTABLE="${python_exe}"
+              -DPython3_FIND_STRATEGY=LOCATION
+            )
+
+            case "${PYTHON_TAG}" in
+              *t) cmake_args+=(-DVTK_MODULE_ENABLE_VTK_IONetCDF=NO) ;;
+            esac
+
+            cmake -S /vtk -B /build -GNinja "${cmake_args[@]}"
+            # Mirrors ctest_build.cmake: a plain build (default target "all") first,
+            # then install as its own build invocation - ninja's install edge here
+            # doesn't transitively pull in every module's compile edge (e.g.
+            # libvtkWrappingTools.so) when targeted directly.
+            cmake --build /build --parallel "$(nproc)"
+            cmake --build /build --target install --parallel "$(nproc)"
+
+            cd /build
+            "${python_exe}" -m pip install -U setuptools wheel
+            "${python_exe}" setup.py bdist_wheel
+            auditwheel show dist/*.whl
+            auditwheel repair -w /build/wheelhouse dist/*.whl
+            ;;
+          test)
+            "${python_exe}" -m venv /tmp/venv
+            . /tmp/venv/bin/activate
+            pip install -U pip
+            pip install /build/wheelhouse/*.whl
+            python -c "import vtk"
+            python -m vtkmodules.generate_pyi --test -p vtkmodules
+            ;;
+          *)
+            echo "usage: $0 <build|test>" >&2
+            exit 1
+            ;;
+          esac
+          EOF
+
+      - name: Build wheel
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "${PWD}":/vtk \
+            -v "${PWD}/build":/build \
+            --workdir /vtk \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            --pull=newer \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /vtk/riscv64-build-and-test.sh build
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: vtk-${{ env.VTK_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: build/wheelhouse/*.whl
+          if-no-files-found: error
+
+      - name: Test wheel
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "${PWD}":/vtk \
+            -v "${PWD}/build":/build \
+            --workdir /vtk \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /vtk/riscv64-build-and-test.sh test
+
+  publish:
+    name: Publish vtk ${{ inputs.version || '9.7.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: vtk-${{ inputs.version || '9.7.0' }}-*-manylinux_riscv64
