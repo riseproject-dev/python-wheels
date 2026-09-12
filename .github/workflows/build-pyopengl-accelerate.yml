@@ -1,0 +1,116 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/mcfletch/pyopengl/blob/3.1.10/.github/workflows/accelerate-manylinux.yml
+name: Build pyopengl-accelerate wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pyopengl-accelerate version to build (git tag, e.g. 3.1.10)'
+        required: true
+        default: '3.1.10'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pyopengl-accelerate.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '3.1.10' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 3.1.10 there.
+  PYOPENGL_ACCELERATE_VERSION: ${{ inputs.version || '3.1.10' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pyopengl-accelerate ${{ inputs.version || '3.1.10' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout pyopengl ${{ env.PYOPENGL_ACCELERATE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: mcfletch/pyopengl
+          ref: ${{ env.PYOPENGL_ACCELERATE_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pyopengl-accelerate source
+        run: git apply python-wheels/patches/pyopengl-accelerate/${{ env.PYOPENGL_ACCELERATE_VERSION }}/*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: accelerate
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy has no riscv64 musllinux wheel anywhere (registry or public PyPI),
+          # and it's a build-time requirement (numpy_formathandler); musllinux is
+          # dropped rather than compiling numpy from source in-container.
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=numpy
+          # OpenGL.GL binds libGL at import time (not lazily at first call), so the
+          # accelerate test suite needs it on disk even though it never creates a
+          # real GL context - mesa-libGL provides it.
+          CIBW_BEFORE_TEST_LINUX: dnf install -y mesa-libGL
+          CIBW_TEST_REQUIRES: pytest PyOpenGL numpy
+          CIBW_TEST_SOURCES: accelerate/tests
+          CIBW_TEST_COMMAND: python -m pytest -ra {project}/accelerate/tests
+
+      - name: Check the compiled extensions and licence made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          expected = {
+              "wrapper", "formathandler", "arraydatatype", "errorchecker", "vbo",
+              "nones_formathandler", "latebind", "buffers_formathandler",
+              "numpy_formathandler",
+          }
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              found = {
+                  n.rsplit("/", 1)[1].split(".", 1)[0]
+                  for n in names
+                  if n.startswith("OpenGL_accelerate/") and n.endswith(".so")
+              }
+              assert found == expected, f"{whl}: {sorted(found)}"
+              licenses = {n.rsplit("/", 1)[1] for n in names if "dist-info/licenses/" in n and not n.endswith("/")}
+              assert licenses == {"license.txt"}, f"{whl}: {sorted(licenses)}"
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyopengl-accelerate-${{ env.PYOPENGL_ACCELERATE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyopengl-accelerate ${{ inputs.version || '3.1.10' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pyopengl-accelerate-${{ inputs.version || '3.1.10' }}-*riscv64
