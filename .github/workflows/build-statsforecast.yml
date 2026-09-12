@@ -1,0 +1,130 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/Nixtla/statsforecast/blob/v2.1.1/.github/workflows/python-publish.yml
+name: Build statsforecast wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'statsforecast version to build (git tag without leading v, e.g. 2.1.1)'
+        required: true
+        default: '2.1.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-statsforecast.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.1.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  STATSFORECAST_VERSION: ${{ inputs.version || '2.1.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build statsforecast ${{ inputs.version || '2.1.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # pybind11 links the version-specific ABI, no abi3 build.
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        include:
+          # statsmodels (a hard, unguarded runtime dep) has no riscv64 wheel
+          # for cp314 or cp314t on pypi.riseproject.dev yet
+          # (build-statsmodels.yml's own matrix is cp312/cp313 only); pandas
+          # is also missing for cp314t. Build still runs for both.
+          - python: "cp314"
+            test_skip: "*"
+          - python: "cp314t"
+            test_skip: "*"
+
+    steps:
+      - name: Checkout statsforecast v${{ env.STATSFORECAST_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Nixtla/statsforecast
+          ref: v${{ env.STATSFORECAST_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      # external_libs/eigen is a header-only submodule compiled into the
+      # wheel, but upstream's own wheel ships only its own LICENSE. Stage
+      # eigen's at the root for setuptools' default license-files glob
+      # (COPYING*) to pick up.
+      - name: Stage the vendored dependency's licence
+        run: cp external_libs/eigen/COPYING.MPL2 COPYING.eigen
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # coreforecast (a hard runtime dep) has no riscv64 wheel published
+          # yet, so it is deliberately left off PIP_ONLY_BINARY: pip falls
+          # back to building its sdist, which bundles its own vendored deps.
+          # polars is pinned to the newest version pypi.riseproject.dev has
+          # built for riscv64 (the "polars" package on PyPI is a thin
+          # py3-none-any shim requiring polars-runtime-32==<same version>).
+          CIBW_TEST_ENVIRONMENT: >-
+            PIP_ONLY_BINARY=numpy,pandas,statsmodels,matplotlib,scikit-learn
+            MPLBACKEND=Agg
+          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
+          # scikit-learn is an unguarded import inside MFLES's optimizer path
+          # (statsforecast/mfles.py), not just SklearnModel's own tests.
+          CIBW_TEST_REQUIRES: pytest matplotlib scikit-learn polars==1.44.1
+          CIBW_TEST_SOURCES: tests
+          # test_tbats_selection_and_forecast asserts fitted values against an
+          # x86_64-computed golden array at rtol=1e-6; riscv64's BLAS/LAPACK
+          # kernels converge the BATS optimizer to a different (max 3.7%
+          # relative difference) but still-valid fit -- a cross-platform
+          # optimizer-convergence divergence, not a code defect (same root
+          # cause class as gotcha 170's BLAS-divergence case, different
+          # mechanism: convergence point vs. dtype).
+          CIBW_TEST_COMMAND: >-
+            python -m pytest tests
+            --ignore=tests/test_adapters_prophet.py
+            --ignore=tests/test_distributed_fugue.py
+            --deselect "tests/test_tbats.py::test_tbats_selection_and_forecast"
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for path in sys.argv[1:]:
+              names = zipfile.ZipFile(path).namelist()
+              assert any(n.endswith(".so") for n in names), (path, names)
+              licences = {n.rsplit("/", 1)[-1] for n in names
+                          if ".dist-info/licenses/" in n} - {""}
+              assert licences == {"LICENSE", "COPYING.eigen"}, (path, licences)
+              print(path, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: statsforecast-${{ env.STATSFORECAST_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish statsforecast ${{ inputs.version || '2.1.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: statsforecast-${{ inputs.version || '2.1.1' }}-*-manylinux_riscv64
