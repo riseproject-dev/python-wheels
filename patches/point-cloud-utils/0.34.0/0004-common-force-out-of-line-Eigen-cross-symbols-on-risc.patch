@@ -1,0 +1,53 @@
+From f630bb41f8f8758eb9828f8d3ad170c118ce71c1 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 11 Sep 2026 23:20:30 +0200
+Subject: [PATCH 4/4] common: force out-of-line Eigen::cross() symbols on
+ riscv64
+
+Every riscv64 CI build failed importing _pcu_internal.so with:
+undefined symbol: ...MatrixBase<Matrix<float,3,1,...>>::cross<...>
+(and the same for Matrix<double,3,1,...>). nm -D --undefined-only on
+the built .so shows these are the *only* two unexplained undefined
+symbols -- everything else is normal versioned libstdc++/libgcc/Python
+C-API symbols resolved at load time. Eigen's cross() is a plain
+'inline' (EIGEN_STRONG_INLINE expands to plain 'inline' on GCC, not
+always_inline) template method, so every call site that doesn't fully
+inline it should itself emit a fallback out-of-line weak definition;
+somewhere in this build that guarantee isn't holding on riscv64
+(disabling EIGEN_DONT_VECTORIZE entirely, tried first, made no
+difference, ruling out the SSE/NEON Geometry_SIMD.h specialization).
+Force a genuine out-of-line, address-taken instantiation so the
+dynamic symbol always resolves regardless of what upstream's own
+translation units decide to inline.
+
+Upstream-Status: Inappropriate [riscv64-only workaround for a linkage issue that doesn't reproduce on any architecture upstream actually builds for]
+---
+ src/common/geogram_utils.cpp | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/src/common/geogram_utils.cpp b/src/common/geogram_utils.cpp
+index db7d349..9f948d5 100644
+--- a/src/common/geogram_utils.cpp
++++ b/src/common/geogram_utils.cpp
+@@ -37,3 +37,18 @@ void init_geogram_only_once() {
+     geogram_is_initialized = true;
+   }
+ }
++
++#if defined(__riscv)
++#include <Eigen/Geometry>
++
++namespace {
++// MatrixBase<Vector3f>::cross()/MatrixBase<Vector3d>::cross() end up as
++// unresolved dynamic symbols in the built .so (every call site elsewhere is
++// fully inlined, so no translation unit ever emits an out-of-line copy).
++// Taking their address here forces GCC to emit a real, linkable definition.
++__attribute__((used))
++auto force_riscv64_vector3_cross_f = &Eigen::MatrixBase<Eigen::Vector3f>::cross<Eigen::Vector3f>;
++__attribute__((used))
++auto force_riscv64_vector3_cross_d = &Eigen::MatrixBase<Eigen::Vector3d>::cross<Eigen::Vector3d>;
++}
++#endif
+-- 
+2.50.1 (Apple Git-155)
+
