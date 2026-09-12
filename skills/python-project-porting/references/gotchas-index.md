@@ -293,6 +293,9 @@ The porting gotchas (363 of them) live in [`references/gotchas/`](gotchas/), spl
 - **359** — A CMake project forked from old LLVM sources can validate the host
   architecture through two independent mechanisms — the vendored `utils/llvm-build`
   Python tool has its own separate check and its own escape hatch.
+- **374** — `find_package(Python3 REQUIRED COMPONENTS Interpreter Development)` fails on
+  manylinux's static-libpython CPython, on any architecture — only `Development.Module`
+  is ever needed to build an extension module, not the `Development.Embed` half.
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 

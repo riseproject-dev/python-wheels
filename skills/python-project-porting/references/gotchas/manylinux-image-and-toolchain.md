@@ -51,6 +51,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **359** — A CMake project forked from old LLVM sources can validate the host
   architecture through *two* independent mechanisms — the vendored `utils/llvm-build`
   Python tool has its own separate check and its own escape hatch.
+- **374** — `find_package(Python3 REQUIRED COMPONENTS Interpreter Development)` fails on
+  manylinux's static-libpython CPython, on any architecture — only `Development.Module`
+  is ever needed to build an extension module, not the `Development.Embed` half.
 
 ---
 
@@ -958,3 +961,23 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
     `"Unknown"` to mean "no native target" (`native_target_name = None`, skipping the
     component lookup entirely) — the same state a real absent architecture already
     reaches, and the only value that satisfies both checks at once.
+
+374. **`find_package(Python3 REQUIRED COMPONENTS Interpreter Development)` fails on
+    manylinux's own CPython the same way on x86_64/aarch64/riscv64 alike — nothing
+    riscv64-specific about it (the tensordict case).** CMake's `Development` component
+    is shorthand for *both* `Development.Module` (what building a `.so` extension needs)
+    and `Development.Embed` (a linkable `libpython` for embedding Python in a C++ host).
+    manylinux images build CPython with `Py_ENABLE_SHARED=0` and ship only a static
+    `libpythonX.Y.a`, and `Development.Embed`'s `Python3_LIBRARIES` lookup does not
+    accept it — `FindPython3` aborts with `Could NOT find Python3 (missing:
+    Python3_LIBRARIES Development Development.Embed)` before a single file compiles.
+    A pybind11/pure-C-extension project that never embeds Python only ever needs
+    `Development.Module`; requesting the wider `Development` component is the bug, not
+    the missing static lib. Confirmed by reproducing the exact configure failure on
+    `quay.io/pypa/manylinux_2_39_aarch64` (no QEMU/riscv64 needed to hit it), then
+    confirming `Development.Module` alone lets configure succeed, the extension link
+    with zero `libpython` reference in `ldd`, and the import work. Fix: patch the
+    project's `CMakeLists.txt` component list from `Development` to `Development.Module`
+    (`Upstream-Status: To upstream`, since it is a real portability bug independent of
+    riscv64) — do not reach for a `dnf`/pip-installed shared-libpython workaround, since
+    the fix is one word and matches how manylinux extensions are meant to link anyway.
