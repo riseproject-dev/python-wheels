@@ -87,6 +87,9 @@ The porting gotchas (363 of them) live in [`references/gotchas/`](gotchas/), spl
   build (the embreex/Embree case).
 - **372** — Zero sdist ever published, plus a license that independently bars redistribution
   even if a riscv64 build existed, is a double lock, not one (the hdbcli case).
+- **373** — A binding whose own C-extension source is fully open can still be `not-feasible`
+  when the thing it `dlopen()`s at runtime is proprietary with zero source and no riscv64
+  build at the vendor, official or unofficial (the cx_Oracle case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

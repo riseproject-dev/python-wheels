@@ -1542,3 +1542,35 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       fields together with zero sdists across the *entire* release history (not just the
       pinned version) is enough to suspect a closed-source vendor drop before even opening a
       wheel.
+
+373. **A binding whose own C-extension source is fully open can still be `not-feasible` when
+    the thing it `dlopen()`s at runtime is proprietary, has zero source anywhere, and has no
+    riscv64 build at the vendor, official or unofficial (the cx_Oracle case) — a third shape
+    past gotcha 157/183's "vendored inside the wheel" and gotcha 342's "linked at build
+    time".** cx_Oracle 8.3.0's extension is cx_Oracle's own BSD-licensed glue plus a vendored
+    copy of ODPI-C (dual Apache-2.0/UPL, `odpi/` in the sdist) — read `setup.py` and
+    `odpi/src/dpiOci.c` directly rather than assume from the "wraps Oracle" reputation:
+    `dpiOci.c` self-declares every OCI type/function prototype it calls (no Oracle SDK
+    headers needed to compile) and reaches `libclntsh.so*` only via `dlopen()`/`dlsym()` at
+    runtime — nothing is bundled or downloaded into the wheel at all, the same shape as
+    psycopg2 expecting the user to supply `libpq`. So the wheel itself builds and imports
+    cleanly on any arch, riscv64 included, with zero proprietary bytes anywhere in it. The
+    permanent blocker sits one layer out: every real operation (`connect()` and everything
+    after) needs Oracle Instant Client's `libclntsh.so`, which is closed-source with no
+    source ever published, and Oracle's own Instant Client download pages list only Linux
+    x86-64, Linux x86-32, Linux ARM (aarch64), Windows x64, and macOS ARM64 — no riscv64 at
+    any client version, official or unofficial (unlike playwright's Node.js driver, gotcha
+    183, there is no third-party rebuild possible either, because there is no open Instant
+    Client to rebuild from). Same verdict as playwright: installable and importable, but
+    non-functional for its entire purpose on riscv64, with no patch or build-from-source
+    escape hatch (gotcha 77 does not apply — there is nothing to build). Also unlike
+    mssql-python-odbc/hdbcli (gotchas 342/372), the *binding* here has real, open, portable
+    source; only the vendor runtime it dlopens at call time is the dead end. Parked
+    (`.queue.yml`); no worktree/branch/PR — confirmed read-only against the real 8.3.0 sdist
+    (`setup.py`, `odpi/src/dpiOci.c`, `LICENSE.txt`) and Oracle's live Instant Client
+    download/documentation pages.
+    - cx_Oracle 8.3.0 was itself Oracle's last release of this package before folding into
+      `python-oracledb`, which added a pure-Python "thin mode" speaking the Oracle Net
+      protocol directly and needing no Instant Client at all — a real riscv64 path exists
+      in the ecosystem, just not in this legacy binding; that successor package is a
+      separate `.queue.yml` candidate, out of scope here.
