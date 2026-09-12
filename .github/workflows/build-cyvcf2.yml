@@ -1,0 +1,125 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/brentp/cyvcf2/blob/v0.34.0/.github/workflows/wheels.yml
+name: Build cyvcf2 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'cyvcf2 version to build (git tag, e.g. 0.34.0)'
+        required: true
+        default: '0.34.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-cyvcf2.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.34.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.34.0 there.
+  CYVCF2_VERSION: ${{ inputs.version || '0.34.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build cyvcf2 ${{ inputs.version || '0.34.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout cyvcf2 v${{ env.CYVCF2_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: brentp/cyvcf2
+          ref: v${{ env.CYVCF2_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch cyvcf2 source
+        run: git apply python-wheels/patches/cyvcf2/${{ env.CYVCF2_VERSION }}/00*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf install -y autoconf automake libtool cmake ninja-build
+            zlib-devel bzip2-devel xz-devel
+          # No libcurl-devel and no EPEL on riscv64 (as build-pysam.yml/build-pybigwig.yml),
+          # so drop --enable-libcurl/--enable-s3/--with-libdeflate from upstream's own
+          # options; each defaults to "check" and htslib's configure silently disables it
+          # when the headers are absent instead of failing. bz2/lzma default to required,
+          # matching the devel packages installed above.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+            CYVCF2_HTSLIB_CONFIGURE_OPTIONS="--enable-lzma --enable-bz2"
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: cyvcf2/tests pyproject.toml
+          # test_reader.py/test_writer.py reach the compiled extension via a
+          # package-relative `from ..cyvcf2 import ...`, so cyvcf2/tests alone (no
+          # cyvcf2/__init__.py) isn't a deep enough package for that import to resolve.
+          # Merge the installed package (the compiled wheel) into the staged tree so the
+          # relative import lands on it directly, still exercising the compiled .so; its
+          # auditwheel-repaired RPATH is $ORIGIN-relative to a sibling cyvcf2.libs/
+          # (bz2/lzma), so stage that alongside it too.
+          CIBW_TEST_COMMAND: >-
+            site_pkg="$(python -c 'import cyvcf2, os; print(os.path.dirname(cyvcf2.__file__))')" &&
+            cp -a "$site_pkg/." cyvcf2/ &&
+            cp -a "$site_pkg/../cyvcf2.libs" . &&
+            python -m pytest -v cyvcf2/tests
+
+      - name: Verify the wheel ships the compiled extension and vendored licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = sorted(n for n in names if n.endswith(".so"))
+          print("\n".join(sos))
+          assert any("cyvcf2/cyvcf2" in n for n in sos), sos
+
+          lic = sorted(n.split("/")[-1] for n in names if ".dist-info/licenses/" in n and not n.endswith("/"))
+          print("\n".join(lic))
+          assert {"LICENSE", "LICENSE.htslib", "LICENSE.htscodecs"} <= set(lic), lic
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cyvcf2-${{ env.CYVCF2_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cyvcf2 ${{ inputs.version || '0.34.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: cyvcf2-${{ inputs.version || '0.34.0' }}-*-manylinux_riscv64
