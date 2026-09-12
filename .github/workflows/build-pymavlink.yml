@@ -1,0 +1,164 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/ArduPilot/pymavlink/blob/v2.4.49/.github/workflows/python-publish.yml
+name: Build pymavlink wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pymavlink version to build (git tag without leading v, e.g. 2.4.49)'
+        required: true
+        default: '2.4.49'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pymavlink.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2.4.49' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYMAVLINK_VERSION: ${{ inputs.version || '2.4.49' }}
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_ONLY_BINARY: ':all:'
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  python_sdist:
+    needs: [setup]
+    runs-on: ubuntu-latest
+    outputs:
+      sdist_artifact_name: ${{ steps.build_sdist.outputs.sdist_artifact_name }}
+      package_version: ${{ steps.build_sdist.outputs.package_version }}
+    steps:
+    - name: checkout pymavlink v${{ env.PYMAVLINK_VERSION }}
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      with:
+        repository: ArduPilot/pymavlink
+        ref: v${{ env.PYMAVLINK_VERSION }}
+        persist-credentials: false
+
+    - name: setup uv
+      uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+      with:
+        python-version: '3.12'
+        activate-environment: true
+        enable-cache: false
+
+    - name: build sdist
+      id: build_sdist
+      # setup.py's build_py regenerates dialects/*.py from the MAVLink XML message
+      # definitions, which live in the separate ArduPilot/mavlink repo (same as
+      # upstream's own build-sdist job); `uv pip install .` triggers that generation
+      # in place, so the sdist it feeds into `build --sdist` carries the generated
+      # dialect sources and message_definitions XML, matching the real PyPI sdist.
+      run: |
+        set -eux
+
+        git clone --depth=1 https://github.com/ArduPilot/mavlink.git
+        ln -s "$PWD/mavlink/message_definitions" message_definitions
+
+        rm -rf dist/
+        uv pip install build
+        uv pip install .
+        python -m build --sdist
+
+        echo "sdist_artifact_name=$(ls ./dist)" >> "$GITHUB_OUTPUT"
+        echo "package_version=$(ls ./dist | sed -En 's/pymavlink-(.+)\.tar\.gz/\1/p')" >> "$GITHUB_OUTPUT"
+
+    - name: upload sdist artifact
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: ${{ steps.build_sdist.outputs.sdist_artifact_name }}
+        path: dist/${{ steps.build_sdist.outputs.sdist_artifact_name }}
+        if-no-files-found: error
+
+  linux:
+    needs: [setup, python_sdist]
+    name: Build pymavlink ${{ inputs.version || '2.4.49' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+    - name: fetch sdist artifact
+      id: fetch_sdist
+      uses: actions/download-artifact@v8
+      with:
+        name: ${{ needs.python_sdist.outputs.sdist_artifact_name }}
+
+    - name: setup uv
+      uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+      with:
+        python-version: '3.12'
+        activate-environment: true
+        enable-cache: false
+
+    - name: build/test wheels
+      id: build
+      env:
+        CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+        CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+        # numpy has no riscv64 wheel on public PyPI; pull it (and anything else
+        # missing) from our registry inside the test venv.
+        CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+        # test_trim.py/test_wp.py import pkg_resources at module level; cibuildwheel's
+        # test venv is built with --no-setuptools, and setuptools 82 dropped pkg_resources
+        # entirely, so pin below that to keep it available.
+        CIBW_TEST_REQUIRES: pytest numpy setuptools<82
+        # No CIBW_TEST_SOURCES: it stages relative to cibuildwheel's cwd (the
+        # workspace root), not package-dir (gotcha 104), so {package}/tests below
+        # ({package} is the package-dir; {project} is its parent) reaches the
+        # real tests directly with no staging.
+        # test_mavlogdump.py and test_mavxml.py read fixture files (test.BIN,
+        # 64/65-fields.xml) that upstream's own packaging leaves out of the sdist;
+        # RallyTest/FenceTest in test_wp.py hit the same gap (rally/fence .txt
+        # fixtures). test_wp.py::MAVWPTest::test_save only passes when it is the
+        # first test file to import pymavlink.mavutil in the process: mavutil picks
+        # its MAVLink dialect once at import time from the MAVLINK20 env var, and
+        # an earlier test file importing it first (with MAVLINK20 unset) leaves the
+        # wrong dialect cached for the rest of the pytest run. Everything else in
+        # the suite is self-contained and order-independent.
+        CIBW_TEST_COMMAND: >-
+          python -m pytest {package}/tests
+          --ignore={package}/tests/test_mavlogdump.py
+          --ignore={package}/tests/test_mavxml.py
+          -k "not RallyTest and not FenceTest and not (MAVWPTest and test_save)"
+      run: |
+        set -eux
+
+        mkdir pymavlink
+
+        tar zxf ${{ steps.fetch_sdist.outputs.download-path }}/pymavlink-*.tar.gz --strip-components=1 -C pymavlink
+        uv pip install --upgrade cibuildwheel
+
+        python -m cibuildwheel --output-dir dist ./pymavlink
+
+        echo "artifact_name=$(ls ./dist/)" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: pymavlink-${{ needs.python_sdist.outputs.package_version }}-${{ matrix.python }}-manylinux_riscv64
+        path: ./dist/*.whl
+        if-no-files-found: error
+
+  publish:
+    name: Publish pymavlink ${{ inputs.version || '2.4.49' }}
+    needs: [setup, python_sdist, linux]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pymavlink-${{ needs.python_sdist.outputs.package_version }}-*-manylinux_riscv64
