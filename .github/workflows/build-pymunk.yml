@@ -1,0 +1,117 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel builder:
+#   https://github.com/viblo/pymunk/blob/7.3.0/.github/workflows/wheels.yml
+name: Build pymunk wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pymunk version to build (git tag, e.g. 7.3.0)'
+        required: true
+        default: '7.3.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pymunk.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '7.3.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 7.3.0 there.
+  PYMUNK_VERSION: ${{ inputs.version || '7.3.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_sdist:
+    needs: [setup]
+    name: Build pymunk ${{ inputs.version || '7.3.0' }} sdist
+    runs-on: ubuntu-latest
+    outputs:
+      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
+      package_version: ${{ steps.sdist.outputs.package_version }}
+    steps:
+      - name: Checkout pymunk ${{ env.PYMUNK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: viblo/pymunk
+          ref: ${{ env.PYMUNK_VERSION }}
+          # Munk2D (vendored Chipmunk2D) is a submodule; MANIFEST.in's
+          # recursive-include only bundles it into the sdist if present.
+          submodules: true
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build sdist
+        id: sdist
+        run: |
+          uv pip install build
+          python -m build --sdist
+          sdists=(dist/*.tar.gz)
+          sdist_name="$(basename "${sdists[0]}")"
+          echo "sdist_name=${sdist_name}" >> "$GITHUB_OUTPUT"
+          echo "package_version=$(echo "${sdist_name}" | sed -En 's/pymunk-(.+)\.tar\.gz/\1/p')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pymunk-${{ env.PYMUNK_VERSION }}-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_sdist]
+    name: Build pymunk ${{ inputs.version || '7.3.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: pymunk-${{ env.PYMUNK_VERSION }}-sdist
+          path: dist/
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # cffi, needed to build and to import the extension, has no riscv64 wheel on PyPI.
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pymunk-${{ needs.build_sdist.outputs.package_version }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pymunk ${{ inputs.version || '7.3.0' }}
+    needs: [setup, build_sdist, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pymunk-${{ needs.build_sdist.outputs.package_version }}-*-manylinux_riscv64
