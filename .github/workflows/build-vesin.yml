@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on: https://github.com/Luthaf/vesin/blob/v0.6.1/.github/workflows/build-wheels.yml (build-wheels)
+name: Build vesin wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'vesin version to build (git tag without the leading v, e.g. 0.6.1)'
+        required: true
+        default: '0.6.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-vesin.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.6.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  VESIN_VERSION: ${{ inputs.version || '0.6.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  GPULITE_COMMIT: 6c221167aeca7e113ea6f27e9a2e12391bdb189a  # mts-v1.3.0, pinned in lib/CMakeLists.txt
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build vesin ${{ inputs.version || '0.6.1' }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout vesin v${{ env.VESIN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Luthaf/vesin
+          ref: v${{ env.VESIN_VERSION }}
+          persist-credentials: false
+
+      # setup.py's `universal_wheel` forces py3-none, so one build serves every
+      # interpreter. The wheel statically links gpulite (fetched by CMake); neither
+      # licence reaches python/vesin's pyproject.toml glob root, so upstream ships none.
+      - name: Stage the vesin and gpulite licences
+        run: |
+          cp LICENSE python/vesin/LICENSE
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/metatensor/gpu-lite/${{ env.GPULITE_COMMIT }}/LICENSE" -o python/vesin/LICENSE.gpulite
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python/vesin
+          output-dir: wheelhouse/
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BUILD_FRONTEND: build
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=cmake
+          CIBW_TEST_REQUIRES: pytest pytest-timeout ase
+          # {project} is the checkout root, not package-dir, since python/vesin's CMakeLists.txt
+          # needs the sibling top-level vesin/ (C++ library) directory.
+          # test_fork_during_calculations deterministically times out (>10s, pytest-timeout)
+          # forking while a background thread holds the native threadpool's locks -- 2/2 on
+          # this runner (run 34600349160, incl. a rerun); upstream's own x86_64/arm64/Windows
+          # CI never exercises riscv64. -k, not --deselect (gotcha 14): nodeids are
+          # rootdir-relative, {project} here is absolute.
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as md;
+            assert {p.name for p in md.files('vesin') if 'licenses' in str(p)} == {'LICENSE', 'LICENSE.gpulite'}" &&
+            pytest {project}/python/vesin/tests -k "not test_fork_during_calculations"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: vesin-${{ env.VESIN_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish vesin ${{ inputs.version || '0.6.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: vesin-${{ inputs.version || '0.6.1' }}-*-manylinux_riscv64
