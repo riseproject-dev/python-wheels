@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/Nixtla/coreforecast/blob/v0.0.18/.github/workflows/python-publish.yml
+name: Build coreforecast wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'coreforecast version to build (git tag without leading v, e.g. 0.0.18)'
+        required: true
+        default: '0.0.18'
+  pull_request:
+    paths:
+      - '.github/workflows/build-coreforecast.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.0.18' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  COREFORECAST_VERSION: ${{ inputs.version || '0.0.18' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build coreforecast ${{ inputs.version || '0.0.18' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    # 60m was too tight: the pybind11/Eigen build runs anywhere from ~50m to
+    # over 60m depending on runner load, so this job was intermittently
+    # cancelled mid-build rather than genuinely failing (misread as infra
+    # flakiness before checking startedAt/completedAt on the cancelled runs).
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # pybind11 links the version-specific ABI, no abi3 build.
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        include:
+          # pandas is a hard, unguarded test dependency in most test modules;
+          # pypi.riseproject.dev has no riscv64 cp314t pandas wheel yet (PyPI
+          # itself does), so the tests can't collect there. Build still runs.
+          - python: "cp314t"
+            test_skip: "*"
+
+    steps:
+      - name: Checkout coreforecast v${{ env.COREFORECAST_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Nixtla/coreforecast
+          ref: v${{ env.COREFORECAST_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      # external_libs/{eigen,skiplist,stl-cpp} are header-only submodules
+      # compiled into the wheel, but upstream's own wheel ships only its own
+      # LICENSE. Stage theirs at the root for scikit-build-core's default
+      # wheel.license-files glob to pick up.
+      - name: Stage the vendored dependencies' licences
+        run: |
+          cp external_libs/eigen/COPYING.MPL2 COPYING.eigen
+          cp external_libs/skiplist/LICENSE LICENSE.skiplist
+          cp external_libs/stl-cpp/LICENSE-MIT LICENSE.stl-cpp
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,pandas
+          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
+          CIBW_TEST_REQUIRES: pandas pytest
+          CIBW_TEST_COMMAND: python -m pytest {project}/tests -k "not efficiency"
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for path in sys.argv[1:]:
+              names = zipfile.ZipFile(path).namelist()
+              assert any(n.endswith(".so") for n in names), (path, names)
+              licences = {n.rsplit("/", 1)[-1] for n in names
+                          if ".dist-info/licenses/" in n} - {""}
+              assert licences == {"LICENSE", "COPYING.eigen", "LICENSE.skiplist", "LICENSE.stl-cpp"}, (path, licences)
+              print(path, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: coreforecast-${{ env.COREFORECAST_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish coreforecast ${{ inputs.version || '0.0.18' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: coreforecast-${{ inputs.version || '0.0.18' }}-*-manylinux_riscv64
