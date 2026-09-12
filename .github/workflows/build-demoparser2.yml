@@ -1,0 +1,131 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/LaihoE/demoparser/blob/v0.42.0/.github/workflows/deploy.yml
+name: Build demoparser2 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'demoparser2 version to build (git tag without leading v, e.g. 0.42.0)'
+        required: true
+        default: '0.42.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-demoparser2.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.42.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.42.0 there.
+  DEMOPARSER2_VERSION: ${{ inputs.version || '0.42.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build demoparser2 ${{ inputs.version || '0.42.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        # demoparser2's pyo3 dependency has a plain `features = ["extension-module",
+        # "generate-import-lib"]` (no abi3-pyNN), so every interpreter needs its own build.
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        include:
+          # demoparser2's own Requires-Dist hard-pins pandas, which ships no cp314t
+          # wheel at all (any version, our registry or PyPI) -- cibuildwheel's own
+          # test-install step fails resolving it before CIBW_TEST_COMMAND even runs,
+          # so the wheel builds fine but the test phase must be skipped here.
+          - python: "cp314t"
+            test_skip: "*"
+
+    steps:
+      - name: Checkout demoparser2 v${{ env.DEMOPARSER2_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: LaihoE/demoparser
+          ref: v${{ env.DEMOPARSER2_VERSION }}
+          persist-credentials: false
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: src/python
+          output-dir: wheelhouse/
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # demoparser2 ships no [tool.cibuildwheel], so the Rust toolchain its maturin
+          # backend needs is installed in-container here. Upstream's own before-script-linux
+          # downloads a pinned protoc release, but its arch case statement covers only
+          # x86_64/aarch64; Rocky 10's CRB repo (enabled in the image) has protoc instead
+          # (gotcha 100). csgoproto's build.rs shells out to `git clone` at build time, so
+          # git also needs to be present, and the copied-in checkout's ownership triggers
+          # git's "dubious ownership" guard for that clone.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
+            yum install -y protobuf-compiler protobuf-devel git &&
+            git config --global --add safe.directory '*'
+          # PROTOC_INCLUDE is needed because CRB's protoc 3.19 resolves
+          # google/protobuf/*.proto from disk rather than from the binary (gotcha 100).
+          # CARGO_BUILD_JOBS halves concurrent rustc processes: the cp314t leg died
+          # compiling demoparser2's own crate with `free(): corrupted unsorted chunks`
+          # (SIGABRT) linking against polars on the 4-core riscv64 runners (gotcha 228).
+          # demoparser2's own Requires-Dist pulls in polars (and pandas via
+          # CIBW_TEST_REQUIRES below); PyPI's newest releases of both ship no
+          # riscv64 wheel yet, so without PIP_ONLY_BINARY pip resolves them
+          # over our registry's slightly older (but wheel-having) versions
+          # and falls back to a from-source build that never finishes in
+          # CI's time budget (polars-runtime-32 in particular is a Rust
+          # binary crate).
+          CIBW_ENVIRONMENT: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PROTOC_INCLUDE=/usr/include
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=pandas,polars,polars-runtime-32
+            CARGO_BUILD_JOBS=2
+          # Upstream's committed Cargo.lock pins ethnum 1.5.2 (pulled in transitively via
+          # polars-arrow/polars-parquet), whose `tfie()` helper transmutes `()` into
+          # `TryFromIntError`; a std layout change (any arch, any stable toolchain built
+          # from nightly-2026-04-18 onward) grew that type from 0 to 1 byte, so the
+          # transmute is now a compile error everywhere, not just riscv64. 1.5.3 replaces
+          # it with a safe construction (nlordell/ethnum-rs#58) and satisfies polars'
+          # `^1.3.2` requirement.
+          CIBW_BEFORE_BUILD_LINUX: cd src/python && cargo update -p ethnum --precise 1.5.3
+          CIBW_TEST_REQUIRES: pandas
+          # Staged at their checkout-relative paths (gotcha 104) so signature_tests.py's own
+          # `../parser/test_demo.dem` (relative to a src/python cwd, matching upstream's own
+          # `working-directory: ./src/python` test job) resolves inside test_cwd too.
+          CIBW_TEST_SOURCES: src/python/tests src/parser/test_demo.dem
+          CIBW_TEST_COMMAND: >-
+            python -c "import demoparser2.demoparser2 as m; assert m.__file__.endswith('.so'), m.__file__" &&
+            cd src/python && python tests/signature_tests.py
+          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: demoparser2-${{ env.DEMOPARSER2_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish demoparser2 ${{ inputs.version || '0.42.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: demoparser2-${{ inputs.version || '0.42.0' }}-*-manylinux_riscv64
