@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/alan-turing-institute/CleverCSV/blob/v0.8.5/.github/workflows/deploy.yml
+name: Build clevercsv wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'clevercsv version to build (git tag without leading v, e.g. 0.8.5)'
+        required: true
+        default: '0.8.5'
+  pull_request:
+    paths:
+      - '.github/workflows/build-clevercsv.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.8.5' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  CLEVERCSV_VERSION: ${{ inputs.version || '0.8.5' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build clevercsv ${{ inputs.version || '0.8.5' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout clevercsv v${{ env.CLEVERCSV_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: alan-turing-institute/CleverCSV
+          ref: v${{ env.CLEVERCSV_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # pandas/wilderness cover the hard imports in tests/test_unit
+          # (test_wrappers.py, test_console.py); faust-cchardet is skipped -
+          # it has no riscv64 wheel, and test_encoding.py already skips
+          # itself when it can't be imported. chardet's heuristic changed in
+          # 6.0, so test_console.py's hardcoded expectations need chardet<6.
+          CIBW_TEST_REQUIRES: 'chardet<6 pandas wilderness'
+          # Our registry has no cp314t pandas wheel, so PIP_PREFER_BINARY
+          # (not PIP_ONLY_BINARY, which would break that one leg) skips an
+          # ~45-minute from-source build on the other three interpreters.
+          CIBW_TEST_ENVIRONMENT: PIP_PREFER_BINARY=1
+          CIBW_TEST_COMMAND: "python -VV && python -m unittest discover -f -s {project}/tests/test_unit/"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: clevercsv-${{ env.CLEVERCSV_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish clevercsv ${{ inputs.version || '0.8.5' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: clevercsv-${{ inputs.version || '0.8.5' }}-*-manylinux_riscv64
