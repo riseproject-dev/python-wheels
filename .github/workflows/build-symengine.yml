@@ -1,0 +1,155 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/symengine/symengine-wheels' conda
+# recipe (recipe/build.sh), the actual process that builds the published PyPI
+# wheels — symengine.py's own .github/workflows/ci.yml tests against a
+# system-installed SymEngine and never packages a wheel.
+name: Build symengine wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'symengine version to build (git tag, e.g. v0.14.1)'
+        required: true
+        default: 'v0.14.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-symengine.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || 'v0.14.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to v0.14.1 there.
+  SYMENGINE_VERSION: ${{ inputs.version || 'v0.14.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # The C++ SymEngine release symengine.py's own symengine_version.txt commit
+  # descends from, pinned by symengine-wheels' recipe/meta.yaml alongside a
+  # sha256 for the release tarball.
+  SYMENGINE_CXX_VERSION: '0.14.0'
+  SYMENGINE_CXX_SHA256: '11c5f64e9eec998152437f288b8429ec001168277d55f3f5f1df78e3cf129707'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build symengine ${{ inputs.version || 'v0.14.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      - name: Checkout symengine.py ${{ env.SYMENGINE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: symengine/symengine.py
+          ref: ${{ env.SYMENGINE_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Builds the C++ SymEngine library once per container (not per
+          # interpreter) and installs it to /usr/local, which CMake's
+          # find_package(SymEngine) searches by default -- setup.py's own
+          # cmake invocation then picks it up with no --symengine-dir needed.
+          # gmp/mpfr/libmpc come from Rocky 10's repos, replacing upstream's
+          # conda-forge builds of the same libraries -- build/link-time only,
+          # no effect on what the C++ library computes. INTEGER_CLASS stays
+          # at its default (gmp) rather than upstream's flint: flint-devel
+          # has no Rocky 10 package on any arch (confirmed via repoquery), and
+          # it is a performance accelerator, not required for correctness.
+          # WITH_LLVM likewise stays at its default (no): upstream's own
+          # recipe pins llvmdev<17, but Rocky 10 only carries llvm-devel 21.x,
+          # and the LLVM JIT backend is optional. BUILD_TESTS/BUILD_BENCHMARKS
+          # are off to keep the native build bounded; the Python wheel is
+          # exercised instead by the upstream pytest suite below.
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf -y install gmp-devel mpfr-devel libmpc-devel &&
+            cd /tmp &&
+            curl -fsSLO https://github.com/symengine/symengine/releases/download/v${{ env.SYMENGINE_CXX_VERSION }}/symengine-${{ env.SYMENGINE_CXX_VERSION }}.tar.gz &&
+            echo "${{ env.SYMENGINE_CXX_SHA256 }}  symengine-${{ env.SYMENGINE_CXX_VERSION }}.tar.gz" | sha256sum -c - &&
+            tar xzf symengine-${{ env.SYMENGINE_CXX_VERSION }}.tar.gz &&
+            cmake -Bbuild -Ssymengine-${{ env.SYMENGINE_CXX_VERSION }} -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_BUILD_TYPE=Release
+            -DBUILD_FOR_DISTRIBUTION=yes -DBUILD_SHARED_LIBS=no -DWITH_MPC=yes -DBUILD_TESTS=no -DBUILD_BENCHMARKS=no &&
+            cmake --build build -j"$(nproc)" &&
+            cmake --build build --target install &&
+            cp /usr/share/licenses/gmp/COPYINGv3 /project/LICENSE.gmp &&
+            cp /usr/share/licenses/mpfr/COPYING.LESSER /project/LICENSE.mpfr &&
+            cp /usr/share/licenses/libmpc/COPYING.LESSER /project/LICENSE.mpc
+          CIBW_BEFORE_BUILD: pip install -U "cython>=0.29.24" setuptools
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          # SymEngineConfig.cmake (installed by the C++ build) declares
+          # `cmake_minimum_required(VERSION 2.8.12)` with no upper bound;
+          # CMake 4 in this image refuses anything below 3.5 (gotcha 257).
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+            CMAKE_POLICY_VERSION_MINIMUM=3.5
+          # The wheel bundles its own tests/ (symengine/tests/CMakeLists.txt
+          # installs them alongside the package), so no checkout staging is
+          # needed -- this is upstream's own bin/test_python.py invocation,
+          # run against the installed wheel with no source tree in sys.path
+          # to shadow it.
+          CIBW_TEST_REQUIRES: pytest sympy numpy
+          CIBW_TEST_COMMAND: python -c "import symengine, sys; sys.exit(0 if symengine.test() else 1)"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: symengine-${{ env.SYMENGINE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc gmp mpfr libmpc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: symengine-${{ env.SYMENGINE_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish symengine ${{ inputs.version || 'v0.14.1' }}
+    needs: [setup, build_wheels, gpl_sources]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: symengine-${{ inputs.version || 'v0.14.1' }}-*-manylinux_riscv64
+      gpl-sources-artifact: symengine-${{ inputs.version || 'v0.14.1' }}-gpl-sources
+      gpl-sources-description: gcc, gmp, mpfr, mpc
