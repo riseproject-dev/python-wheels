@@ -68,6 +68,14 @@ jobs:
           # libwebp, libtiff, mpg123, flac, libvorbis+libogg and opus come from
           # Rocky 10's own repos, same as build-pygame.yml.
           CIBW_BEFORE_ALL: |
+            # TEMPORARY diagnostic (gotcha: riscv64 self-hosted runner jobs that
+            # get killed mid-step never flush their GH Actions step log to blob
+            # storage, so `gh api .../jobs/<id>/logs` 404s with BlobNotFound and
+            # even a clean job's stdout is lost). Tee to a file under /project
+            # (bind-mounted from $GITHUB_WORKSPACE) so a later host-side step can
+            # recover it via $GITHUB_STEP_SUMMARY/upload-artifact even if this
+            # step's own log never makes it out.
+            exec > >(tee -a /project/pgce-ci-diag.log) 2>&1
             dnf install -y -q \
               libpng-devel libjpeg-turbo-devel freetype-devel libwebp-devel libtiff-devel \
               mpg123-devel flac-devel libvorbis-devel libogg-devel opus-devel \
@@ -130,13 +138,24 @@ jobs:
             cp SDL2_mixer-2.8.2/LICENSE.txt /usr/local/share/pg-licenses/LICENSE.sdl2_mixer.txt
 
             ldconfig
+          # cibuildwheel's own default `uv pip install numpy` (from pygame-ce's
+          # own [tool.cibuildwheel] test-requires, which this workflow doesn't
+          # override) doesn't reliably resolve PyPI's newest numpy releases
+          # via just PIP_EXTRA_INDEX_URL when uv is the installer -- needs its
+          # own UV_* env vars too, same fix minorminer's port needed.
           CIBW_ENVIRONMENT: >-
             SDL_VIDEODRIVER=dummy
             SDL_AUDIODRIVER=disk
             PATH=/usr/local/bin:$PATH
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             PIP_ONLY_BINARY=numpy
+            UV_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            UV_INDEX_STRATEGY=unsafe-best-match
+            UV_ONLY_BINARY=numpy
           CIBW_BEFORE_BUILD: |
+            # See the CIBW_BEFORE_ALL diagnostic comment above -- appends to the
+            # same file so it captures the full before-all + before-build history.
+            exec > >(tee -a /project/pgce-ci-diag.log) 2>&1
             # docs/reST/conf.py's extensions list also needs sphinx-autoapi
             # (the "autoapi.extension" entry); upstream's own build-wheels.sh
             # only installs Sphinx itself, relying on something else in their
@@ -168,6 +187,32 @@ jobs:
             if [ ! -f /var/lib/dbus/machine-id ]; then
                 dbus-uuidgen > /var/lib/dbus/machine-id
             fi
+
+      # TEMPORARY: works around riscv64 self-hosted runner jobs killed mid-step
+      # never flushing their GH Actions step log (BlobNotFound on the jobs/logs
+      # API even for a job that otherwise completes normally); recovers whatever
+      # CIBW_BEFORE_ALL/CIBW_BEFORE_BUILD managed to tee out before that happened.
+      - name: Surface build diagnostics if the step log capture failed
+        if: always()
+        run: |
+          if [ -f pgce-ci-diag.log ]; then
+            {
+              echo "### pygame-ce ${{ matrix.python }} CI diagnostics (last 500 lines)"
+              echo
+              echo '```'
+              tail -n 500 pgce-ci-diag.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No pgce-ci-diag.log found (job likely died before CIBW_BEFORE_ALL ran)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: pygame-ce-${{ env.PYGAME_CE_VERSION }}-${{ matrix.python }}-ci-diag
+          path: pgce-ci-diag.log
+          if-no-files-found: ignore
 
       - name: Check the vendored licences made it into the wheel
         run: |
