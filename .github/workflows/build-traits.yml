@@ -51,7 +51,18 @@ jobs:
           ref: ${{ env.TRAITS_VERSION }}
           persist-credentials: false
 
-      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      # TEMPORARY: run cibuildwheel via CLI (instead of the pypa/cibuildwheel action)
+      # and tee its output to a file, because this run's per-job logs came back
+      # BlobNotFound from the Actions API (gotcha 62) - revert to the action once a
+      # real failure log is in hand.
+      - name: Build and test wheel
         env:
           CIBW_ARCHS: riscv64
           CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
@@ -66,6 +77,18 @@ jobs:
           CIBW_TEST_COMMAND: >-
             python -c "import traits.ctraits as m; assert m.__file__.endswith('.so'), m.__file__" &&
             python -m unittest discover -v traits
+        run: |
+          set -o pipefail
+          uv pip install --upgrade cibuildwheel
+          python -m cibuildwheel --output-dir wheelhouse . 2>&1 | tee cibuildwheel.log
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: traits-${{ env.TRAITS_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64-log
+          path: cibuildwheel.log
+          if-no-files-found: warn
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
