@@ -1,0 +1,124 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on upstream's own wheel build setup:
+#   https://github.com/K0lb3/astc-encoder-py/blob/main/.github/workflows/release.yml
+#   https://github.com/K0lb3/astc-encoder-py/blob/main/pyproject.toml
+name: Build astc-encoder-py wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'astc-encoder-py version to build (e.g. 0.1.12)'
+        required: true
+        default: '0.1.12'
+  pull_request:
+    paths:
+      - '.github/workflows/build-astc-encoder-py.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.1.12' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.1.12 there.
+  ASTC_ENCODER_PY_VERSION: ${{ inputs.version || '0.1.12' }}
+  # Upstream cuts releases without git tags, so pin the release commit: this is
+  # "chore(release): bump 0.1.12", whose tree is byte-identical to the 0.1.12
+  # PyPI sdist (checked against src/, setup.py, pyproject.toml, and the pinned
+  # src/astc-encoder submodule commit). Update alongside ASTC_ENCODER_PY_VERSION.
+  ASTC_ENCODER_PY_REF: c0ba64c050a50646b09d80c0217ff546b18e72f8
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build astc-encoder-py ${{ inputs.version || '0.1.12' }} cp312-abi3-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # setup.py's bdist_wheel_abi3 hardcodes the cp37-abi3 tag on every
+        # CPython build (no Py_GIL_DISABLED guard), so one build per libc
+        # covers cp312/cp313/cp314 via find_compatible_wheel; cp314t is
+        # dropped because the extension is unconditionally compiled with
+        # Py_LIMITED_API, which CPython rejects under the free-threaded
+        # build ("The free-threaded build does not currently support the
+        # Limited C API or the stable ABI") - same shape as build-coincurve.yml.
+        # The registry has no riscv64 musllinux wheels yet for the upstream
+        # test extras (pillow/imagehash/numpy/scipy/pywavelets/psutil), so
+        # musllinux runs a dependency-free smoke test instead of the full
+        # upstream suite while manylinux runs the real thing.
+        include:
+          - libc: manylinux
+            test_extras: tests
+            # test_refcount_cleanup asserts sys.getrefcount(astc_image) == 2, which
+            # breaks under cp314's new LOAD_FAST_BORROW opcode (no incref on a local
+            # passed straight to a call) - a CPython-version change, not a riscv64 or
+            # extension bug; the extension itself round-trips correctly on cp314.
+            test_command: pytest -vs {package}/tests -k "not test_refcount_cleanup"
+          - libc: musllinux
+            test_extras: ''
+            test_command: >-
+              python -c "import astc_encoder as ae;
+              w, h = 16, 16;
+              raw = bytes((i * 7) % 256 for i in range(w * h * 4));
+              img = ae.ASTCImage(ae.ASTCType.U8, w, h, data=raw);
+              config = ae.ASTCConfig(ae.ASTCProfile.LDR_SRGB, 4, 4);
+              ctx = ae.ASTCContext(config, threads=0);
+              swizzle = ae.ASTCSwizzle();
+              comp = ctx.compress(img, swizzle);
+              out = ae.ASTCImage(ae.ASTCType.U8, w, h);
+              decomp = ctx.decompress(comp, out, swizzle);
+              assert len(decomp.data) == w * h * 4, len(decomp.data);
+              print('astc_encoder OK: compressed', len(comp), 'decompressed', len(decomp.data))"
+
+    steps:
+      - name: Checkout astc-encoder-py ${{ env.ASTC_ENCODER_PY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: K0lb3/astc-encoder-py
+          ref: ${{ env.ASTC_ENCODER_PY_REF }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: >-
+            cp312-${{ matrix.libc }}_riscv64
+            cp313-${{ matrix.libc }}_riscv64
+            cp314-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_EXTRAS: ${{ matrix.test_extras }}
+          CIBW_TEST_COMMAND: ${{ matrix.test_command }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: astc-encoder-py-${{ env.ASTC_ENCODER_PY_VERSION }}-cp312-abi3-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish astc-encoder-py ${{ inputs.version || '0.1.12' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: astc-encoder-py-${{ inputs.version || '0.1.12' }}-*riscv64
