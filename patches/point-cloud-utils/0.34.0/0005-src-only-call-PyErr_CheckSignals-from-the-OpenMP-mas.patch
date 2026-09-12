@@ -1,0 +1,116 @@
+From b8a21e3c1b589622180ca50e7fe64ca390809ff4 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sat, 12 Sep 2026 04:55:11 +0200
+Subject: [PATCH 5/5] src: only call PyErr_CheckSignals() from the OpenMP
+ master thread
+
+test_mesh_face_areas segfaulted on riscv64 with a gdb backtrace
+(gotcha 115's technique) showing a SIGSEGV inside PyErr_CheckSignals(),
+called from three separate OpenMP worker threads that were all
+spawned by mesh_face_areas' #pragma omp for loop, none of which hold
+the GIL or have a registered Python thread state. PyErr_CheckSignals()
+touches interpreter-global signal-handling state and is documented as
+callable only from the main thread; the Ctrl-C-cancellation checks
+this project adds inside several "#pragma omp for" loops
+(face_areas.cpp, morton.cpp x4, point_cloud_distance.cpp,
+point_cloud_normals.cpp) call it from every worker thread on every
+loop iteration instead. This is a pre-existing bug in the upstream
+source, not a riscv64-only gap -- it likely races harmlessly on other
+platforms/allocators but reproduces reliably here. Guard each call
+with omp_get_thread_num() == 0 so only the thread that entered the
+parallel region from Python ever calls it; the shared threw_exception
+flag still lets every other thread observe the cancellation.
+Call sites outside any "#pragma omp for" (connected_components.cpp,
+sparse_voxel_grid.cpp, morton.cpp's commented-out-parallel loop, and
+point_cloud_normals.cpp's single-threaded fallback) are untouched.
+
+Upstream-Status: To upstream [real bug, not riscv64-specific, but this session is barred from filing issues/PRs on third-party repos]
+---
+ src/face_areas.cpp           | 2 +-
+ src/morton.cpp               | 8 ++++----
+ src/point_cloud_distance.cpp | 2 +-
+ src/point_cloud_normals.cpp  | 2 +-
+ 4 files changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/src/face_areas.cpp b/src/face_areas.cpp
+index 02ca3b1..76bb4d9 100644
+--- a/src/face_areas.cpp
++++ b/src/face_areas.cpp
+@@ -37,7 +37,7 @@ npe_begin_code()
+         #pragma omp for nowait
+         #endif
+         for (int i = 0; i < f.rows(); i += 1) {
+-            if (PyErr_CheckSignals() != 0) {
++            if (omp_get_thread_num() == 0 && PyErr_CheckSignals() != 0) {
+                 #if defined(_OPENMP)
+                     if (threw_exception) {
+                         continue;
+diff --git a/src/morton.cpp b/src/morton.cpp
+index 33e1ddc..d53107c 100644
+--- a/src/morton.cpp
++++ b/src/morton.cpp
+@@ -62,7 +62,7 @@ npe_begin_code()
+         #pragma omp for
+         #endif
+         for(int i = 0; i < codes_1.rows(); i += 1) {
+-            if (PyErr_CheckSignals() != 0) {
++            if (omp_get_thread_num() == 0 && PyErr_CheckSignals() != 0) {
+                 #if defined(_OPENMP)
+                     if (threw_exception) {
+                         continue;
+@@ -142,7 +142,7 @@ npe_begin_code()
+         #pragma omp for
+         #endif
+         for(int i = 0; i < codes_1.rows(); i += 1) {
+-            if (PyErr_CheckSignals() != 0) {
++            if (omp_get_thread_num() == 0 && PyErr_CheckSignals() != 0) {
+                 #if defined(_OPENMP)
+                     if (threw_exception) {
+                         continue;
+@@ -210,7 +210,7 @@ npe_begin_code()
+         #pragma omp for
+         #endif
+         for(int i = 0; i < pts.rows(); i += 1) {
+-            if (PyErr_CheckSignals() != 0) {
++            if (omp_get_thread_num() == 0 && PyErr_CheckSignals() != 0) {
+                 #if defined(_OPENMP)
+                     if (threw_exception) {
+                         continue;
+@@ -278,7 +278,7 @@ npe_begin_code()
+         #pragma omp for
+         #endif
+         for(int i = 0; i < codes.rows(); i += 1) {
+-            if (PyErr_CheckSignals() != 0) {
++            if (omp_get_thread_num() == 0 && PyErr_CheckSignals() != 0) {
+                 #if defined(_OPENMP)
+                     if (threw_exception) {
+                         continue;
+diff --git a/src/point_cloud_distance.cpp b/src/point_cloud_distance.cpp
+index f04b3e7..d1dd15d 100644
+--- a/src/point_cloud_distance.cpp
++++ b/src/point_cloud_distance.cpp
+@@ -57,7 +57,7 @@ void shortest_distances_nanoflann(Source& query_mat,
+         #pragma omp for
+         #endif
+         for(int i = 0; i < query_mat.rows(); ++i) {
+-            if (PyErr_CheckSignals() != 0) {
++            if (omp_get_thread_num() == 0 && PyErr_CheckSignals() != 0) {
+                 #if defined(_OPENMP)
+                     if (threw_exception) {
+                         continue;
+diff --git a/src/point_cloud_normals.cpp b/src/point_cloud_normals.cpp
+index 41ab7d6..6c36abe 100644
+--- a/src/point_cloud_normals.cpp
++++ b/src/point_cloud_normals.cpp
+@@ -205,7 +205,7 @@ void estimate_normals_parallel(const InPointsType& points, const InViewDirsType&
+         #pragma omp for nowait
+         #endif
+         for (int i = 0; i < points.rows(); i++) {
+-            if (PyErr_CheckSignals() != 0) {
++            if (omp_get_thread_num() == 0 && PyErr_CheckSignals() != 0) {
+                 #if defined(_OPENMP)
+                     if (threw_exception) {
+                         continue;
+-- 
+2.50.1 (Apple Git-155)
+

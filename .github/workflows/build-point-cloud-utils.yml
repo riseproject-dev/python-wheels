@@ -1,0 +1,173 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/fwilliams/point-cloud-utils/blob/v0.34/.github/workflows/build-wheels-and-publish-to-pipy.yml
+name: Build point-cloud-utils wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'point-cloud-utils git tag to build (e.g. v0.34)'
+        required: true
+        default: 'v0.34'
+  pull_request:
+    paths:
+      - '.github/workflows/build-point-cloud-utils.yml'
+      - 'patches/point-cloud-utils/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || 'v0.34' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  POINT_CLOUD_UTILS_TAG: ${{ inputs.version || 'v0.34' }}
+  # v0.34's setup.py hardcodes version="0.34.0"; the git tag itself doesn't
+  # carry the patch component.
+  POINT_CLOUD_UTILS_VERSION: '0.34.0'
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build point-cloud-utils ${{ inputs.version || 'v0.34' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        python: [cp312, cp313, cp314, cp314t]
+
+    steps:
+      - name: Checkout point-cloud-utils ${{ env.POINT_CLOUD_UTILS_TAG }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: fwilliams/point-cloud-utils
+          ref: ${{ env.POINT_CLOUD_UTILS_TAG }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply python-wheels/patches/point-cloud-utils/${{ env.POINT_CLOUD_UTILS_VERSION }}/*.patch
+
+      # numpyeigen, igl, tinyply, tinyobjloader, simde, manifold and geogram
+      # (plus eigen and pybind11, which numpyeigen itself pulls in) are
+      # download_dep()'d by CMake at build time, not vendored as submodules,
+      # so their own licences aren't in this checkout; stage each at the
+      # root for setuptools' default LICEN[CS]E*/COPYING* wheel.license-files
+      # glob to pick up. Embree is no longer one of them (see the patches).
+      - name: Stage the vendored dependencies' licences
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/fwilliams/numpyeigen/master/LICENSE" -o LICENSE.numpyeigen
+          {
+            curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/3.4.0/COPYING.README"
+            curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/3.4.0/COPYING.MPL2"
+            curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/3.4.0/COPYING.BSD"
+            curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/3.4.0/COPYING.LGPL"
+          } > LICENSE.eigen
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/pybind/pybind11/v2.13.6/LICENSE" -o LICENSE.pybind11
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/libigl/libigl/6868413/LICENSE.MPL2" -o LICENSE.igl
+          # tinyply carries no LICENSE file; tinyply.h's own header dedicates
+          # it to the public domain.
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/ddiakopoulos/tinyply/2.4/source/tinyply.h" | sed -n '1,16p' > LICENSE.tinyply
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/tinyobjloader/tinyobjloader/release/LICENSE" -o LICENSE.tinyobjloader
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/simd-everywhere/simde/dd0b662fd8cf4b1617dbbb4d08aa053e512b08e4/COPYING" -o COPYING.simde
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/AppledoreM/Manifold/28e335f8bfde0721f39fc439e362727c6ad47987/LICENSE.txt" -o LICENSE.manifold
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/fwilliams/geogram-pcu/main/LICENSE" -o LICENSE.geogram
+          # geogram's own third_party/{LM7,rply,zlib,gzstream,PoissonRecon}
+          # are compiled in unconditionally (aux_source_directories() outside
+          # any GEOGRAM_WITH_* option); HLBFGS is excluded by the patches.
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/fwilliams/geogram-pcu/main/src/lib/geogram/third_party/LM7/LICENSE_lgpl.txt" -o LICENSE.LM7
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/fwilliams/geogram-pcu/main/src/lib/geogram/third_party/rply/LICENSE" -o LICENSE.rply
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/fwilliams/geogram-pcu/main/src/lib/geogram/third_party/zlib/LICENSE" -o LICENSE.geogram-zlib
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/fwilliams/geogram-pcu/main/src/lib/geogram/third_party/gzstream/COPYING.LIB" -o LICENSE.gzstream
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/fwilliams/geogram-pcu/main/src/lib/geogram/third_party/PoissonRecon/LICENSE.txt" -o LICENSE.poissonrecon
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy,cmake
+          CIBW_TEST_SOURCES: tests data
+          CIBW_TEST_REQUIRES: pytest
+          # ray_mesh_intersection/RaySurfelIntersector need Embree, which the
+          # patches drop for riscv64 (no Embree ISA exists for it).
+          CIBW_TEST_COMMAND: >-
+            pytest tests -k "not test_ray_mesh_intersection and not test_ray_surfel_intersection"
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          path = sys.argv[1]
+          names = zipfile.ZipFile(path).namelist()
+          libs = [n for n in names if n.endswith(".so")]
+          assert libs, names
+          assert not any("embree" in n.lower() for n in names), names
+          licences = {n.rsplit("/", 1)[-1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          expected = {"LICENSE", "LICENSE.numpyeigen", "LICENSE.eigen", "LICENSE.pybind11",
+                      "LICENSE.igl", "LICENSE.tinyply", "LICENSE.tinyobjloader", "COPYING.simde",
+                      "LICENSE.manifold", "LICENSE.geogram", "LICENSE.LM7", "LICENSE.rply",
+                      "LICENSE.geogram-zlib", "LICENSE.gzstream", "LICENSE.poissonrecon"}
+          assert licences == expected, licences
+          print(path, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: point-cloud-utils-${{ env.POINT_CLOUD_UTILS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    name: Collect GPL sources (gcc) for point-cloud-utils ${{ inputs.version || 'v0.34' }}
+    runs-on: ubuntu-24.04-riscv
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Collect gcc source RPM from manylinux_riscv64
+        uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: point-cloud-utils-${{ env.POINT_CLOUD_UTILS_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish point-cloud-utils 0.34.0
+    needs: [setup, build_wheels, gpl_sources]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: point-cloud-utils-0.34.0-*-manylinux_riscv64
+      gpl-sources-artifact: point-cloud-utils-0.34.0-gpl-sources
+      gpl-sources-description: gcc (geogram links OpenMP/libgomp)
