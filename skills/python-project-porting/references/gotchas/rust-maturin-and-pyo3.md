@@ -28,6 +28,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
   different path in the git checkout than in the PyPI sdist.
 - **259** — A maturin `bindings = "bin"` project can declare two `[[bin]]` targets where
 - **260** — `puccinialin` (and similar rust-bootstrap-on-demand helpers) has no riscv64 entry
+- **371** — pyo3 0.22's version ceiling (gotcha 306) is a hard ceiling for a non-abi3,
+  per-interpreter build too, one minor above its own release-time latest — the
+  `PYO3_USE_ABI3_FORWARD_COMPATIBILITY` escape hatch works without turning abi3 on.
   the second execs the first over `$PATH`, not a sibling path.
 - **266** — A vendored-C build script's own "require SIMD" default feature can turn
   upstream's documented non-SIMD fallback into a fatal error on any arch the vendored
@@ -1094,3 +1097,35 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       `build-daft.yml`/other heavy Rust ports) rather than sizing it to the happy-path
       duration** — the cost of an idle timeout is cheap compared to a job dying at 359
       minutes into a build that would have finished at 361.
+
+371. **pyo3 0.22's version ceiling (gotcha 306) is a hard ceiling for a non-abi3,
+    per-interpreter build too, one minor above its own release-time latest — the
+    `PYO3_USE_ABI3_FORWARD_COMPATIBILITY` escape hatch works without turning abi3 on
+    (the flpc case).** flpc's `Cargo.toml` pins plain `pyo3 = "0.22.0"` with no `abi3-pyNN`
+    feature, so gotcha 306's "no ceiling, only a floor" claim (pyo3 0.15.1 against a
+    murmurhash2 cp312 interpreter) looked like it should generalize. It doesn't: building
+    the identical crate against a cp314 interpreter fails outright with `error: the
+    configured Python interpreter version (3.14) is newer than PyO3's maximum supported
+    version (3.13)` — 0.22.0 does carry a ceiling, one minor past its own
+    `ABI3_MAX_MINOR` (12), evidently to tolerate the next CPython that was in
+    pre-release when 0.22.0 shipped. cp312/cp313 both compile and run clean with no
+    special handling; only cp314 trips it.
+    - **`PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1` (`CIBW_ENVIRONMENT_LINUX`) clears the
+      ceiling without touching the crate's feature set.** The name suggests it only
+      matters for abi3 builds, but it also unblocks a plain per-interpreter build: the
+      resulting wheel is still tagged `cp314-cp314` (not `cp314-abi3`), and — verified
+      locally by unzipping the wheel into a `python3.14 -m venv --without-pip` site-packages
+      and running the module directly (no network `pip install` needed) — `compile`/
+      `search`/`fmatch`/`findall`/`sub` all behave identically to the cp312 build. Setting
+      the var unconditionally across the whole matrix is harmless: it is a no-op on
+      cp312/cp313, which never hit the ceiling it exists to bypass.
+    - **cp314t is a separate, real wall** (gotcha 306's free-threading half): pyo3 0.22.0
+      predates PEP 703 entirely, so no forward-compatibility flag substitutes for the
+      missing `Py_GIL_DISABLED` support — drop it from the matrix rather than trying the
+      same escape hatch on it.
+    - **Verify empirically per pyo3 release, not by re-applying gotcha 306's conclusion**:
+      the two gotchas' crates are three years of pyo3 releases apart (0.15.1 vs 0.22.0),
+      and only a local build against the actual next-ceiling interpreter (`cargo build
+      --release` / `maturin build` with `PYO3_PYTHON` pointed at it) settles which
+      behavior — no ceiling, a hard error, or a flag-gated one — the pinned version
+      exhibits.

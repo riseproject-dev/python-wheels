@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (351 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (362 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -228,6 +228,11 @@ The porting gotchas (351 of them) live in [`references/gotchas/`](gotchas/), spl
   diagnostic — while an otherwise-identical retry finishes in under an hour; set a
   generous timeout margin (1440, matching other heavy Rust ports) as insurance rather than
   relying on the happy-path duration.
+- **371** — pyo3 0.22's version ceiling (gotcha 306) is a hard ceiling for a non-abi3,
+  per-interpreter build too, one minor above its own release-time latest (cp314 against a
+  0.22.0-pinned crate fails outright); `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1` clears it
+  without turning abi3 on, verified to build and run correctly, but cp314t stays a real
+  wall since 0.22.0 predates PEP 703 entirely.
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
