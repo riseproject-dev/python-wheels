@@ -1,0 +1,148 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own manylinux wheel job (builds FFmpeg from source, then decord against
+# it, then retags the result py3-none since libdecord.so is ctypes-loaded):
+#   https://github.com/dmlc/decord/blob/v0.6.0/.github/workflows/pypi.yml
+#   https://github.com/dmlc/decord/blob/v0.6.0/tools/build_manylinux2010.sh
+# Unlike upstream's script, FFmpeg is built here without --enable-gpl/--enable-nonfree/
+# libx264/libvpx: decord only ever decodes (no avcodec_find_encoder/AVOutputFormat use
+# anywhere in src/), so a plain LGPL FFmpeg build already covers everything it links against.
+name: Build decord wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'decord version to build (git tag without leading v, e.g. 0.6.0)'
+        required: true
+        default: '0.6.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-decord.yml'
+      - 'patches/decord/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.6.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  DECORD_VERSION: ${{ inputs.version || '0.6.0' }}
+  # decord's own configure.py never gained riscv64 support (FFmpeg didn't add ARCH_RISCV
+  # until 5.0); 6.1.6 is the last release before the 7.0 ch_layout API removal that
+  # src/audio/audio_reader.cc's AVCodecParameters::channels/av_get_default_channel_layout
+  # calls would otherwise need patching for.
+  FFMPEG_VERSION: 6.1.6
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build decord ${{ inputs.version || '0.6.0' }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout decord v${{ env.DECORD_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: dmlc/decord
+          ref: v${{ env.DECORD_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch decord source
+        run: git apply python-wheels/patches/decord/${{ env.DECORD_VERSION }}/00*.patch
+
+      # setuptools' default license-files glob (LICEN[CSZ]E*) is rooted at setup.py's
+      # own directory (gotcha 146), which for decord is python/, not the outer checkout
+      # root where both decord's own LICENSE and this live -- neither is picked up
+      # without copying them alongside setup.py first.
+      - name: Stage licence texts for packaging
+        run: |
+          cp LICENSE python/LICENSE
+          curl -sL -o python/LICENSE.FFmpeg https://raw.githubusercontent.com/FFmpeg/FFmpeg/n${{ env.FFMPEG_VERSION }}/COPYING.LGPLv2.1
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python
+          output-dir: wheelhouse/
+          # wheel_include_libs in python/setup.py only ever bundles a ctypes-loaded
+          # libdecord.so, no interpreter-specific extension -- one build serves everyone
+          # (retagged py3-none below, same as upstream's own pypi.yml rename step).
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT_LINUX: LD_LIBRARY_PATH=/tmp/ffmpeg-build/lib:$LD_LIBRARY_PATH
+          CIBW_BEFORE_BUILD: |
+            set -eux && \
+            curl -L -O https://ffmpeg.org/releases/ffmpeg-${{ env.FFMPEG_VERSION }}.tar.bz2 && \
+            tar xjf ffmpeg-${{ env.FFMPEG_VERSION }}.tar.bz2 && cd ffmpeg-${{ env.FFMPEG_VERSION }} && \
+            ./configure --prefix=/tmp/ffmpeg-build --disable-static --enable-shared --enable-pic --disable-programs --disable-doc && \
+            make -j$(nproc) && make install && \
+            cd .. && rm -rf ffmpeg-${{ env.FFMPEG_VERSION }}* && \
+            cmake -S {project} -B {project}/build -DUSE_CUDA=OFF -DFFMPEG_DIR=/tmp/ffmpeg-build -DCMAKE_BUILD_TYPE=Release && \
+            cmake --build {project}/build --parallel $(nproc)
+          CIBW_TEST_REQUIRES: pytest numpy
+          CIBW_TEST_SOURCES: tests examples
+          # Mirrors upstream's own sanity check (all 3 of pypi.yml's platform jobs run
+          # this same file, historically via `nose` -- patched to pytest.raises since
+          # nose 1.3.7 imports the removed-in-3.12 stdlib `imp` module, unrelated to
+          # riscv64 (see patches/decord/0.6.0/0003-*.patch)).
+          CIBW_TEST_COMMAND: pytest -v tests/python/unittests/test_video_reader.py
+
+      # setup.py's get_tag() has no py3-none override (unlike plotext's), so cibuildwheel
+      # produces a cp312-cp312 tag; retag it the same way upstream's own pypi.yml does
+      # (mv ... cp36-cp36m -> py3-none), just with the wheel/RECORD metadata kept correct.
+      - name: Retag the wheel py3-none (libdecord.so is ctypes-loaded, not interpreter-specific)
+        run: |
+          # The runner's system Python is PEP 668 externally-managed; a venv
+          # sidesteps that instead of --break-system-packages (gotcha precedent
+          # in build-pylerc.yml's "Install the built wheel" step).
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install -q "wheel>=0.42"
+          python3 -m wheel tags --python-tag py3 --abi-tag none --remove wheelhouse/decord-*.whl
+
+      - name: Check the wheel carries libdecord and a vendored LGPL FFmpeg
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          for want in ("decord/libdecord.so", "libavcodec", "licenses/LICENSE", "licenses/LICENSE.FFmpeg"):
+              if not any(want in n for n in names):
+                  raise SystemExit(f"error: {want} missing from {sys.argv[1]}")
+          print("\n".join(n for n in names if ".so" in n))
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: decord-${{ env.DECORD_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish decord ${{ inputs.version || '0.6.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: decord-${{ inputs.version || '0.6.0' }}-*-manylinux_riscv64
