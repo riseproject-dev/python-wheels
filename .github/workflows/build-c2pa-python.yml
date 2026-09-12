@@ -1,0 +1,126 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the Linux job of
+# https://github.com/contentauth/c2pa-python/blob/v0.37.10/.github/workflows/build-wheel.yml
+name: Build c2pa-python wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'c2pa-python version to build (git tag without leading v, e.g. 0.37.10)'
+        required: true
+        default: '0.37.10'
+  pull_request:
+    paths:
+      - '.github/workflows/build-c2pa-python.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.37.10' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.37.10 there.
+  C2PA_PYTHON_VERSION: ${{ inputs.version || '0.37.10' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheel:
+    needs: [setup]
+    name: Build c2pa-python ${{ inputs.version || '0.37.10' }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    steps:
+      - name: Checkout c2pa-python v${{ env.C2PA_PYTHON_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: contentauth/c2pa-python
+          ref: v${{ env.C2PA_PYTHON_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch c2pa-python source
+        run: git apply python-wheels/patches/c2pa-python/${{ env.C2PA_PYTHON_VERSION }}/*.patch
+
+      # c2pa-python bundles a prebuilt libc2pa_c.so downloaded from
+      # contentauth/c2pa-rs's GitHub releases (scripts/download_artifacts.py),
+      # pinned by c2pa-native-version.txt. c2pa-rs publishes no riscv64 asset
+      # for that library, so build it from source instead (gotcha 77), with
+      # the feature set upstream's own release-linux-gnu-arm recipe uses
+      # (c2pa_c_ffi/Makefile) minus the cross-compilation bits - this runs
+      # natively on riscv64. rust_native_crypto swaps the default openssl
+      # dependency for pure-Rust crypto crates, so no OpenSSL build is needed.
+      - name: Build wheel
+        run: |
+          set -eux
+          mkdir -p artifacts/riscv64gc-unknown-linux-gnu src/c2pa/libs
+          C2PA_NATIVE_TAG="$(cat c2pa-native-version.txt)"
+          docker run --rm \
+            -v "$(pwd)":/io \
+            --workdir /io \
+            -e C2PA_NATIVE_TAG="$C2PA_NATIVE_TAG" \
+            "${{ env.MANYLINUX_RISCV64_IMAGE }}" \
+            bash -c '
+              set -eux
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+              git clone --depth 1 --branch "$C2PA_NATIVE_TAG" https://github.com/contentauth/c2pa-rs /tmp/c2pa-rs
+              cd /tmp/c2pa-rs
+              "$HOME/.cargo/bin/cargo" build --release --locked -p c2pa-c-ffi --no-default-features --features "rust_native_crypto,add_thumbnails,http,file_io"
+              cp target/release/libc2pa_c.so /io/artifacts/riscv64gc-unknown-linux-gnu/
+              cd /io
+              /opt/python/cp312-cp312/bin/pip install -q toml==0.10.2 setuptools==68.0.0 wheel==0.46.2
+              /opt/python/cp312-cp312/bin/python setup.py bdist_wheel --plat-name manylinux_2_39_riscv64
+            '
+          ls -la dist/
+
+      - name: Check the built library and licences made it into the wheel
+        run: |
+          python3 - dist/*.whl <<'EOF'
+          import sys, zipfile
+          whl = sys.argv[1]
+          names = zipfile.ZipFile(whl).namelist()
+          assert any(n.endswith("c2pa/libs/libc2pa_c.so") for n in names), whl
+          assert any("LICENSE-MIT" in n for n in names), whl
+          assert any("LICENSE-APACHE" in n for n in names), whl
+          print(whl, "ok")
+          EOF
+
+      - name: Install the built wheel and run upstream's test suite
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          # The runner's stock pip predates riscv64 manylinux tag support and
+          # rejects the wheel as unsupported.
+          pip install -q --upgrade pip
+          pip install -q --extra-index-url https://pypi.riseproject.dev/simple/ dist/*.whl
+          python3 ./tests/test_unit_tests.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: c2pa-python-${{ env.C2PA_PYTHON_VERSION }}-py3-none-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish c2pa-python ${{ inputs.version || '0.37.10' }}
+    needs: [setup, build_wheel]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: c2pa-python-${{ inputs.version || '0.37.10' }}-*-manylinux_riscv64
