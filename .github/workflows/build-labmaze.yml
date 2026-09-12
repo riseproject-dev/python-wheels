@@ -1,0 +1,274 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# labmaze has no upstream CI: it ships no .github/workflows/ at all. This
+# workflow instead drives its setup.py's own BazelExtension build directly,
+# https://github.com/google-deepmind/labmaze/blob/6d7e8f058428025cd4253f1ef6a1ed6618d9b0ea/setup.py
+---
+name: Build labmaze wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'labmaze version to build'
+        required: true
+        default: '1.0.6'
+  pull_request:
+    paths:
+      - '.github/workflows/build-labmaze.yml'
+      - 'patches/labmaze/**'
+
+run-name: build-labmaze - ${{ inputs.version || '1.0.6' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.0.6' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  LABMAZE_VERSION: ${{ inputs.version || '1.0.6' }}
+  # Upstream never tagged the 1.0.6 release (google-deepmind/labmaze#5); this is
+  # master's tip, proven byte-identical to the PyPI 1.0.6 sdist. Move together.
+  LABMAZE_REF: 6d7e8f058428025cd4253f1ef6a1ed6618d9b0ea
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Fetched from the bazel releases, which publish no riscv64 binary; 7.5.0 is
+  # the version this repo bootstraps from source.
+  BAZEL_VERSION: '7.5.0'
+  # versions bazel 7.5.0's MODULE.bazel pins; both need a riscv64 fix below.
+  RULES_PYTHON_VERSION: '0.33.2'
+  RULES_JAVA_VERSION: '7.6.5'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  bazel:
+    needs: [setup]
+    name: Bootstrap bazel (riscv64)
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+
+    steps:
+      - name: Restore bazel binary
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: bazel-bin
+          key: bazel-${{ env.BAZEL_VERSION }}-manylinux_riscv64
+
+      - name: Bootstrap bazel ${{ env.BAZEL_VERSION }}
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p bazel-bin
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e BAZEL_VERSION="${BAZEL_VERSION}" \
+            -e RULES_PYTHON_VERSION="${RULES_PYTHON_VERSION}" \
+            -e RULES_JAVA_VERSION="${RULES_JAVA_VERSION}" \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          dnf install -y --disablerepo=extras --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+
+          # rules_python 0.33.2's PLATFORMS has no riscv64 entry, aborting the bootstrap
+          # (bazelbuild/bazel#23018). Any linux entry is a safe stand-in: the toolchain it
+          # names is never selected on a riscv64 host. Fixed in bazel 8.2.0; the 7.x
+          # backport is open.
+          mkdir -p /tmp/rules_python
+          curl -fsSLo /tmp/rules_python.tar.gz "https://github.com/bazel-contrib/rules_python/releases/download/${RULES_PYTHON_VERSION}/rules_python-${RULES_PYTHON_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_python.tar.gz -C /tmp/rules_python --strip-components=1
+          sed -i 's|fail("No platform declared for host OS {} on arch {}".format(os_name, arch))|return "x86_64-unknown-linux-gnu"|' \
+            /tmp/rules_python/python/private/toolchains_repo.bzl
+
+          # rules_java 7.x maps riscv64 to a stray-colon include path, so a JNI library
+          # can't find jni_md.h. Fixed in rules_java 8.x, never backported.
+          mkdir -p /tmp/rules_java
+          curl -fsSLo /tmp/rules_java.tar.gz "https://github.com/bazelbuild/rules_java/releases/download/${RULES_JAVA_VERSION}/rules_java-${RULES_JAVA_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_java.tar.gz -C /tmp/rules_java
+          sed -i 's|\[":include/linux"\]|["include/linux"]|g' /tmp/rules_java/toolchains/BUILD
+
+          mkdir -p /tmp/bazel-src
+          cd /tmp/bazel-src
+          curl -fsSLo dist.zip "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-dist.zip"
+          unzip -q dist.zip
+
+          EXTRA_BAZEL_ARGS="--tool_java_runtime_version=local_jdk \
+            --override_module=rules_python=/tmp/rules_python \
+            --override_module=rules_java=/tmp/rules_java" \
+            bash ./compile.sh
+          install -m 0755 output/bazel /work/bazel-bin/bazel
+          SCRIPT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin/bazel
+          if-no-files-found: error
+
+  build_wheels:
+    name: Build labmaze ${{ inputs.version || '1.0.6' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    needs: [setup, bazel]
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Upstream has published no wheel past cp312 (last release: Nov 2022);
+        # this port follows the registry's current default matrix instead.
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout labmaze ${{ inputs.version || '1.0.6' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: google-deepmind/labmaze
+          ref: ${{ env.LABMAZE_REF }}
+          path: labmaze
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Apply patches
+        working-directory: labmaze
+        run: git apply -v ../python-wheels/patches/labmaze/${{ env.LABMAZE_VERSION }}/*.patch
+
+      - name: Download bazel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin
+
+      - name: Build wheel
+        env:
+          PYTHON_TAG: ${{ matrix.python }}
+        run: |
+          mkdir -p wheelhouse
+          set -o pipefail
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work/labmaze \
+            -e PYTHON_TAG \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT' 2>&1 | tee build.log
+          set -eux
+
+          dnf install -y --disablerepo=extras --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+          install -m 0755 /work/bazel-bin/bazel /usr/local/bin/bazel
+
+          case "${PYTHON_TAG}" in
+            *t) python_dir="/opt/python/${PYTHON_TAG%t}-${PYTHON_TAG}/bin" ;;
+            *) python_dir="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin" ;;
+          esac
+          export PATH="${python_dir}:${PATH}"
+          python_exe="${python_dir}/python"
+          "${python_exe}" -m pip install -q -U pip setuptools wheel auditwheel
+
+          # First pass just to populate bazel's external-repo cache with abseil/pybind11.
+          "${python_exe}" -m pip wheel . --no-deps --no-build-isolation -w /tmp/wheelbuild
+
+          # The extension statically links these; upstream ships none of their licences,
+          # so collect them from the sources bazel fetched and let setuptools' own
+          # LICENSE* auto-detection carry them into the wheel on the second pass.
+          OUTPUT_BASE="$(bazel info output_base)"
+          for repo in com_google_absl:abseil-cpp pybind11:pybind11; do
+            name="${repo#*:}"
+            dir="$(find "${OUTPUT_BASE}/external" -mindepth 1 -maxdepth 1 -type d \
+              \( -name "${repo%:*}" -o -name "${repo%:*}~" \) | head -1)"
+            file="$(find "${dir}" -maxdepth 1 -type f -iname 'LICENSE*' | head -1)"
+            cp "${file}" "LICENSE.${name}"
+          done
+
+          "${python_exe}" -m pip wheel . --no-deps --no-build-isolation -w /work/labmaze/wheelhouse
+          auditwheel repair --plat manylinux_2_39_riscv64 -w /work/labmaze/wheelhouse_repaired /work/labmaze/wheelhouse/*.whl
+          SCRIPT
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: labmaze-${{ env.LABMAZE_VERSION }}-${{ matrix.python }}-build-log
+          path: labmaze/build.log
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: labmaze-${{ env.LABMAZE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: labmaze/wheelhouse_repaired/*.whl
+          if-no-files-found: error
+
+      - name: Test wheel
+        env:
+          PYTHON_TAG: ${{ matrix.python }}
+        run: |
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -e PYTHON_TAG \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          case "${PYTHON_TAG}" in
+            *t) python_dir="/opt/python/${PYTHON_TAG%t}-${PYTHON_TAG}/bin" ;;
+            *) python_dir="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin" ;;
+          esac
+          export PATH="${python_dir}:${PATH}"
+          python_exe="${python_dir}/python"
+
+          "${python_exe}" -m pip install -q /work/labmaze/wheelhouse_repaired/*.whl pytest
+
+          # /work holds the checkout, whose labmaze/ would shadow the installed wheel.
+          cd /tmp
+          "${python_exe}" -c "
+          from labmaze.cc.python import _defaults, _random_maze
+          assert _defaults.__file__.endswith('.so'), _defaults.__file__
+          assert _random_maze.__file__.endswith('.so'), _random_maze.__file__
+
+          import labmaze
+          maze = labmaze.RandomMaze(height=11, width=11, random_seed=1)
+          assert maze.entity_layer.shape == (11, 11)"
+
+          # The two golden-regeneration tests fail on any toolchain newer than the one
+          # upstream last released against (see conda-forge/labmaze-feedstock's meta.yaml),
+          # not on riscv64 specifically.
+          "${python_exe}" -m pytest --pyargs labmaze -v \
+            -k "not testGoldenTwoRoom9x11Maze and not testGoldenMazeRegeneration"
+
+          "${python_exe}" -c "
+          import importlib.metadata
+
+          licenses = {
+              str(f).rsplit('/', 1)[1]
+              for f in importlib.metadata.files('labmaze')
+              if '.dist-info/licenses/' in str(f)
+          }
+          # setuptools' default license-files glob also matches AUTHORS* -- labmaze
+          # ships a top-level AUTHORS file, so it rides along automatically.
+          expected = {'LICENSE', 'AUTHORS', 'LICENSE.abseil-cpp', 'LICENSE.pybind11'}
+          assert licenses == expected, licenses"
+          SCRIPT
+
+  publish:
+    name: Publish labmaze ${{ inputs.version || '1.0.6' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: labmaze-${{ inputs.version || '1.0.6' }}-*-manylinux_riscv64
