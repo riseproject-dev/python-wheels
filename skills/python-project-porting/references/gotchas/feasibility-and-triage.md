@@ -1510,3 +1510,35 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       shape) can hide a *second*, deeper blocker even after deciding to build it from source
       instead**: the source itself can carry the same architecture ceiling as the binaries it
       normally downloads.
+
+372. **Zero sdist ever published, plus a license that independently bars redistribution even
+    if a riscv64 build existed, is a double lock, not one (the hdbcli case).** `hdbcli`
+    2.29.27's PyPI project history — all 1352 files across every version, not just the
+    latest — contains no `.tar.gz`/sdist at all, only platform wheels
+    (`manylinux2014_{x86_64,aarch64,ppc64le}`, `musllinux_1_2_x86_64`, two macOS, two
+    Windows); `home`/`repo` both resolve to `https://www.sap.com/`, a marketing page with no
+    source host behind it. Each wheel's payload is not a vendored-and-called runtime (gotcha
+    157) or a git-committed prebuilt blob linked at build time (gotcha 246) — it *is* the
+    entire extension: a single 14 MB `pyhdbcli.abi3.so`, unstripped x86-64 ELF, alongside ~11
+    KB of pure-Python glue (`hdbcli/dbapi.py` etc.). There is no `setup.py`/`pyproject.toml`
+    build step to read and no C source to inspect, so gotcha 77's "build it yourself" escape
+    hatch fails at the first step: there is nothing upstream ever published to build *from*.
+    That alone would already be `not-feasible`, but the `LICENSE` shipped in
+    `*.dist-info/licenses/` closes the second, independent door: the SAP DEVELOPER LICENSE
+    AGREEMENT's IP clause (§2(a)) prohibits the licensee from "provid[ing] or mak[ing] the
+    APIs, Tools or Software available to any third party", "creat[ing] derivative works of or
+    based on the APIs, Tools or Software", and reverse-engineering them — so even a
+    hypothetical riscv64 `pyhdbcli.abi3.so` obtained directly from SAP could not legally be
+    rehosted on `pypi.riseproject.dev` as a rebuilt `hdbcli` wheel; the license, not just the
+    missing source, forecloses this port. Confirmed by downloading the real
+    `manylinux2014_x86_64` wheel from `files.pythonhosted.org` and inspecting its contents
+    directly (`unzip -l`, `file pyhdbcli.abi3.so`, the bundled `LICENSE` text) rather than
+    trusting the PyPI classifier (`License :: Other/Proprietary License`) alone. Parked
+    (`.queue.yml`); no worktree/branch/PR created — there is no buildable artifact to stage a
+    workflow around.
+    - **A generic vendor homepage (`https://<company>.com/`) in `home`/`repo` is itself a
+      signal worth checking early** — a real open-source project's PyPI metadata almost
+      always points `repo` at the actual source host; a corporate marketing URL in both
+      fields together with zero sdists across the *entire* release history (not just the
+      pinned version) is enough to suspect a closed-source vendor drop before even opening a
+      wheel.

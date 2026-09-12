@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (362 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (363 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -85,6 +85,8 @@ The porting gotchas (362 of them) live in [`references/gotchas/`](gotchas/), spl
 - **366** — A genuinely-compilable CMake C++ library can still be `not-feasible` when its
   kernel code is gated to specific SIMD ISAs with no portable/scalar fallback anywhere in the
   build (the embreex/Embree case).
+- **372** — Zero sdist ever published, plus a license that independently bars redistribution
+  even if a riscv64 build existed, is a double lock, not one (the hdbcli case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
