@@ -1,0 +1,154 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/k2-fsa/sherpa-onnx/blob/v1.13.6/.github/workflows/build-wheels-linux.yaml
+name: Build sherpa-onnx wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'sherpa-onnx version to build (git tag, e.g. 1.13.6)'
+        required: true
+        default: '1.13.6'
+  pull_request:
+    paths:
+      - '.github/workflows/build-sherpa-onnx.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.13.6' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.13.6 there.
+  SHERPA_ONNX_VERSION: ${{ inputs.version || '1.13.6' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Upstream's own riscv64 onnxruntime (csukuangfj/onnxruntime-libs v1.14.1) is
+  # cross-compiled for the T-Head XuanTie ABI (needs ld-linux-riscv64xthead-lp64d.so.1,
+  # a non-standard loader our manylinux_2_39_riscv64 image doesn't have) - use our own
+  # already-published riscv64 onnxruntime wheel instead (gotcha 17's dep-wheel pattern).
+  ONNXRUNTIME_VERSION: 1.29.0
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build sherpa-onnx ${{ inputs.version || '1.13.6' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        # Per-interpreter (not abi3): the pybind11 extension links the version-specific ABI.
+        # cp314t dropped: sherpa-onnx's CMake/pybind11 extension-suffix detection
+        # misidentifies the free-threaded 3.14t interpreter's ABI tag, naming the
+        # compiled module "_sherpa_onnx.cpython-315-riscv64-linux-gnu.so" (a
+        # nonexistent "3.15" ABI) instead of the real cpython-314t tag -- the
+        # actual interpreter confirmed as genuine CPython 3.14.7 free-threading,
+        # not a riscv64 toolchain/version issue. The mis-tagged .so then can't be
+        # found by sherpa_onnx/__init__.py's version-tag-based import at runtime.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+
+    steps:
+      - name: Checkout sherpa-onnx v${{ env.SHERPA_ONNX_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: k2-fsa/sherpa-onnx
+          ref: v${{ env.SHERPA_ONNX_VERSION }}
+          persist-credentials: false
+
+      # Non-split build (SHERPA_ONNX_SPLIT_PYTHON_PACKAGE left unset): upstream's
+      # own published wheels depend at runtime on sherpa-onnx-core, which has no
+      # riscv64 wheel or sdist. cmake_extension.py's non-split path bundles
+      # onnxruntime and every other native dependency straight into this wheel
+      # instead, with no separate package. Each dependency below is pulled in by
+      # CMake's own FetchContent at build time (invisible from `git ls-files`),
+      # so its licence has to be staged here for setuptools' default
+      # LICEN[CS]E*/COPYING* glob to pick it up into dist-info/licenses/.
+      - name: Stage vendored licences
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/microsoft/onnxruntime/v${{ env.ONNXRUNTIME_VERSION }}/LICENSE" -o LICENSE.onnxruntime
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/csukuangfj/espeak-ng/ed530aa113046142eb5115cf2fc9157854d0ffe1/COPYING" -o COPYING.espeak-ng
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/csukuangfj/espeak-ng/ed530aa113046142eb5115cf2fc9157854d0ffe1/COPYING.APACHE" -o COPYING.espeak-ng.APACHE
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/csukuangfj/espeak-ng/ed530aa113046142eb5115cf2fc9157854d0ffe1/COPYING.BSD2" -o COPYING.espeak-ng.BSD2
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/csukuangfj/espeak-ng/ed530aa113046142eb5115cf2fc9157854d0ffe1/COPYING.UCD" -o COPYING.espeak-ng.UCD
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/csukuangfj/piper-phonemize/f3ff95afc03640bc1399e113e83361192a2fafb4/LICENSE.md" -o LICENSE.piper-phonemize
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/csukuangfj/kaldi-native-fbank/v1.22.3/LICENSE" -o LICENSE.kaldi-native-fbank
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/k2-fsa/kaldi-decoder/v0.3.0/LICENSE" -o LICENSE.kaldi-decoder
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/csukuangfj/openfst/v1.8.5-2026-07-09/COPYING" -o COPYING.openfst
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/pkufool/simple-sentencepiece/v0.7/LICENSE" -o LICENSE.simple-sentencepiece
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/zaphoyd/websocketpp/b9aeec6eaf3d5610503439b4fae3581d9aff08e8/COPYING" -o COPYING.websocketpp
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/chriskohlhoff/asio/asio-1-24-0/asio/LICENSE_1_0.txt" -o LICENSE.asio
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/nlohmann/json/v3.12.0/LICENSE.MIT" -o LICENSE.json
+          curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/5.0.1/COPYING.MPL2" -o COPYING.eigen
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/csukuangfj/hclust-cpp/2026-02-25/LICENSE" -o LICENSE.hclust-cpp
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/likle/cargs/v1.0.3/LICENSE.md" -o LICENSE.cargs
+          curl -fsSL --retry 5 "http://files.portaudio.com/archives/pa_stable_v190700_20210406.tgz" -o /tmp/pa.tgz
+          tar xzf /tmp/pa.tgz -O portaudio/LICENSE.txt > LICENSE.portaudio
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # SHERPA_ONNX_USE_PRE_INSTALLED_ONNXRUNTIME_IF_AVAILABLE is ON by default;
+          # pointing it at our own riscv64 onnxruntime wheel (see env.ONNXRUNTIME_VERSION
+          # above) skips CMake's FetchContent download of the T-Head-only binary entirely.
+          # Headers come straight from the matching onnxruntime release tag - the pip
+          # wheel ships only the runtime .so, not the C/C++ API headers.
+          CIBW_BEFORE_BUILD: >-
+            pip download --no-deps --only-binary=:all: --index-url https://pypi.riseproject.dev/simple/ -d /tmp/ort_pkg "onnxruntime==${{ env.ONNXRUNTIME_VERSION }}" &&
+            unzip -q /tmp/ort_pkg/*.whl -d /tmp/ort_pkg/extracted &&
+            mkdir -p {project}/onnxruntime-riscv64/lib &&
+            cp /tmp/ort_pkg/extracted/onnxruntime/capi/libonnxruntime.so.${{ env.ONNXRUNTIME_VERSION }} /tmp/ort_pkg/extracted/onnxruntime/capi/libonnxruntime_providers_shared.so {project}/onnxruntime-riscv64/lib/ &&
+            ln -sf libonnxruntime.so.${{ env.ONNXRUNTIME_VERSION }} {project}/onnxruntime-riscv64/lib/libonnxruntime.so &&
+            ln -sf libonnxruntime.so.${{ env.ONNXRUNTIME_VERSION }} {project}/onnxruntime-riscv64/lib/libonnxruntime.so.1 &&
+            curl -fsSL --retry 5 "https://github.com/microsoft/onnxruntime/releases/download/v${{ env.ONNXRUNTIME_VERSION }}/onnxruntime-linux-aarch64-${{ env.ONNXRUNTIME_VERSION }}.tgz"
+            | tar xz -C {project}/onnxruntime-riscv64 --wildcards --strip-components=1 "onnxruntime-linux-aarch64-${{ env.ONNXRUNTIME_VERSION }}/include/*.h"
+          # LD_LIBRARY_PATH is required at auditwheel-repair time, not just at
+          # link time: SHERPA_ONNXRUNTIME_LIB_DIR only tells CMake where to
+          # find libonnxruntime.so to link against, but auditwheel's own
+          # dependency scan (ldd-based) needs the actual DT_NEEDED SONAME
+          # (libonnxruntime.so.1, not the dev-symlink libonnxruntime.so) on
+          # its own search path to locate and bundle it into the wheel.
+          CIBW_ENVIRONMENT: >-
+            MAKEFLAGS=-j$(nproc)
+            SHERPA_ONNXRUNTIME_INCLUDE_DIR=/project/onnxruntime-riscv64/include
+            SHERPA_ONNXRUNTIME_LIB_DIR=/project/onnxruntime-riscv64/lib
+            LD_LIBRARY_PATH=/project/onnxruntime-riscv64/lib
+          CIBW_TEST_COMMAND: >-
+            python -c "import sherpa_onnx; print(sherpa_onnx.__version__); print(sherpa_onnx.OnlineRecognizer); print(sherpa_onnx.OfflineRecognizer)" &&
+            sherpa-onnx-offline --help &&
+            sherpa-onnx-offline-tts --help &&
+            curl -fsSL --retry 5 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23.tar.bz2 | tar xj &&
+            sherpa-onnx --tokens=./sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23/tokens.txt --encoder=./sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23/encoder-epoch-99-avg-1.onnx --decoder=./sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23/decoder-epoch-99-avg-1.onnx --joiner=./sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23/joiner-epoch-99-avg-1.onnx ./sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23/test_wavs/0.wav &&
+            curl -fsSL --retry 5 https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-lessac-medium.tar.bz2 | tar xj &&
+            sherpa-onnx-offline-tts --vits-model=./vits-piper-en_US-lessac-medium/en_US-lessac-medium.onnx --vits-data-dir=./vits-piper-en_US-lessac-medium/espeak-ng-data --vits-tokens=./vits-piper-en_US-lessac-medium/tokens.txt --output-filename=./test.wav 'test' &&
+            test -s ./test.wav
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sherpa-onnx-${{ env.SHERPA_ONNX_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish sherpa-onnx ${{ inputs.version || '1.13.6' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: sherpa-onnx-${{ inputs.version || '1.13.6' }}-*-manylinux_riscv64
