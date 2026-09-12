@@ -1,0 +1,149 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# imagecodecs ships no public CI (no .github/workflows upstream). setup.py has a
+# customize_build_* preset per downstream (cgohlke/pyodide/cibuildwheel/conda-forge/
+# macports/mingw), selected through an imagecodecs_distributor_setup module import
+# that isn't reliably importable inside cibuildwheel's isolated build subprocess; the
+# patch below adds a Rocky 10 riscv64 preset selected through an env var instead.
+name: Build imagecodecs wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'imagecodecs version to build (git tag, e.g. 2026.8.16)'
+        required: true
+        default: '2026.8.16'
+  pull_request:
+    paths:
+      - '.github/workflows/build-imagecodecs.yml'
+      - 'patches/imagecodecs/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '2026.8.16' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 2026.8.16 there.
+  IMAGECODECS_VERSION: ${{ inputs.version || '2026.8.16' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build imagecodecs ${{ inputs.version || '2026.8.16' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # setup.py's own py_limited_api collapses every GIL interpreter into one
+        # cp312-abi3 wheel, built on our floor (cp312); Py_GIL_DISABLED forces its
+        # own non-abi3 build for cp314t.
+        python: ["cp312", "cp314t"]
+
+    steps:
+      - name: Checkout imagecodecs v${{ env.IMAGECODECS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: cgohlke/imagecodecs
+          ref: v${{ env.IMAGECODECS_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: |
+          git apply -v python-wheels/patches/imagecodecs/${{ env.IMAGECODECS_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # jxrlib (jpegxr) isn't packaged for Rocky 10 riscv64 at all, so it's
+          # dropped like upstream's own customize_build_macports does; wavpack is
+          # packaged but too old (5.6.0, predates the multithreaded-encoding API
+          # _wavpack.pyx calls); libdeflate isn't packaged either, so it's built
+          # from its own small upstream source.
+          CIBW_BEFORE_ALL_LINUX: |
+            dnf install -y \
+              lcms2-devel lz4-devel libzstd-devel liblerc-devel openjpeg2-devel \
+              libjpeg-turbo-devel xz-devel libpng-devel libtiff-devel libwebp-devel \
+              zlib-ng-compat-devel brotli-devel snappy-devel giflib-devel bzip2-devel
+            curl -sSL https://github.com/ebiggers/libdeflate/archive/refs/tags/v1.26.tar.gz | tar xz -C /tmp
+            cmake -S /tmp/libdeflate-1.26 -B /tmp/libdeflate-1.26/build -DCMAKE_BUILD_TYPE=Release -DLIBDEFLATE_BUILD_STATIC_LIB=OFF -DLIBDEFLATE_BUILD_GZIP=OFF
+            cmake --build /tmp/libdeflate-1.26/build -j"$(nproc)"
+            cmake --install /tmp/libdeflate-1.26/build
+          CIBW_ENVIRONMENT: >-
+            IMAGECODECS_RISCV64=1
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest tifffile
+          CIBW_TEST_SOURCES: tests
+          # Deselected: TIFF/lzma (Rocky 10's libtiff is built without liblzma, so the
+          # TIFF-container lzma compression scheme is unavailable even though standalone
+          # imagecodecs.lzma_encode/decode works), two 16-bit lossless-JPEG-in-TIFF files
+          # (libjpeg-turbo 3 decodes them a few pixels differently), cms colour-transform
+          # precision (lcms2 2.16 on riscv64 rounds a few output values differently),
+          # PixarLog per-strip re-decoding (fails whenever libtiff picks more than one
+          # strip), htj2k_level (openjph isn't built; the test has no skip guard),
+          # bfloat16 -nan round-tripping (sign bit not preserved), and float16 TIFFs with
+          # a floating-point predictor written big-endian (libtiff 4.6.0 corrupts the
+          # predictor state when byte-swapping, decoding garbage instead of the source
+          # image; same-endian and non-float dtypes are unaffected).
+          CIBW_TEST_COMMAND: >-
+            python -c "import imagecodecs;
+            assert imagecodecs.PNG.available and imagecodecs.LERC.available and imagecodecs.BROTLI.available;
+            assert not imagecodecs.JPEGXR.available and not imagecodecs.AVIF.available and not imagecodecs.WAVPACK.available" &&
+            python -m pytest -v tests/test_imagecodecs.py tests/test_imagelayout.py
+            --deselect tests/test_imagecodecs.py::test_cms
+            --deselect tests/test_imagecodecs.py::test_cms_identity_transforms
+            --deselect tests/test_imagecodecs.py::test_tiff_encode_pixarlog
+            --deselect "tests/test_imagecodecs.py::test_tiff_encode_compression[None-f2-True-None-deflate->]"
+            --deselect "tests/test_imagecodecs.py::test_tiff_encode_compression[None-f2-True-None-zstd->]"
+            --deselect "tests/test_imagecodecs.py::test_tiff_encode_compression[None-f2-True-None-lzw->]"
+            --deselect "tests/test_imagecodecs.py::test_tiff_encode_compression[None-f2-True--1-deflate->]"
+            --deselect "tests/test_imagecodecs.py::test_tiff_encode_compression[None-f2-True--1-zstd->]"
+            --deselect "tests/test_imagecodecs.py::test_tiff_encode_compression[None-f2-True--1-lzw->]"
+            --deselect "tests/test_imagecodecs.py::test_tiff_encode_compression[None-f2-True-8-deflate->]"
+            --deselect "tests/test_imagecodecs.py::test_tiff_encode_compression[None-f2-True-8-zstd->]"
+            --deselect "tests/test_imagecodecs.py::test_tiff_encode_compression[None-f2-True-8-lzw->]"
+            --deselect "tests/test_imagecodecs.py::test_tiff_encode_compression[tile1-f2-True-None-deflate->]"
+            --deselect "tests/test_imagecodecs.py::test_tiff_encode_compression[tile1-f2-True-None-zstd->]"
+            --deselect "tests/test_imagecodecs.py::test_tiff_encode_compression[tile1-f2-True-None-lzw->]"
+            --deselect "tests/test_imagecodecs.py::test_tiff_encode_compression[tile1-f2-True--1-deflate->]"
+            --deselect "tests/test_imagecodecs.py::test_tiff_encode_compression[tile1-f2-True--1-zstd->]"
+            --deselect "tests/test_imagecodecs.py::test_tiff_encode_compression[tile1-f2-True--1-lzw->]"
+            --deselect "tests/test_imagecodecs.py::test_tiff_encode_compression[tile1-f2-True-8-deflate->]"
+            --deselect "tests/test_imagecodecs.py::test_tiff_encode_compression[tile1-f2-True-8-zstd->]"
+            --deselect "tests/test_imagecodecs.py::test_tiff_encode_compression[tile1-f2-True-8-lzw->]"
+            -k "not (tiff_encode_compression and lzma) and not (tifffile and lzma) and not (tiff_decode_files and lzma) and not (tiff_decode_files and rgb_u2_jpeg) and not htj2k_level and not (bfloat16 and nan)"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: imagecodecs-${{ env.IMAGECODECS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish imagecodecs ${{ inputs.version || '2026.8.16' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: imagecodecs-${{ inputs.version || '2026.8.16' }}-*-manylinux_riscv64
