@@ -1,0 +1,148 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build at this tag (the python-manylinux job of
+# .github/workflows/packaging.yml and ci/scripts/python_wheel_unix_{build,relocate}.sh):
+#   https://github.com/apache/arrow-adbc/blob/apache-arrow-adbc-24/.github/workflows/packaging.yml
+# which builds libadbc_driver_sqlite.so via CMake against vcpkg's static
+# sqlite3, then setup.py copies it into the package and the relocate script
+# retags + auditwheel-repairs the resulting py3-none-any wheel into a
+# platform one. This narrows that to Linux riscv64: vcpkg has no riscv64
+# binary cache, so sqlite3 comes from the manylinux image's own sqlite-devel
+# instead, and the relocate script's retag step is reproduced inline since it
+# isn't vendored as a package file we can invoke directly. See
+# build-adbc-driver-manager.yml for why the checkout uses the Go module tag.
+name: Build adbc-driver-sqlite wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'adbc-driver-sqlite version to build (PyPI version, e.g. 1.12.0)'
+        required: true
+        default: '1.12.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-adbc-driver-sqlite.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.12.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.12.0 there.
+  ADBC_VERSION: ${{ inputs.version || '1.12.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build adbc-driver-sqlite ${{ inputs.version || '1.12.0' }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    # numpy/pandas/pyarrow/adbc-driver-manager download for the test step alone takes
+    # ~an hour on this runner (same as adbc-driver-postgresql's identical install line),
+    # even though the driver build itself is fast with no vcpkg compile involved.
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout apache/arrow-adbc v${{ env.ADBC_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: apache/arrow-adbc
+          ref: go/adbc/v${{ env.ADBC_VERSION }}
+          persist-credentials: false
+
+      # The wheel is py3-none (no compiled CPython extension, just a ctypes-loaded
+      # .so), so cibuildwheel's per-interpreter model doesn't fit; drive the
+      # manylinux image directly instead (gotcha 15's pattern), with the build
+      # script written to a file rather than an inline `bash -c` one-liner.
+      - name: Write the build script
+        run: |
+          cat > build.sh <<'BUILD_SCRIPT'
+          set -euo pipefail
+
+          dnf install -y --setopt=install_weak_deps=False sqlite-devel
+
+          cmake -S c -B build \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            -DCMAKE_INSTALL_PREFIX=/workspace/build/install \
+            -DADBC_BUILD_SHARED=ON \
+            -DADBC_BUILD_STATIC=OFF \
+            -DADBC_DRIVER_SQLITE=ON
+          cmake --build build --target install -j"$(nproc)"
+
+          PY=/opt/python/cp312-cp312/bin
+          "$PY"/pip install -q --upgrade pip wheel auditwheel
+
+          cd python/adbc_driver_sqlite
+          ADBC_SQLITE_LIBRARY=/workspace/build/install/lib/libadbc_driver_sqlite.so \
+            "$PY"/pip wheel . --no-deps -w dist
+
+          # setup.py declares no ext_modules, so setuptools tags the wheel
+          # py3-none-any/purelib even though it embeds a real .so; fix that up
+          # the way ci/scripts/python_wheel_fix_tag.py does upstream (on every
+          # OS, not just macOS/Windows) before repairing.
+          plat=$("$PY"/python -c 'import sysconfig; print(sysconfig.get_platform().replace("-", "_").replace(".", "_"))')
+          cd dist
+          "$PY"/python -m wheel unpack ./*.whl -d unpacked
+          meta=$(find unpacked -name WHEEL)
+          sed -i \
+            -e 's/^Root-Is-Purelib: true$/Root-Is-Purelib: false/' \
+            -e "s/^Tag: py3-none-any\$/Tag: py3-none-${plat}/" \
+            "$meta"
+          rm ./*.whl
+          "$PY"/python -m wheel pack unpacked/* --dest-dir .
+          rm -rf unpacked
+
+          "$PY"/python -m auditwheel repair ./*.whl -w /workspace/wheelhouse --plat manylinux_2_39_riscv64
+          BUILD_SCRIPT
+
+      - name: Build the driver and package the wheel
+        run: |
+          docker run --rm \
+            -v "$(pwd)":/workspace \
+            --workdir /workspace \
+            "${{ env.MANYLINUX_RISCV64_IMAGE }}" \
+            bash build.sh
+
+      - name: Install the wheel and run the test suite
+        run: |
+          set -euo pipefail
+          python3 -m venv .venv
+          . .venv/bin/activate
+          # The runner's stock pip predates riscv64 manylinux tag support and
+          # rejects the wheel as unsupported.
+          pip install -q --upgrade pip
+          # adbc-driver-manager/pandas/pyarrow riscv64 wheels only exist on our
+          # own registry.
+          PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ pip install -q \
+            wheelhouse/*.whl adbc-driver-manager numpy pandas "pyarrow>=14.0.1" "pytest>=9"
+
+          python -c "import adbc_driver_sqlite; import adbc_driver_sqlite.dbapi"
+          # Mirrors upstream's own python_util.sh test_packages(): --import-mode
+          # append keeps the installed wheel authoritative over the checkout.
+          # SQLite is an embedded database, so no external service is needed.
+          python -m pytest -vv --import-mode append python/adbc_driver_sqlite/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: adbc-driver-sqlite-${{ env.ADBC_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish adbc-driver-sqlite ${{ inputs.version || '1.12.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: adbc-driver-sqlite-${{ inputs.version || '1.12.0' }}-*-manylinux_riscv64
