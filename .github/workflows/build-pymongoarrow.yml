@@ -1,0 +1,128 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on: https://github.com/mongodb-labs/mongo-arrow/blob/1.15.0/.github/workflows/dist-python.yml
+# and bindings/python/{pyproject.toml,cibw_before_build.sh,CMakeLists.txt,build-libbson.sh} at
+# the same tag. Build-from-checkout, inheriting upstream's [tool.cibuildwheel] (before-build
+# builds libbson from mongo-c-driver source; repair-wheel-command excludes libarrow* since the
+# extension resolves it at runtime via pyarrow's own preloaded shared libraries).
+name: Build pymongoarrow wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pymongoarrow version to build (git tag, e.g. 1.15.0)'
+        required: true
+        default: '1.15.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pymongoarrow.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.15.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYMONGOARROW_VERSION: ${{ inputs.version || '1.15.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pymongoarrow ${{ inputs.version || '1.15.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: [cp312, cp313, cp314, cp314t]
+
+    steps:
+      - name: Checkout pymongoarrow ${{ env.PYMONGOARROW_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: mongodb-labs/mongo-arrow
+          ref: ${{ env.PYMONGOARROW_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: bindings/python
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # mongo-c-driver's root CMakeLists.txt itself declares cmake_minimum_required(3.15),
+          # but nested subdirectories built along with libbson can declare older floors that
+          # CMake 4 (bundled in the manylinux image) rejects outright (gotcha 257).
+          # pyarrow/numpy/pymongo are build-time requirements (CMakeLists.txt cimports pyarrow's
+          # headers and links its libraries; find_package(... NumPy) needs numpy's), so the
+          # registry URL has to reach both the build and test phases (gotcha 12); cython is left
+          # unscoped since our registry has no riscv64 cp314t build of it and it must compile
+          # from sdist there.
+          # before-build and the actual scikit-build-core/CMake configure run with different
+          # cwds, so upstream's relative LIBBSON_INSTALL_DIR=./libbson (pyproject.toml) would
+          # resolve to two different directories; pin it absolute instead.
+          CIBW_ENVIRONMENT: >-
+            CMAKE_POLICY_VERSION_MINIMUM=3.5
+            LIBBSON_INSTALL_DIR=/tmp/pymongoarrow-libbson
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=pyarrow,numpy,pymongo
+          # before-build runs from the checkout root, not package-dir (same as
+          # test-sources below), so upstream's own relative "./cibw_before_build.sh" 404s.
+          # Upstream's script itself (Linux branch) just installs rust-just/uv and runs
+          # `just build-libbson`, but that recipe's `uv sync --dev` step pulls the full dev
+          # group (pre-commit, sphinx-autobuild -> watchfiles), and watchfiles needs a Rust
+          # target rustup has no riscv64 entry for. build-libbson.sh needs no Python beyond an
+          # existing .venv to source, so call it directly instead of through the dev sync.
+          CIBW_BEFORE_BUILD: >-
+            cd bindings/python &&
+            pip install -q uv &&
+            uv venv .venv &&
+            bash build-libbson.sh
+          CIBW_TEST_REQUIRES: pytest>=8.0
+          # test-sources resolves against the checkout root, not package-dir.
+          CIBW_TEST_SOURCES: bindings/python/test bindings/python/pyproject.toml
+          # No riscv64 mongod exists (upstream's own MongoDB Server download center ships no
+          # riscv64 build), so only the tests that don't need a live server run - the same
+          # constraint build-pymongo.yml documents for the driver itself.
+          CIBW_TEST_COMMAND: >-
+            cd bindings/python &&
+            python -c "from pymongoarrow.lib import libbson_version" &&
+            python -m pytest test/test_bson.py test/test_builders.py test/test_schema.py
+            test/test_monkey.py test/test_libbson.py
+
+      - name: Check the wheel bundles libbson2 and its licence
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any("pymongoarrow/libbson2.so" in n for n in names), whl
+              assert any(".dist-info/licenses/LICENSE" in n for n in names), whl
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pymongoarrow-${{ env.PYMONGOARROW_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pymongoarrow ${{ inputs.version || '1.15.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pymongoarrow-${{ inputs.version || '1.15.0' }}-*-manylinux_riscv64
