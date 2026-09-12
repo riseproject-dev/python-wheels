@@ -18,6 +18,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
 - **173** — `gh pr list --state open --head <pkg>` does not see a *merged* PR, so a finished
 - **208** — A fresh `main` publish dispatch finishing green does not mean
 - **357** — A single combined-interpreter build job's artifact name needs to match the
+- **370** — `.queue.yml` lives on `main` in a checkout shared by every concurrently
 
 ---
 
@@ -298,3 +299,30 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
       instead; for a multi-hour single-job build this means eating a full rebuild to
       re-validate just the publish-job config, since the build and publish jobs are
       not independently re-runnable once the artifact-pattern itself was wrong.
+
+370. **`.queue.yml` lives on `main` in a checkout shared by every concurrently
+    running agent, so a plain `git add .queue.yml && git commit` can silently commit
+    (and thus attribute to your message) another agent's unrelated in-flight edit sitting
+    in the same working tree — or worse, a *stale* full-file write from another agent can
+    revert your own just-pushed change back to its old value the moment that agent's
+    commit lands (observed live: an xrootd `porting` update was clobbered back to `queued`
+    three commits later by a sibling agent that had started from a checkout predating the
+    push).** Editing the shared worktree in place is not safe for this file. Instead, edit
+    it from an ephemeral, isolated worktree checked out fresh from `origin/main` for each
+    state transition:
+    ```bash
+    git fetch origin main
+    git worktree add --detach .git/pw-scratch/<pkg>/queue-edit origin/main
+    # edit .git/pw-scratch/<pkg>/queue-edit/.queue.yml, validate parseability + count
+    git -C .git/pw-scratch/<pkg>/queue-edit commit -am "queue: mark <pkg> as <state>, ..."
+    git -C .git/pw-scratch/<pkg>/queue-edit push origin HEAD:main
+    git worktree remove .git/pw-scratch/<pkg>/queue-edit --force
+    ```
+    This guarantees the commit's tree is exactly `origin/main` plus your one-entry diff,
+    with nothing else riding along. It does not fully close the race — another agent can
+    still push between your fetch and your push (retry with a fresh fetch on rejection),
+    or land a stale-based commit of their own *after* yours that reverts it the same way
+    yours could have reverted theirs. **Re-read the entry back from `origin/main` after
+    every push in this same session** (not just trust the push exit code) so a collision
+    like the one above is caught and re-applied immediately rather than surfacing only
+    at the next periodic queue.yml audit.

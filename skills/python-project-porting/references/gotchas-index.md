@@ -508,3 +508,7 @@ The porting gotchas (351 of them) live in [`references/gotchas/`](gotchas/), spl
 - **163** — A maintainer hold that *names* a condition is an instruction to come back and
 - **173** — `gh pr list --state open --head <pkg>` does not see a *merged* PR, so a finished
 - **208** — A fresh `main` publish dispatch finishing green does not mean
+- **370** — `.queue.yml` lives on `main` in a checkout shared by every concurrently
+  running agent — edit it from an ephemeral detached worktree off fresh `origin/main`
+  per state transition, and re-read the entry back after every push to catch a
+  concurrent stale-based commit reverting it.
