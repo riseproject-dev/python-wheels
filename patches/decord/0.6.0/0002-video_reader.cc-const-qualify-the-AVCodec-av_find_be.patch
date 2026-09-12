@@ -1,0 +1,41 @@
+From 941cde5866ec9e756b58dee2e08561661e375098 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 11 Sep 2026 04:28:44 +0200
+Subject: [PATCH] video_reader.cc: const-qualify the AVCodec*
+ av_find_best_stream fills
+
+Upstream-Status: To upstream [decord is unmaintained: no commits addressing FFmpeg API compatibility since v0.6.0 (2021-06-14)]
+
+FFmpeg's avcodec_find_decoder()/av_find_best_stream() family started
+returning const AVCodec* around FFmpeg 5.x (part of the same
+const-correctness pass that added AVCodecParameters' constness earlier);
+SetVideoStream()'s local AVCodec *dec was never updated to match, and
+&dec no longer converts to the const AVCodec** av_find_best_stream()
+now expects:
+
+  video_reader.cc:149:88: error: invalid conversion from 'AVCodec**' to
+  'const AVCodec**' [-fpermissive]
+
+codecs_ (std::vector<const AVCodec*>) and every other AVCodec* use in
+this file were already const; grepped src/ and include/ for any other
+non-const "AVCodec *" declaration and found none.
+---
+ src/video/video_reader.cc | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/video/video_reader.cc b/src/video/video_reader.cc
+index af4858d..99c9635 100644
+--- a/src/video/video_reader.cc
++++ b/src/video/video_reader.cc
+@@ -145,7 +145,7 @@ VideoReader::~VideoReader(){
+ 
+ void VideoReader::SetVideoStream(int stream_nb) {
+     if (!fmt_ctx_) return;
+-    AVCodec *dec;
++    const AVCodec *dec;
+     int st_nb = av_find_best_stream(fmt_ctx_.get(), AVMEDIA_TYPE_VIDEO, stream_nb, -1, &dec, 0);
+     // LOG(INFO) << "find best stream: " << st_nb;
+     CHECK_GE(st_nb, 0) << "ERROR cannot find video stream with wanted index: " << stream_nb;
+-- 
+2.50.1 (Apple Git-155)
+
