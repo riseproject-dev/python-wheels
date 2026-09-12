@@ -1,0 +1,103 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/google/jsonnet/blob/v0.22.0/.github/workflows/publish-python.yml
+name: Build jsonnet wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'jsonnet version to build (git tag without leading v, e.g. 0.22.0)'
+        required: true
+        default: '0.22.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-jsonnet.yml'
+      - 'patches/jsonnet/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.22.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.22.0 there.
+  JSONNET_VERSION: ${{ inputs.version || '0.22.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build jsonnet ${{ inputs.version || '0.22.0' }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # setup.py tags the wheel cp310-abi3 for any GIL-enabled interpreter
+          # >=3.10, so cp312 (our floor) already produces the wheel cp313/cp314
+          # need; cibuildwheel reuses+tests that one wheel via find_compatible_wheel.
+          - tag: cp310-abi3
+            build: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          # setup.py skips the Limited API under Py_GIL_DISABLED (free-threading).
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+
+    steps:
+      - name: Checkout jsonnet v${{ env.JSONNET_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: google/jsonnet
+          ref: v${{ env.JSONNET_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # Ships the vendored nlohmann/json, md5, and rapidyaml licence texts
+      # compiled straight into the extension (see the patch commit message).
+      - name: Patch jsonnet source
+        run: |
+          git apply python-wheels/patches/jsonnet/${{ env.JSONNET_VERSION }}/00*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_BUILD_FRONTEND: build
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_COMMAND: >-
+            python -c "import _jsonnet, importlib.metadata as m;
+            assert _jsonnet.__file__.endswith('.so'), _jsonnet.__file__;
+            l = sorted(str(p).rsplit('/', 1)[-1] for p in m.files('jsonnet') if '.dist-info/licenses/' in str(p));
+            assert l == ['LICENSE', 'LICENSE.md5', 'LICENSE.nlohmann-json', 'LICENSE.rapidyaml'], l" &&
+            python {package}/python/_jsonnet_test.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: jsonnet-${{ env.JSONNET_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish jsonnet ${{ inputs.version || '0.22.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: jsonnet-${{ inputs.version || '0.22.0' }}-*-manylinux_riscv64
