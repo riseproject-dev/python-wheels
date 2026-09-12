@@ -1,0 +1,129 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Mirrors upstream's utils/pypi/sdktowheel.py (the script that turns a CMake
+# ENABLE_BUILD_DYNAMIC install tree into the "gmsh" PyPI wheel) and the SDK build
+# recipe from .gitlab-ci.yml's linux-sdk_official_* jobs, narrowed to riscv64.
+name: Build gmsh wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'gmsh version to build (git tag is gmsh_<version with _ instead of .>, e.g. 4.15.2)'
+        required: true
+        default: '4.15.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-gmsh.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '4.15.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GMSH_VERSION: ${{ inputs.version || '4.15.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build gmsh ${{ inputs.version || '4.15.2' }} py2.py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    steps:
+      # gmsh is hosted on GitLab, not GitHub, so actions/checkout (github.com/GHES
+      # only) can't fetch it; a GitLab archive download is upstream's own tarball URL.
+      - name: Download gmsh gmsh_${{ env.GMSH_VERSION }} source
+        run: |
+          set -euxo pipefail
+          tag="gmsh_${GMSH_VERSION//./_}"
+          curl -fsSL -o gmsh.tar.gz \
+            "https://gitlab.onelab.info/gmsh/gmsh/-/archive/${tag}/gmsh-${tag}.tar.gz"
+          mkdir gmsh
+          tar xzf gmsh.tar.gz -C gmsh --strip-components=1
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
+
+      - name: Build the SDK and the wheel
+        run: |
+          mkdir -p output
+          docker run -i --rm \
+            -v "$PWD/gmsh:/gmsh" \
+            -v "$PWD/output:/output" \
+            -e GMSH_VERSION \
+            "$MANYLINUX_RISCV64_IMAGE" bash -s <<'GMSH_BUILD_EOF'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+
+          GMSH_VERSION="${GMSH_VERSION:?must be set, e.g. 4.15.2}"
+          PY=/opt/python/cp312-cp312/bin/python3
+
+          dnf install -y --setopt=install_weak_deps=False gmp-devel
+
+          cd /gmsh
+          # OpenCASCADE and FLTK are optional (gmsh's CMake probes for both and
+          # degrades gracefully when absent) but neither is available prebuilt for
+          # riscv64, so this drops CAD-kernel and GUI support rather than building
+          # either from source. Everything else DEFAULT enables (Netgen, HXT, ANN,
+          # METIS, ...) is bundled under contrib/ and needs no external package.
+          export CMAKE_POLICY_VERSION_MINIMUM=3.5
+          # GNUInstallDirs defaults CMAKE_INSTALL_LIBDIR to lib64 on this
+          # RHEL/Rocky-family image; utils/pypi/sdktowheel.py hardcodes a
+          # glob against sdk_dir/lib/ for the installed gmsh*.dist-info,
+          # so it silently finds nothing (IndexError) unless lib is forced.
+          cmake -S. -Bbuild -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/tmp/install \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            -DGMSH_RELEASE=1 -DENABLE_BUILD_DYNAMIC=1 -DENABLE_FLTK=0 -DENABLE_OCC=0
+          cmake --build build --target install -j"$(nproc)"
+
+          "$PY" utils/pypi/sdktowheel.py /tmp/install manylinux_2_39_riscv64
+          mv gmsh-*.whl /output/
+          ls -la /output
+          GMSH_BUILD_EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: gmsh-${{ env.GMSH_VERSION }}-py2.py3-none-manylinux_riscv64
+          path: output/*.whl
+          if-no-files-found: error
+
+      - name: Test gmsh wheel
+        run: |
+          docker run -i --rm \
+            -v "$PWD/gmsh:/gmsh" \
+            -v "$PWD/output:/output" \
+            "$MANYLINUX_RISCV64_IMAGE" bash -s <<'GMSH_TEST_EOF'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+
+          # py2.py3-none: the same wheel installs unmodified on every interpreter
+          # (gmsh.py is a hand-written ctypes wrapper around libgmsh.so, not a
+          # compiled extension module, so there's no per-interpreter ABI to build).
+          for tag in cp312-cp312 cp313-cp313 cp314-cp314; do
+            PY="/opt/python/$tag/bin/python"
+            "$PY" -m pip install /output/gmsh-*.whl
+            # t1.py: upstream's own first tutorial, built-in (geo) kernel only, so
+            # it doesn't need the OpenCASCADE support this build leaves disabled.
+            "$PY" /gmsh/tutorials/python/t1.py -nopopup
+            test -f t1.msh
+            rm -f t1.msh
+          done
+          GMSH_TEST_EOF
+
+  publish:
+    name: Publish gmsh ${{ inputs.version || '4.15.2' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: gmsh-${{ inputs.version || '4.15.2' }}-*-manylinux_riscv64
