@@ -24,6 +24,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
 - **269** — A project's own `build-system.requires` floor can be looser than what its
 - **346** — The `clang` PyPI package (LLVM's own `cindex.py` bindings, repackaged per release)
 - **361** — Gotcha 29's `pkg_resources` removal also bites `CIBW_TEST_REQUIRES`, not just a
+- **367** — A `setup.py`'s own "distributor customization" import hook can go silently
 
 ---
 
@@ -547,3 +548,39 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
     module named 'pkg_resources'`, just at test-collection time instead of build time.
     Fix is the same pin, applied to the other knob: `CIBW_TEST_REQUIRES: pytest numpy
     "setuptools<82"`.
+
+367. **A `setup.py`'s own "distributor customization" import hook can go silently
+    unused under cibuildwheel's default build frontend, because the isolated
+    `python -m build` subprocess never puts the project directory on `sys.path` (the
+    imagecodecs case; see `build-imagecodecs.yml`).** imagecodecs documents exactly
+    this extension point: drop an `imagecodecs_distributor_setup.py` next to `setup.py`
+    and its `try: from imagecodecs_distributor_setup import customize_build except
+    ImportError: ...` picks it up — a pattern several real distributors (Pyodide,
+    conda-forge, MacPorts) already rely on. Writing that file into the checkout via a
+    `run:` step before the `cibuildwheel` step (gotcha 7's usual move) compiles clean,
+    every extension builds, and yet the wrong `customize_build_*` preset silently runs:
+    a codec needing an unpackaged system library still gets compiled in and dies at
+    `#include` with a missing header, or a legacy code path nobody asked for gets used
+    instead of the modern one — both signs the custom module was never imported at
+    all, not that its logic is wrong. `cibuildwheel`'s default `CIBW_BUILD_FRONTEND` is
+    `build`, and `build` creates a fresh isolated venv per invocation and runs the PEP
+    517 hook in a subprocess whose `sys.path[0]` is that hook caller's own directory,
+    not the project root — unlike a bare `python setup.py ...` invocation, nothing
+    inserts the checkout onto `sys.path`, so the `import` always raises `ImportError`
+    and every fallback branch after it runs instead.
+    - **`PYTHONPATH=/project` in `CIBW_ENVIRONMENT` does not fix it** — `build`'s
+      isolated-env machinery does not forward a stray `PYTHONPATH` from the outer
+      environment into the hook subprocess either, so the import keeps failing exactly
+      the same way after adding it; this is a wasted CI cycle that looks like it should
+      have worked.
+    - **The reliable fix is a patch, not an environment tweak**: add the distributor's
+      customize function as a real branch in `setup.py`'s own dispatch chain (selected
+      by a plain `os.environ.get('MY_ENV_VAR', '')` check, no import involved), the
+      same way upstream's own `COMPUTERNAME`/`CONDA_BUILD`/`PYODIDE` branches already
+      work in that project. It compiles and runs regardless of which frontend or
+      isolation mode cibuildwheel ends up using.
+    - **Confirm the true cause from the build log, not by guessing**: grep for the
+      literal include paths or source filenames the *wrong* preset would add (upstream's
+      `customize_build_default`, say) — their presence in the actual `gcc`/cythonize
+      invocation proves the import silently failed, before spending a cycle on any other
+      theory.

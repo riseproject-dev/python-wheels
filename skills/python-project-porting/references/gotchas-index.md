@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (348 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (351 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -302,6 +302,7 @@ The porting gotchas (348 of them) live in [`references/gotchas/`](gotchas/), spl
 - **231** — A vendored C library's own CMake can carry a genuine, tested riscv64 branch —
 - **278** — A vendored, direct-copy (not submodule) header can be missing riscv64 from its
 - **363** — A `libraries=[...]` entry can go missing from the link line with *no* error —
+- **368** — Linking several codecs against Rocky 10's system libraries instead of
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 
@@ -370,6 +371,7 @@ The porting gotchas (348 of them) live in [`references/gotchas/`](gotchas/), spl
 - **277** — A CMake-backed `pyproject.toml` build dependency with no upper bound can still be
 - **346** — The `clang` PyPI package gained a `File.__eq__` with no matching `__hash__` in the
 - **361** — Gotcha 29's `pkg_resources` removal also bites `CIBW_TEST_REQUIRES`, not just a
+- **367** — A `setup.py`'s own "distributor customization" import hook can go silently
 
 ### Testing: test-sources & shadowing — [`gotchas/testing-and-shadowing.md`](gotchas/testing-and-shadowing.md)
 
@@ -491,6 +493,7 @@ The porting gotchas (348 of them) live in [`references/gotchas/`](gotchas/), spl
 - **188** — A fat-LTO maturin release profile makes a full QEMU riscv64 build-rehearsal too
 - **223** — For a `bindings = "bin"` CLI's test assertions, `cargo build --release` the tool
 - **298** — A local rehearsal's `pip`-resolved cibuildwheel can be too old for
+- **369** — Without docker, fetch Rocky 10's own dnf repodata over plain HTTPS to
 
 ### PR, CI, triggers, publishing & maintainer signals — [`gotchas/pr-ci-and-maintainer.md`](gotchas/pr-ci-and-maintainer.md)
 

@@ -21,6 +21,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
 - **220** — BLST (Ethereum's vendored elliptic-curve library, pulled in by ckzg/c-kzg-4844
 - **231** — A vendored C library's own CMake can carry a genuine, tested riscv64 branch —
 - **363** — A `libraries=[...]` entry can go missing from the link line with *no* error —
+- **368** — Linking several codecs against Rocky 10's system libraries instead of
 
 ---
 
@@ -463,3 +464,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
     - **Fix upstream's helper to treat empty as unset**: `os.environ.get("VAR", "")` plus
       an `if value:` truthiness check (not `"VAR" in os.environ`), and filter empty
       elements out of the `.split(":")` result in case of a trailing/doubled separator too.
+
+368. **Linking several codecs against Rocky 10's system libraries instead of
+    vendoring surfaces API-version-skew failures one library at a time, not all at
+    once — each looks like an isolated compile bug until you've hit the pattern (the
+    imagecodecs case; see `build-imagecodecs.yml`).** A build that links against a
+    dozen distro `-devel` packages compiles most extensions cleanly and then dies on
+    one specific codec calling an API newer than the packaged library version: a
+    struct field and macro missing entirely (`WavpackConfig.worker_threads`,
+    `OPEN_THREADS_SHFT` — Rocky 10 ships WavPack 5.6.0, that field landed later) or a
+    whole function undeclared (`png_set_cICP` — added in libpng 1.6.45, Rocky 10 ships
+    1.6.40). Fixing that one (drop the codec, or patch out the call) just uncovers the
+    next one a build minute later; treat this as an expected multi-round pattern for
+    any project whose Cython/C layer tracks upstream libraries aggressively, not as a
+    sign the port needs a fundamentally different approach.
+    - **A container-format library can also lack a whole *codec inside itself*, not
+      just a newer function — check its RPM `Requires:` for the codec's own shared
+      library, not just its own version number.** Rocky 10's `libtiff` (4.6.0) links
+      `libLerc`/`libjpeg`/`libwebp`/`libz`/`libzstd` but no `liblzma`, meaning it was
+      built with LZMA support compiled out entirely; any TIFF-container operation
+      needing that pseudo-tag fails with `TiffError: Unknown pseudo-tag <N>` even
+      though the project's own *standalone* LZMA codec (linked directly against
+      `liblzma`, unrelated to libtiff) works fine. `rpm -q --requires <pkg>` (or the
+      primary/filelists repodata gotcha 369 describes) is the fast way to confirm which
+      codecs a distro's container-format library was actually built with, before
+      chasing the pseudo-tag error as if it were a bug in the wrapper code.
+    - **Settle "is this a real version wall" against the library's own changelog, not
+      by guessing from the error text.** `implicit declaration of function
+      'png_set_cICP'` reads like it could be a header/macro-guard issue fixable with a
+      compiler flag; libpng's own `CHANGES` file (`grep -n cICP CHANGES` against the
+      tagged release) gives the exact version the symbol was added in, and confirms
+      Rocky 10's 1.6.40 predates it — a real wall, not a flag away.

@@ -16,6 +16,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
 - **188** — A fat-LTO maturin release profile makes a full QEMU riscv64 build-rehearsal too
 - **223** — For a `bindings = "bin"` CLI's test assertions, `cargo build --release` the tool
 - **298** — A local rehearsal's `pip`-resolved cibuildwheel can be too old for
+- **369** — Without docker, fetch Rocky 10's own dnf repodata over plain HTTPS to
 
 ---
 
@@ -221,3 +222,28 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
     default `python3` that is older) and pin the same major `cibuildwheel` version the
     target workflow uses (`pip install cibuildwheel==4.2.0`) before trusting a green
     (or this particular red) local run.
+
+369. **Without docker, fetch Rocky 10's own dnf repodata over plain HTTPS to answer
+    "is package X available", "which version", and "what file does it actually
+    install" for `manylinux_2_39_riscv64` — no container runtime needed (the
+    imagecodecs case; see `build-imagecodecs.yml`).** `quay.io/pypa/manylinux_2_39_riscv64`
+    is a Rocky 10 riscv64 image with `baseos`/`appstream`/`crb` enabled (gotcha 100);
+    that means its exact package set is Rocky's own public riscv64 SIG mirror, fetchable
+    straight from a plain `curl` on any host, x86 laptop included:
+    `https://dl.rockylinux.org/pub/rocky/10/<Repo>/riscv64/os/repodata/repomd.xml` names
+    the current `primary.xml.gz` (package names/versions/`Requires:`) and
+    `filelists.xml.gz` (every installed file path per package) for `<Repo>` in
+    `BaseOS`/`AppStream`/`CRB`. `grep -n '<name>libfoo-devel</name>'
+    primary.xml` settles "is it packaged and in which repo" in seconds; the matching
+    block in `filelists.xml` gives the exact `.so` name and include paths the `-devel`
+    package installs, and the `<rpm:requires>` list gives the other shared libraries it
+    was linked against (gotcha 368's container-format-codec check). This is a real
+    dnf/EPEL fact-check, not a guess from package-name convention — no riscv64 binary
+    ever runs, so it works identically on macOS/Linux/any arch host with no QEMU/binfmt
+    setup at all, and settles in under a minute what would otherwise cost a full CI
+    cycle to discover as a build or link failure.
+    - **The `filelists.xml` files are large (100-200MB uncompressed)** — download once
+      per port into a scratch directory (`.git/pw-scratch/<pkg>/`, gotcha 9), `grep -n`
+      by package `name=` attribute to jump straight to its block rather than loading
+      the whole file, and delete it when done; it is Rocky's own public mirror data,
+      not anything project-specific worth keeping.
