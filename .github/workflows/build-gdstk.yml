@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `wheels-linux` job of
+# https://github.com/heitzmann/gdstk/blob/v1.0.1/.github/workflows/publish-packages.yml
+name: Build gdstk wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'gdstk version to build (git tag is v<version>)'
+        required: true
+        default: '1.0.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-gdstk.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.0.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.0.1 there.
+  GDSTK_VERSION: ${{ inputs.version || '1.0.1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  QHULL_TAG: v8.0.2
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build gdstk ${{ inputs.version || '1.0.1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout gdstk v${{ env.GDSTK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: heitzmann/gdstk
+          ref: v${{ env.GDSTK_VERSION }}
+          persist-credentials: false
+
+      # external/clipper is compiled straight into the extension under its own
+      # BSL-1.0 terms (same licence as gdstk, different copyright holder), and
+      # Qhull is statically linked in too; stage both notices at the root for
+      # scikit-build-core's default license-files glob.
+      - name: Stage the vendored dependencies' licences
+        run: |
+          sed -n '/Author    :  Angus Johnson/,/http:\/\/www.boost.org\/LICENSE_1_0.txt/p' \
+            external/clipper/clipper.hpp > LICENSE.clipper
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/qhull/qhull/${{ env.QHULL_TAG }}/COPYING.txt" -o LICENSE.qhull
+          test -s LICENSE.clipper
+          test -s LICENSE.qhull
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # zlib is linked from the system; Qhull is not on the manylinux image
+          # and is built from source, mirroring upstream's own before-all step.
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf -y install zlib-devel &&
+            mkdir -p /tmp/qhull &&
+            curl -fsSL "https://github.com/qhull/qhull/archive/refs/tags/${{ env.QHULL_TAG }}.tar.gz"
+            | tar -xz -C /tmp/qhull --strip-components=1 &&
+            cmake -S /tmp/qhull -B /tmp/qhull/build -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+            -DCMAKE_BUILD_TYPE=Release &&
+            cmake --build /tmp/qhull/build --parallel --target install &&
+            ldconfig
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+            LIBRARY_PATH=/usr/local/lib
+            LD_LIBRARY_PATH=/usr/local/lib
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: python -m pytest tests -v
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for path in sys.argv[1:]:
+              names = zipfile.ZipFile(path).namelist()
+              assert any(n.startswith("gdstk/_gdstk") and n.endswith(".so") for n in names), (path, names)
+              licences = {n.rsplit("/", 1)[-1] for n in names
+                          if ".dist-info/licenses/" in n} - {""}
+              assert licences == {"LICENSE", "LICENSE.clipper", "LICENSE.qhull"}, (path, licences)
+              print(path, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: gdstk-${{ env.GDSTK_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish gdstk ${{ inputs.version || '1.0.1' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: gdstk-${{ inputs.version || '1.0.1' }}-*-manylinux_riscv64
