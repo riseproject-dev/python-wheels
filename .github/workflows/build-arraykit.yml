@@ -1,0 +1,111 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `wheels` job of
+# https://github.com/static-frame/arraykit/blob/v1.12.0/.github/workflows/ci.yml
+name: Build arraykit wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'arraykit version to build (git tag without leading v, e.g. 1.12.0)'
+        required: true
+        default: '1.12.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-arraykit.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.12.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.12.0 there.
+  ARRAYKIT_VERSION: ${{ inputs.version || '1.12.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build arraykit ${{ inputs.version || '1.12.0' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Per-interpreter (not abi3): the extension links numpy's C API
+        # directly. Matches upstream's own published matrix exactly.
+        python:
+          - "cp310"
+          - "cp311"
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      - name: Checkout arraykit v${{ env.ARRAYKIT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: static-frame/arraykit
+          ref: v${{ env.ARRAYKIT_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy is a build and runtime requirement, and only our registry has
+          # it for riscv64; only-binary keeps a newer PyPI sdist-only release
+          # from winning the resolution and trying to build from source.
+          # setup.py locates numpy's headers via site.getsitepackages(), which
+          # a PEP 517 build-isolation overlay is invisible to, so numpy has to
+          # be preinstalled with isolation disabled.
+          # PIP_ONLY_BINARY also covers hypothesis: our registry has 6.165.10 with a
+          # cp314t riscv64 wheel, but PyPI's newer 6.168.0 (no riscv64 wheel for
+          # cp314t) otherwise wins version resolution and falls back to its sdist.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,hypothesis
+          CIBW_BEFORE_BUILD: pip install setuptools wheel "numpy>=2.2"
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          CIBW_TEST_REQUIRES: pytest hypothesis
+          CIBW_TEST_COMMAND: pytest {project}/test --durations=0
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          exts = {n.split("/")[-1].split(".")[0] for n in names if n.endswith(".so")}
+          assert exts == {"_arraykit"}, exts
+          licences = {n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n and not n.endswith("/")}
+          assert licences == {"LICENSE.txt"}, licences
+          EOF
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: arraykit-${{ env.ARRAYKIT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish arraykit ${{ inputs.version || '1.12.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: arraykit-${{ inputs.version || '1.12.0' }}-*-manylinux_riscv64
