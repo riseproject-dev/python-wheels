@@ -1,0 +1,149 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of:
+# https://github.com/kyamagu/skia-python/blob/v144.0.post2/.github/workflows/ci.yml
+name: Build skia-python wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'skia-python version to build (git tag without leading v, e.g. 144.0.post2)'
+        required: true
+        default: '144.0.post2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-skia-python.yml'
+      - 'patches/skia-python/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '144.0.post2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 144.0.post2 there.
+  SKIA_PYTHON_VERSION: ${{ inputs.version || '144.0.post2' }}
+  GN_REVISION: 0625da07ece7b1a374ec0719b6f40ebe3d0950c1
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build skia-python ${{ inputs.version || '144.0.post2' }} cp312/cp313/cp314/cp314t-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440  # full Skia (Chromium's 2D graphics engine) compile from source
+
+    steps:
+      - name: Checkout skia-python v${{ env.SKIA_PYTHON_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: kyamagu/skia-python
+          ref: v${{ env.SKIA_PYTHON_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch skia-python source
+        run: git apply python-wheels/patches/skia-python/${{ env.SKIA_PYTHON_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64 cp314t-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_SKIP: "*musllinux*"
+          # Reimplements scripts/build_Linux.sh: its `yum install ... ninja-build gn`
+          # comes from EPEL, which the riscv64 manylinux image doesn't carry (gotcha
+          # 51), so ninja comes from its own riscv64 PyPI wheel and gn is bootstrapped
+          # from source (gn.googlesource.com/gn's build/gen.py has no arch-specific
+          # logic). Everything after that mirrors the upstream script unchanged.
+          CIBW_BEFORE_ALL_LINUX: |
+            set -e
+            dnf install -y --enablerepo=crb \
+              fontconfig-devel mesa-libGL-devel mesa-libEGL-devel libglvnd-devel \
+              mesa-libGLES-devel libglvnd mesa-libGLES mesa-libEGL libglvnd-egl \
+              mesa-dri-drivers expat-devel libxml2-devel libstdc++-static
+            python3 -m pip install ninja
+            # Full clone, not --depth 1: build/gen.py's GenerateLastCommitPosition
+            # runs `git describe --match initial-commit` unconditionally whenever
+            # .git exists, which needs the full history back to that root tag.
+            git clone https://gn.googlesource.com/gn /tmp/gn
+            git -C /tmp/gn checkout ${{ env.GN_REVISION }}
+            # build/gen.py defaults CXX to clang++ on any non-MSVC/AIX/Windows
+            # host when CXX isn't set; this image has no clang, only GCC.
+            # --allow-warnings: gn's own source only gets clang -Werror
+            # coverage upstream; GCC's -Wcomment fires on an ASCII-art
+            # diagram in a doc-comment (src/gn/header_checker.h).
+            (cd /tmp/gn && CXX=g++ python3 build/gen.py --allow-warnings && ninja -C out gn)
+            install -m 0755 /tmp/gn/out/gn /usr/local/bin/gn
+            # BUILD.gn's `skia.h` action hardcodes rebase_path("//bin/gn") --
+            # the path our patched bin/fetch-gn would have populated -- so PATH
+            # alone isn't enough; put the same binary there too.
+            install -D -m 0755 /tmp/gn/out/gn skia/bin/gn
+            cd skia
+            patch -R -p1 < ../patch/0001-Make-SkPath-immutable-on-GN-build.patch
+            patch -R -p1 < ../patch/0001-Disable-legacy-PNG-encoding-decoding-in-SkPicture.patch
+            patch -p1 < ../patch/skia-m144-minimize-download.patch
+            patch -p1 < ../patch/skia-m132-colrv1-freetype.diff
+            patch -p1 < ../patch/skia-m132-egl-runtime.diff
+            python3 tools/git-sync-deps
+            gn gen out/Release --args="
+            is_official_build=true
+            skia_enable_svg=true
+            skia_use_vulkan=true
+            skia_use_system_libjpeg_turbo=false
+            skia_use_system_libwebp=false
+            skia_use_system_libpng=false
+            skia_use_system_icu=false
+            skia_use_system_harfbuzz=false
+            skia_use_system_freetype2=false
+            extra_cflags_cc=[\"-frtti\"]
+            extra_ldflags=[\"-lrt\"]
+            "
+            ninja -C out/Release
+            cd ..
+          CIBW_BEFORE_BUILD: pip install pybind11 numpy
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest pillow glfw
+          # moderngl (used only by test_GrDirectContext_MakeGL_EGL) has no riscv64 wheel;
+          # test_GrDirectContext_MakeGL_GLX has no display-unavailable skip at all, unlike
+          # the fixture-based 'gpu'-parametrized tests 0001-*.patch covers. No xvfb-run:
+          # Rocky 10 ships no Xvfb (nor Xvnc/weston) at all, so there's no display to run
+          # one under. -k, not --deselect {project}/...: gotcha 14 -- a path-based
+          # --deselect silently no-ops since pytest reports nodeids relative to its
+          # rootdir, not the absolute {project} path.
+          CIBW_TEST_COMMAND: >-
+            python -m pytest {project}/tests
+            -k "not test_GrDirectContext_MakeGL_EGL and not test_GrDirectContext_MakeGL_GLX"
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair --exclude libEGL.so.1 -w {dest_dir} {wheel}"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: skia-python-${{ env.SKIA_PYTHON_VERSION }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish skia-python ${{ inputs.version || '144.0.post2' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: skia-python-${{ inputs.version || '144.0.post2' }}-manylinux_riscv64
