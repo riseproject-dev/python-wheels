@@ -1,0 +1,148 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on: https://github.com/PythonOT/POT/blob/0.9.7.post1/.github/workflows/build_wheels.yml
+name: Build pot wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pot version to build (git tag, e.g. 0.9.7.post1)'
+        required: true
+        default: '0.9.7.post1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pot.yml'
+      - 'patches/pot/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.9.7.post1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  POT_VERSION: ${{ inputs.version || '0.9.7.post1' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pot ${{ inputs.version || '0.9.7.post1' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        include:
+          # test_BaseEstimator hits a real bug in ot.utils.BaseEstimator.get_params():
+          # it saves/restores warnings.filters via a bare `.pop(0)` in a finally
+          # block, mutating process-global state with no protection. Under cp314t
+          # something about the surrounding tests' warnings-filter state leaves
+          # that list already empty by the time this runs, so the pop() raises
+          # IndexError instead of the test's own expected ValueError -- a fragile
+          # global-state pattern in POT's own code, not a riscv64 issue (same
+          # class of free-threading-exposed fragility as this session's asv port).
+          - python: "cp314t"
+            extra_deselect: '--deselect "test/test_utils.py::test_BaseEstimator"'
+
+    steps:
+      - name: Checkout POT ${{ env.POT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: PythonOT/POT
+          ref: ${{ env.POT_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply python-wheels/patches/pot/${{ env.POT_VERSION }}/*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy/scipy are build- and run-time requirements; only our registry
+          # has them for riscv64, and only-binary keeps a newer PyPI release
+          # from winning the resolution and then compiling from sdist.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy
+          # ot/helpers/openmp_helpers.py (imported by test_helpers.py) itself
+          # imports setuptools.errors, which the test venv doesn't ship by
+          # default.
+          CIBW_TEST_REQUIRES: pytest setuptools
+          # test/test_helpers.py does sys.path.append(os.path.join("ot", "helpers"))
+          # and imports openmp_helpers from there directly (not through the
+          # installed `ot` package) -- needs staging alongside test/ too.
+          CIBW_TEST_SOURCES: test ot/helpers
+          CIBW_TEST_COMMAND: python -m pytest --durations=20 -v test ${{ matrix.extra_deselect }}
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          exts = {n.split("/")[-1].split(".")[0] for n in names if n.endswith(".so")}
+          assert exts == {"emd_wrap", "partial_cython", "bsp_wrap"}, exts
+          licences = {n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n} - {""}
+          assert licences == {"LICENSE", "LICENSE.eigen-mpl2", "LICENSE.eigen-bsd"}, licences
+          EOF
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pot-${{ env.POT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # POT's emd_wrap/bsp_wrap extensions link -fopenmp on Linux (setup.py's
+      # OMP probe), so auditwheel vendors the image's libgomp into pot.libs/.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pot-${{ env.POT_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish pot ${{ inputs.version || '0.9.7.post1' }}
+    needs: [setup, build_wheels, gpl_sources]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pot-${{ inputs.version || '0.9.7.post1' }}-*-manylinux_riscv64
+      gpl-sources-artifact: pot-${{ inputs.version || '0.9.7.post1' }}-gpl-sources
+      gpl-sources-description: gcc
