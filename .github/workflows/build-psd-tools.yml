@@ -1,0 +1,104 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow drives upstream's own [tool.cibuildwheel] config (release.yml
+# just runs `pypa/cibuildwheel` with no overrides):
+# https://github.com/psd-tools/psd-tools/blob/v1.19.0/.github/workflows/release.yml
+name: Build psd-tools wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'psd-tools version to build (git tag without leading v, e.g. 1.19.0)'
+        required: true
+        default: '1.19.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-psd-tools.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.19.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PSD_TOOLS_VERSION: ${{ inputs.version || '1.19.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build psd-tools ${{ inputs.version || '1.19.0' }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # setup.py's Py_LIMITED_API macro + tools/configure_abi_tag.sh (a
+          # [tool.cibuildwheel] override for cp3{13,14}) tag cp313+ non-free-
+          # threaded builds cp313-abi3, so one build serves cp313 and cp314;
+          # cp312 is below the abi3 floor and free-threaded can't use it.
+          - tag: cp312
+            build: cp312-manylinux_riscv64
+          - tag: cp313-abi3
+            build: cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+
+    steps:
+      - name: Checkout psd-tools ${{ env.PSD_TOOLS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: psd-tools/psd-tools
+          ref: v${{ env.PSD_TOOLS_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          # musllinux is dropped: numpy (a core runtime dependency) has no
+          # musllinux riscv64 wheel on either PyPI or pypi.riseproject.dev.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Upstream's cp313/cp314 repair-wheel-command pipx-installs abi3audit
+          # itself, redundant with cibuildwheel's own abi3 audit and unavailable
+          # in the riscv64 image.
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: auditwheel repair -w {dest_dir} {wheel}
+          # Upstream's own test-skip = "*" (it tests via `uv run pytest` against
+          # a checkout, not through cibuildwheel) skips every identifier here too.
+          CIBW_TEST_SKIP: ''
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests/psd_tools/compression
+          # --import-mode=importlib: Python 3.14 added a real stdlib
+          # `compression` package (PEP 784); pytest's default "prepend" import
+          # mode makes the rootless tests/psd_tools/compression/ directory
+          # itself importable as a bare top-level `compression`, colliding
+          # with the stdlib one under cp314+ and failing test collection
+          # entirely. importlib mode names each test module by its full path
+          # instead, avoiding the collision.
+          CIBW_TEST_COMMAND: >-
+            python -c "import psd_tools.compression._rle as m; assert m.__file__.endswith('.so'), m.__file__"
+            && python -m pytest -v --import-mode=importlib tests/psd_tools/compression
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: psd-tools-${{ env.PSD_TOOLS_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish psd-tools ${{ inputs.version || '1.19.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: psd-tools-${{ inputs.version || '1.19.0' }}-*-manylinux_riscv64
