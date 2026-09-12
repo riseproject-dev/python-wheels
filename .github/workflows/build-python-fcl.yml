@@ -1,0 +1,111 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/berkeleyautomation/python-fcl/blob/v0.7.0.11/.github/workflows/push.yml
+name: Build python-fcl wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'python-fcl version to build (git tag without leading v, e.g. 0.7.0.11)'
+        required: true
+        default: '0.7.0.11'
+  pull_request:
+    paths:
+      - '.github/workflows/build-python-fcl.yml'
+      - 'patches/python-fcl/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.7.0.11' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.7.0.11 there.
+  PYTHON_FCL_VERSION: ${{ inputs.version || '0.7.0.11' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build python-fcl ${{ inputs.version || '0.7.0.11' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    steps:
+      - name: Checkout python-fcl v${{ env.PYTHON_FCL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: berkeleyautomation/python-fcl
+          ref: v${{ env.PYTHON_FCL_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply -v python-wheels/patches/python-fcl/${{ env.PYTHON_FCL_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # build_dependencies/install_linux.sh builds eigen/libccd/octomap/fcl from
+          # source; the license copies are appended here since CIBW_BEFORE_ALL_LINUX
+          # fully replaces pyproject.toml's own before-all rather than extending it.
+          # -DBUILD_TESTING=OFF skips fcl's own test-binary build (not shipped in the
+          # wheel either way, and it otherwise adds ~25min per interpreter).
+          CIBW_BEFORE_ALL_LINUX: >-
+            sed -i '/^cd fcl$/,/^cd \.\.$/ s/^\$CMAKE \.[[:space:]]*$/$CMAKE . -DBUILD_TESTING=OFF/' build_dependencies/install_linux.sh &&
+            bash build_dependencies/install_linux.sh &&
+            cp deps/fcl/LICENSE /project/LICENSE.fcl &&
+            cp deps/libccd/BSD-LICENSE /project/LICENSE.libccd &&
+            cp deps/octomap/octomap/LICENSE.txt /project/LICENSE.octomap
+          # numpy: our registry is one patch release behind PyPI's latest (gotcha 84).
+          # cmake: install_linux.sh pip-installs an exact-pinned cmake==3.31.6, which
+          # our registry also carries; PIP_ONLY_BINARY keeps it off a source bootstrap.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=cmake,numpy
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m;
+            n={p.name for p in m.files('python-fcl') if '.dist-info/licenses/' in str(p)};
+            assert n == {'LICENSE', 'LICENSE.fcl', 'LICENSE.libccd', 'LICENSE.octomap'}, n" &&
+            pytest {project}/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: python-fcl-${{ env.PYTHON_FCL_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish python-fcl ${{ inputs.version || '0.7.0.11' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: python-fcl-${{ inputs.version || '0.7.0.11' }}-*-manylinux_riscv64
