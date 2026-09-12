@@ -1,0 +1,43 @@
+From ba4f377e460a8611d1ca7ff6015306913bcfd714 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 10 Sep 2026 13:07:37 +0200
+Subject: [PATCH] Skip GPU-context tests when glfw.init() fails, not just when
+ glfw is missing
+
+opengl_context's try/except only catches ImportError (glfw not
+installed) and UserWarning; glfw_context() raises a plain RuntimeError
+when glfw.init() returns False, which happens whenever no display
+server (X11/Wayland) is reachable, not only when glfw itself is
+absent. That RuntimeError propagates uncaught, erroring every test
+that depends on the 'gpu'-parametrized surface/context fixtures
+instead of the graceful pytest.skip('OpenGL is not available') the
+rest of this fixture already falls back to.
+
+Rocky Linux 10 (the riscv64 manylinux image's base) ships no virtual
+X server at all: xorg-x11-server-Xvfb, tigervnc-server and weston are
+all absent from BaseOS/AppStream/CRB/Extras on every architecture, not
+just riscv64 (RHEL 10 dropped Xvfb outright, same shape as its SDL2
+removal) -- so no DISPLAY is ever available to build a real GL context
+in that container, and every test using 'gpu' hits this exact path.
+
+Upstream-Status: Inappropriate [Rocky 10, this repo's riscv64 CI base image, ships no Xvfb/Xvnc/weston at all -- specific to our infra, not a defect other environments with a display server would hit]
+---
+ tests/conftest.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/tests/conftest.py b/tests/conftest.py
+index 0658d2a..af22987 100644
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -46,7 +46,7 @@ def opengl_context(request):
+         return
+     except ImportError:
+         logger.warning('glfw not found')
+-    except UserWarning as e:
++    except (RuntimeError, UserWarning) as e:
+         logger.exception(e)
+         pytest.skip('GLFW error')
+ 
+-- 
+2.50.1 (Apple Git-155)
+
