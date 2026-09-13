@@ -766,7 +766,7 @@ packages:
   version: 144.0.post2
   home: https://github.com/kyamagu/skia-python
   repo: https://github.com/kyamagu/skia-python
-  status: ci-running
+  status: publishing
   pr: 1697
   notes: 'Builds Skia from source (GN/Ninja), not a prebuilt-binary download -- different shape from gotcha 335/340/341/342. Reimplements scripts/build_Linux.sh''s `yum install ninja-build gn` (EPEL-only, riscv64 has no EPEL) inline: ninja from its own riscv64 PyPI wheel, gn bootstrapped from source, patched to skip its riscv64-less CIPD download. MILESTONE: the full multi-interpreter build (cp312/cp313/cp314/cp314t, Skia GN/Ninja compile + wheel build + tests) went fully green in run 34544835553. Only the publish dry-run job failed: the single combined-interpreter artifact name (no per-leg segment) didn''t match _publish-wheel.yml''s artifact-pattern wildcard -- fixed by dropping the wildcard to match exactly. A `gh run rerun --failed` confirmed reruns pin to the original run''s workflow snapshot (didn''t pick up the fix), so a fresh `gh workflow run --ref skia-python` dispatch (run 34594707848) is validating the fix end-to-end now. PR #1697, should be the last iteration.'
 - pkg: pyside6-addons
@@ -815,7 +815,7 @@ packages:
   version: 9.7.0
   home: https://vtk.org
   repo: https://vtk.org
-  status: ci-running
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1727
   notes: 'CMake-based build (not cibuildwheel/scikit-build): drives quay.io/pypa/manylinux_2_39_riscv64 directly with cmake configure/build + setup.py bdist_wheel + auditwheel repair, mirroring .gitlab/ci/configure_wheel.cmake + .cmake_build_wheel_linux from https://gitlab.kitware.com/vtk/vtk (mirrored at Kitware/VTK). Wheel build disables Qt/MPI/Boost/OpenVDB/ADIOS2/GDAL/etc (same module list upstream disables for wheels) and needs no Bazel, no CUDA, no Qt. VTK_JPEG_ENABLE_SIMD forced OFF: riscv64 has no SIMD kernel in vendored libjpeg-turbo and upstream''s default ON hard-fails configure otherwise. KWIML endianness detection already has a riscv64 branch (fixed 2019, Debian bug #924611); Debian already ships vtk9 built natively on riscv64. Not abi3 (VTK_WRAP_PYTHON links Python.h directly), so one full rebuild per interpreter (cp312/cp313/cp314/cp314t), matching upstream''s own per-Python wheel jobs. Runtime GL/OSMesa/EGL libs are dlopened from the host, not bundled, so no vendored binary blobs. matplotlib is a hard runtime dependency (requires_dist, unconditional); already on pypi.riseproject.dev for cp312-cp314t. PR #1727 opened, CI dispatched on the PR branch (full 4-way matrix, up to 24h/job).'
 - pkg: cuda-tile
@@ -843,7 +843,7 @@ packages:
   version: 3.12.0
   home: https://github.com/google-deepmind/mujoco
   repo: https://github.com/google-deepmind/mujoco
-  status: in-review
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1728
   notes: 'CI green on PR #1728 across cp312/cp313/cp314/cp314t (385 passed, 14 skipped each). Two-stage CMake build mirroring upstream build_steps.sh (core lib via FetchContent of ccd/qhull/tinyxml2/tinyobjloader/lodepng/miniz, then pybind11 bindings against MUJOCO_PATH), driven directly in the manylinux_riscv64 image per-interpreter rather than cibuildwheel. Studio (Filament GUI, dear_imgui/implot) and OpenUSD dropped: Filament needs Vulkan/Metal tooling with no riscv64 story, USD is a separate heavy build; the classic GLFW viewer (mujoco.viewer) is kept, reusing the X11/Wayland dnf packages already validated by the glfw riscv64 port (build-glfw.yml). auditwheel excludes libmujoco.so.* (gotcha: auditwheel would otherwise graft a second, renamed copy into mujoco.libs/ for the plugin .so files only, splitting the process into two libmujoco instances and breaking the plugin registry). Root-caused and fixed 5 plugin-test failures (test_load_plugin, test_plugin, etc., all "XML Error: plugin ... not found"): mujoco/__init__.py extends its __path__ via pkgutil.extend_path, and running pytest from a cd-ed /mujoco/python let `python -m pytest` cwd-prepended sys.path resolve the checkout python/mujoco/ package ahead of the installed wheel - compiled extensions still worked via the merged path, but PLUGINS_DIR (derived from that shadowing __file__) pointed at a nonexistent python/mujoco/plugin/, so zero bundled plugins loaded. Fixed by running pytest from the repo root instead, matching upstream build_steps.sh test_python_bindings (which never cds into python/ for that step). Awaiting maintainer review/merge; not yet published.'
 - pkg: ua-parser-rs
@@ -1518,7 +1518,7 @@ packages:
   version: 0.6.0
   home: https://github.com/dmlc/decord
   repo: https://github.com/dmlc/decord
-  status: in-review
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1736
   notes: '1 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev. libdecord.so is ctypes-loaded (decord/_ffi), not a CPython extension -- the real PyPI wheel is built with one interpreter then hand-retagged py3-none (pypi.yml), same shape as plotext/xgboost. Upstream''s own manylinux job (tools/build_manylinux2010.sh) compiles FFmpeg 4.1.6 from source with --enable-gpl/--enable-nonfree/libx264/libvpx for encoding it never uses (decord has no avcodec_find_encoder/AVOutputFormat call anywhere in src/) -- so build-decord.yml instead builds a plain LGPL FFmpeg (no GPL bits, no gpl_sources job needed). FFmpeg 4.1.6 predates ARCH_RISCV entirely (added in FFmpeg 5.0); pinned to FFmpeg 6.1.6 instead, the last release before FFmpeg 7.0 removed the channels/channel_layout/av_get_default_channel_layout API src/audio/audio_reader.cc still uses (deprecated-but-present through 6.x, so this avoids a source patch entirely -- confirmed by reading FFmpeg''s own libavcodec/codec_par.h at each tag). PyAV-Org/pyav-ffmpeg (this repo''s riscv64 vendor for the in-review av port, PR #461) was considered and rejected: it already publishes the linkable-library artifact shape decord''s FindFFmpeg.cmake needs, but its build enables GPL x264/x265, which decord has no use for and which would need the same vendor_sources/gpl_sources machinery av''s still-draft PR carries. Wheel carries decord.libs/libavcodec* etc. via auditwheel, same shape as the real PyPI wheel. Worktree/branch at .claude/worktrees/decord, branch decord. PR https://github.com/riseproject-dev/python-wheels/pull/1736 opened, CI running.'
 - pkg: thriftpy2
@@ -1581,7 +1581,7 @@ packages:
   version: 1.16.1
   home: https://github.com/tink-crypto/tink-py
   repo: https://github.com/tink-crypto/tink-py
-  status: ci-running
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1738
   notes: '10 Linux wheels upstream (abi cp310-cp314, x86_64+aarch64), sdist present; no riscv64 anywhere. tink-py compiles its pybind11 C++ extension (//tink/cc/pybind:tink_bindings) entirely via Bazel/bzlmod (MODULE.bazel, no WORKSPACE) -- bazel_dep on abseil-cpp, protobuf, tink_cc (which pulls in BoringSSL) and pybind11_bazel, all of which already have riscv64 precedent elsewhere in this repo (gotcha 132). No CMake path exists; this is a genuine Bazel build, mirroring build-ray.yml/build-array-record.yml''s bootstrap-bazel-from-dist-archive shape (gotcha 47), since bazel publishes no riscv64 release binary. Unlike those ports, tink-py pins bazel 9.1.0 and rules_python 2.2.0 (confirmed via BCR: rules_python 2.2.0''s versions.bzl already lists a riscv64-unknown-linux-gnu platform, and python-build-standalone now publishes riscv64 CPython 3.10-3.14 builds), so no rules_python/rules_java riscv64 override is needed, unlike the bazel 7.x era ports. No protoc release ships a riscv64 binary (setup.py needs one on PATH to regenerate tink/proto/*_pb2.py), so the workflow builds it from the project''s own pinned protobuf (30.1) via Bazel instead of downloading it. Upstream''s own published wheel ships only its own Apache-2.0 LICENSE despite statically linking BoringSSL/abseil-cpp/protobuf/tink_cc/pybind11 (confirmed against the real PyPI cp312 manylinux wheel); patches/tink/1.16.1/0001-*.patch adds LICENSE.<dep> for each at the checkout root, picked up by setuptools'' default license_files glob with no setup.cfg change. Testing runs tink''s own *_test.py suite against the installed wheel, excluding tink/integration/ (live AWS/GCP/Vault KMS calls, no credentials in CI). PR #1738 opened, CI running.'
 - pkg: qdldl
@@ -1609,7 +1609,7 @@ packages:
   version: 30.17.0
   home: https://sqlglot.com/
   repo: https://github.com/tobymao/sqlglot
-  status: ci-running
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1737
   notes: 'Confirmed genuine: mypyc-compiled companion extension for sqlglot (Requires-Dist: sqlglot==30.17.0, Root-Is-Purelib: false). cibuildwheel builds the sqlglotc/ subdirectory of the tobymao/sqlglot monorepo (setup.py runs mypyc.build.mypycify over a subset of sqlglot''s own modules); mirrors package-publish.yml''s build-wheels job, which has no committed [tool.cibuildwheel] table to inherit (unlike build-black.yml), so CIBW_* is set explicitly here. Matrix trimmed to cp312/cp313/cp314 (no cp314t - upstream itself ships none, "mypyc doesn''t have great support for free threaded builds" per build-black.yml). Testing runs upstream''s own make unitc recipe (SKIP_INTEGRATION=1 python -m unittest) against the installed compiled wheel; duckdb and pandas (needed by tests/test_optimizer.py and tests/test_executor.py) both have riscv64 wheels on pypi.riseproject.dev for cp312-cp314, confirmed via the registry simple index. Worktree/branch sqlglotc created.'
 - pkg: mutf8
@@ -1721,7 +1721,7 @@ packages:
   version: 0.1.7
   home: https://github.com/PostHog/posthog
   repo: https://github.com/PostHog/posthog
-  status: in-review
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1805
   notes: '4 Linux wheels upstream (abi: cp312); no riscv64 on PyPI or pypi.riseproject.dev. PyO3/maturin crate at rust/deltalite/python inside the posthog monorepo Cargo workspace (rust/Cargo.toml); no git tag, so pinned to commit f2583328 (the merge that bumped Cargo.toml/pyproject.toml to 0.1.7, verified byte-identical to the PyPI sdist). PR #1805 open, CI green (single cp312-abi3 wheel, sparse-checkout of rust/ + LICENSE only). Test wheel step drops upstreams deltalake/pyarrow/duckdb parity suite: uv (0.12.13, riscv64) rejects deltalake==1.6.3s only wheel (cp310-abi3) as unusable when resolved by name from any index (gotcha 375); runs test_planner.py only (17/18 tests, one deselected for the same reason) plus the wheel-install + license check.'
 - pkg: aiocsv
@@ -3101,7 +3101,7 @@ packages:
   version: 1.12.0
   home: https://arrow.apache.org/adbc/
   repo: https://github.com/apache/arrow-adbc
-  status: in-review
+  status: publishing
   pr: 1740
   notes: 'Compiles the SQLite-based ADBC driver (c/driver/sqlite, C++ over libsqlite3) into libadbc_driver_sqlite.so, loaded via ctypes as a py3-none wheel. libsqlite3 comes from the manylinux images sqlite-devel instead of vcpkg (no riscv64 binary cache); py3-none-any wheel retagged and auditwheel-repaired the way upstreams own relocate script does, same shape as adbc-driver-postgresql. No cibuildwheel - image driven directly. CI green: build, 14/14 tests passed (SQLite is embedded, no external service needed), publish dry-run clean. PR #1740.'
 - pkg: pyswisseph
@@ -3129,7 +3129,7 @@ packages:
   version: 0.2.62
   home: https://github.com/rvben/rumdl
   repo: https://github.com/rvben/rumdl.git
-  status: ci-running
+  status: publishing
   pr: 1741
   notes: '4 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: complexipy
@@ -3157,7 +3157,7 @@ packages:
   version: 2.4.49
   home: https://github.com/ArduPilot/pymavlink/
   repo: https://github.com/ArduPilot/pymavlink/
-  status: in-review
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1744
   notes: 'PR #1744 green: cp312/cp313/cp314/cp314t built and tested (45 passed, 3 deselected each - two fixture-file gaps in the sdist, plus test_wp.py::test_save which needs to be the first file to import pymavlink.mavutil in-process). Publish job dry-ran cleanly. Awaiting review.'
 - pkg: pymoo
@@ -3388,7 +3388,7 @@ packages:
   version: 5.12.0
   home: https://github.com/moderngl/moderngl
   repo: https://github.com/moderngl/moderngl/
-  status: in-review
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1742
   notes: 'Hand-written C++ extension (src/moderngl.cpp), no build-time native deps - GL is called through function pointers loaded by glcontext (already on the registry) at runtime, same shape as the glcontext port itself (PR #1396). build-moderngl.yml mirrors upstream''s release.yml (bare cibuildwheel, cp312/cp313/cp314/cp314t manylinux+musllinux). manylinux runs the real upstream pytest suite via a standalone EGL context (tests/conftest.py), deselecting test_local (asserts an editable install, never true for a wheel); 359 passed. musllinux runs a context-creation smoke test instead - numpy/scipy have no musllinux riscv64 wheel. PR #1742 green (build+publish dry-run), awaiting review.'
 - pkg: typst
@@ -3535,7 +3535,7 @@ packages:
   version: 7.0.0
   home: https://github.com/silx-kit/hdf5plugin
   repo: https://github.com/silx-kit/hdf5plugin
-  status: in-review
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1747
   notes: '3 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: libipld
@@ -4081,7 +4081,7 @@ packages:
   version: 0.8.5
   home: https://github.com/alan-turing-institute/CleverCSV/
   repo: https://github.com/alan-turing-institute/CleverCSV/
-  status: in-review
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1745
   notes: '14 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp39); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: cupti-python
@@ -4277,7 +4277,7 @@ packages:
   version: 3.1.10
   home: https://mcfletch.github.io/pyopengl/
   repo: https://github.com/mcfletch/pyopengl
-  status: in-review
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1748
   notes: 'PR #1748 green: cp312/cp313/cp314/cp314t manylinux_riscv64 wheels built, 53 tests passed on each, publish dry-ran cleanly. Cython/setuptools build of PyOpenGL''s compiled acceleration package (wrapper, formathandler, arraydatatype, errorchecker, vbo, nones_formathandler, latebind, buffers_formathandler, numpy_formathandler) - dlopened GL, no link-time GL dependency. Dropped musllinux: numpy (a build-time dependency) has no riscv64 musllinux wheel anywhere. Runs the real upstream test suite (upstream itself tests nothing in CI); CIBW_BEFORE_TEST_LINUX installs mesa-libGL since OpenGL.GL binds libGL at import time. Small pyproject.toml patch (license-files) so the wheel ships license.txt - the legacy [project.license] table form suppresses setuptools'' PEP 639 default glob, same gap as the real PyPI wheel. Awaiting maintainer review/merge.'
 - pkg: jax-cuda13-pjrt
@@ -4403,7 +4403,7 @@ packages:
   version: 0.4.7
   home: https://github.com/YannickJadoul/Parselmouth
   repo: https://github.com/YannickJadoul/Parselmouth
-  status: ci-running
+  status: publishing
   pr: 1746
   notes: '36 Linux wheels upstream (abi: cp27,cp310,cp311,cp312,cp313,cp314,cp35,cp36,cp37,cp38,cp39,); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: cudf-cu12
@@ -4648,14 +4648,14 @@ packages:
   version: 1.5.4
   home: https://github.com/Chia-Network/chiabip158
   repo: https://github.com/Chia-Network/chiabip158
-  status: in-review
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1750
   notes: '10 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev. PR #1750 green: cp312/cp313/cp314/cp314t riscv64 wheels built, 2 upstream tests pass on every leg, publish job dry-ran cleanly.'
 - pkg: symengine
   version: 0.14.1
   home: https://github.com/symengine/symengine.py
   repo: https://github.com/symengine/symengine.py
-  status: ci-running
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1752
   notes: '24 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp39); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: mojimoji
@@ -4767,7 +4767,7 @@ packages:
   version: 1.4.1
   home: https://github.com/tombi-toml/tombi
   repo: https://github.com/tombi-toml/tombi
-  status: in-review
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1749
   notes: '10 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: foxglove-sdk
@@ -5012,7 +5012,7 @@ packages:
   version: 7.3.0
   home: https://www.pymunk.org
   repo: https://github.com/viblo/pymunk.git
-  status: ci-running
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1751
   notes: 'PR #1751 open, CI running. Vendors Munk2D (a Chipmunk2D fork maintained by pymunk''s author) as a git submodule, compiled in-process via cffi out-of-line API mode (no system library dependency). cffi has no riscv64 wheel on PyPI, added via CIBW_ENVIRONMENT.'
 - pkg: mergify-cli
@@ -5355,14 +5355,14 @@ packages:
   version: 0.6.0
   home: https://github.com/Yikai-Liao/symusic
   repo: https://github.com/Yikai-Liao/symusic.git
-  status: ci-running
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1762
   notes: '25 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp39,pp311); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: kaldi-native-fbank
   version: 1.22.3
   home: https://github.com/csukuangfj/kaldi-native-fbank
   repo: https://github.com/csukuangfj/kaldi-native-fbank
-  status: in-review
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1764
   notes: 'PR #1764 green on cp312/cp313/cp314/cp314t (manylinux only), publish dry-run OK, awaiting review. Self-contained C++ (pybind11 + kissfft, both FetchContent-downloaded at build time; no external Python deps). cp314t needed KALDI_NATIVE_FBANK_CMAKE_ARGS=-DPython_EXECUTABLE=... since setup.py''s legacy -DPYTHON_EXECUTABLE hint is ignored by pybind11 3.0''s modern find_package(Python), which otherwise resolved an unrelated system python3.15 for the free-threaded build. Added LICENSE.kissfft (BSD-3-Clause) via patch, since kissfft is statically linked but ships no licence text in the real PyPI wheel.'
 - pkg: pyats-tcl
@@ -5467,7 +5467,7 @@ packages:
   version: 0.15.2
   home: https://github.com/biojppm/rapidyaml-python
   repo: https://github.com/biojppm/rapidyaml-python
-  status: ci-running
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1761
   notes: '21 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp38,cp39); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: wreq
@@ -5593,7 +5593,7 @@ packages:
   version: 1.0.6
   home: https://github.com/google-deepmind/labmaze
   repo: https://github.com/google-deepmind/labmaze
-  status: ci-running
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1763
   notes: '12 Linux wheels upstream (abi: cp310,cp311,cp312,cp37,cp38,cp39); no riscv64 on PyPI or pypi.riseproject.dev. PyPI records no project URL; locate upstream during research.'
 - pkg: pemja
@@ -5740,7 +5740,7 @@ packages:
   version: 2.32.0
   home: https://scikit-hep.org/iminuit
   repo: http://github.com/scikit-hep/iminuit
-  status: ci-running
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1771
   notes: '30 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp39); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: img2table
@@ -5754,7 +5754,7 @@ packages:
   version: 2.6.3
   home: https://github.com/libigl/libigl-python-bindings
   repo: https://github.com/libigl/libigl-python-bindings
-  status: ci-running
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1772
   notes: '10 Linux wheels upstream (abi: cp310,cp311,cp312,cp38,cp39); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: portforward
@@ -5922,7 +5922,7 @@ packages:
   version: 0.9.3
   home: https://zubanls.com
   repo: https://github.com/zubanls/zubanls-python
-  status: ci-running
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1769
   notes: '8 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: pyreqwest
@@ -6160,7 +6160,7 @@ packages:
   version: 0.7.0.11
   home: https://github.com/berkeleyautomation/python-fcl
   repo: https://github.com/berkeleyautomation/python-fcl
-  status: in-review
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1770
   notes: 'CI green on PR #1770: cp312/cp313/cp314/cp314t riscv64 wheels built, 15 tests passed each, publish job dry-ran cleanly. Root cause of the riscv64-only build failure: setup.py''s get_libraries_dir() unconditionally splits os.environ["LD_LIBRARY_PATH"] whenever the key is merely present (our manylinux_riscv64 container exports it empty), producing a bare -L with no argument that swallows the following -lfcl as its path instead of a library flag -- libfcl was never linked, causing undefined symbol: typeinfo for fcl::CollisionGeometry<double> at import. Patched (0002-*.patch) to treat an empty value as unset. Awaiting maintainer review/merge; not yet published.'
 - pkg: zttp
@@ -6272,14 +6272,14 @@ packages:
   version: 0.1.12
   home: https://github.com/K0lb3/astc-encoder-py
   repo: https://github.com/K0lb3/astc-encoder-py
-  status: in-review
+  status: publishing
   pr: 1776
   notes: '23 Linux wheels upstream (abi: cp37,pp310,pp37,pp38,pp39); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: gdstk
   version: 1.0.1
   home: https://heitzmann.github.io/gdstk/
   repo: https://github.com/heitzmann/gdstk
-  status: in-review
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1773
   notes: '14 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp39); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: pyqt6-webengine-qt6
@@ -6405,7 +6405,7 @@ packages:
   version: 0.9.2
   home: https://www.keystone-engine.org
   repo: https://github.com/keystone-engine/keystone
-  status: in-review
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1775
   notes: '2 Linux wheels upstream (abi: py2.py3); no riscv64 on PyPI or pypi.riseproject.dev. Pure ctypes wrapper around a vendored, self-contained LLVM 3.9 MC-layer/codegen fork (Arm, Arm64, Hexagon, Mips, PowerPC, Sparc, SystemZ, X86, EVM) built via CMake; no ext_modules and setup.cfg bdist_wheel universal=1 tag every wheel py2.py3-none-..., collapsing the matrix to a single cp312 build. musllinux dropped: setup.py hardcodes a manylinux1_ plat-name regardless of actual libc (fixed upstream in capstone, capstone#2445, but not here), and upstream itself never builds musllinux either. CI green on manylinux riscv64; test command exercises ks.asm() across every architecture keystone supports.'
 - pkg: python-stretch
@@ -6727,7 +6727,7 @@ packages:
   version: 0.34.0
   home: https://github.com/brentp/cyvcf2/
   repo: https://github.com/brentp/cyvcf2/
-  status: ci-running
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/1774
   notes: '23 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp39,pp311); no riscv64 on PyPI or pypi.riseproject.dev. PR #1774 open, CI running (cp312/cp313/cp314/cp314t manylinux_riscv64).'
 - pkg: power-grid-model
@@ -10521,7 +10521,7 @@ packages:
   version: 0.42.0
   home: https://pypi.org/project/demoparser2/
   repo: https://pypi.org/project/demoparser2/
-  status: in-review
+  status: publishing
   pr: 1483
   notes: '16 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp37,cp38,cp39); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: tdewolff-minify
