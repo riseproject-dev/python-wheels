@@ -1,0 +1,154 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build-dll`/`build-wheel` jobs of
+# https://github.com/bpcreech/PyMiniRacer/blob/v0.14.1/.github/workflows/build.yml
+name: Build mini-racer wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'mini-racer version to build (git tag without leading v)'
+        required: true
+        default: '0.14.1'
+  pull_request:
+    paths:
+      - '.github/workflows/build-mini-racer.yml'
+      - 'patches/mini-racer/**'
+
+run-name: build-mini-racer - ${{ inputs.version || '0.14.1' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.14.1' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MINI_RACER_VERSION: ${{ inputs.version || '0.14.1' }}
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_dll:
+    name: Build v8 dll for mini-racer ${{ inputs.version || '0.14.1' }}-riscv64
+    needs: [setup]
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440  # 24h: a from-scratch monolithic v8 build
+    container:
+      image: quay.io/pypa/manylinux_2_39_riscv64
+
+    steps:
+      - name: Checkout mini-racer v${{ env.MINI_RACER_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: bpcreech/PyMiniRacer
+          ref: v${{ env.MINI_RACER_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch mini-racer source
+        run: git apply python-wheels/patches/mini-racer/${{ env.MINI_RACER_VERSION }}/*.patch
+
+      - name: Install build dependencies
+        run: dnf install -y git curl which
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          # the v8 build still doesn't work with a system Python > 3.11 (upstream
+          # build.yml pins the same version):
+          python-version: '3.11'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Provide a riscv64-linux-gnu- prefixed toolchain
+        run: |
+          mkdir -p "${RUNNER_TEMP}/riscv64-toolchain/bin"
+          for tool in gcc g++ ar as ld nm objcopy objdump ranlib readelf strip; do
+            real=$(command -v "${tool}" || true)
+            [ -n "${real}" ] && ln -sf "${real}" "${RUNNER_TEMP}/riscv64-toolchain/bin/riscv64-linux-gnu-${tool}"
+          done
+          echo "${RUNNER_TEMP}/riscv64-toolchain/bin" >> "${GITHUB_PATH}"
+
+      - name: Build dll with v8
+        run: |
+          uv sync --no-install-project
+          uv run --no-project builder/v8_build.py --out-path=_dll --target-cpu=riscv64
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mini-racer-${{ env.MINI_RACER_VERSION }}-dll-riscv64
+          path: _dll
+          if-no-files-found: error
+
+  build_wheel:
+    name: Build and test mini-racer ${{ inputs.version || '0.14.1' }} wheel for riscv64
+    needs: [setup, build_dll]
+    runs-on: ubuntu-24.04-riscv
+    container:
+      image: quay.io/pypa/manylinux_2_39_riscv64
+
+    steps:
+      - name: Checkout mini-racer v${{ env.MINI_RACER_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: bpcreech/PyMiniRacer
+          ref: v${{ env.MINI_RACER_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch mini-racer source
+        run: git apply python-wheels/patches/mini-racer/${{ env.MINI_RACER_VERSION }}/*.patch
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: mini-racer-${{ env.MINI_RACER_VERSION }}-dll-riscv64
+          path: src/py_mini_racer
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build wheel
+        run: uv build
+
+      # The wheel is "py3-none-<platform>" (one v8 build serves every interpreter);
+      # test it against each one the image ships, since uv has no riscv64 pythons to download.
+      - name: Test wheel
+        run: |
+          for py in /opt/python/cp312-cp312 /opt/python/cp313-cp313 /opt/python/cp314-cp314 /opt/python/cp314t-cp314t; do
+            "${py}/bin/pip" install dist/*.whl pytest
+            "${py}/bin/python" -m pytest tests
+            "${py}/bin/pip" uninstall -y mini-racer
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mini-racer-${{ env.MINI_RACER_VERSION }}-py3-manylinux_riscv64
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish mini-racer ${{ inputs.version || '0.14.1' }}
+    needs: [setup, build_wheel]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: mini-racer-${{ inputs.version || '0.14.1' }}-py3-manylinux_riscv64
