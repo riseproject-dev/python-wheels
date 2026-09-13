@@ -118,6 +118,10 @@ jobs:
             bash <<'SCRIPT' 2>&1 | tee build.log
           set -eux
 
+          dnf install -y --setopt=install_weak_deps=False java-21-openjdk-devel
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+
           install -m 0755 /work/bazel-bin/bazel /usr/local/bin/bazel
           git config --global --add safe.directory '*'
 
@@ -139,7 +143,6 @@ jobs:
 
           for python in cp311-cp311 cp312-cp312 cp313-cp313 cp314-cp314 cp314-cp314t; do
             "/opt/python/${python}/bin/pip" install -q -r third_party/pypa/wheel_requirements_frozen.txt
-            "/opt/python/${python}/bin/pip" install -q numpy ml_dtypes
             PATH="/opt/python/${python}/bin:$PATH" \
               "/opt/python/${python}/bin/python" -m pip wheel -w /work/wheelhouse . --no-deps --no-build-isolation
           done
@@ -175,7 +178,10 @@ jobs:
 
           for python in cp311-cp311 cp312-cp312 cp313-cp313 cp314-cp314 cp314-cp314t; do
             pytag="${python%%-*}"
-            "/opt/python/${python}/bin/pip" install /work/wheelhouse/tensorstore-*-"${pytag}"-*.whl \
+            # PIP_ONLY_BINARY stops pip at the newest numpy/ml_dtypes our registry has a
+            # riscv64 wheel for, instead of resolving a newer sdist-only release.
+            PIP_ONLY_BINARY=numpy,ml_dtypes "/opt/python/${python}/bin/pip" install \
+              /work/wheelhouse/tensorstore-*-"${pytag}"-*.whl \
               pytest pytest-asyncio cloudpickle numpy ml_dtypes
             # /work holds the tensorstore checkout, whose root would shadow the installed
             # wheel if pytest ran from there (python/tensorstore is importable as-is).
