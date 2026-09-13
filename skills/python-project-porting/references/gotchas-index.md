@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (366 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (367 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -90,6 +90,9 @@ The porting gotchas (366 of them) live in [`references/gotchas/`](gotchas/), spl
 - **373** — A binding whose own C-extension source is fully open can still be `not-feasible`
   when the thing it `dlopen()`s at runtime is proprietary with zero source and no riscv64
   build at the vendor, official or unofficial (the cx_Oracle case).
+- **376** — A permissive `License:` field on the wrapper package says nothing about whether
+  the payload it ships has any source at all — check the binary's own content, not the
+  metadata's license family (the tableauhyperapi case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

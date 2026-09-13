@@ -48,6 +48,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   still be blocked because its `WORKSPACE` links the extension directly against a *live,
   pip-installed* sibling package's compiled library, not just its headers (the
   tensorflow-io-gcs-filesystem case).
+- **376** — A permissive `License:` field on the wrapper package says nothing about whether
+  the payload it ships has any source at all — check the binary's own content, not the
+  metadata's license family (the tableauhyperapi case).
 
 ---
 
@@ -1574,3 +1577,49 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       protocol directly and needing no Instant Client at all — a real riscv64 path exists
       in the ecosystem, just not in this legacy binding; that successor package is a
       separate `.queue.yml` candidate, out of scope here.
+
+376. **A permissive `License:` field on the wrapper package says nothing about whether the
+    payload it ships has any source at all — check the binary's own content, not the
+    metadata's license family (the tableauhyperapi case).** Gotcha 372's hdbcli reasoning
+    pairs "zero sdist" with a *restrictive* bundled EULA as a double lock; tableauhyperapi
+    is the inversion that still ends `parked` even though the second lock is absent.
+    `tableauhyperapi` 0.0.26359's `dist-info/METADATA` declares `License: Apache-2.0` and
+    ships a plain, unmodified Apache-2.0 `LICENSE` file — nothing here bars redistribution
+    the way SAP's DEVELOPER LICENSE AGREEMENT does. Downloading and unzipping the real
+    89 MB `manylinux2014_x86_64` wheel shows why that doesn't matter: its payload is not a
+    compiled Python extension at all but two prebuilt native artifacts —
+    `tableauhyperapi/bin/hyper/hyperd` (255 MB uncompressed, a stripped x86-64 PIE ELF —
+    Tableau's proprietary in-process "Hyper" database engine, launched as a subprocess by
+    `hyperprocess.py`) and `tableauhyperapi/bin/libtableauhyperapi.so` (43 MB, stripped
+    x86-64 ELF, `dlopen()`'d directly in ABI mode: `impl/dll.py` does
+    `lib = ffi.dlopen(str(find_hyper_api_library()))`, and `impl/cdef_compiled.py` is only
+    cffi type declarations, not C source — gotcha 116's ABI-mode signal, but here there is
+    no API-mode alternative anywhere to fall back to). There is no `setup.py`/
+    `pyproject.toml` build step and zero sdist across the *entire* PyPI release history —
+    152 files across all 46 versions ever published, confirmed via the full releases JSON,
+    every one a wheel — so gotcha 77's "build it yourself" escape hatch fails at the first
+    step exactly as it does for hdbcli, just without hdbcli's license-side reinforcement.
+    The bundled `HYPER_API_OSS_disclosure.txt` lists ~40 third-party OSS components
+    compiled into `hyperd` (abseil, Arrow, LLVM 22.1.7, PostgreSQL, protobuf, zstd, ...)
+    but conspicuously never lists the Hyper engine's own core code — the Apache-2.0 grant
+    covers the wrapper and lets those dependencies' licenses pass through cleanly, it does
+    not make the engine itself open source.
+    - **Read the vendor's own hardware/system-requirements page, not just the PyPI wheel
+      list, for the architecture verdict.** Tableau's installation docs
+      (`tableau.github.io/hyper-db/docs/installation/`) state the requirement in as many
+      words: "Intel Nehalem, Apple Silicon or AMD Bulldozer processor or newer" — x86_64
+      and Apple-Silicon ARM64 only, no RISC-V, stated as policy rather than inferred from
+      an absence. PyPI's own file list for 0.0.26359 corroborates it structurally:
+      `macosx_10_11_x86_64`, `macosx_13_0_arm64`, `manylinux2014_x86_64`, `win_amd64` — no
+      `manylinux*_aarch64` wheel exists either, so even Linux ARM64 users get nothing,
+      let alone riscv64.
+    - **A closed-source binary can still embed strings that look like architecture
+      support and mean nothing of the kind.** `strings` on `hyperd` turns up hundreds of
+      `riscv`/`aarch64` symbols (`llvm::RISCVVType`, `ELFLinkGraphBuilder_riscv`,
+      `__aarch64_cas16_acq`, ...) — these are LLVM's own JIT backend code, compiled into
+      Hyper because it uses LLVM to JIT-compile query plans, not evidence that Hyper runs
+      on those host architectures. Grep for the vendor's *own* product code, not a vendored
+      compiler toolchain's target list, before reading anything into a binary's strings.
+    - Parked (`.queue.yml`); no worktree/branch/PR created — diagnosed read-only against
+      the real 0.0.26359 wheel contents (`unzip -l`, `file`/`strings` on both native
+      binaries) and Tableau's own installation/hardware-requirements documentation.
