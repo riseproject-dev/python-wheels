@@ -18,6 +18,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **207** — A vendored dependency three submodules deep can declare a `cmake_minimum_required`
 - **226** — GCC 14 turns `-Wincompatible-pointer-types` (and `-Wimplicit-function-declaration`,
 - **235** — The manylinux image's bundled `/opt/python/cpXY-cpXY` interpreters have
+- **377** — Rocky's `lib64` `GNUInstallDirs` default can make a hardcoded `"lib"`
+- **378** — A newer libstdc++ on the manylinux image can turn a project's own
 - **257** — `CMAKE_POLICY_VERSION_MINIMUM` also works as an environment variable, not just a
 - **243** — The `manylinux_2_39_riscv64` container's IPv6 loopback binds but can't send:
 - **252** — Rocky 10 (the riscv64 manylinux image's base) names the Wayland client
@@ -981,3 +983,48 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
     (`Upstream-Status: To upstream`, since it is a real portability bug independent of
     riscv64) — do not reach for a `dnf`/pip-installed shared-libpython workaround, since
     the fix is one word and matches how manylinux extensions are meant to link anyway.
+
+377. **Rocky's `lib64` `GNUInstallDirs` default can make a hardcoded `"lib"`
+    packaging check silently drop the one file a wheel exists to ship (the mlx case;
+    see `build-mlx.yml`).** CMake's `GNUInstallDirs` defaults `CMAKE_INSTALL_LIBDIR` to
+    `lib64` on 64-bit RHEL/Rocky-family systems — every `manylinux_2_39_*` image,
+    riscv64 included, since they are all Rocky 10 — not the plain `lib` that
+    Debian-based hosts (upstream's own `ubuntu-22-large`/`ubuntu-22.04-arm` CI runners)
+    use. MLX splits every release into a per-interpreter `mlx` wheel and a `mlx-cpu`
+    backend wheel by classifying each installed file in `setup.py` with
+    `file.is_relative_to(Path(mlx_dir, "lib"))` (plus `"include"`/`"share"`) — a
+    hardcoded `"lib"` that never matches `mlx/lib64/libmlx.so` on a Rocky-based build,
+    so the entire compiled compute library is deleted from the one wheel that is
+    supposed to ship it, with the build otherwise going green (`Successfully built
+    mlx_cpu-...whl`, no error, just a wheel 15x smaller than expected and missing its
+    only real payload). Passing `-DCMAKE_INSTALL_LIBDIR=lib` in `CMAKE_ARGS` sidesteps
+    the bug with no source patch, since `GNUInstallDirs` respects an already-set value.
+    - **Caught by inspecting the built wheel's file list, not a riscv64 CI failure.**
+      `unzip -l dist/*.whl | grep -i lib` on any host reproduces it identically on
+      `manylinux_2_39_aarch64`/`_x86_64` too — it is a Rocky-vs-Debian `GNUInstallDirs`
+      difference, not an riscv64 one, so a local rehearsal (gotcha 101) catches it for
+      free before spending a CI cycle.
+    - **A packaging script that classifies files by a hardcoded path fragment is a
+      pattern to watch for generally** whenever a project splits one build into
+      multiple wheels (frontend/backend, core/GPU, etc.) — the classification logic is
+      usually written and tested only against the author's own CI image family.
+
+378. **A newer libstdc++ on the manylinux image can turn a project's own
+    `-DCMAKE_COMPILE_WARNING_AS_ERROR=ON` CI flag into a build failure that has nothing
+    to do with riscv64 (the mlx case).** `quay.io/pypa/manylinux_2_39_riscv64`/`_aarch64`
+    ship GCC 14 (Rocky 10), whose libstdc++ marks the free-function
+    `std::atomic_load`/`atomic_store`/`atomic_exchange` overloads on `shared_ptr`
+    deprecated (superseded by `std::atomic<std::shared_ptr<T>>`, C++20). MLX's
+    `mlx/error.h` uses exactly those three calls, and upstream's own release action
+    always adds `-DCMAKE_COMPILE_WARNING_AS_ERROR=ON` for non-Windows — a flag their own
+    `ubuntu-22-large`/`-arm` runners' older libstdc++ never trips, so it reached 0.32.2
+    unnoticed. Building the identical source under the newer toolchain turns three
+    warnings into three hard errors (`cc1plus: all warnings being treated as errors`)
+    before a single test runs. Simply not passing that one flag (CMake defaults
+    `CMAKE_COMPILE_WARNING_AS_ERROR` to `OFF`) reproduces upstream's actual
+    `CMakeLists.txt` unmodified — the `-Werror` promotion is their CI script's opinion,
+    not the project's own baseline, so omitting it needed no patch and is not really a
+    divergence from the project being built, only from one argument in their action.
+    - **Reproduce locally first**: a plain `python -m build -w` with the flag on vs. off
+      on `manylinux_2_39_aarch64` (gotcha 101) settles which of the two is responsible
+      in minutes, and shows the exact deprecated symbols by name.

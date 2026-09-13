@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (367 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -299,6 +299,12 @@ The porting gotchas (367 of them) live in [`references/gotchas/`](gotchas/), spl
 - **374** — `find_package(Python3 REQUIRED COMPONENTS Interpreter Development)` fails on
   manylinux's static-libpython CPython, on any architecture — only `Development.Module`
   is ever needed to build an extension module, not the `Development.Embed` half.
+- **377** — Rocky's `lib64` `GNUInstallDirs` default can make a hardcoded `"lib"`
+  packaging check silently drop the one compiled library a split-package wheel exists
+  to ship, on any Rocky-based manylinux arch, not just riscv64.
+- **378** — A newer libstdc++ on the manylinux image can deprecate calls a project's own
+  `-DCMAKE_COMPILE_WARNING_AS_ERROR=ON` CI flag then turns into hard errors, purely from
+  a toolchain-version gap upstream's own (older) runners never see.
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
@@ -471,6 +477,11 @@ The porting gotchas (367 of them) live in [`references/gotchas/`](gotchas/), spl
 - **323** — Gotcha 127's GIL-reenable safety net only rules out concurrency races — a
 - **330** — A manylinux image's system library can be years newer than what upstream ever
 - **362** — A `multiprocessing.Process().join()` regression test for a native threadpool's
+- **379** — A test asserting a specific cross-thread ordering (a `gc.collect()`-on-one-
+  thread-finalizes-an-object-another-thread-observes shape) can fail deterministically,
+  only on `cp314t`, with no riscv64 or correctness bug behind it — free-threaded
+  CPython's deferred reference counting doesn't guarantee the ordering GIL-serialized
+  builds do.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
@@ -530,3 +541,7 @@ The porting gotchas (367 of them) live in [`references/gotchas/`](gotchas/), spl
   running agent — edit it from an ephemeral detached worktree off fresh `origin/main`
   per state transition, and re-read the entry back after every push to catch a
   concurrent stale-based commit reverting it.
+- **380** — A project that splits every release into two independently-named PyPI
+  packages from one build needs two `_publish-wheel.yml` calls with disjoint artifact
+  patterns, not two patterns on one call — the reusable workflow asserts a single
+  normalized name and version per invocation.

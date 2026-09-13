@@ -13,6 +13,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **60** — A SIGSEGV in a port's test run is usually an ordinary upstream refcount bug —
 - **61** — A callback that stays armed past the assertion fires again during teardown (the
 - **115** — A SIGSEGV that will not reproduce off the runner: get the native backtrace *in CI*
+- **379** — A test asserting a specific cross-thread ordering (a `gc.collect()`-on-one-thread-
 - **120** — Hypothesis' `too_slow` health check is a wall-clock budget on *input generation*,
 - **164** — A test helper with a per-architecture syscall table falls back to a fixed sleep on
 - **166** — The riscv64 runners' libgomp faults on the `dynamic` and `guided` OpenMP
@@ -877,3 +878,41 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       same call as gotcha 285's chroma-hnswlib case: one deselected test with a comment
       naming the run id and the mechanism beats an unverified fix to native concurrency
       code neither upstream nor this port's diagnostic budget can confirm.
+
+379. **A test asserting a specific cross-thread ordering (a `gc.collect()`-on-one-thread-
+    finalizes-an-object-another-thread-observes shape) can fail deterministically, only
+    on `cp314t`, with no riscv64 or correctness bug behind it (the mlx case; see
+    `build-mlx.yml`).** MLX 0.32 made its JIT compile cache `thread_local`, with a
+    `weak_ptr` cross-thread erase path so a function traced on one thread and released
+    on another still invalidates correctly (`ml-explore/mlx#4377`). Its own test,
+    `test_compile_release_on_another_thread`, traces a function on a worker thread, then
+    the main thread clears its only other reference and calls `gc.collect()`, then the
+    worker re-compiles the same callable and the test asserts a second trace happened
+    (`self.assertEqual(len(traces), 2)`) — this reproduced as `AssertionError: 1 != 2`
+    on **every** run on the riscv64 cp314t leg (twice, ~9.5 minutes apart, same test,
+    same assertion), while cp312/cp313/cp314 (GIL-serialized) passed the identical
+    tree cleanly every time. Free-threaded CPython's biased/deferred reference counting
+    does not guarantee that a `gc.collect()` call on one thread synchronously reconciles
+    and finalizes an object whose refcount was primarily manipulated on another thread
+    the way GIL-serialized refcounting does — the test's ordering assumption, not MLX's
+    cache logic, is what breaks.
+    - **Confirm determinism before deselecting anything** — rerun the single failing
+      leg once (`gh run rerun <run-id> --failed` once every sibling leg is terminal,
+      gotcha 65/357's polling discipline) rather than assume a one-off flake; an
+      identical failure at both the same test and roughly the same wall-clock point is
+      the signal, a passing rerun would instead point at a genuine race worth chasing.
+    - **Check upstream's own issue tracker for the subsystem the test exercises before
+      deciding it's a test-design gap** (`gh api "search/issues?q=repo:<owner>/<repo>+
+      is:issue+<keyword>"`, read-only) — finding the maintainers' own design writeup for
+      the exact mechanism under test (here, the thread_local+weak_ptr redesign) is much
+      stronger evidence than guessing from the assertion alone, and upstream's own CI
+      matrix already covering `cp314t`/`cp313t` (check their release workflow) means a
+      *deterministic* failure would likely already be known/fixed there — pointing
+      toward a timing-window difference on this runner class, not a universal break.
+    - **Deselect the one test for the free-threaded leg only, with a comment
+      naming the mechanism and the evidence**, not a blanket skip of the file/class —
+      mirrors the same pattern used for other packages' `cp314t`-only test-design gaps
+      elsewhere in this repo's build workflows: keep the exact assertion and thread
+      choreography in the comment so a future upstream fix (or disproof) is easy to
+      recognize, and note that it was reproduced deterministically rather than assumed
+      flaky.

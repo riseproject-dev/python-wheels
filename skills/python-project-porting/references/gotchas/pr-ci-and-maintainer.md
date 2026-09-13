@@ -18,6 +18,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
 - **173** — `gh pr list --state open --head <pkg>` does not see a *merged* PR, so a finished
 - **208** — A fresh `main` publish dispatch finishing green does not mean
 - **357** — A single combined-interpreter build job's artifact name needs to match the
+- **380** — A project that splits every release into two independently-named PyPI
 - **370** — `.queue.yml` lives on `main` in a checkout shared by every concurrently
 
 ---
@@ -326,3 +327,32 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
     every push in this same session** (not just trust the push exit code) so a collision
     like the one above is caught and re-applied immediately rather than surfacing only
     at the next periodic queue.yml audit.
+
+380. **A project that splits every release into two independently-named PyPI
+    packages from one build needs two `_publish-wheel.yml` calls, not two artifact
+    patterns on one call (the mlx case; see `build-mlx.yml`).** Upstream's own
+    `setup.py` builds the identical C++ tree twice with different env vars
+    (`MLX_BUILD_FRONTEND_PACKAGE=1` / `MLX_BUILD_BACKEND_PACKAGE=1`) to produce a thin
+    per-interpreter `mlx` wheel (the nanobind bindings) and a per-platform,
+    python-agnostic `mlx-cpu` wheel (the compiled `libmlx.so`) that `mlx`'s own
+    `install_requires` depends on at runtime — neither one imports anything on its own.
+    `_publish-wheel.yml` asserts exactly one normalized package name and one version
+    across whatever `artifact-pattern` matches (`len(normalized_names) != 1 or
+    len(versions) != 1` raises), so publishing both needs two separate
+    `uses: $/.github/workflows/_publish-wheel.yml` jobs with disjoint patterns
+    (`mlx-<ver>-cp3*-manylinux_riscv64` vs. `mlx_cpu-<ver>-manylinux_riscv64` — anchor
+    each pattern so neither's prefix matches the other's artifact names), each creating
+    its own `docs/packages/<pkg>.yaml` on first publish with no extra registration step.
+    - **A GPL-sources job attaches to whichever wheel actually vendors the GPL library,
+      not both automatically.** Here only the backend (`mlx-cpu`) wheel's `auditwheel
+      repair` vendors `libopenblas`/`libgfortran`; the frontend wheel's repair step
+      excludes and only relabels the platform tag (see gotcha below on that), so only
+      the backend's `publish` job needs `gpl-sources-artifact`/`-description` — wiring
+      it into both is harmless but adds a needless second copy of the same tarball to a
+      release that ships no GPL-linked binary.
+    - **Test the split for real, not per-half** — install both wheels together in the
+      same environment and run a real op (e.g. `import mlx.core as mx;
+      mx.eval(mx.array([1.0]) * 2)`) before trusting either wheel in isolation, since a
+      backend-only or frontend-only smoke test cannot catch a packaging mismatch (an
+      `RPATH`/install-location assumption, a version skew between the two) between the
+      halves that only surfaces when they are installed side by side.
