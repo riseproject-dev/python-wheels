@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/zensical/zensical/blob/master/.github/workflows/build.yml
+name: Build zensical wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'zensical version to build (git tag, e.g. v0.0.57)'
+        required: true
+        default: 'v0.0.57'
+  pull_request:
+    paths:
+      - '.github/workflows/build-zensical.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || 'v0.0.57' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  ZENSICAL_VERSION: ${{ inputs.version || 'v0.0.57' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  # abi3-py310, so cp310 is the only identifier that actually compiles (gotcha
+  # 96: upstream itself pins --interpreter python3.10 for this reason, see
+  # build.yml's "Temporary fix for .../issues/425"); cibuildwheel builds once
+  # there and reuses+retests that wheel on cp312/cp313/cp314
+  # (find_compatible_wheel).
+  build_wheels:
+    needs: [setup]
+    name: Build zensical ${{ inputs.version || 'v0.0.57' }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    steps:
+      - name: Checkout zensical ${{ env.ZENSICAL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: zensical/zensical
+          ref: ${{ env.ZENSICAL_VERSION }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Prepare build
+        run: python scripts/prepare.py
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: 'cp310-* cp312-* cp313-* cp314-*'
+          CIBW_SKIP: '*-musllinux_*'  # rustup.rs has no riscv64 musl toolchain
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # tomli>=2.4.0 has no cp310 riscv64 wheel on the registry (only
+          # cp312+), so cp310 can build but not install-and-test (gotcha 216).
+          CIBW_TEST_SKIP: cp310-*
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: python/tests
+          CIBW_TEST_COMMAND: python -m pytest {project}/python/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: zensical-${{ env.ZENSICAL_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish zensical ${{ inputs.version || 'v0.0.57' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: zensical-${{ inputs.version || 'v0.0.57' }}-*-manylinux_riscv64
