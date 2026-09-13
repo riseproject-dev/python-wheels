@@ -1,0 +1,147 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on PostHog/posthog's own release and test workflows for this package:
+# https://github.com/PostHog/posthog/blob/f25833286a435bbcc6f4f25a4a34514e9e498628/.github/workflows/build-deltalite.yml
+# https://github.com/PostHog/posthog/blob/f25833286a435bbcc6f4f25a4a34514e9e498628/.github/workflows/ci-deltalite-python.yml
+name: Build deltalite wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'deltalite version to build (e.g. 0.1.7)'
+        required: true
+        default: '0.1.7'
+  pull_request:
+    paths:
+      - '.github/workflows/build-deltalite.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.1.7' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.1.7 there.
+  DELTALITE_VERSION: ${{ inputs.version || '0.1.7' }}
+  # deltalite lives in the PostHog/posthog monorepo and is never tagged on its
+  # own; this is the commit whose rust/deltalite/ tree is byte-for-byte the
+  # 0.1.7 PyPI sdist (verified by diff). Update alongside the version.
+  DELTALITE_REF: f25833286a435bbcc6f4f25a4a34514e9e498628
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  # Halves concurrent rustc processes on the 4-core riscv64 runner (gotcha 228).
+  CARGO_BUILD_JOBS: 2
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build deltalite ${{ inputs.version || '0.1.7' }} cp312-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+
+    steps:
+      # posthog/posthog is a multi-GB application monorepo; rust/ (plus the
+      # repo-root LICENSE) is the self-contained slice the Cargo workspace at
+      # rust/Cargo.toml needs. Cone mode (the actions/checkout default) is
+      # required here: non-cone sparse-checkout leaves the working tree in a
+      # shape cargo's own file-walking/exclude-matching can't handle,
+      # failing with "Failed to update the excludes stack" -- cone mode
+      # supports mixing a directory pattern (rust) with a top-level file
+      # pattern (LICENSE) just fine on a modern git.
+      - name: Checkout PostHog/posthog ${{ env.DELTALITE_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: PostHog/posthog
+          ref: ${{ env.DELTALITE_REF }}
+          sparse-checkout: |
+            rust
+            LICENSE
+          persist-credentials: false
+
+      # maturin's licence auto-glob only looks next to pyproject.toml
+      # (rust/deltalite/python/), not the repo root where LICENSE lives
+      # (gotcha 146).
+      - name: Bundle LICENSE into the wheel
+        run: cp LICENSE rust/deltalite/python/LICENSE
+
+      # Same OOM guard build-deltalake.yml needs for a comparably sized Rust
+      # build (this one links AWS-LC too).
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 10
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          manylinux: '2_39'
+          # pyo3 carries `abi3-py312` unconditionally in Cargo.toml, so
+          # upstream ships one cp312-abi3 wheel and no free-threaded variant
+          # (gotcha 181).
+          args: >-
+            -i python3.12 --release --strip --out dist
+            --manifest-path rust/deltalite/python/Cargo.toml
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      # ci-deltalite-python.yml's own parity suite installs pinned
+      # deltalake/pyarrow/duckdb and runs the full rust/deltalite/python/tests
+      # tree against them, but that isn't reproducible here: uv (0.12.13,
+      # riscv64) rejects deltalake==1.6.3's only wheel
+      # (cp310-abi3-manylinux_2_39_riscv64, correctly `data-requires-python:
+      # >=3.10` on our index) as "has no usable wheels" when resolved BY NAME
+      # from any index -- confirmed with our registry as both the extra index
+      # and, separately, as the *default* index (ruling out an index-priority
+      # cause) -- while duckdb/pyarrow (exact cp312-cp312 tag, no abi3) and
+      # deltalite's own local-file wheel install both succeed. This isolates
+      # the break to uv's abi3-forward-compatibility tag check specifically
+      # for a wheel fetched from a registry rather than a local path (gotcha
+      # 375); there is no clean workaround from this side. Of the 8 files
+      # under tests/, 7 import deltalake/pyarrow/duckdb (directly or via
+      # harness/common.py) and can't run without them -- only test_planner.py
+      # is self-contained, so it's the one real test file left to run.
+      # test_planner.py itself has one test that also imports deltalake/
+      # pyarrow inline (a real DeltaLiteTable.upsert round-trip), deselected
+      # for the same reason -- the other 17 pure-plan() unit tests still run.
+      # deltalite's own wheel already installs and licenses correctly on its
+      # own.
+      - name: Test wheel
+        run: |
+          uv pip install pytest dist/*.whl --force-reinstall
+          python -c "
+          import importlib.metadata
+          files = {str(p) for p in importlib.metadata.files('deltalite') if '.dist-info/' in str(p)}
+          assert any('LICENSE' in f for f in files), files
+          "
+          python -m pytest rust/deltalite/python/tests/test_planner.py -q \
+            -k "not test_knob_kwargs_are_accepted_by_a_real_upsert"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: deltalite-${{ env.DELTALITE_VERSION }}-cp312-abi3-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish deltalite ${{ inputs.version || '0.1.7' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: deltalite-${{ inputs.version || '0.1.7' }}-*-manylinux_riscv64
