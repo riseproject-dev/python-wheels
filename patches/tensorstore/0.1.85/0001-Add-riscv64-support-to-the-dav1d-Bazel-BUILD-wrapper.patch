@@ -1,0 +1,118 @@
+From 721c7c44fa91bc8ac74682c16896458df70938b7 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 13 Sep 2026 04:40:02 +0200
+Subject: [PATCH] Add riscv64 support to the dav1d Bazel BUILD wrapper
+
+dav1d.BUILD.bazel's select()s for deps/TMPL_SRCS/DAV1D_SRCS/TEXTUAL_HDRS/
+CONFIG_H only branch on arm64/ppc/x86_64, so building //python/tensorstore
+for any other cpu (riscv64 included) fails bazel's analysis phase outright:
+"doesn't match this configuration. Would a default condition help?".
+
+dav1d has shipped riscv64 (rv64gcv) assembly since 1.4.0 under src/riscv/,
+gated on ARCH_RISCV/ARCH_RV64 in config.h exactly like the other arches'
+asm is gated on their own ARCH_* defines (src/cpu.c, src/*_tmpl.c). This
+adds a riscv64 branch mirroring arm64's shape (raw .S sources, no _tmpl.c
+split, asm.S as a textual header) instead of falling back to a slower
+plain-C build, plus a //conditions:default on the three selects that only
+varied by "is there extra arch-specific work" (empty on every arch this
+project doesn't build asm for anyway).
+
+Upstream-Status: To upstream [not submitted from this automated port run; needs a pull request against google/tensorstore]
+---
+ .../org_videolan_dav1d/dav1d.BUILD.bazel      | 34 +++++++++++++++++++
+ 1 file changed, 34 insertions(+)
+
+diff --git a/third_party/org_videolan_dav1d/dav1d.BUILD.bazel b/third_party/org_videolan_dav1d/dav1d.BUILD.bazel
+index a8c504d..b371088 100644
+--- a/third_party/org_videolan_dav1d/dav1d.BUILD.bazel
++++ b/third_party/org_videolan_dav1d/dav1d.BUILD.bazel
+@@ -30,6 +30,7 @@ cc_library(
+         "@platforms//cpu:arm64": [],
+         "@platforms//cpu:ppc": [],
+         "@platforms//cpu:x86_64": [":dav1d_asm_x86"],
++        "//conditions:default": [],
+     }),
+ )
+ 
+@@ -53,6 +54,13 @@ PPC_ASM_SRCS = glob(
+     ],
+ )
+ 
++# Mirrors upstream's src/meson.build riscv branch: cpu.c plus the riscv64 .S
++# sources, with no _tmpl.c split (dav1d has none for this arch).
++RISCV_ASM_SRCS = glob([
++    "src/riscv/*.c",
++    "src/riscv/64/*.S",
++])
++
+ # TMPL_SRCS are compiled for BITDEPTH=8 and BITDEPTH=16
+ TMPL_SRCS = glob(["src/*_tmpl.c"]) + select({
+     "@platforms//cpu:arm64": glob(
+@@ -67,6 +75,7 @@ TMPL_SRCS = glob(["src/*_tmpl.c"]) + select({
+         ["src/x86/*_tmpl.c"],
+         allow_empty = True,
+     ),
++    "//conditions:default": [],
+ })
+ 
+ DAV1D_SRCS = glob(
+@@ -78,10 +87,12 @@ DAV1D_SRCS = glob(
+ }) + select({
+     "@platforms//cpu:arm64": ARM_ASM_SRCS,
+     "@platforms//cpu:ppc": PPC_ASM_SRCS,
++    "@platforms//cpu:riscv64": RISCV_ASM_SRCS,
+     "@platforms//cpu:x86_64": glob(
+         ["src/x86/*.c"],
+         exclude = ["src/x86/*_tmpl.c"],
+     ),
++    "//conditions:default": [],
+ })
+ 
+ TEXTUAL_HDRS = select({
+@@ -96,6 +107,11 @@ TEXTUAL_HDRS = select({
+         "src/*.h",
+         "src/ppc/*.h",
+     ]),
++    "@platforms//cpu:riscv64": glob([
++        "src/*.h",
++        "src/riscv/*.h",
++        "src/riscv/asm.S",
++    ]),
+     "@platforms//cpu:x86_64": glob([
+         "src/*.h",
+         "src/x86/*.h",
+@@ -326,6 +342,23 @@ PPC_CONFIG_H = [
+     "",
+ ]
+ 
++# dav1d has shipped riscv64 (rv64gcv) asm since 1.4.0 (src/riscv), gated on
++# ARCH_RISCV/ARCH_RV64 the same way the other arches gate their asm dispatch.
++RISCV64_CONFIG_H = [
++    "#define ARCH_AARCH64 0",
++    "#define ARCH_ARM 0",
++    "#define ARCH_X86 0",
++    "#define ARCH_X86_32 0",
++    "#define ARCH_X86_64 0",
++    "#define ARCH_PPC64LE 0",
++    "#define ARCH_RISCV 1",
++    "#define ARCH_RV32 0",
++    "#define ARCH_RV64 1",
++    "",
++    "#define HAVE_ASM 1",
++    "",
++]
++
+ CONFIG_END_H = [
+     "",
+     "#define CONFIG_16BPC 1",
+@@ -358,6 +391,7 @@ CONFIG_H = CONFIG_START_H + select({
+     "@platforms//cpu:x86_64": X86_64_CONFIG_H,
+     "@platforms//cpu:arm64": ARM64_CONFIG_H,
+     "@platforms//cpu:ppc": PPC_CONFIG_H,
++    "@platforms//cpu:riscv64": RISCV64_CONFIG_H,
+ }) + select({
+     "@platforms//os:macos": DARWIN_CONFIG_H,
+     "//conditions:default": [],
+-- 
+2.50.1 (Apple Git-155)
+

@@ -9,25 +9,25 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'tensorstore version to build (git tag, e.g. v0.1.85)'
+        description: 'tensorstore version to build (git tag without leading v, e.g. 0.1.85)'
         required: true
-        default: 'v0.1.85'
+        default: '0.1.85'
   pull_request:
     paths:
       - '.github/workflows/build-tensorstore.yml'
       - 'patches/tensorstore/**'
 
-run-name: build-tensorstore - ${{ inputs.version || 'v0.1.85' }}
+run-name: build-tensorstore - ${{ inputs.version || '0.1.85' }}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || 'v0.1.85' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ inputs.version || '0.1.85' }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 env:
-  TENSORSTORE_VERSION: ${{ inputs.version || 'v0.1.85' }}
+  TENSORSTORE_VERSION: ${{ inputs.version || '0.1.85' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   # bazelisk.py has no riscv64 entry in determine_bazel_filename(), so bootstrap a bazel
   # binary from the dist archive instead. Bazel fixed riscv64 bootstrapping in 8.2.0
@@ -85,20 +85,31 @@ jobs:
           if-no-files-found: error
 
   build_wheels:
-    name: Build tensorstore ${{ inputs.version || 'v0.1.85' }} manylinux_riscv64
+    name: Build tensorstore ${{ inputs.version || '0.1.85' }} manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 1440
     needs: [setup, bazel]
 
     steps:
-      - name: Checkout tensorstore ${{ env.TENSORSTORE_VERSION }}
+      - name: Checkout tensorstore v${{ env.TENSORSTORE_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: google/tensorstore
-          ref: ${{ env.TENSORSTORE_VERSION }}
+          ref: v${{ env.TENSORSTORE_VERSION }}
           path: tensorstore
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Patch tensorstore source
+        working-directory: tensorstore
+        run: git apply ../python-wheels/patches/tensorstore/${{ env.TENSORSTORE_VERSION }}/00*.patch
 
       - name: Download bazel
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
@@ -191,11 +202,11 @@ jobs:
           SCRIPT
 
   publish:
-    name: Publish tensorstore ${{ inputs.version || 'v0.1.85' }}
+    name: Publish tensorstore ${{ inputs.version || '0.1.85' }}
     needs: [setup, build_wheels]
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: tensorstore-${{ inputs.version || 'v0.1.85' }}-*-manylinux_riscv64
+      artifact-pattern: tensorstore-${{ inputs.version || '0.1.85' }}-*-manylinux_riscv64
