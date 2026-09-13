@@ -1,0 +1,219 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# This workflow is based on: https://github.com/google/tensorstore/blob/v0.1.85/.github/workflows/build.yml
+---
+name: Build tensorstore wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'tensorstore version to build (git tag without leading v, e.g. 0.1.85)'
+        required: true
+        default: '0.1.85'
+  pull_request:
+    paths:
+      - '.github/workflows/build-tensorstore.yml'
+      - 'patches/tensorstore/**'
+
+run-name: build-tensorstore - ${{ inputs.version || '0.1.85' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.1.85' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  TENSORSTORE_VERSION: ${{ inputs.version || '0.1.85' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # bazelisk.py has no riscv64 entry in determine_bazel_filename(), so bootstrap a bazel
+  # binary from the dist archive instead. Bazel fixed riscv64 bootstrapping in 8.2.0
+  # (bazelbuild/bazel#25745); tensorstore's own .bazelversion (8.5.1) is past that, so no
+  # rules_python/rules_java patches are needed.
+  BAZEL_VERSION: '8.5.1'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  bazel:
+    needs: [setup]
+    name: Bootstrap bazel (riscv64)
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+
+    steps:
+      - name: Restore bazel binary
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: bazel-bin
+          key: bazel-${{ env.BAZEL_VERSION }}-manylinux_riscv64
+
+      - name: Bootstrap bazel ${{ env.BAZEL_VERSION }}
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p bazel-bin
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e BAZEL_VERSION="${BAZEL_VERSION}" \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+
+          mkdir -p /tmp/bazel-src
+          cd /tmp/bazel-src
+          curl -fsSLo dist.zip "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-dist.zip"
+          unzip -q dist.zip
+
+          EXTRA_BAZEL_ARGS="--tool_java_runtime_version=local_jdk" bash ./compile.sh
+          install -m 0755 output/bazel /work/bazel-bin/bazel
+          SCRIPT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin/bazel
+          if-no-files-found: error
+
+  build_wheels:
+    name: Build tensorstore ${{ inputs.version || '0.1.85' }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    needs: [setup, bazel]
+
+    steps:
+      - name: Checkout tensorstore v${{ env.TENSORSTORE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: google/tensorstore
+          ref: v${{ env.TENSORSTORE_VERSION }}
+          path: tensorstore
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Patch tensorstore source
+        working-directory: tensorstore
+        run: git apply ../python-wheels/patches/tensorstore/${{ env.TENSORSTORE_VERSION }}/00*.patch
+
+      - name: Download bazel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin
+
+      - name: Build wheels
+        run: |
+          mkdir -p wheelhouse
+          set -o pipefail
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            -e PIP_ONLY_BINARY=numpy \
+            -e TENSORSTORE_VERSION="${TENSORSTORE_VERSION}" \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT' 2>&1 | tee build.log
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False java-21-openjdk-devel
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+
+          install -m 0755 /work/bazel-bin/bazel /usr/local/bin/bazel
+          git config --global --add safe.directory '*'
+          # git apply leaves the tree dirty, so setuptools_scm reads it as a
+          # post-release dev build (0.1.85 -> 0.1.85.post1.dev0) unless pinned.
+          export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_TENSORSTORE="${TENSORSTORE_VERSION}"
+
+          # setup.py invokes `sys.executable -u $TENSORSTORE_BAZELISK`, so the bootstrapped
+          # native bazel binary needs a thin python shim rather than direct assignment.
+          cat > /usr/local/bin/bazelisk_shim.py <<'PY'
+          import os
+          import sys
+          os.execv("/usr/local/bin/bazel", ["/usr/local/bin/bazel"] + sys.argv[1:])
+          PY
+
+          export TENSORSTORE_BAZELISK=/usr/local/bin/bazelisk_shim.py
+          export TENSORSTORE_BAZEL_STARTUP_OPTIONS="--output_user_root=/work/bazel-output"
+          # A multi-hour build's default curses progress output is large enough that
+          # GitHub drops the job log, taking the failure with it. --local_ram_resources
+          # keeps analysis/compile action concurrency from oversubscribing memory on the
+          # shared riscv64 runner pool (other jobs run concurrently on the same hosts).
+          export TENSORSTORE_BAZEL_BUILD_OPTIONS="--curses=no --show_progress_rate_limit=60 --local_ram_resources=HOST_RAM*.5"
+
+          cd /work/tensorstore
+
+          for python in cp311-cp311 cp312-cp312 cp313-cp313 cp314-cp314 cp314-cp314t; do
+            "/opt/python/${python}/bin/pip" install -q -r third_party/pypa/wheel_requirements_frozen.txt
+            PATH="/opt/python/${python}/bin:$PATH" \
+              "/opt/python/${python}/bin/python" -m pip wheel -w /work/wheelhouse . --no-deps --no-build-isolation
+          done
+
+          for wheel in /work/wheelhouse/*.whl; do
+            mv "${wheel}" "$(dirname "${wheel}")/$(basename "${wheel}" | sed 's/-linux_riscv64\.whl$/-manylinux_2_39_riscv64.whl/')"
+          done
+          SCRIPT
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tensorstore-${{ env.TENSORSTORE_VERSION }}-build-log
+          path: build.log
+
+      # Uploaded before the smoke test so a failing wheel is still available to inspect.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tensorstore-${{ env.TENSORSTORE_VERSION }}-wheels-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Test wheels
+        run: |
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          for python in cp311-cp311 cp312-cp312 cp313-cp313 cp314-cp314 cp314-cp314t; do
+            pytag="${python%%-*}"
+            # PIP_ONLY_BINARY stops pip at the newest numpy/ml_dtypes our registry has a
+            # riscv64 wheel for, instead of resolving a newer sdist-only release.
+            PIP_ONLY_BINARY=numpy,ml_dtypes "/opt/python/${python}/bin/pip" install \
+              /work/wheelhouse/tensorstore-*-"${pytag}"-*.whl \
+              pytest pytest-asyncio cloudpickle numpy ml_dtypes
+            # /work holds the tensorstore checkout, whose root would shadow the installed
+            # wheel if pytest ran from there (python/tensorstore is importable as-is).
+            (cd /tmp && "/opt/python/${python}/bin/python" -m pytest \
+              /work/tensorstore/python/tensorstore/tests -vv -s --asyncio-mode=auto)
+          done
+          SCRIPT
+
+  publish:
+    name: Publish tensorstore ${{ inputs.version || '0.1.85' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: tensorstore-${{ inputs.version || '0.1.85' }}-*-manylinux_riscv64
