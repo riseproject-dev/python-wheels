@@ -1,0 +1,100 @@
+From 35676e94c3c2fff8ad578b136205f99c929d7ccb Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Tue, 8 Sep 2026 06:02:05 +0200
+Subject: [PATCH 2/3] easel: don't compile x86 CPUID assembly when SSE is
+ routed through SIMDe on a non-x86 host
+
+esl_cpu.c's cpu_run_id()/cpu_has_sse() use raw `__asm__("cpuid" ...)`
+whenever eslENABLE_SSE is defined, on the assumption that Easel's SSE
+vector code can only ever be compiled on real x86/x86-64 hardware.
+That assumption breaks once eslENABLE_SSE is turned on for a SIMDe-
+emulated build on another architecture (riscv64): the inline asm
+does not assemble there, so the build fails.
+
+None of the compiled sources actually call esl_cpu_has_sse() (only
+esl_avx512.c calls the AVX-512 counterpart, and that file is never
+part of this build), so this diagnostic path is dead weight on the
+riscv64/SIMDe configuration; skip compiling the CPUID-dependent
+functions whenever HMMER_VECTOR_SIMDE is set, and have
+esl_cpu_has_sse() fall back to its existing "not supported" return of
+0, same as when eslENABLE_SSE isn't defined at all.
+
+Upstream-Status: To upstream [a real portability gap in esl_cpu.c independent of our SIMDe choice, but not yet submitted -- needs review from Easel/HMMER maintainers on whether they even want a non-x86 SSE-compatible path]
+---
+ vendor/easel/esl_cpu.c | 22 +++++++++++++---------
+ 1 file changed, 13 insertions(+), 9 deletions(-)
+
+diff --git a/vendor/easel/esl_cpu.c b/vendor/easel/esl_cpu.c
+index 0957831..66655b2 100644
+--- a/vendor/easel/esl_cpu.c
++++ b/vendor/easel/esl_cpu.c
+@@ -25,10 +25,14 @@
+ #include "esl_cpu.h"
+ 
+ /* declarations of static functions that come in section (2)  */
+-#if defined(eslENABLE_SSE) || defined(eslENABLE_SSE4) || defined(eslENABLE_AVX) || defined(eslENABLE_AVX512)
++/* eslENABLE_SSE can be set with the SSE code routed through SIMDe on a
++ * non-x86 host (HMMER_VECTOR_SIMDE); CPUID is real x86 assembly, so it
++ * only makes sense to declare/call it when we are compiling for x86.
++ */
++#if (defined(eslENABLE_SSE) || defined(eslENABLE_SSE4) || defined(eslENABLE_AVX) || defined(eslENABLE_AVX512)) && !defined(HMMER_VECTOR_SIMDE)
+ static void cpu_run_id(uint32_t eax, uint32_t ecx, uint32_t *abcd);
+ #endif
+-#ifdef eslENABLE_SSE
++#if defined(eslENABLE_SSE) && !defined(HMMER_VECTOR_SIMDE)
+ static int  cpu_has_sse(void);
+ #endif
+ #ifdef eslENABLE_SSE4
+@@ -65,7 +69,7 @@ static int  cpu_has_avx512(void);
+ int
+ esl_cpu_has_sse(void)
+ {
+-#ifdef eslENABLE_SSE
++#if defined(eslENABLE_SSE) && !defined(HMMER_VECTOR_SIMDE)
+   static int sse_support = -1;
+   if (sse_support < 0)
+     sse_support = cpu_has_sse();
+@@ -185,7 +189,7 @@ esl_cpu_Get(void)
+  * 2. Internal code used in x86 vector code checks
+  *****************************************************************/
+ 
+-#if defined(eslENABLE_SSE) || defined(eslENABLE_SSE4) || defined(eslENABLE_AVX) || defined(eslENABLE_AVX512)
++#if (defined(eslENABLE_SSE) || defined(eslENABLE_SSE4) || defined(eslENABLE_AVX) || defined(eslENABLE_AVX512)) && !defined(HMMER_VECTOR_SIMDE)
+ /* cpu_run_id()
+  *
+  * Bit flags in EAX (and maybe ECX) registers specify the information
+@@ -213,8 +217,8 @@ cpu_run_id(uint32_t eax, uint32_t ecx, uint32_t *abcd)
+ #endif
+   abcd[0] = eax; abcd[1] = ebx; abcd[2] = ecx; abcd[3] = edx;
+ #endif // ! _MSC_VER
+-}     
+-#endif // eslENABLE_SSE | eslENABLE_SSE4 | eslENABLE_AVX | eslENABLE_AVX512
++}
++#endif // (eslENABLE_SSE | eslENABLE_SSE4 | eslENABLE_AVX | eslENABLE_AVX512) && !HMMER_VECTOR_SIMDE
+ 
+ 
+ 
+@@ -271,9 +275,9 @@ cpu_check_xcr0_zmm(void)
+ #endif
+ 
+ 
+-#ifdef eslENABLE_SSE
++#if defined(eslENABLE_SSE) && !defined(HMMER_VECTOR_SIMDE)
+ /* cpu_has_sse()
+- * 
++ *
+  * Test whether processor supports SSE/SSE2 instructions.
+  * Note that Easel's "SSE" vector code means SSE+SSE2.
+  */
+@@ -289,7 +293,7 @@ cpu_has_sse(void)
+     return 0;
+   return 1;
+ }
+-#endif // eslENABLE_SSE
++#endif // eslENABLE_SSE && !HMMER_VECTOR_SIMDE
+ 
+ 
+ #ifdef eslENABLE_SSE4
+-- 
+2.50.1 (Apple Git-155)
+

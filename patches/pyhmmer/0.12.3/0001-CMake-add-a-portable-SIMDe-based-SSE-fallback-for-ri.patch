@@ -1,0 +1,85 @@
+From 9976743d8d3398eefced9abe15d9ced114d19faf Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Tue, 8 Sep 2026 06:01:51 +0200
+Subject: [PATCH 1/3] CMake: add a portable SIMDe-based SSE fallback for
+ riscv64 (and any other unrecognized architecture)
+
+HMMER/Easel's fast profile-HMM filters (MSVFilter, ViterbiFilter, the
+striped Forward/Backward implementation) only exist as hand-written
+SSE, NEON and AltiVec/VMX kernels; there is no portable scalar
+implementation of the optimized P7_OPROFILE/P7_OMX pipeline that
+pyhmmer's Cython bindings wrap (the "generic" P7 algorithms in
+vendor/hmmer/src/generic_*.c are a separate, unoptimized reference
+implementation used for calibration/testing, not what Pipeline
+dispatches to). CMakeLists.txt's SIMD-detection cascade reflects
+this: it hard-fails with a FATAL_ERROR on any architecture where none
+of SSE2/NEON/VMX is available, which is every riscv64 host.
+
+Rather than leave riscv64 unbuildable, fetch SIMDe (a header-only,
+BSD-licensed library purpose-built for this: it translates x86
+SSE/SSE2/SSE3 intrinsics to a portable C implementation, and is
+tested in SIMDe's own CI on riscv64) and reuse the SSE implementation
+on any architecture where no native backend is detected. Every
+intrinsic the impl_sse sources and esl_sse.[ch] use resolves at the
+SSE/SSE2 level (eslENABLE_SSE4, which would need SSE4.1, is never
+turned on for this path since the host has no FindSSE4 match to
+begin with), so a single generated shim header directory that
+redirects <xmmintrin.h>/<emmintrin.h>/<pmmintrin.h>/<x86intrin.h> to
+<simde/x86/sse3.h> (which itself pulls in SIMDe's sse.h/sse2.h), with
+SIMDE_ENABLE_NATIVE_ALIASES so no call site needs to change, is
+enough. The shim lives entirely in the build directory rather than
+patching the vendored sources, because pyhmmer's own
+patches/impl_sse/*.c.patch apply against them by absolute line number
+(src/hmmer/CMakeLists.txt) and would mis-apply if those files' line
+counts changed.
+
+Upstream-Status: Inappropriate [SIMDe is a third-party portability shim we chose for our riscv64 build; upstream may prefer a native RVV backend or no riscv64 support at all, and hasn't been asked]
+---
+ CMakeLists.txt | 31 ++++++++++++++++++++++++++++++-
+ 1 file changed, 30 insertions(+), 1 deletion(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0aed183..308b142 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -32,7 +32,36 @@ elseif(HAVE_VMX)
+     set(HMMER_IMPL "VMX")
+     string(REPLACE " " ";" IMPL_FLAGS "${VMX_C_FLAGS}")
+ else()
+-    message(FATAL_ERROR "Unsupported platform, none of SSE2, NEON or AltiVec available.")
++    # None of SSE2, NEON or AltiVec are available natively (e.g. riscv64).
++    # Reuse the SSE implementation, and satisfy the x86 intrinsics headers
++    # it includes (all at the SSE/SSE2/SSE3 level) with SIMDe's portable
++    # translation instead, by shimming those header names to redirect to
++    # it. This is done with a generated include directory rather than by
++    # editing the vendored .c/.h files, because pyhmmer's own
++    # patches/impl_sse/*.c.patch apply against those files by absolute
++    # line number at build time (src/hmmer/CMakeLists.txt) and would
++    # silently mis-apply if the files' line counts changed.
++    include(FetchContent)
++    FetchContent_Declare(
++        simde
++        GIT_REPOSITORY https://github.com/simd-everywhere/simde.git
++        GIT_TAG        71fd833d9666141edcd1d3c109a80e228303d8d7 # v0.8.2
++        GIT_SHALLOW    true
++    )
++    FetchContent_MakeAvailable(simde)
++
++    set(SIMDE_SHIM_DIR "${CMAKE_CURRENT_BINARY_DIR}/simde-shim-include")
++    file(MAKE_DIRECTORY "${SIMDE_SHIM_DIR}")
++    foreach(_hdr IN ITEMS xmmintrin.h emmintrin.h pmmintrin.h x86intrin.h)
++        file(WRITE "${SIMDE_SHIM_DIR}/${_hdr}"
++            "#define SIMDE_ENABLE_NATIVE_ALIASES\n#include <simde/x86/sse3.h>\n")
++    endforeach()
++    include_directories(BEFORE "${SIMDE_SHIM_DIR}" "${simde_SOURCE_DIR}")
++
++    add_compile_definitions(HMMER_VECTOR_SIMDE)
++    set(eslENABLE_SSE true)
++    set(HMMER_IMPL "SSE")
++    set(IMPL_FLAGS "")
+ endif()
+ 
+ foreach(flag IN LISTS IMPL_FLAGS)
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on upstream's own cibuildwheel-driven
+# https://github.com/althonos/pyhmmer/blob/v0.12.3/.github/workflows/package.yml
+# (the `wheel-linux-x86_64`/`wheel-linux-aarch64` jobs), narrowed to Linux riscv64.
+name: Build pyhmmer wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pyhmmer version to build (git tag, e.g. 0.12.3)'
+        required: true
+        default: '0.12.3'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pyhmmer.yml'
+      - 'patches/pyhmmer/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.12.3' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYHMMER_VERSION: ${{ inputs.version || '0.12.3' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build pyhmmer ${{ inputs.version || '0.12.3' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # Matches the interpreters upstream actually publishes wheels for
+        # (cp38/cp39/cp310/cp311, then a single cp312-abi3 build, then the
+        # free-threaded cp314t), minus cp38: manylinux_2_39_riscv64 has no
+        # cp38 interpreter to build it with. cp313/cp314 aren't listed
+        # separately since they load the cp312-abi3 wheel already built.
+        python: ["cp39", "cp310", "cp311", "cp312", "cp314", "cp314t"]
+
+    steps:
+      - name: Checkout pyhmmer v${{ env.PYHMMER_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: althonos/pyhmmer
+          ref: v${{ env.PYHMMER_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pyhmmer source
+        run: git apply python-wheels/patches/pyhmmer/${{ env.PYHMMER_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # psutil (pyhmmer's only runtime dependency) has no riscv64 wheel on
+          # PyPI; our registry already carries it.
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyhmmer-${{ env.PYHMMER_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyhmmer ${{ inputs.version || '0.12.3' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pyhmmer-${{ inputs.version || '0.12.3' }}-*-manylinux_riscv64
