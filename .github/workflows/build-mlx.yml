@@ -1,0 +1,247 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Mirrors the Linux "cpu" leg of upstream's .github/workflows/release.yml
+# (build_frontend + build_backend jobs, via .github/actions/build-wheel). Upstream
+# splits every release into a per-interpreter "mlx" frontend wheel (thin nanobind
+# bindings) and one per-platform "mlx-cpu" backend wheel (the compiled libmlx.so);
+# both are built here since a working install needs both.
+name: Build mlx wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'mlx version to build (git tag without leading v, e.g. 0.32.2)'
+        required: true
+        default: '0.32.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-mlx.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.32.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MLX_VERSION: ${{ inputs.version || '0.32.2' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_backend:
+    needs: [setup]
+    name: Build mlx-cpu ${{ inputs.version || '0.32.2' }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    steps:
+      - name: Checkout ml-explore/mlx v${{ env.MLX_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ml-explore/mlx
+          ref: v${{ env.MLX_VERSION }}
+          path: mlx
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Build mlx-cpu wheel
+        run: |
+          mkdir -p output
+          docker run -i --rm \
+            -v "$PWD/mlx:/mlx" \
+            -v "$PWD/output:/output" \
+            "$MANYLINUX_RISCV64_IMAGE" bash -s <<'MLX_BUILD_EOF'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+
+          dnf install -y --setopt=install_weak_deps=False openblas-devel lapack-devel blas-devel ninja-build
+          # auditwheel vendors libopenblas.so.0 (dynamically links libgfortran, see the
+          # gpl_sources job below), so its licence has to travel with the wheel too.
+          cp /usr/share/licenses/openblas/LICENSE /mlx/LICENSE.openblas
+
+          PY=/opt/python/cp312-cp312/bin/python
+          "$PY" -m pip install -U --no-cache-dir build auditwheel patchelf
+
+          cd /mlx
+          # CMAKE_INSTALL_LIBDIR=lib: Rocky's GNUInstallDirs default (lib64) makes
+          # setup.py's MLXBdistWheel.is_backend_file() (which only recognizes "lib")
+          # drop the compiled libmlx.so from the mlx-cpu wheel entirely; forcing "lib"
+          # avoids patching setup.py.
+          export CMAKE_ARGS="-DMLX_BUILD_METAL=OFF -DMLX_BUILD_CUDA=OFF -DCMAKE_INSTALL_LIBDIR=lib -G Ninja"
+          export MLX_BUILD_BACKEND_PACKAGE=1
+          "$PY" -m build -w
+
+          auditwheel repair dist/mlx_cpu-*.whl --plat manylinux_2_39_riscv64 --wheel-dir /output
+          MLX_BUILD_EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mlx_cpu-${{ env.MLX_VERSION }}-manylinux_riscv64
+          path: output/*.whl
+          if-no-files-found: error
+
+  build_frontend:
+    needs: [setup]
+    name: Build mlx ${{ inputs.version || '0.32.2' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+    steps:
+      - name: Checkout ml-explore/mlx v${{ env.MLX_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ml-explore/mlx
+          ref: v${{ env.MLX_VERSION }}
+          path: mlx
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Build mlx wheel
+        run: |
+          mkdir -p output
+          docker run -i --rm \
+            -v "$PWD/mlx:/mlx" \
+            -v "$PWD/output:/output" \
+            -e PYTAG="${{ matrix.python }}" \
+            "$MANYLINUX_RISCV64_IMAGE" bash -s <<'MLX_BUILD_EOF'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+
+          dnf install -y --setopt=install_weak_deps=False openblas-devel lapack-devel blas-devel ninja-build
+
+          # The image names the free-threaded 3.14 dir cp314-cp314t, not cp314t-cp314t.
+          PYDIR="$PYTAG-$PYTAG"
+          if [ "$PYTAG" = "cp314t" ]; then
+            PYDIR="cp314-cp314t"
+          fi
+          PY="/opt/python/$PYDIR/bin/python"
+          "$PY" -m pip install -U --no-cache-dir build auditwheel patchelf
+
+          cd /mlx
+          export CMAKE_ARGS="-DMLX_BUILD_METAL=OFF -DMLX_BUILD_CUDA=OFF -DCMAKE_INSTALL_LIBDIR=lib -G Ninja"
+          export MLX_BUILD_FRONTEND_PACKAGE=1
+          "$PY" -m build -w
+
+          # libmlx.so ships separately in mlx-cpu, so it (and anything only reachable
+          # through it, e.g. libopenblas) is excluded rather than vendored here;
+          # --only-plat then skips the policy check that exclusion would otherwise fail.
+          auditwheel repair dist/mlx-*.whl --plat manylinux_2_39_riscv64 --exclude 'libmlx.so*' --only-plat --wheel-dir /output
+          MLX_BUILD_EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mlx-${{ env.MLX_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: output/*.whl
+          if-no-files-found: error
+
+  test_wheels:
+    needs: [setup, build_backend, build_frontend]
+    name: Test mlx ${{ inputs.version || '0.32.2' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+    steps:
+      - name: Checkout ml-explore/mlx v${{ env.MLX_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ml-explore/mlx
+          ref: v${{ env.MLX_VERSION }}
+          path: mlx
+          persist-credentials: false
+
+      - name: Download mlx-cpu wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: mlx_cpu-${{ env.MLX_VERSION }}-manylinux_riscv64
+          path: wheels
+
+      - name: Download mlx wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: mlx-${{ env.MLX_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheels
+
+      - name: Test mlx wheel
+        run: |
+          docker run -i --rm \
+            -v "$PWD/mlx:/mlx" \
+            -v "$PWD/wheels:/wheels" \
+            -e PYTAG="${{ matrix.python }}" \
+            "$MANYLINUX_RISCV64_IMAGE" bash -s <<'MLX_TEST_EOF'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+
+          PYDIR="$PYTAG-$PYTAG"
+          if [ "$PYTAG" = "cp314t" ]; then
+            PYDIR="cp314-cp314t"
+          fi
+          PY="/opt/python/$PYDIR/bin/python"
+
+          # torch/ml_dtypes are optional, import-guarded test deps upstream also
+          # runs without on any CI leg that lacks them; only numpy is required.
+          "$PY" -m pip install -U --no-cache-dir \
+            --extra-index-url https://pypi.riseproject.dev/simple/ --only-binary numpy numpy
+          "$PY" -m pip install /wheels/mlx_cpu-*.whl /wheels/mlx-*.whl
+
+          cd /mlx/python/tests
+          "$PY" run.py -v --failfast
+          MLX_TEST_EOF
+
+  gpl_sources:
+    needs: [setup]
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # OpenBLAS is compiled with gfortran, so auditwheel vendors the image's
+      # libgfortran into mlx_cpu.libs/.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mlx-${{ env.MLX_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish_frontend:
+    name: Publish mlx ${{ inputs.version || '0.32.2' }}
+    # No GPL sources here: --only-plat repair vendors nothing into the frontend wheel.
+    needs: [setup, build_frontend, test_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: mlx-${{ inputs.version || '0.32.2' }}-cp3*-manylinux_riscv64
+
+  publish_backend:
+    name: Publish mlx-cpu ${{ inputs.version || '0.32.2' }}
+    needs: [setup, build_backend, gpl_sources, test_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: mlx_cpu-${{ inputs.version || '0.32.2' }}-manylinux_riscv64
+      gpl-sources-artifact: mlx-${{ inputs.version || '0.32.2' }}-gpl-sources
+      gpl-sources-description: gcc
