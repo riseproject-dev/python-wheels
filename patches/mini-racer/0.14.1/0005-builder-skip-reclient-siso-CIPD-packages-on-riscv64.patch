@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 13 Sep 2026 04:54:55 +0200
+Subject: [PATCH] builder: skip reclient/siso CIPD packages on riscv64
+
+v8's DEPS fetches 'buildtools/reclient' (infra/rbe/client, the remote
+build execution client) and 'third_party/siso/cipd' (the siso build
+tool) on every Linux host; their conditions already exclude
+s390x/ppc64/zos and arm64-on-Linux, but not riscv64, and neither
+package is published for linux-riscv64:
+
+  no such package: infra/rbe/client/linux-riscv64
+  no such package: build/siso/linux-riscv64
+
+Both are optional build accelerators that run_build()'s plain
+gn gen + ninja.py invocation never asks for, so skip fetching them via
+custom_deps instead of failing gclient sync outright.
+
+Upstream-Status: To upstream [not yet submitted to bpcreech/PyMiniRacer]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ builder/v8_build.py | 23 ++++++++++++++++++-----
+ 1 file changed, 18 insertions(+), 5 deletions(-)
+
+diff --git a/builder/v8_build.py b/builder/v8_build.py
+index 4c8f3f4..9ca7d2e 100644
+--- a/builder/v8_build.py
++++ b/builder/v8_build.py
+@@ -159,16 +159,29 @@ def ensure_v8_src(revision: str) -> None:
+     if not gclient_file.exists():
+         get_workspace_path().mkdir(parents=True, exist_ok=True)
+ 
++        custom_deps = "{}"
++        if machine().lower() == "riscv64":
++            # v8's DEPS fetches these two CIPD packages on every Linux host
++            # (their conditions exclude s390x/ppc64/zos and arm64-on-Linux,
++            # but not riscv64), yet neither is published for linux-riscv64;
++            # both are optional build accelerators (remote execution, the
++            # siso build tool) that plain gn+ninja never asks for, so skip
++            # fetching them instead of failing gclient sync outright:
++            custom_deps = """{
++      "v8/buildtools/reclient": None,
++      "v8/third_party/siso/cipd": None,
++    }"""
++
+         gclient_file.write_text(
+-            """\
++            f"""\
+ solutions = [
+-  { "name"        : "v8",
++  {{ "name"        : "v8",
+     "url"         : "https://chromium.googlesource.com/v8/v8.git",
+     "deps_file"   : "DEPS",
+     "managed"     : False,
+-    "custom_deps" : {},
+-    "custom_vars": {},
+-  },
++    "custom_deps" : {custom_deps},
++    "custom_vars": {{}},
++  }},
+ ]
+ """
+         )
