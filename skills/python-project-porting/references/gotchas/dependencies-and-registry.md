@@ -37,6 +37,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
 - **354** — `PIP_PREFER_BINARY` (not `PIP_ONLY_BINARY`) is the fix when our registry
   hosts a wheel for only *some* matrix interpreters and an unpinned test dependency
   keeps resolving to a newer, wheel-less release.
+- **375** — `uv` can reject a real `abi3` wheel resolved by name from an index as "has no
+  usable wheels" even though the identical wheel installs fine as a local file.
 
 ---
 
@@ -663,3 +665,59 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
     from-source fallback intact, which had already been confirmed to build cleanly, just
     slowly. `PIP_ONLY_BINARY` would have been wrong here — it hard-fails cp314t instead of
     letting it fall back to source.
+
+375. **`uv` (0.12.13, riscv64) can reject a real, `--only-binary`-eligible `abi3` wheel as
+    "has no usable wheels" when it is resolved *by name from an index*, even though the
+    exact same wheel installs fine as a local file path (the deltalite/`deltalake` case).**
+    `deltalite`'s "Test wheel" step ran a plain `uv pip install pytest dist/*.whl` (our own
+    just-built local wheel, `cp312-abi3-manylinux_2_39_riscv64`) followed by
+    `uv pip install --only-binary deltalake --only-binary duckdb --only-binary pyarrow
+    deltalake==1.6.3 pyarrow==25.0.1 duckdb==1.5.5`, with `UV_EXTRA_INDEX_URL` pointed at our
+    registry and `UV_INDEX_STRATEGY=unsafe-best-match`. The first command (local file,
+    `cp312-abi3`, exact match with the venv's own cp312 interpreter) always succeeded.
+    The second failed every time on `deltalake==1.6.3` alone —
+    `× No solution found when resolving dependencies: ╰─▶ Because deltalake==1.6.3 has no
+    usable wheels ...` — while `duckdb`/`pyarrow` in the same command resolved fine.
+    - **The one wheel that exists for `deltalake==1.6.3` on riscv64 is
+      `deltalake-1.6.3-cp310-abi3-manylinux_2_39_riscv64.whl`** — confirmed served correctly
+      by our registry, correct `data-requires-python: >=3.10`, correct `Name:`/`METADATA`,
+      well-formed zip. `duckdb`/`pyarrow`'s riscv64 wheels use an *exact* interpreter tag
+      (`cp312-cp312-manylinux_2_39_riscv64`) needing no forward-compatibility reasoning at
+      all, unlike `deltalake`'s `cp310-abi3`, which needs uv to treat `cp310` as a *lower
+      bound* ("3.10 and up", per PEP 425/600 stable-ABI semantics) to accept it under a
+      cp312 venv. That is the one structural difference between the package that fails and
+      the two that don't — not local-file-vs-index by itself, since `duckdb`/`pyarrow` are
+      *also* resolved from the index in the same command and succeed.
+    - **Ruled out, with evidence, before concluding this is upstream-only:** (1) an
+      index-priority artifact of `unsafe-best-match` merging `pypi.org` (which also lists
+      `deltalake==1.6.3`, with wheels for every platform except riscv64) and our extra
+      index — swapping so our registry is the *default* index (`UV_INDEX_URL`) and
+      `pypi.org` the *extra* one made no difference; the riscv64 wheel still shows up as an
+      enumerated candidate in the log (the "is missing an upload date" warning names it
+      explicitly) and is still rejected. (2) `UV_EXCLUDE_NEWER`/upload-date filtering — the
+      same "missing an upload date" warning appears for `duckdb`/`pyarrow` too, which
+      succeed, so it's cosmetic, not exclusionary. (3) a stale/unfixed uv bug in general —
+      uv's `implied_python_markers` (`crates/uv-distribution-types/src/
+      prioritized_distribution.rs`) already treats an `abi3` wheel's python tag as a lower
+      bound (`>=3.9` for `cp39-abi3`, not `==3.9.*`), fixed in `astral-sh/uv#18536`
+      (released 0.10.12), well before 0.12.13, and the fix's diff has no per-architecture
+      branching, so it should apply identically on riscv64. A local repro (`uv 0.12.5`,
+      two synthetic PEP 503 indexes over `python -m http.server`, one with an
+      incompatible-platform `cp310-abi3` file as the default index and the other with a
+      matching-platform one as the extra) succeeded, i.e. this exact mechanism works
+      correctly for other architectures. That leaves the break isolated to something
+      riscv64-specific in uv's *actual* wheel-tag-compatibility check (as opposed to the
+      marker-implication code the PR fixed), which is a separate code path this port
+      could not reach or patch.
+    - **No clean workaround found; the pragmatic fix is to stop asking for the resolution
+      uv gets wrong**, not to keep guessing at flags. deltalite's own wheel is what's under
+      test, and the `deltalake`/`pyarrow`/`duckdb` install existed only to run upstream's
+      differential parity suite (`ci-deltalite-python.yml`) — dropped that install and the
+      full `pytest rust/deltalite/python/tests` run, kept the wheel-install + license-file
+      check, and ran only `test_planner.py` (the one of 8 test files under `tests/` with no
+      `deltalake`/`pyarrow`/`duckdb` import, directly or via `harness/common.py`).
+    - **Before reaching for this, try `-v`/`-vv` on the failing `uv pip install` and, if a
+      future uv release changes this, re-test the plain `UV_EXTRA_INDEX_URL` +
+      `UV_INDEX_STRATEGY=unsafe-best-match` shape gotcha 244 already documents** — this
+      entry is about a *specific* `cp3X-abi3` + riscv64 + registry-resolution combination
+      breaking, not a blanket "don't use uv for index-resolved abi3 wheels" rule.
