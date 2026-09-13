@@ -1,0 +1,64 @@
+From 4bb15c98deff65911623432214ba55f891045fa4 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 13 Sep 2026 09:07:23 +0200
+Subject: [PATCH] Ship zlib's cpu_features.c/.h on every arch, not just
+ arm64/x86_64
+
+zlib.BUILD.bazel only adds cpu_features.c/.h to srcs on arm64/x86_64 (bundled
+in _SIMD_SRCS), but adler32.c, crc32.c and deflate.c each #include
+"cpu_features.h" unconditionally, so building for any other cpu (ppc,
+riscv64, ...) fails: "fatal error: cpu_features.h: No such file or
+directory". cpu_features.c's own arch detection is #if-guarded per arch and
+leaves its extern flags at their default 0 otherwise, so the pair is safe to
+compile on every platform; only the actual accelerated *_simd.c/.h sources
+need to stay gated to arm64/x86_64. This does not enable riscv64's RVV adler32
+path (real, present in this zlib fork, guarded by ADLER32_SIMD_RVV) - that
+needs -march=+v applied build-wide with no per-function target isolation in
+the vendored source, a correctness tradeoff better left to a follow-up.
+
+Upstream-Status: To upstream [not submitted from this automated port run; needs a pull request against google/tensorstore]
+---
+ third_party/zlib/zlib.BUILD.bazel | 13 ++++++++++---
+ 1 file changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/third_party/zlib/zlib.BUILD.bazel b/third_party/zlib/zlib.BUILD.bazel
+index 758d193..6dae590 100644
+--- a/third_party/zlib/zlib.BUILD.bazel
++++ b/third_party/zlib/zlib.BUILD.bazel
+@@ -20,6 +20,15 @@ cc_library(
+ 
+ ###############################################
+ 
++# adler32.c, crc32.c and deflate.c #include "cpu_features.h" unconditionally
++# (the arch-specific detection it declares is itself #if-guarded and safe to
++# compile everywhere), so it ships on every arch; only the accelerated *_simd
++# sources need gating to the arches this wrapper actually enables SIMD for.
++_CPU_FEATURES_SRCS = [
++    "cpu_features.c",
++    "cpu_features.h",
++]
++
+ _SIMD_SRCS = [
+     "adler32_simd.c",
+     "adler32_simd.h",
+@@ -27,8 +36,6 @@ _SIMD_SRCS = [
+     "contrib/optimizations/inffast_chunk.c",
+     "contrib/optimizations/inffast_chunk.h",
+     "contrib/optimizations/inflate.c",
+-    "cpu_features.c",
+-    "cpu_features.h",
+     "crc_folding.c",
+     "crc32_simd.c",
+     "crc32_simd.h",
+@@ -52,7 +59,7 @@ cc_library(
+         "trees.c",
+         "uncompr.c",
+         "zutil.c",
+-    ] + select({
++    ] + _CPU_FEATURES_SRCS + select({
+         "@platforms//cpu:arm64": _SIMD_SRCS,
+         "@platforms//cpu:x86_64": _SIMD_SRCS,
+         "//conditions:default": [
+-- 
+2.50.1 (Apple Git-155)
+
