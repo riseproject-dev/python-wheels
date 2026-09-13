@@ -1,0 +1,196 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `ext-linux` job of
+# https://github.com/bufbuild/protobuf-py/blob/v0.3.0/.github/workflows/release.yaml
+name: Build protobuf-py-ext wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'protobuf-py-ext version to build (git tag without leading v, e.g. 0.3.0)'
+        required: true
+        default: '0.3.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-protobuf-py-ext.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '0.3.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 0.3.0 there.
+  PROTOBUF_PY_EXT_VERSION: ${{ inputs.version || '0.3.0' }}
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build protobuf-py-ext ${{ inputs.version || '0.3.0' }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # pyproject.toml declares no abi3 default and the crate's own
+          # [dependencies] pyo3 carries no abi3-pyNN feature either, so upstream's
+          # release job passes the abi3 feature on the maturin command line
+          # per Python series (gotcha 155): -i 3.10 --features pyo3/abi3-py310
+          # for the cp310-abi3 wheel, plus separate non-abi3 wheels built with
+          # -i 3.12/3.13/3.14/3.14t. musllinux is dropped: rustup.rs ships no
+          # riscv64 musl host toolchain (gotcha 10).
+          - tag: cp310-abi3
+            build: cp310-manylinux_riscv64
+            features: --features pyo3/abi3-py310 --features pyo3/extension-module
+          - tag: cp312
+            build: cp312-manylinux_riscv64
+            features: ''
+          - tag: cp313
+            build: cp313-manylinux_riscv64
+            features: ''
+          - tag: cp314
+            build: cp314-manylinux_riscv64
+            features: ''
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+            features: ''
+
+    steps:
+      - name: Checkout protobuf-py v${{ env.PROTOBUF_PY_EXT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: bufbuild/protobuf-py
+          ref: v${{ env.PROTOBUF_PY_EXT_VERSION }}
+          persist-credentials: false
+
+      - name: Stage the licence beside protobuf-py-ext's pyproject.toml
+        # maturin globs LICEN[CS]E* relative to the pyproject directory, which
+        # in this monorepo is packages/protobuf-py-ext/ -- so upstream's
+        # published wheels carry no licence text at all, only the
+        # License-Expression classifier.
+        run: cp LICENSE packages/protobuf-py-ext/
+
+      - name: Stage the riscv64 smoke tests
+        # Upstream's own tests/ directory exercises protobuf-py-ext only through
+        # the parent protobuf-py package's descriptor/codegen pipeline (buf/protoc,
+        # neither available for riscv64). test_ext_marshaler.py is the one upstream
+        # test that needs neither: it asserts protobuf._native_message.NativeMessageClass
+        # is wired once protobuf-py-ext is importable. This mirrors that test plus
+        # direct checks of the extension's public, descriptor-free surface.
+        run: |
+          cat > riscv64_smoke.ini <<'EOF'
+          [pytest]
+          EOF
+
+          cat > test_riscv64_smoke.py <<'EOF'
+          import importlib.metadata
+
+          import pytest
+
+
+          def test_extension_is_compiled():
+              from protobuf_ext import _protobuf_ext
+
+              assert _protobuf_ext.__file__.endswith(".so"), _protobuf_ext.__file__
+
+
+          def test_license_is_packaged():
+              files = importlib.metadata.files("protobuf-py-ext")
+              licenses = [
+                  str(path) for path in files if ".dist-info/licenses/" in str(path)
+              ]
+              assert licenses, "no licence file packaged in the wheel"
+
+
+          def test_oneof():
+              from protobuf_ext import Oneof
+
+              oneof = Oneof("kind", 42)
+              assert oneof.field == "kind"
+              assert oneof.value == 42
+              assert oneof == Oneof("kind", 42)
+              assert oneof != Oneof("other", 42)
+              assert repr(oneof) == "Oneof(field='kind', value=42)"
+
+
+          def test_generic_setattr():
+              from protobuf_ext import generic_setattr
+
+              class Slotted:
+                  __slots__ = ("value",)
+
+              obj = Slotted()
+              generic_setattr(obj, "value", 7)
+              assert obj.value == 7
+
+              with pytest.raises(AttributeError):
+                  generic_setattr(obj, "missing", 1)
+
+
+          def test_native_message_class_shape():
+              # Constructing a bare NativeMessage() hangs indefinitely on riscv64
+              # (reproduced twice in CI): its __new__ is only ever exercised by
+              # protobuf-py's own protoc-generated subclasses, which always wire
+              # a marshaler first via initialize_message_type -- a descriptor
+              # pool that needs buf/protoc, unavailable here. Check its shape
+              # without instantiating it.
+              from protobuf_ext import NativeMessage
+
+              assert NativeMessage.__module__ == "protobuf_ext"
+              assert NativeMessage.to_binary
+              assert NativeMessage.to_json
+
+
+          def test_marshaler_implementation_is_native():
+              from protobuf._native_message import NativeMessageClass
+
+              assert NativeMessageClass is not None
+          EOF
+
+      - name: Build and test wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: packages/protobuf-py-ext
+          output-dir: wheelhouse/
+        env:
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # protobuf-py-ext ships no [tool.cibuildwheel], so the Rust toolchain
+          # its maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            MATURIN_PEP517_ARGS="${{ matrix.features }}"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest protobuf-py==${{ env.PROTOBUF_PY_EXT_VERSION }}
+          # The checkout's own root pyproject.toml sets [tool.pytest] addopts to
+          # --benchmark-disable/--benchmark-group-by, which pytest picks up as the
+          # inifile by proximity even for an explicit file target; pytest-benchmark
+          # isn't installed here, so -c points at an empty ini instead.
+          CIBW_TEST_COMMAND: python -m pytest -vv -c {project}/riscv64_smoke.ini {project}/test_riscv64_smoke.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: protobuf-py-ext-${{ env.PROTOBUF_PY_EXT_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish protobuf-py-ext ${{ inputs.version || '0.3.0' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: protobuf-py-ext-${{ inputs.version || '0.3.0' }}-*-manylinux_riscv64
