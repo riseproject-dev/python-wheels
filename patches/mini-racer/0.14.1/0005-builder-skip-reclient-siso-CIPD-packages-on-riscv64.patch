@@ -1,64 +1,116 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Ludovic Henry <git@ludovic.dev>
-Date: Sun, 13 Sep 2026 04:54:55 +0200
+Date: Sun, 13 Sep 2026 05:38:02 +0200
 Subject: [PATCH] builder: skip reclient/siso CIPD packages on riscv64
 
-v8's DEPS fetches 'buildtools/reclient' (infra/rbe/client, the remote
-build execution client) and 'third_party/siso/cipd' (the siso build
-tool) on every Linux host; their conditions already exclude
-s390x/ppc64/zos and arm64-on-Linux, but not riscv64, and neither
-package is published for linux-riscv64:
+v8's DEPS fetches two CIPD packages unconditioned on riscv64:
+buildtools/reclient (infra/rbe/client, the remote build execution
+client) and third_party/siso/cipd (the siso build tool). Their
+conditions exclude s390x/ppc64/zos and arm64-on-Linux, but not
+riscv64, and CI confirmed neither package is published for
+linux-riscv64:
 
   no such package: infra/rbe/client/linux-riscv64
   no such package: build/siso/linux-riscv64
 
-Both are optional build accelerators that run_build()'s plain
-gn gen + ninja.py invocation never asks for, so skip fetching them via
-custom_deps instead of failing gclient sync outright.
+Both are optional build accelerators that plain gn gen + ninja never
+asks for. gn and ninja share the exact same guard clause and *do*
+have riscv64 packages (verified against
+https://chrome-infra-packages.appspot.com/p/gn/gn/linux-riscv64 and
+the ninja/cpython3 3pp packages), so this can't be fixed by
+overriding gclient's host_cpu var globally -- that would also stop gn
+and ninja from being fetched. custom_deps can't target the two
+packages by name either: CipdDependency.run() never consults the
+Dependency.url a custom_deps override would change, only
+should_process (derived from the DEPS-declared condition).
+
+Instead, let the first sync attempt run to completion (it always
+clones v8 in full before it gets to resolving CIPD packages, so this
+isn't wasted work), patch the two conditions out of the now-checked-
+out DEPS on failure, and retry: gclient re-resolves "v8@{revision}"
+to the same commit we are already on, so its git step is a no-op
+(unless --reset/--force, neither of which we pass) and the patch
+survives into the retry's dependency processing.
 
 Upstream-Status: To upstream [not yet submitted to bpcreech/PyMiniRacer]
 
 Signed-off-by: Ludovic Henry <git@ludovic.dev>
 ---
- builder/v8_build.py | 23 ++++++++++++++++++-----
- 1 file changed, 18 insertions(+), 5 deletions(-)
+ builder/v8_build.py | 55 +++++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 48 insertions(+), 7 deletions(-)
 
 diff --git a/builder/v8_build.py b/builder/v8_build.py
-index 4c8f3f4..9ca7d2e 100644
+index 4c8f3f4..37a1f15 100644
 --- a/builder/v8_build.py
 +++ b/builder/v8_build.py
-@@ -159,16 +159,29 @@ def ensure_v8_src(revision: str) -> None:
-     if not gclient_file.exists():
-         get_workspace_path().mkdir(parents=True, exist_ok=True)
+@@ -10,7 +10,7 @@ from platform import machine
+ from re import match
+ from shlex import join as shlexjoin
+ from shutil import copyfile, rmtree
+-from subprocess import check_call
++from subprocess import CalledProcessError, check_call
+ from sys import executable, platform
+ from typing import TYPE_CHECKING
  
-+        custom_deps = "{}"
-+        if machine().lower() == "riscv64":
-+            # v8's DEPS fetches these two CIPD packages on every Linux host
-+            # (their conditions exclude s390x/ppc64/zos and arm64-on-Linux,
-+            # but not riscv64), yet neither is published for linux-riscv64;
-+            # both are optional build accelerators (remote execution, the
-+            # siso build tool) that plain gn+ninja never asks for, so skip
-+            # fetching them instead of failing gclient sync outright:
-+            custom_deps = """{
-+      "v8/buildtools/reclient": None,
-+      "v8/third_party/siso/cipd": None,
-+    }"""
+@@ -182,14 +182,55 @@ solutions = [
+     ]
+ 
+     if machine().lower() == "riscv64":
+-        # depot_tools' own gclient.py already serializes sync ("-j1") on 32-bit
+-        # arm boards because parallel syncs are flaky there; riscv64 boards hit
+-        # the same class of failure (a "gsutil" bootstrap lockfile.LockError:
+-        # [Errno 11] Resource temporarily unavailable from concurrent workers
+-        # racing to fetch it), so do the same here.
++        # depot_tools' own gclient.py already serializes sync ("-j1") on
++        # 32-bit arm boards because parallel syncs are flaky there; riscv64
++        # boards hit the same class of failure (a "gsutil" bootstrap
++        # lockfile.LockError: [Errno 11] Resource temporarily unavailable
++        # from concurrent workers racing to fetch it), so do the same here.
+         gclient_args += ["--jobs", "1"]
+ 
+-    run(*gclient_args, cwd=get_workspace_path())
++        try:
++            run(*gclient_args, cwd=get_workspace_path())
++        except CalledProcessError:
++            # v8 is already fully cloned by this point (gclient always
++            # fetches the solution itself before resolving CIPD packages):
++            # two of its DEPS entries, buildtools/reclient
++            # (infra/rbe/client) and third_party/siso/cipd (the siso build
++            # tool), are unconditioned on riscv64 (their conditions exclude
++            # s390x/ppc64/zos, and arm64 on Linux, but not riscv64) even
++            # though neither package is published for linux-riscv64. Both
++            # are optional build accelerators that plain gn gen + ninja
++            # never asks for. gn and ninja share the exact same guard
++            # clause and *do* have riscv64 packages, so this can't be fixed
++            # by overriding gclient's host_cpu var (it would also disable
++            # gn/ninja); patch the two conditions out of the checkout
++            # instead.
++            deps_file = get_v8_path() / "DEPS"
++            if not deps_file.exists():
++                raise
 +
-         gclient_file.write_text(
--            """\
-+            f"""\
- solutions = [
--  { "name"        : "v8",
-+  {{ "name"        : "v8",
-     "url"         : "https://chromium.googlesource.com/v8/v8.git",
-     "deps_file"   : "DEPS",
-     "managed"     : False,
--    "custom_deps" : {},
--    "custom_vars": {},
--  },
-+    "custom_deps" : {custom_deps},
-+    "custom_vars": {{}},
-+  }},
- ]
- """
-         )
++            text = deps_file.read_text()
++            for condition in (
++                '(host_os == "linux" or host_os == "mac" or '
++                'host_os == "win") and host_cpu != "s390x" and '
++                'host_os != "zos" and host_cpu != "ppc64" and '
++                '(host_cpu != "arm64" or host_os == "mac")',
++                'not build_with_chromium and host_cpu != "s390x" and '
++                'host_os != "zos" and host_cpu != "ppc64"',
++            ):
++                text = text.replace(
++                    condition, f'{condition} and host_cpu != "riscv64"', 1
++                )
++            deps_file.write_text(text)
++
++            # Retrying re-resolves "v8@{revision}" to the same commit we
++            # are already sitting on, so gclient's git step is a no-op (it
++            # only touches the working tree on mismatch, or with
++            # --reset/--force, neither of which we pass) and the DEPS
++            # patch survives into this second sync's dependency processing.
++            run(*gclient_args, cwd=get_workspace_path())
++    else:
++        run(*gclient_args, cwd=get_workspace_path())
+ 
+     link_name = get_v8_path() / "custom_deps" / "mini_racer"
+     link_name.unlink(missing_ok=True)
