@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 13 Sep 2026 08:09:44 +0200
+Subject: [PATCH] builder: use_sysroot=false, use_custom_libcxx=false,
+ enable_rust=false on riscv64
+
+CI got past the DEPS/CIPD fixes and into an actual ninja build for the
+first time, which surfaced three independent problems:
+
+* use_sysroot defaults to Chromium's bundled
+  build/linux/debian_trixie_riscv64-sysroot, meant for *cross*-compiling
+  from an amd64 host. On a native riscv64 build host it fails
+  ('bits/wordsize.h: No such file or directory' -- its usr/include
+  lacks the multiarch subdirectory our riscv64-linux-gnu- toolprefix
+  trick expects from a real cross toolchain's built-in search paths).
+  Use the host's own headers/libc, which are already the right ones.
+
+* v8's custom (LLVM) libc++ requires GCC 15+ to build with GCC
+  (third_party/libc++/src/include/__configuration/compiler.h); our
+  manylinux_2_39_riscv64 image's GCC is older. Use system libstdc++,
+  which is what a GCC build normally pairs with.
+
+* Something still invokes third_party/rust-toolchain/bin/rustc despite
+  enable_rust defaulting to build_with_chromium (false for our
+  standalone checkout), and it segfaults on riscv64
+  ('rustc --print=cfg --target=riscv64gc-unknown-linux-gnu' died with
+  SIGSEGV) -- like Chromium's clang, the prebuilt Rust toolchain is
+  published for amd64/arm64/mac hosts only. Disable Rust explicitly.
+
+Upstream-Status: To upstream [not yet submitted to bpcreech/PyMiniRacer]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ builder/v8_build.py | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/builder/v8_build.py b/builder/v8_build.py
+index aeaf0a3..c82341e 100644
+--- a/builder/v8_build.py
++++ b/builder/v8_build.py
+@@ -310,6 +310,30 @@ def run_build(build_dir: Path, args: Args) -> None:
+         # build/toolchain/linux/BUILD.gn:
+         opts["is_clang"] = "false"
+ 
++        # use_sysroot defaults to fetching and building against Chromium's
++        # bundled build/linux/debian_trixie_riscv64-sysroot, meant for
++        # *cross*-compiling from an amd64 host; on a native riscv64 build
++        # host it fails outright (its usr/include lacks the multiarch
++        # bits/wordsize.h our riscv64-linux-gnu- toolprefix trick expects,
++        # since it isn't a real cross toolchain with matching built-in
++        # search paths). Use the host's own headers/libc instead, which are
++        # already the right ones for a native build:
++        opts["use_sysroot"] = "false"
++
++        # v8's custom (LLVM) libc++ requires GCC 15+ to build with GCC
++        # (//third_party/libc++/src/include/__configuration/compiler.h);
++        # our manylinux_2_39_riscv64 image's GCC is older. Use the system
++        # libstdc++ instead, which is what a GCC build normally pairs with:
++        opts["use_custom_libcxx"] = "false"
++
++        # enable_rust defaults to build_with_chromium (false for our
++        # standalone v8 checkout), but the prebuilt third_party/rust-toolchain
++        # is, like Chromium's clang, published for amd64/arm64/mac hosts only;
++        # something still invokes it for our riscv64 build and segfaults
++        # trying to run it, so disable Rust explicitly rather than rely on a
++        # default this pinned build/rust.gni revision may compute differently:
++        opts["enable_rust"] = "false"
++
+     if is_linux() and target_cpu != get_local_v8_target_cpu():
+         run(
+             executable,
