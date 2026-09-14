@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/PostHog/posthog/blob/master/.github/workflows/build-hogql-parser.yml
+name: Build hogql-parser wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'hogql-parser version to build (posthog monorepo version, e.g. 1.3.84)'
+        required: true
+        default: '1.3.84'
+  pull_request:
+    paths:
+      - '.github/workflows/build-hogql-parser.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.3.84' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.3.84 there.
+  HOGQL_PARSER_VERSION: ${{ inputs.version || '1.3.84' }}
+  # PostHog/posthog never tags this package; pin the commit that bumped
+  # common/hogql_parser/setup.py to 1.3.84 (matches the PyPI sdist). Same
+  # commit hogql-parser-rs (build-hogql-parser-rs.yml) is pinned to.
+  HOGQL_PARSER_REF: c30d2736928729ea424b08003c9cea2006b7606b
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheels:
+    needs: [setup]
+    name: Build hogql-parser ${{ inputs.version || '1.3.84' }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # setup.py builds a plain per-interpreter Extension (no abi3), matching
+        # upstream's own coverage for this version (cp310-cp313; cp314 support
+        # landed after 1.3.84).
+        python: ["cp310", "cp311", "cp312", "cp313"]
+
+    steps:
+      # common/hogql_parser's checked-in generated ANTLR sources make this a
+      # self-contained build directory; sparse-checkout skips the rest of the
+      # multi-GB posthog monorepo (Django app, frontend, ...).
+      - name: Checkout posthog common/hogql_parser
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: PostHog/posthog
+          ref: ${{ env.HOGQL_PARSER_REF }}
+          sparse-checkout: common/hogql_parser
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build wheel
+        env:
+          CIBW_ARCHS: riscv64
+          # Upstream's own [tool.cibuildwheel] `build` list only names macOS and
+          # manylinux_x86_64/aarch64 identifiers, so it must be overridden here
+          # rather than relying on cibuildwheel's `--only` to add riscv64 to it.
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream's own before-all (manylinux_2_28/AlmaLinux 8) installs
+          # `epel-release` to get a newer `cmake3` - EPEL doesn't exist on
+          # riscv64 (gotcha 51) and isn't needed anyway, since Rocky 10's
+          # system `cmake` is already 3.31. Same antlr4-cpp-runtime source
+          # build otherwise, unchanged from upstream.
+          CIBW_BEFORE_ALL_LINUX: |
+            set -ex
+            dnf install -y unzip cmake curl uuid pkg-config
+            curl --fail --location https://www.antlr.org/download/antlr4-cpp-runtime-4.13.1-source.zip --output antlr4-source.zip || curl --fail --location https://raw.githubusercontent.com/antlr/website-antlr4/gh-pages/download/antlr4-cpp-runtime-4.13.1-source.zip --output antlr4-source.zip
+            antlr_known_md5sum="c875c148991aacd043f733827644a76f"
+            antlr_found_md5sum="$(md5sum antlr4-source.zip | cut -d' ' -f1)"
+            if [[ "$antlr_known_md5sum" != "$antlr_found_md5sum" ]]; then exit 64; fi
+            unzip antlr4-source.zip -d antlr4-source && cd antlr4-source
+            cmake . -DBUILD_TESTING=OFF -DANTLR4_BUILD_TESTS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+            DESTDIR=out make install
+            cp -r out/usr/local/include/antlr4-runtime /usr/include/
+            cp out/usr/local/lib64/libantlr4-runtime.so* /usr/lib64/
+            ldconfig
+        # No CIBW_TEST_COMMAND: upstream's own workflow doesn't test the wheel
+        # either. `import hogql_parser` eagerly imports `posthog.hogql.ast`
+        # (the posthog Django app, not on PyPI) at module load, so it can't be
+        # smoke-tested outside the monorepo it ships alongside - confirmed by
+        # reproducing the same ModuleNotFoundError against the real PyPI wheel.
+        run: |
+          set -euo pipefail
+          uv pip install --upgrade cibuildwheel
+          python -m cibuildwheel --output-dir wheelhouse common/hogql_parser
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: hogql-parser-${{ env.HOGQL_PARSER_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish hogql-parser ${{ inputs.version || '1.3.84' }}
+    needs: [setup, build_wheels]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: hogql-parser-${{ inputs.version || '1.3.84' }}-*-manylinux_riscv64
