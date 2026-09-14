@@ -1,0 +1,90 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/PostHog/pixelhog/blob/v1.2.0/.github/workflows/wheels.yml
+name: Build pixelhog wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pixelhog version to build (git tag without leading v, e.g. 1.2.0)'
+        required: true
+        default: '1.2.0'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pixelhog.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '1.2.0' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # `inputs.version` is empty on pull_request events; default to 1.2.0 there.
+  PIXELHOG_VERSION: ${{ inputs.version || '1.2.0' }}
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+
+  build_wheel:
+    needs: [setup]
+    name: Build pixelhog ${{ inputs.version || '1.2.0' }} cp312-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout pixelhog v${{ env.PIXELHOG_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: PostHog/pixelhog
+          ref: v${{ env.PIXELHOG_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          manylinux: '2_39'
+          # pyo3 carries abi3-py312 unconditionally in Cargo.toml, so
+          # upstream ships one cp312-abi3 wheel and no free-threaded variant.
+          args: >-
+            -i python3.12 --release --strip --out dist
+            --manifest-path crates/pixelhog-python/Cargo.toml
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      # pillow (a test dependency) has no riscv64 wheel on public PyPI.
+      - name: Test wheel
+        env:
+          UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+          UV_INDEX_STRATEGY: unsafe-best-match
+        run: |
+          uv pip install pytest pillow dist/*.whl --force-reinstall
+          python -c "import pixelhog; assert pixelhog.pixelhog.__file__.endswith('.so'), pixelhog.pixelhog.__file__"
+          python -m pytest python/tests -q
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pixelhog-${{ env.PIXELHOG_VERSION }}-cp312-abi3-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pixelhog ${{ inputs.version || '1.2.0' }}
+    needs: [setup, build_wheel]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pixelhog-${{ inputs.version || '1.2.0' }}-*-manylinux_riscv64
