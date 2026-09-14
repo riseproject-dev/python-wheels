@@ -1,0 +1,65 @@
+From d68ef7d42938f075c372d6b2c2f7fae527c5c584 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 13 Sep 2026 02:52:08 +0200
+Subject: [PATCH] use schedule(static) for the dynamic and guided OpenMP loops
+ in ParallelFor
+
+Upstream-Status: Inappropriate [works around a libgomp defect on the riscv64 runners, riseproject-dev/python-wheels#617]
+
+libgomp's dynamic and guided work-share schedules fault on the riscv64
+machines these wheels are built and tested on. A 40-line C program that
+allocates nothing in the loop body segfaults 3 times out of 3 under
+schedule(guided) and schedule(dynamic), on the bare runner with GCC
+13.3.0 and inside manylinux_2_39_riscv64 with GCC 14.3.1, while
+schedule(static) on the same program is clean and 30M concurrent
+malloc/free per thread are clean. The identical binaries pass under QEMU
+riscv64 and on aarch64 at 64 threads, so it is specific to that
+hardware, not to the code.
+
+XGBoost routes essentially all of its OpenMP parallel regions through
+common::ParallelFor() in threading_utils.h, which picks the pragma at
+compile time from a Sched enum. Only two call sites ever request a
+non-static schedule: Sched::Dyn() in the exact tree updater
+(updater_colmaker.cc, used only by tree_method="exact") and
+Sched::Guided() in the LambdaMART ranking objective
+(lambdarank_obj.cc, used only by rank:* objectives). Both are off the
+default training path (tree_method="hist", objective="reg:*" etc.), but
+patching the two switch cases in ParallelFor covers every current and
+future caller instead of chasing individual call sites.
+
+Revert once the runners' toolchain is fixed.
+---
+ src/common/threading_utils.h | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/common/threading_utils.h b/src/common/threading_utils.h
+index 868dd30..8f1912c 100644
+--- a/src/common/threading_utils.h
++++ b/src/common/threading_utils.h
+@@ -206,12 +206,12 @@ void ParallelFor(Index size, std::int32_t n_threads, Sched sched, Func&& fn) {
+     }
+     case Sched::kDynamic: {
+       if (sched.chunk == 0) {
+-#pragma omp parallel for num_threads(n_threads) schedule(dynamic)
++#pragma omp parallel for num_threads(n_threads) schedule(static)
+         for (OmpInd i = 0; i < length; ++i) {
+           exc.Run(fn, i);
+         }
+       } else {
+-#pragma omp parallel for num_threads(n_threads) schedule(dynamic, sched.chunk)
++#pragma omp parallel for num_threads(n_threads) schedule(static, sched.chunk)
+         for (OmpInd i = 0; i < length; ++i) {
+           exc.Run(fn, i);
+         }
+@@ -233,7 +233,7 @@ void ParallelFor(Index size, std::int32_t n_threads, Sched sched, Func&& fn) {
+       break;
+     }
+     case Sched::kGuided: {
+-#pragma omp parallel for num_threads(n_threads) schedule(guided)
++#pragma omp parallel for num_threads(n_threads) schedule(static)
+       for (OmpInd i = 0; i < length; ++i) {
+         exc.Run(fn, i);
+       }
+-- 
+2.50.1 (Apple Git-155)
+
