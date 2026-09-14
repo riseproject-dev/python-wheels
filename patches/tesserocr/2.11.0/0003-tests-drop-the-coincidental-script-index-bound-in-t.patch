@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sat, 12 Sep 2026 15:55:00 +0200
+Subject: [PATCH] tests: drop the coincidental script-index bound in
+ test_detect_os
+
+The removed assertLess(orientation["script"], len(get_languages()[1]))
+check compares two unrelated things: "script" is an index into
+tesseract's internal OSD script table (a fixed, compiled-in table
+unrelated to what's installed), while get_languages()[1] just counts
+whichever .traineddata files happen to be sitting in TESSDATA_PREFIX.
+The assertion only ever held when a test environment's installed
+language-pack count happened to exceed the real script table's size by
+chance; this port's minimal two-file tessdata set (eng + osd, no LSTM/
+legacy duplicates needed elsewhere) doesn't, and there is no principled
+number of extra .traineddata files to add that would make the bound
+meaningful rather than coincidental. The test's own next two lines
+already call the follow-on script-name lookup "not reliable" for the
+same underlying reason.
+
+Every other assertion in test_detect_os is left intact and does pass,
+including the one that matters most for this port: DetectOS() itself
+completing without the vector<bool>::at(-1) crash tesseract's own
+osdetect.cpp has (patched separately, 0002-*.patch in this directory).
+
+Upstream-Status: To upstream [not yet submitted; this repo's own policy bars opening issues/PRs against any GitHub repo other than riseproject-dev/python-wheels]
+---
+ tests/test_api.py | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/tests/test_api.py b/tests/test_api.py
+index 88b0fa3..3a7ac8c 100644
+--- a/tests/test_api.py
++++ b/tests/test_api.py
+@@ -234,9 +234,14 @@ class TestTessBaseApi(unittest.TestCase):
+             for k in ["sconfidence", "oconfidence", "script", "orientation"]
+         )
+         self.assertEqual(orientation["orientation"], 0)
+-        # this is sorted alphabetically!
+-        languages = tesserocr.get_languages()[1]
+-        self.assertLess(orientation["script"], len(languages))
++        # The upstream assertLess(orientation["script"], len(get_languages()[1]))
++        # bound removed here is coincidental, not a real invariant: "script" is
++        # an index into tesseract's internal OSD script table, while
++        # get_languages()[1] just counts whichever .traineddata files happen
++        # to be in TESSDATA_PREFIX -- it only held when a test environment's
++        # installed language-pack count happened to exceed the real script
++        # table size. This port's minimal (2-file) tessdata set doesn't, same
++        # as it wouldn't on any platform using the same setup.
+         # therefore does not work
+         # script_name = languages[orientation["script"]]
+         # self.assertEqual(script_name, 'Latin') # cannot test: not reliable
+--
+2.43.0

@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sat, 12 Sep 2026 15:40:00 +0200
+Subject: [PATCH] tesseract: osdetect - guard against unset script_id
+
+This patches vendored tesseract 5.5.1 (built from source in
+CIBW_BEFORE_ALL_LINUX, not tesserocr's own Python sources), applied with
+`patch -p1` against the extracted tarball since it has no .git directory.
+
+ScriptDetector::detect_blob() indexes a std::vector<bool> with a
+BLOB_CHOICE's script_id() without checking it against the vector's bounds
+first. BLOB_CHOICE's default constructor sets script_id_ = -1 as its
+"unset" sentinel (ccstruct/ratngs.h); when the classifier leaves a choice
+at that default, id is a negative int, and passing it to `done.at(id)`
+implicitly converts it to a huge size_t, so `at()` throws
+std::out_of_range. Nothing up the call stack (through
+TessBaseAPI::DetectOS, which promises a plain return value, not an
+exception) catches it, so it reaches std::terminate() and aborts the
+whole process -- confirmed via a real gdb backtrace on riscv64
+(SIGABRT -> abort -> __cxa_throw -> std::__throw_out_of_range_fmt ->
+vector<bool>::_M_range_check -> vector<bool>::at, called from
+ScriptDetector::detect_blob at this exact line). Reproduced against the
+tests/eurotext.tif image tesserocr's own test_detect_os exercises via
+TessBaseAPI::DetectOS(); not riscv64-specific in root cause (the sentinel
+and the unchecked .at() call are architecture-independent), just apparently
+not triggered by whatever inputs upstream's own test coverage uses. Still
+unfixed on tesseract's `main` branch as of this writing.
+
+Upstream-Status: To upstream [not yet submitted; this repo's own policy bars opening issues/PRs against any GitHub repo other than riseproject-dev/python-wheels, so filing this against tesseract-ocr/tesseract is left to whoever reviews this port]
+---
+ src/ccmain/osdetect.cpp | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/src/ccmain/osdetect.cpp b/src/ccmain/osdetect.cpp
+index 64a8bd6..f619d89 100644
+--- a/src/ccmain/osdetect.cpp
++++ b/src/ccmain/osdetect.cpp
+@@ -491,8 +491,11 @@ void ScriptDetector::detect_blob(BLOB_CHOICE_LIST *scores) {
+           continue; // Not found in list.
+         }
+       }
+-      // Script already processed before.
+-      if (done.at(id)) {
++      // Script already processed before. A BLOB_CHOICE's script_id defaults
++      // to -1 (unset) when its classifier never assigned a real script id;
++      // done.at() on that (wrapping to SIZE_MAX as an unsigned index) throws
++      // std::out_of_range, which nothing here catches, aborting the process.
++      if (id < 0 || done.at(id)) {
+         continue;
+       }
+       done[id] = true;
+--
+2.43.0
