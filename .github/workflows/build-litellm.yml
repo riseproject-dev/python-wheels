@@ -92,13 +92,27 @@ jobs:
           #     one identical wheel (deduped by find_compatible_wheel).
           # 3.12 is RISE's minimum published Python, so a cp312-abi3 floor (loadable
           # on 3.12/3.13/3.14) is the right target - we intentionally do NOT mirror
-          # upstream's 3.10 floor. Idempotent: only rewrites the
-          # extension-module-only line; a no-op if an abi3 feature is ever committed
-          # upstream. Bake it in BEFORE building the sdist so maturin captures it.
+          # whatever floor upstream picks. Idempotent either way; a no-op only if
+          # abi3-py312 is ever committed upstream verbatim. Bake it in BEFORE
+          # building the sdist so maturin captures it.
           bridge_manifest="litellm-rust/crates/python-bridge/Cargo.toml"
-          sed -i -E 's/^(pyo3 = \{ workspace = true, features = \[)("extension-module")(\] \})/\1\2, "abi3-py312"\3/' "${bridge_manifest}"
-          echo "pyo3 feature line now:"
-          grep -n 'pyo3 = ' "${bridge_manifest}"
+          if grep -q '^abi3 = \[' "${bridge_manifest}"; then
+            # v1.101.0+ ships its own default-enabled `abi3` feature, floored at
+            # 3.10 (features add to Cargo's defaults rather than replacing them,
+            # so maturin's plain `features = ["extension-module"]` config leaves
+            # `default = ["abi3"]` active) - lower our floor into it.
+            perl -pi -e 's/^abi3 = \["pyo3\/abi3-py\d+"\]/abi3 = ["pyo3\/abi3-py312"]/' "${bridge_manifest}"
+          elif grep -q '^extension-module = \["pyo3/extension-module"\]' "${bridge_manifest}"; then
+            # v1.100.0-v1.100.x: no dedicated abi3 feature yet, so add our floor
+            # to the extension-module feature maturin already builds with.
+            perl -pi -e 's/(extension-module = \["pyo3\/extension-module")\]/$1, "pyo3\/abi3-py312"]/' "${bridge_manifest}"
+          else
+            # Pre-1.100.0: no [features] table at all - pyo3's features are
+            # listed inline on its own dependency line.
+            perl -pi -e 's/(pyo3 = \{ workspace = true, features = \["extension-module")(\] \})/$1, "abi3-py312"$2/' "${bridge_manifest}"
+          fi
+          echo "pyo3 abi3 feature line now:"
+          grep -n 'abi3' "${bridge_manifest}"
           grep -q 'abi3-py312' "${bridge_manifest}" || { echo "::error::failed to set abi3-py312 (upstream line shape changed?)"; exit 1; }
 
       - name: Build sdist
