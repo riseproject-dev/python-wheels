@@ -12,33 +12,51 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'mlx version to build (git tag without leading v, e.g. 0.32.2)'
-        required: true
-        default: '0.32.2'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/mlx.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-mlx.yml'
+      - 'docs/packages/mlx.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mlx.yml'
+      - 'docs/packages/mlx.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.32.2' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 env:
-  MLX_VERSION: ${{ inputs.version || '0.32.2' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      # mlx-cpu is built from the same checkout; keep docs/packages/mlx-cpu.yaml's versions in lockstep.
+      package: mlx
+      version: ${{ inputs.version }}
 
   build_backend:
     needs: [setup]
-    name: Build mlx-cpu ${{ inputs.version || '0.32.2' }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build mlx-cpu ${{ matrix.version }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
+    env:
+      MLX_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout ml-explore/mlx v${{ env.MLX_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -92,13 +110,18 @@ jobs:
 
   build_frontend:
     needs: [setup]
-    name: Build mlx ${{ inputs.version || '0.32.2' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build mlx ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+    env:
+      MLX_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout ml-explore/mlx v${{ env.MLX_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -152,13 +175,18 @@ jobs:
 
   test_wheels:
     needs: [setup, build_backend, build_frontend]
-    name: Test mlx ${{ inputs.version || '0.32.2' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Test mlx ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+    env:
+      MLX_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout ml-explore/mlx v${{ env.MLX_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -243,8 +271,16 @@ jobs:
 
   gpl_sources:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Collect GPL sources
     runs-on: ubuntu-24.04-riscv
+
+    env:
+      MLX_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout python-wheels
@@ -267,24 +303,34 @@ jobs:
           if-no-files-found: error
 
   publish_frontend:
-    name: Publish mlx ${{ inputs.version || '0.32.2' }}
+    name: Publish mlx ${{ matrix.version }}
     # No GPL sources here: --only-plat repair vendors nothing into the frontend wheel.
     needs: [setup, build_frontend, test_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: mlx-${{ inputs.version || '0.32.2' }}-cp3*-manylinux_riscv64
+      artifact-pattern: mlx-${{ matrix.version }}-cp3*-manylinux_riscv64
 
   publish_backend:
-    name: Publish mlx-cpu ${{ inputs.version || '0.32.2' }}
+    name: Publish mlx-cpu ${{ matrix.version }}
     needs: [setup, build_backend, gpl_sources, test_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: mlx_cpu-${{ inputs.version || '0.32.2' }}-manylinux_riscv64
-      gpl-sources-artifact: mlx-${{ inputs.version || '0.32.2' }}-gpl-sources
+      artifact-pattern: mlx_cpu-${{ matrix.version }}-manylinux_riscv64
+      gpl-sources-artifact: mlx-${{ matrix.version }}-gpl-sources
       gpl-sources-description: gcc

@@ -46,3 +46,36 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: python ci_scripts/check_patch.py "$BASE_SHA" "$HEAD_SHA"
+
+  check_packages_yaml:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: false
+
+      - name: Validate changed docs/packages/*.yaml and their build workflows
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          ret=0
+          for path in $(git diff --name-only --diff-filter=ACMR "$BASE_SHA" "$HEAD_SHA" -- 'docs/packages/*.yaml'); do
+            uv run --quiet ci_scripts/pending_versions.py --check "$(basename "$path" .yaml)" || ret=1
+          done
+          for path in $(git diff --name-only --diff-filter=ACMR "$BASE_SHA" "$HEAD_SHA" -- '.github/workflows/build-*.yml' '.github/workflows/test-*.yml'); do
+            package=$(sed -En 's/^\s+package:\s*([^ #]+).*/\1/p' "$path" | head -n1)
+            if [[ -z "$package" ]]; then
+              echo "::error file=$path::the setup job must call _setup.yml with a package: input"
+              ret=1
+            elif [[ ! -f "docs/packages/$package.yaml" ]]; then
+              echo "::error file=$path::docs/packages/$package.yaml does not exist; add it with the versions to build"
+              ret=1
+            fi
+          done
+          exit $ret

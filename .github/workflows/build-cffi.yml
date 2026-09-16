@@ -5,22 +5,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'cffi version to build (git tag without leading v, e.g. 2.1.0)'
-        required: true
-        default: '2.1.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cffi.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-cffi.yml'
+      - 'docs/packages/cffi.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cffi.yml'
+      - 'docs/packages/cffi.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.1.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  CFFI_VERSION: ${{ inputs.version || '2.1.0' }}
   UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
   UV_INDEX_STRATEGY: unsafe-best-match
   UV_ONLY_BINARY: ':all:'
@@ -29,13 +35,21 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: cffi
+      version: ${{ inputs.version }}
 
   python_sdist:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     runs-on: ubuntu-24.04-riscv
-    outputs:
-      sdist_artifact_name: ${{ steps.build_sdist.outputs.sdist_artifact_name }}
-      package_version: ${{ steps.build_sdist.outputs.package_version }}
+    env:
+      CFFI_VERSION: ${{ matrix.version }}
+
     steps:
     - name: checkout cffi
       uses: actions/checkout@v7
@@ -53,20 +67,16 @@ jobs:
         enable-cache: false
 
     - name: build sdist
-      id: build_sdist
       run: |
         rm -rf dist/
         uv pip install build
         python -m build --sdist
 
-        echo "sdist_artifact_name=$(ls ./dist)" >> "$GITHUB_OUTPUT"
-        echo "package_version=$(ls ./dist | sed -En 's/cffi-(.+)\.tar\.gz/\1/p')" >> "$GITHUB_OUTPUT"
-
     - name: upload sdist artifact
       uses: actions/upload-artifact@v7
       with:
-        name: ${{ steps.build_sdist.outputs.sdist_artifact_name }}
-        path: dist/${{ steps.build_sdist.outputs.sdist_artifact_name }}
+        name: cffi-${{ env.CFFI_VERSION }}-sdist
+        path: dist/*.tar.gz
         if-no-files-found: error
       # always upload the sdist artifact- all the wheel build jobs require it
 
@@ -74,19 +84,24 @@ jobs:
     # Unlike upstream, we depend only on python_sdist, since we don't need to
     # build a large matrix of targets
     needs: [setup, python_sdist]
-    name: Build cffi ${{ inputs.version || '2.1.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cffi ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      CFFI_VERSION: ${{ matrix.version }}
 
     steps:
     - name: fetch sdist artifact
       id: fetch_sdist
       uses: actions/download-artifact@v8
       with:
-        name: ${{ needs.python_sdist.outputs.sdist_artifact_name }}
+        name: cffi-${{ env.CFFI_VERSION }}-sdist
 
     - name: setup uv
       uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
@@ -134,11 +149,16 @@ jobs:
         if-no-files-found: error
 
   publish:
-    name: Publish cffi ${{ inputs.version || '2.1.0' }}
+    name: Publish cffi ${{ matrix.version }}
     needs: [setup, linux]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: cffi-${{ inputs.version || '2.1.0' }}-*-manylinux_riscv64
+      artifact-pattern: cffi-${{ matrix.version }}-*-manylinux_riscv64

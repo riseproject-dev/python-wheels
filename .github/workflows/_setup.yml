@@ -5,10 +5,45 @@ name: Build workflow setup
 
 on:
   workflow_call:
+    inputs:
+      package:
+        description: Package whose docs/packages/<package>.yaml lists the versions to build.
+        required: true
+        type: string
+      version:
+        description: Version glob to (re)build; empty builds every version not released yet.
+        required: false
+        default: ''
+        type: string
+    outputs:
+      versions:
+        description: JSON list of versions to build; "[]" when there is nothing to build.
+        value: ${{ jobs.setup.outputs.versions }}
 
 jobs:
   setup:
     if: github.event_name != 'pull_request' || github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.versions.outputs.versions }}
     steps:
-      - run: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          sparse-checkout: |
+            ci_scripts
+            docs/packages
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: false
+
+      - name: Select versions of ${{ inputs.package }} to build
+        id: versions
+        env:
+          PACKAGE: ${{ inputs.package }}
+          VERSION_GLOB: ${{ inputs.version }}
+        run: |
+          versions=$(uv run --quiet ci_scripts/pending_versions.py ${VERSION_GLOB:+--glob "$VERSION_GLOB"} "$PACKAGE")
+          echo "versions=$versions" >> "$GITHUB_OUTPUT"
+          echo "Versions to build: $versions"
