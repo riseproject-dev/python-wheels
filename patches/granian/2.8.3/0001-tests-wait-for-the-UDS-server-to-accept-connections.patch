@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 27 Aug 2026 00:00:00 +0000
+Subject: [PATCH] tests: wait for the UDS server to accept connections
+
+tests/test_uds.py gives the spawned server a flat 1.5s to import granian,
+bind its socket and start accepting. That budget holds on upstream's x86
+runners and does not on the slower riscv64 ones, where the whole
+tests/test_uds.py http section fails before the socket exists:
+
+    httpx.ConnectError: [Errno 2] No such file or directory
+    httpx.ConnectError: [Errno 111] Connection refused
+
+tests/conftest.py already solves this for the TCP tests by retrying the
+connection until it succeeds; do the same here. The wait returns as soon
+as the socket answers, so faster hardware pays nothing.
+
+Upstream-Status: To upstream [not yet submitted]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/tests/test_uds.py b/tests/test_uds.py
+index 332a1a0..c2c91ae 100644
+--- a/tests/test_uds.py
++++ b/tests/test_uds.py
+@@ -1,6 +1,7 @@
+ import asyncio
+ import multiprocessing as mp
+ import os
++import socket
+ import stat
+ import sys
+ from contextlib import asynccontextmanager
+@@ -50,7 +51,17 @@ async def _server(
+ 
+     proc = mp.get_context('spawn').Process(target=_serve, kwargs=kwargs)
+     proc.start()
+-    await asyncio.sleep(1.5)
++
++    conn_failures = 0
++    while conn_failures < 10:
++        try:
++            await asyncio.sleep(1.5)
++            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
++                sock.settimeout(1)
++                sock.connect('granian.sock')
++            break
++        except Exception:
++            conn_failures += 1
+ 
+     try:
+         yield
