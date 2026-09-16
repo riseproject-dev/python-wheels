@@ -1,0 +1,111 @@
+From 1678e8201f7d8e30324de5cd9f65a37ee5ac524f Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 28 Aug 2026 07:35:26 +0200
+Subject: [PATCH] tests: wait on what is asserted, and scale the context-pump
+ budgets
+
+Two more races that only a slow machine reaches, both in the same family as
+the completion-wait budget.
+
+test_raising_callback_does_not_kill_the_result_handler_thread waits for
+`failing_op.written` to become non-zero and then asserts the excepthook
+recorded the ZeroDivisionError. Those are two different events: the result
+handler sets `written` and only afterwards unwinds the raising callback into
+threading.excepthook, so the assertion can run in the gap. pytest's own
+output shows it happening -- `assert 0 == 1` where the rendered list already
+holds the _ExceptHookArgs. Wait for `unraisable` instead, which is what the
+next two lines assert; nothing else in the block reads `written`.
+
+_pump_contexts drains submitted operations under a fixed deadline, and the
+heaviest parametrisation of test_concurrent_submits_to_one_context_all_backends
+queues 32*64*8 = 16384 of them against a 20s budget. Scale the pump budgets
+by the factor separating this runner from upstream's CI (the suite takes 700s
+here against 117s in the same image on aarch64); `timeout=0` is left alone,
+since it means "check once and do not wait".
+
+Upstream-Status: To upstream [not yet submitted; found porting caio to riscv64]
+---
+ tests/test_free_threading.py      | 14 +++++++-------
+ tests/test_python_aio_callback.py |  2 +-
+ 2 files changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/tests/test_free_threading.py b/tests/test_free_threading.py
+index 115f508..47af3fc 100644
+--- a/tests/test_free_threading.py
++++ b/tests/test_free_threading.py
+@@ -126,7 +126,7 @@ def _require_gil_disabled():
+         pytest.skip("requires a free-threaded interpreter with the GIL disabled")
+ 
+ 
+-def _pump_contexts(contexts, predicate, timeout=10):
++def _pump_contexts(contexts, predicate, timeout=60):
+     deadline = time.monotonic() + timeout
+     while not predicate():
+         if time.monotonic() >= deadline:
+@@ -305,7 +305,7 @@ def test_same_operation_is_claimed_once_across_contexts_all_backends(
+                 _pump_contexts(
+                     contexts,
+                     window_finished,
+-                    timeout=20,
++                    timeout=120,
+                 )
+ 
+         workers.join()
+@@ -318,7 +318,7 @@ def test_same_operation_is_claimed_once_across_contexts_all_backends(
+         _pump_contexts(
+             contexts,
+             all_callbacks_finished,
+-            timeout=20,
++            timeout=120,
+         )
+         assert accepted == iterations, (
+             f"{accepted - iterations} Operations were submitted twice"
+@@ -401,7 +401,7 @@ def test_concurrent_submits_to_one_context_all_backends(
+         _pump_contexts(
+             (context,),
+             all_callbacks_finished,
+-            timeout=20,
++            timeout=120,
+         )
+         assert callback_results == [(4, 4)] * total
+ 
+@@ -487,7 +487,7 @@ def test_concurrent_process_events_delivers_each_completion_once(
+         # Fixed synchronized rounds should normally drain everything. Finish
+         # any genuinely late kernel completions serially so the assertion
+         # below diagnoses duplicate delivery, not storage latency.
+-        _pump_contexts((context,), all_callbacks_finished, timeout=20)
++        _pump_contexts((context,), all_callbacks_finished, timeout=120)
+         assert callback_counts == [1] * operation_count
+     finally:
+         workers.close()
+@@ -742,7 +742,7 @@ def test_concurrent_uring_cancel_requests_do_not_corrupt_submission_ring(
+             with callback_lock:
+                 return sum(callback_counts) >= operation_count
+ 
+-        _pump_contexts((context,), all_targets_completed, timeout=10)
++        _pump_contexts((context,), all_targets_completed, timeout=60)
+         assert callback_counts == [1] * operation_count
+     finally:
+         workers.close()
+@@ -753,7 +753,7 @@ def test_concurrent_uring_cancel_requests_do_not_corrupt_submission_ring(
+             _pump_contexts(
+                 (context,),
+                 lambda: sum(callback_counts) >= operation_count,
+-                timeout=5,
++                timeout=30,
+             )
+         except (BrokenPipeError, TimeoutError):
+             pass
+diff --git a/tests/test_python_aio_callback.py b/tests/test_python_aio_callback.py
+index 2eb037b..393d691 100644
+--- a/tests/test_python_aio_callback.py
++++ b/tests/test_python_aio_callback.py
+@@ -38,7 +38,7 @@ def test_raising_callback_does_not_kill_the_result_handler_thread():
+             ctx.submit(failing_op)
+ 
+             deadline = time.monotonic() + 5.0
+-            while failing_op.written == 0 and time.monotonic() < deadline:
++            while not unraisable and time.monotonic() < deadline:
+                 time.sleep(0.001)
+ 
+             assert len(unraisable) == 1

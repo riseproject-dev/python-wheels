@@ -1,0 +1,49 @@
+From c3ad0c0e28ddc3364b66e7075370e4f7d67c6eee Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 17 Sep 2026 08:20:54 +0200
+Subject: [PATCH] tools/structure: catch TypeError too in applyCallableIndex's
+ variadic retry
+
+applyCallableIndex (added in 3.8.1 for callable powerIndex entries like
+`s[ca.vertcat, ['x','y']]`) tries `p(r)` first and falls back to `p(*r)`
+only on NotImplementedError, on the assumption that a variadic free
+function like vertcat raises NotImplementedError when handed a single
+list argument it can't match.
+
+It doesn't: vertcat/horzcat/veccat are SWIG-overloaded functions, so
+`_vertcat((r,))` (a one-tuple holding the list) fails C++ overload
+resolution and raises TypeError instead - "Wrong number or type of
+arguments for overloaded function '_vertcat'". The except clause never
+catches it, so the p(*r) retry this function exists for never runs, and
+every callable-powerIndex lookup using vertcat/horzcat fails outright.
+
+Reproduces on any platform running the test suite (not riscv64-specific):
+tools.Toolstests.test_callable_powerindex and test_structure both exercise
+`s[ca.vertcat, [...]]`.
+
+Upstream-Status: To upstream [not yet submitted; cannot open issues/PRs against casadi/casadi from this environment]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ swig/python/tools/structure.py | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/swig/python/tools/structure.py b/swig/python/tools/structure.py
+index 5c768df..8e89792 100644
+--- a/swig/python/tools/structure.py
++++ b/swig/python/tools/structure.py
+@@ -116,7 +116,10 @@ def applyCallableIndex(p,r):
+   # Apply a callable powerIndex entry to the sub-result it indexes
+   try:
+     return p(r)
+-  except NotImplementedError:
++  except (NotImplementedError, TypeError):
++    # vertcat/horzcat/... are SWIG-overloaded free functions, not methods:
++    # a single-list argument that doesn't match any registered overload
++    # raises TypeError from the C++ dispatch, not NotImplementedError.
+     if not isinstance(r,list): raise
+     return p(*r) # casadi's concatenations (vertcat, ...) are variadic, not list-taking
+ 
+-- 
+2.50.1 (Apple Git-155)
+
