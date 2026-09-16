@@ -12,35 +12,49 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'jq version to build (git tag, e.g. 1.12.0)'
-        required: true
-        default: '1.12.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/jq.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-jq.yml'
+      - 'docs/packages/jq.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-jq.yml'
+      - 'docs/packages/jq.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.12.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  JQ_VERSION: ${{ inputs.version || '1.12.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: jq
+      version: ${{ inputs.version }}
 
   build_sdist:
     needs: [setup]
-    name: Build jq ${{ inputs.version || '1.12.0' }} sdist
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build jq ${{ matrix.version }} sdist
     runs-on: ubuntu-latest
-    outputs:
-      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
-      package_version: ${{ steps.sdist.outputs.package_version }}
+    env:
+      JQ_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout jq.py ${{ env.JQ_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -64,41 +78,40 @@ jobs:
           uv pip install build
           python -m build --sdist --outdir dist
 
-          sdist_name="$(ls dist)"
-          {
-            echo "sdist_name=${sdist_name}"
-            echo "package_version=$(echo "${sdist_name}" | sed -En 's/jq-(.+)\.tar\.gz/\1/p')"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Upload sdist artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: ${{ steps.sdist.outputs.sdist_name }}
-          path: dist/${{ steps.sdist.outputs.sdist_name }}
+          name: jq-${{ env.JQ_VERSION }}-sdist
+          path: dist/*.tar.gz
           if-no-files-found: error
 
   build_wheels:
     needs: [setup, build_sdist]
-    name: Build jq ${{ inputs.version || '1.12.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build jq ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      JQ_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Download sdist
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: ${{ needs.build_sdist.outputs.sdist_name }}
+          name: jq-${{ env.JQ_VERSION }}-sdist
           path: dist/
 
       - name: Extract sdist and stage vendored licence texts
         run: |
           set -euo pipefail
           mkdir src
-          tar xzf "dist/${{ needs.build_sdist.outputs.sdist_name }}" --strip-components=1 -C src
+          tar xzf dist/*.tar.gz --strip-components=1 -C src
 
           # setuptools' default license-files glob (LICEN[CS]E*) picks these up from
           # the project root; jq statically links both libjq and oniguruma into the
@@ -127,11 +140,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish jq ${{ inputs.version || '1.12.0' }}
+    name: Publish jq ${{ matrix.version }}
     needs: [setup, build_sdist, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: jq-${{ needs.build_sdist.outputs.package_version }}-*-manylinux_riscv64
+      artifact-pattern: jq-${{ matrix.version }}-*-manylinux_riscv64

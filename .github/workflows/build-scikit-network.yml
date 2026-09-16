@@ -9,41 +9,56 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'scikit-network version to build (git tag without leading v, e.g. 0.33.5)'
-        required: true
-        default: '0.33.5'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/scikit-network.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-scikit-network.yml'
+      - 'docs/packages/scikit-network.yaml'
+      - 'patches/scikit-network/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-scikit-network.yml'
+      - 'docs/packages/scikit-network.yaml'
       - 'patches/scikit-network/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.33.5' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  SCIKIT_NETWORK_VERSION: ${{ inputs.version || '0.33.5' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: scikit-network
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build scikit-network ${{ inputs.version || '0.33.5' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build scikit-network ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # No cp314t: upstream's own release.yml/wheels_build.yml CIBW_BUILD lists
         # only cp310-cp314, and pyproject.toml pins cython <= 3.0.12 (3.1 breaks
         # the C++ build), a series with no declared free-threading support.
         python: ["cp312", "cp313", "cp314"]
+
+    env:
+      SCIKIT_NETWORK_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout scikit-network v${{ env.SCIKIT_NETWORK_VERSION }}
@@ -83,8 +98,16 @@ jobs:
 
   gpl_sources:
     needs: [setup]
-    name: Collect GPL sources (gcc) for scikit-network ${{ inputs.version || '0.33.5' }}
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources (gcc) for scikit-network ${{ matrix.version }}
     runs-on: ubuntu-24.04-riscv
+
+    env:
+      SCIKIT_NETWORK_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout python-wheels
@@ -106,13 +129,18 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish scikit-network ${{ inputs.version || '0.33.5' }}
+    name: Publish scikit-network ${{ matrix.version }}
     needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: scikit-network-${{ inputs.version || '0.33.5' }}-*-manylinux_riscv64
-      gpl-sources-artifact: scikit-network-${{ inputs.version || '0.33.5' }}-gpl-sources
+      artifact-pattern: scikit-network-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: scikit-network-${{ matrix.version }}-gpl-sources
       gpl-sources-description: gcc

@@ -9,43 +9,56 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'markdown-it-pyrs version to build (git tag without leading v, e.g. 0.4.0)'
-        required: true
-        default: '0.4.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/markdown-it-pyrs.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-markdown-it-pyrs.yml'
+      - 'docs/packages/markdown-it-pyrs.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-markdown-it-pyrs.yml'
+      - 'docs/packages/markdown-it-pyrs.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.4.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.4.0 there.
-  MARKDOWN_IT_PYRS_VERSION: ${{ inputs.version || '0.4.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: markdown-it-pyrs
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build markdown-it-pyrs ${{ inputs.version || '0.4.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build markdown-it-pyrs ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # pyo3 0.19.2 sets no abi3 feature, so every interpreter needs its own
         # build. cp314 segfaults on the first .render() call - pyo3 0.19.2
         # predates CPython 3.14's changed Unicode object layout (gotcha 322) -
         # and it also predates Py_GIL_DISABLED entirely, so cp314t is dropped
         # too.
         python: ["cp312", "cp313"]
+
+    env:
+      MARKDOWN_IT_PYRS_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout markdown-it-pyrs v${{ env.MARKDOWN_IT_PYRS_VERSION }}
@@ -82,11 +95,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish markdown-it-pyrs ${{ inputs.version || '0.4.0' }}
+    name: Publish markdown-it-pyrs ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: markdown-it-pyrs-${{ inputs.version || '0.4.0' }}-*-manylinux_riscv64
+      artifact-pattern: markdown-it-pyrs-${{ matrix.version }}-*-manylinux_riscv64

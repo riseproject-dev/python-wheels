@@ -11,23 +11,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'symengine version to build (git tag, e.g. v0.14.1)'
-        required: true
-        default: 'v0.14.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/symengine.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-symengine.yml'
+      - 'docs/packages/symengine.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-symengine.yml'
+      - 'docs/packages/symengine.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || 'v0.14.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to v0.14.1 there.
-  SYMENGINE_VERSION: ${{ inputs.version || 'v0.14.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   # The C++ SymEngine release symengine.py's own symengine_version.txt commit
   # descends from, pinned by symengine-wheels' recipe/meta.yaml alongside a
@@ -38,27 +43,35 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: symengine
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build symengine ${{ inputs.version || 'v0.14.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build symengine ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python:
           - "cp312"
           - "cp313"
           - "cp314"
           - "cp314t"
 
+    env:
+      SYMENGINE_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout symengine.py ${{ env.SYMENGINE_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: symengine/symengine.py
-          ref: ${{ env.SYMENGINE_VERSION }}
+          ref: v${{ env.SYMENGINE_VERSION }}
           persist-credentials: false
 
       - name: Build wheels
@@ -121,8 +134,16 @@ jobs:
 
   gpl_sources:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Collect GPL sources
     runs-on: ubuntu-24.04-riscv
+
+    env:
+      SYMENGINE_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout python-wheels
@@ -143,13 +164,18 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish symengine ${{ inputs.version || 'v0.14.1' }}
+    name: Publish symengine ${{ matrix.version }}
     needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: symengine-${{ inputs.version || 'v0.14.1' }}-*-manylinux_riscv64
-      gpl-sources-artifact: symengine-${{ inputs.version || 'v0.14.1' }}-gpl-sources
+      artifact-pattern: symengine-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: symengine-${{ matrix.version }}-gpl-sources
       gpl-sources-description: gcc, gmp, mpfr, mpc

@@ -9,15 +9,22 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pycryptodomex version to build (git tag without leading v and trailing x, e.g. 3.23.0)'
-        required: true
-        default: '3.23.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pycryptodomex.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pycryptodomex.yml'
+      - 'docs/packages/pycryptodomex.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pycryptodomex.yml'
+      - 'docs/packages/pycryptodomex.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '3.23.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
@@ -26,7 +33,6 @@ permissions:
 env:
   # The Cryptodome namespace is built from the same tree, tagged with a trailing "x"
   # (that tag adds the .separate_namespace marker setup.py keys off).
-  PYCRYPTODOMEX_VERSION: ${{ inputs.version || '3.23.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   # Upstream's requirements-test.txt; without it SelfTest skips its Wycheproof vectors.
   TEST_REQUIRES: pycryptodome-test-vectors==1.0.22
@@ -35,12 +41,23 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pycryptodomex
+      version: ${{ inputs.version }}
 
   build_abi3:
     needs: [setup]
-    name: Build pycryptodomex ${{ inputs.version || '3.23.0' }} cp37-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pycryptodomex ${{ matrix.version }} cp37-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
+
+    env:
+      PYCRYPTODOMEX_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pycryptodome v${{ env.PYCRYPTODOMEX_VERSION }}x
@@ -68,9 +85,17 @@ jobs:
   # Py_GIL_DISABLED); cp314t is the only free-threaded interpreter in the image.
   build_freethreaded:
     needs: [setup]
-    name: Build pycryptodomex ${{ inputs.version || '3.23.0' }} cp314t-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pycryptodomex ${{ matrix.version }} cp314t-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
+
+    env:
+      PYCRYPTODOMEX_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pycryptodome v${{ env.PYCRYPTODOMEX_VERSION }}x
@@ -95,11 +120,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pycryptodomex ${{ inputs.version || '3.23.0' }}
+    name: Publish pycryptodomex ${{ matrix.version }}
     needs: [setup, build_abi3, build_freethreaded]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pycryptodomex-${{ inputs.version || '3.23.0' }}-*-manylinux_riscv64
+      artifact-pattern: pycryptodomex-${{ matrix.version }}-*-manylinux_riscv64

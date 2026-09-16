@@ -9,37 +9,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pyxirr version to build (git tag without leading v, e.g. 0.10.8)'
-        required: true
-        default: '0.10.8'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyxirr.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pyxirr.yml'
+      - 'docs/packages/pyxirr.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyxirr.yml'
+      - 'docs/packages/pyxirr.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.10.8' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.10.8 there.
-  PYXIRR_VERSION: ${{ inputs.version || '0.10.8' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyxirr
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build pyxirr ${{ inputs.version || '0.10.8' }} ${{ matrix.tag }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyxirr ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           # pyxirr's [tool.maturin] features only lists "extension"
           # (pyo3/extension-module); upstream's own release job additionally
@@ -53,6 +63,9 @@ jobs:
               cp312-manylinux_riscv64 cp313-manylinux_riscv64
               cp314-manylinux_riscv64
             features: --features extension,abi
+
+    env:
+      PYXIRR_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pyxirr v${{ env.PYXIRR_VERSION }}
@@ -147,11 +160,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pyxirr ${{ inputs.version || '0.10.8' }}
+    name: Publish pyxirr ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pyxirr-${{ inputs.version || '0.10.8' }}-*-manylinux_riscv64
+      artifact-pattern: pyxirr-${{ matrix.version }}-*-manylinux_riscv64

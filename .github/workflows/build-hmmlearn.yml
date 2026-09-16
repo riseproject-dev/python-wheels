@@ -8,38 +8,49 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'hmmlearn version to build (git tag, e.g. 0.3.3)'
-        required: true
-        default: '0.3.3'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/hmmlearn.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-hmmlearn.yml'
+      - 'docs/packages/hmmlearn.yaml'
+      - 'patches/hmmlearn/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-hmmlearn.yml'
+      - 'docs/packages/hmmlearn.yaml'
       - 'patches/hmmlearn/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.3.3' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.3.3 there.
-  HMMLEARN_VERSION: ${{ inputs.version || '0.3.3' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: hmmlearn
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build hmmlearn ${{ inputs.version || '0.3.3' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build hmmlearn ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Per-interpreter (not abi3): the pybind11 extension links the version-specific
         # ABI. cp38-cp311 dropped from upstream's cp38-cp313 (gotcha 67/84): hmmlearn's
         # hard runtime dependency scikit-learn>=0.16 only has riscv64 wheels on
@@ -50,6 +61,9 @@ jobs:
           - "cp313"
           - "cp314"
           - "cp314t"
+
+    env:
+      HMMLEARN_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout hmmlearn ${{ env.HMMLEARN_VERSION }}
@@ -96,11 +110,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish hmmlearn ${{ inputs.version || '0.3.3' }}
+    name: Publish hmmlearn ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: hmmlearn-${{ inputs.version || '0.3.3' }}-*-manylinux_riscv64
+      artifact-pattern: hmmlearn-${{ matrix.version }}-*-manylinux_riscv64

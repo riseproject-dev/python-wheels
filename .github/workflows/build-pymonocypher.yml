@@ -9,35 +9,49 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pymonocypher version to build (git tag without leading v, e.g. 4.0.3.3)'
-        required: true
-        default: '4.0.3.3'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pymonocypher.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pymonocypher.yml'
+      - 'docs/packages/pymonocypher.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pymonocypher.yml'
+      - 'docs/packages/pymonocypher.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '4.0.3.3' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  PYMONOCYPHER_VERSION: ${{ inputs.version || '4.0.3.3' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pymonocypher
+      version: ${{ inputs.version }}
 
   build_sdist:
     needs: [setup]
-    name: Build pymonocypher ${{ inputs.version || '4.0.3.3' }} sdist
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pymonocypher ${{ matrix.version }} sdist
     runs-on: ubuntu-latest
-    outputs:
-      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
-      package_version: ${{ steps.sdist.outputs.package_version }}
+    env:
+      PYMONOCYPHER_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout pymonocypher v${{ env.PYMONOCYPHER_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -58,10 +72,6 @@ jobs:
         run: |
           uv pip install build
           python -m build --sdist
-          sdists=(dist/*.tar.gz)
-          sdist_name="$(basename "${sdists[0]}")"
-          echo "sdist_name=${sdist_name}" >> "$GITHUB_OUTPUT"
-          echo "package_version=$(echo "${sdist_name}" | sed -En 's/pymonocypher-(.+)\.tar\.gz/\1/p')" >> "$GITHUB_OUTPUT"
 
       - name: Upload sdist artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -72,13 +82,18 @@ jobs:
 
   build_wheels:
     needs: [setup, build_sdist]
-    name: Build pymonocypher ${{ inputs.version || '4.0.3.3' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pymonocypher ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      PYMONOCYPHER_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Download sdist
@@ -87,9 +102,12 @@ jobs:
           name: pymonocypher-${{ env.PYMONOCYPHER_VERSION }}-sdist
           path: dist/
 
+      - id: sdist_path
+        run: echo "path=$(echo dist/*.tar.gz)" >> "$GITHUB_OUTPUT"
+
       - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
-          package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}
+          package-dir: ${{ steps.sdist_path.outputs.path }}
         env:
           CIBW_ARCHS: riscv64
           CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
@@ -104,16 +122,21 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: pymonocypher-${{ needs.build_sdist.outputs.package_version }}-${{ matrix.python }}-manylinux_riscv64
+          name: pymonocypher-${{ matrix.version }}-${{ matrix.python }}-manylinux_riscv64
           path: ./wheelhouse/*.whl
           if-no-files-found: error
 
   publish:
-    name: Publish pymonocypher ${{ inputs.version || '4.0.3.3' }}
+    name: Publish pymonocypher ${{ matrix.version }}
     needs: [setup, build_sdist, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pymonocypher-${{ needs.build_sdist.outputs.package_version }}-*-manylinux_riscv64
+      artifact-pattern: pymonocypher-${{ matrix.version }}-*-manylinux_riscv64

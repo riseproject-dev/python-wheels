@@ -9,35 +9,52 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'praat-parselmouth version to build (git tag without leading v, e.g. 0.4.7)'
-        required: true
-        default: '0.4.7'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/praat-parselmouth.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-praat-parselmouth.yml'
+      - 'docs/packages/praat-parselmouth.yaml'
+      - 'patches/praat-parselmouth/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-praat-parselmouth.yml'
+      - 'docs/packages/praat-parselmouth.yaml'
       - 'patches/praat-parselmouth/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.4.7' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.4.7 there.
-  PARSELMOUTH_VERSION: ${{ inputs.version || '0.4.7' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: praat-parselmouth
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build praat-parselmouth ${{ inputs.version || '0.4.7' }} cp312/cp313/cp314-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build praat-parselmouth ${{ matrix.version }} cp312/cp313/cp314-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 480  # ~1M lines of vendored Praat C/C++ (clapack, gsl, glpk, flac, portaudio, espeak, vorbis, opusfile)
+
+    env:
+      PARSELMOUTH_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout Parselmouth v${{ env.PARSELMOUTH_VERSION }}
@@ -97,11 +114,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish praat-parselmouth ${{ inputs.version || '0.4.7' }}
+    name: Publish praat-parselmouth ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: praat-parselmouth-${{ inputs.version || '0.4.7' }}-manylinux_riscv64
+      artifact-pattern: praat-parselmouth-${{ matrix.version }}-manylinux_riscv64

@@ -8,23 +8,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'swiglpk version to build (git tag, e.g. 5.0.13)'
-        required: true
-        default: '5.0.13'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/swiglpk.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-swiglpk.yml'
+      - 'docs/packages/swiglpk.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-swiglpk.yml'
+      - 'docs/packages/swiglpk.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '5.0.13' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 5.0.13 there.
-  SWIGLPK_VERSION: ${{ inputs.version || '5.0.13' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   # swiglpk's own CI resolves "latest GLPK" at release time and records the
   # result only in the GitHub release body; swiglpk 5.0.13 built against GLPK
@@ -37,20 +42,28 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: swiglpk
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build swiglpk ${{ inputs.version || '5.0.13' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build swiglpk ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python:
           - "cp312"
           - "cp313"
           - "cp314"
           - "cp314t"
+
+    env:
+      SWIGLPK_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout swiglpk ${{ env.SWIGLPK_VERSION }}
@@ -124,8 +137,16 @@ jobs:
 
   gpl_sources:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Collect GPL sources
     runs-on: ubuntu-24.04-riscv
+
+    env:
+      SWIGLPK_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout python-wheels
@@ -164,13 +185,18 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish swiglpk ${{ inputs.version || '5.0.13' }}
+    name: Publish swiglpk ${{ matrix.version }}
     needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: swiglpk-${{ inputs.version || '5.0.13' }}-*-manylinux_riscv64
-      gpl-sources-artifact: swiglpk-${{ inputs.version || '5.0.13' }}-gpl-sources
+      artifact-pattern: swiglpk-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: swiglpk-${{ matrix.version }}-gpl-sources
       gpl-sources-description: gcc, gmp, glpk

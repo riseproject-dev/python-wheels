@@ -9,35 +9,52 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'nemo-relay version/tag to build (e.g. 0.8.4)'
-        required: true
-        default: '0.8.4'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/nemo-relay.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-nemo-relay.yml'
+      - 'docs/packages/nemo-relay.yaml'
+      - 'patches/nemo-relay/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-nemo-relay.yml'
+      - 'docs/packages/nemo-relay.yaml'
       - 'patches/nemo-relay/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.8.4' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.8.4 there.
-  NEMO_RELAY_VERSION: ${{ inputs.version || '0.8.4' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: nemo-relay
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build nemo-relay ${{ inputs.version || '0.8.4' }} cp311-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build nemo-relay ${{ matrix.version }} cp311-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
+
+    env:
+      NEMO_RELAY_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout nemo-relay ${{ env.NEMO_RELAY_VERSION }}
@@ -113,11 +130,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish nemo-relay ${{ inputs.version || '0.8.4' }}
+    name: Publish nemo-relay ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: nemo-relay-${{ inputs.version || '0.8.4' }}-*-manylinux_riscv64
+      artifact-pattern: nemo-relay-${{ matrix.version }}-*-manylinux_riscv64

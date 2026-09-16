@@ -9,37 +9,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'fastwarc version to build (git tag without leading v, e.g. 1.0.9)'
-        required: true
-        default: '1.0.9'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/fastwarc.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-fastwarc.yml'
+      - 'docs/packages/fastwarc.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fastwarc.yml'
+      - 'docs/packages/fastwarc.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.0.9' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.0.9 there.
-  FASTWARC_VERSION: ${{ inputs.version || '1.0.9' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: fastwarc
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build fastwarc ${{ inputs.version || '1.0.9' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build fastwarc ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Per-interpreter (not abi3): both the Cython legacy extensions and the
         # pyo3 extension link the version-specific ABI.
         python:
@@ -47,6 +57,9 @@ jobs:
           - "cp313"
           - "cp314"
           - "cp314t"
+
+    env:
+      FASTWARC_VERSION: ${{ matrix.version }}
 
     steps:
       # fastwarc-py is a subdirectory of the chatnoir-resiliparse monorepo; its
@@ -129,11 +142,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish fastwarc ${{ inputs.version || '1.0.9' }}
+    name: Publish fastwarc ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: fastwarc-${{ inputs.version || '1.0.9' }}-*-manylinux_riscv64
+      artifact-pattern: fastwarc-${{ matrix.version }}-*-manylinux_riscv64

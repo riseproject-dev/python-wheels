@@ -9,42 +9,55 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'iteration-utilities version to build (git tag without leading v, e.g. 0.13.0)'
-        required: true
-        default: '0.13.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/iteration-utilities.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-iteration-utilities.yml'
+      - 'docs/packages/iteration-utilities.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-iteration-utilities.yml'
+      - 'docs/packages/iteration-utilities.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.13.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.13.0 there.
-  ITERATION_UTILITIES_VERSION: ${{ inputs.version || '0.13.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: iteration-utilities
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build iteration-utilities ${{ inputs.version || '0.13.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build iteration-utilities ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # cp314/cp314t dropped: upstream 0.13.0 predates their _Py_IMMORTAL_REFCNT
         # removal from the public-facing internals iteration_utilities relies on for
         # its singleton objects (PYIU_CREATE_SINGLETON_INSTANCE in helpercompat.h) --
         # upstream ships no cp314 wheel either, confirming this isn't riscv64-specific.
         python: ["cp312", "cp313"]
+
+    env:
+      ITERATION_UTILITIES_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout iteration_utilities v${{ env.ITERATION_UTILITIES_VERSION }}
@@ -73,11 +86,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish iteration-utilities ${{ inputs.version || '0.13.0' }}
+    name: Publish iteration-utilities ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: iteration-utilities-${{ inputs.version || '0.13.0' }}-*-manylinux_riscv64
+      artifact-pattern: iteration-utilities-${{ matrix.version }}-*-manylinux_riscv64

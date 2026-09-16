@@ -9,41 +9,54 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'zlib-state version to build (git tag without leading v, e.g. 0.1.12)'
-        required: true
-        default: '0.1.12'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/zlib-state.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-zlib-state.yml'
+      - 'docs/packages/zlib-state.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-zlib-state.yml'
+      - 'docs/packages/zlib-state.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.1.12' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.1.12 there.
-  ZLIB_STATE_VERSION: ${{ inputs.version || '0.1.12' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: zlib-state
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build zlib-state ${{ inputs.version || '0.1.12' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build zlib-state ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # setup.py is a plain setuptools.Extension (no py_limited_api), so
         # upstream ships one wheel per interpreter, matching PyPI's cp3xx-cp3xx
         # tags for cp39-cp314 plus a cp314t free-threaded build.
         python: ["cp39", "cp310", "cp311", "cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      ZLIB_STATE_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout zlib-state v${{ env.ZLIB_STATE_VERSION }}
@@ -78,11 +91,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish zlib-state ${{ inputs.version || '0.1.12' }}
+    name: Publish zlib-state ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: zlib-state-${{ inputs.version || '0.1.12' }}-*-manylinux_riscv64
+      artifact-pattern: zlib-state-${{ matrix.version }}-*-manylinux_riscv64

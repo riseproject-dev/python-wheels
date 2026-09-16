@@ -10,34 +10,50 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'burner-redis version to build (git tag without the leading v, e.g. 0.1.7)'
-        required: true
-        default: '0.1.7'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/burner-redis.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-burner-redis.yml'
+      - 'docs/packages/burner-redis.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-burner-redis.yml'
+      - 'docs/packages/burner-redis.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.1.7' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.1.7 there.
-  BURNER_REDIS_VERSION: ${{ inputs.version || '0.1.7' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: burner-redis
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build burner-redis ${{ inputs.version || '0.1.7' }} cp310-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build burner-redis ${{ matrix.version }} cp310-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 240
+
+    env:
+      BURNER_REDIS_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout burner-redis v${{ env.BURNER_REDIS_VERSION }}
@@ -114,11 +130,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish burner-redis ${{ inputs.version || '0.1.7' }}
+    name: Publish burner-redis ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: burner-redis-${{ inputs.version || '0.1.7' }}-*-manylinux_riscv64
+      artifact-pattern: burner-redis-${{ matrix.version }}-*-manylinux_riscv64

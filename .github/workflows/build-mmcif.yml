@@ -9,24 +9,30 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'mmcif version to build (e.g. 1.1.1)'
-        required: true
-        default: '1.1.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/mmcif.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-mmcif.yml'
+      - 'docs/packages/mmcif.yaml'
+      - 'patches/mmcif/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mmcif.yml'
+      - 'docs/packages/mmcif.yaml'
       - 'patches/mmcif/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.1.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.1.1 there.
-  MMCIF_VERSION: ${{ inputs.version || '1.1.1' }}
   # Upstream cuts PyPI releases without pushing a git tag; this is the merge
   # commit whose tree is byte-identical to the 1.1.1 sdist (mmcif/__init__.py's
   # __version__ matches, 18 minutes before the sdist upload). Update alongside
@@ -37,16 +43,24 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: mmcif
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build mmcif ${{ inputs.version || '1.1.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build mmcif ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      MMCIF_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout py-mmcif ${{ env.MMCIF_VERSION }}
@@ -95,11 +109,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish mmcif ${{ inputs.version || '1.1.1' }}
+    name: Publish mmcif ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: mmcif-${{ inputs.version || '1.1.1' }}-*-manylinux_riscv64
+      artifact-pattern: mmcif-${{ matrix.version }}-*-manylinux_riscv64

@@ -12,31 +12,41 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'vtk version to build (git tag without leading v, e.g. 9.7.0)'
-        required: true
-        default: '9.7.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/vtk.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-vtk.yml'
+      - 'docs/packages/vtk.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-vtk.yml'
+      - 'docs/packages/vtk.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '9.7.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  VTK_VERSION: ${{ inputs.version || '9.7.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: vtk
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build vtk ${{ inputs.version || '9.7.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build vtk ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 2880  # 48h: these runners have 4 cores, and a prior attempt was only
                             # ~42% through the ninja build (5095/12192 steps) after 7.5h -
@@ -45,9 +55,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # VTK is not abi3 (VTK_WRAP_PYTHON links directly against Python.h): upstream
         # publishes one wheel per interpreter, rebuilding the whole tree each time.
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      VTK_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout VTK v${{ env.VTK_VERSION }}
@@ -218,11 +232,16 @@ jobs:
             bash /vtk/riscv64-build-and-test.sh test
 
   publish:
-    name: Publish vtk ${{ inputs.version || '9.7.0' }}
+    name: Publish vtk ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: vtk-${{ inputs.version || '9.7.0' }}-*-manylinux_riscv64
+      artifact-pattern: vtk-${{ matrix.version }}-*-manylinux_riscv64

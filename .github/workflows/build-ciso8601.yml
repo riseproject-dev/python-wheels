@@ -11,39 +11,53 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'ciso8601 version to build (git tag without leading v, e.g. 2.3.3)'
-        required: true
-        default: '2.3.3'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ciso8601.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-ciso8601.yml'
+      - 'docs/packages/ciso8601.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ciso8601.yml'
+      - 'docs/packages/ciso8601.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.3.3' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  CISO8601_VERSION: ${{ inputs.version || '2.3.3' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: ciso8601
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build ciso8601 ${{ inputs.version || '2.3.3' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build ciso8601 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # No cp314t: the extension uses single-phase init, so importing it
         # re-enables the GIL, and upstream ships no free-threaded wheel.
         python: ["cp312", "cp313", "cp314"]
+
+    env:
+      CISO8601_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout ciso8601 v${{ env.CISO8601_VERSION }}
@@ -72,11 +86,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish ciso8601 ${{ inputs.version || '2.3.3' }}
+    name: Publish ciso8601 ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: ciso8601-${{ inputs.version || '2.3.3' }}-*-manylinux_riscv64
+      artifact-pattern: ciso8601-${{ matrix.version }}-*-manylinux_riscv64

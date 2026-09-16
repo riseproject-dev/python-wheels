@@ -9,39 +9,53 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'fuzzysearch version to build (git tag without leading v, e.g. 0.8.1)'
-        required: true
-        default: '0.8.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/fuzzysearch.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-fuzzysearch.yml'
+      - 'docs/packages/fuzzysearch.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fuzzysearch.yml'
+      - 'docs/packages/fuzzysearch.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.8.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  FUZZYSEARCH_VERSION: ${{ inputs.version || '0.8.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: fuzzysearch
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build fuzzysearch ${{ inputs.version || '0.8.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build fuzzysearch ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # cp314t re-enables the GIL on import (PyModule_Create, no Py_mod_gil
         # slot) and upstream ships no free-threaded wheel either.
         python: ["cp312", "cp313", "cp314"]
+
+    env:
+      FUZZYSEARCH_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout fuzzysearch v${{ env.FUZZYSEARCH_VERSION }}
@@ -70,11 +84,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish fuzzysearch ${{ inputs.version || '0.8.1' }}
+    name: Publish fuzzysearch ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: fuzzysearch-${{ inputs.version || '0.8.1' }}-*-manylinux_riscv64
+      artifact-pattern: fuzzysearch-${{ matrix.version }}-*-manylinux_riscv64

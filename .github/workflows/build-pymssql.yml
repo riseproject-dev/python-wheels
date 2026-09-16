@@ -8,42 +8,56 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pymssql version to build (git tag without the leading v, e.g. 2.3.13)'
-        required: true
-        default: '2.3.13'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pymssql.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pymssql.yml'
+      - 'docs/packages/pymssql.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pymssql.yml'
+      - 'docs/packages/pymssql.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.3.13' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  PYMSSQL_VERSION: ${{ inputs.version || '2.3.13' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pymssql
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build pymssql ${{ inputs.version || '2.3.13' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pymssql ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # No cp314t: upstream skips free-threaded builds (pyproject `skip = "cp31?t-*"`),
         # the extensions don't declare Py_mod_gil, and PyPI ships no cp314t wheel.
         python:
           - "cp312"
           - "cp313"
           - "cp314"
+
+    env:
+      PYMSSQL_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pymssql v${{ env.PYMSSQL_VERSION }}
@@ -93,11 +107,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pymssql ${{ inputs.version || '2.3.13' }}
+    name: Publish pymssql ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pymssql-${{ inputs.version || '2.3.13' }}-*-manylinux_riscv64
+      artifact-pattern: pymssql-${{ matrix.version }}-*-manylinux_riscv64

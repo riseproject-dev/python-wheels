@@ -9,41 +9,55 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'jellyfish version to build (git tag without leading v, e.g. 1.2.1)'
-        required: true
-        default: '1.2.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/jellyfish.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-jellyfish.yml'
+      - 'docs/packages/jellyfish.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-jellyfish.yml'
+      - 'docs/packages/jellyfish.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.2.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  JELLYFISH_VERSION: ${{ inputs.version || '1.2.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: jellyfish
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build jellyfish ${{ inputs.version || '1.2.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build jellyfish ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # PyO3 extension built per interpreter (upstream ships cp3x-cp3x wheels,
         # no abi3). cp314t is excluded: upstream publishes no free-threaded wheel
         # and the module does not declare `gil_used(false)`, so it would re-enable
         # the GIL on import.
         python: ["cp312", "cp313", "cp314"]
+
+    env:
+      JELLYFISH_VERSION: ${{ matrix.version }}
 
     steps:
       # PyPI records the Codeberg repository, but upstream's releases and CI live
@@ -94,11 +108,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish jellyfish ${{ inputs.version || '1.2.1' }}
+    name: Publish jellyfish ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: jellyfish-${{ inputs.version || '1.2.1' }}-*-manylinux_riscv64
+      artifact-pattern: jellyfish-${{ matrix.version }}-*-manylinux_riscv64

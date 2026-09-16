@@ -9,40 +9,53 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'lingua-rs git tag to build, without the leading v (e.g. 1.8.0, which built PyPI lingua-language-detector 2.2.0)'
-        required: true
-        default: '1.8.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/lingua-language-detector.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-lingua-language-detector.yml'
+      - 'docs/packages/lingua-language-detector.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-lingua-language-detector.yml'
+      - 'docs/packages/lingua-language-detector.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.8.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.8.0 there.
-  LINGUA_RS_VERSION: ${{ inputs.version || '1.8.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: lingua-language-detector
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build lingua-language-detector ${{ inputs.version || '1.8.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build lingua-language-detector ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # PyO3 extension built per-interpreter, not abi3, matching upstream's
         # own cp312/cp313/cp314 release wheels; upstream doesn't build 3.14t.
         python: ["cp312", "cp313", "cp314"]
+
+    env:
+      LINGUA_RS_VERSION: ${{ matrix.version }}
 
     steps:
       # The lingua-language-detector PyPI project ships no sdist. Its PyPI
@@ -88,11 +101,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish lingua-language-detector ${{ inputs.version || '1.8.0' }}
+    name: Publish lingua-language-detector ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: lingua_language_detector-${{ inputs.version || '1.8.0' }}-*-manylinux_riscv64
+      artifact-pattern: lingua_language_detector-${{ matrix.version }}-*-manylinux_riscv64

@@ -9,36 +9,53 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'skia-python version to build (git tag without leading v, e.g. 144.0.post2)'
-        required: true
-        default: '144.0.post2'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/skia-python.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-skia-python.yml'
+      - 'docs/packages/skia-python.yaml'
+      - 'patches/skia-python/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-skia-python.yml'
+      - 'docs/packages/skia-python.yaml'
       - 'patches/skia-python/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '144.0.post2' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 144.0.post2 there.
-  SKIA_PYTHON_VERSION: ${{ inputs.version || '144.0.post2' }}
   GN_REVISION: 0625da07ece7b1a374ec0719b6f40ebe3d0950c1
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: skia-python
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build skia-python ${{ inputs.version || '144.0.post2' }} cp312/cp313/cp314/cp314t-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build skia-python ${{ matrix.version }} cp312/cp313/cp314/cp314t-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 1440  # full Skia (Chromium's 2D graphics engine) compile from source
+
+    env:
+      SKIA_PYTHON_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout skia-python v${{ env.SKIA_PYTHON_VERSION }}
@@ -139,11 +156,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish skia-python ${{ inputs.version || '144.0.post2' }}
+    name: Publish skia-python ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: skia-python-${{ inputs.version || '144.0.post2' }}-manylinux_riscv64
+      artifact-pattern: skia-python-${{ matrix.version }}-manylinux_riscv64

@@ -8,37 +8,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'ansible-pylibssh version to build (git tag without leading v, e.g. 1.4.0)'
-        required: true
-        default: '1.4.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ansible-pylibssh.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-ansible-pylibssh.yml'
+      - 'docs/packages/ansible-pylibssh.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ansible-pylibssh.yml'
+      - 'docs/packages/ansible-pylibssh.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.4.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.4.0 there.
-  ANSIBLE_PYLIBSSH_VERSION: ${{ inputs.version || '1.4.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: ansible-pylibssh
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build ansible-pylibssh ${{ inputs.version || '1.4.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build ansible-pylibssh ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Upstream skips "*t-*" (free-threading not supported yet, see
         # ansible/pylibssh#822); mirrored here rather than in `only:`, since
         # `only:` overrides `skip` (gotcha 107) and would build it anyway.
@@ -46,6 +56,9 @@ jobs:
           - "cp312"
           - "cp313"
           - "cp314"
+
+    env:
+      ANSIBLE_PYLIBSSH_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout ansible-pylibssh v${{ env.ANSIBLE_PYLIBSSH_VERSION }}
@@ -106,11 +119,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish ansible-pylibssh ${{ inputs.version || '1.4.0' }}
+    name: Publish ansible-pylibssh ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: ansible-pylibssh-${{ inputs.version || '1.4.0' }}-*-manylinux_riscv64
+      artifact-pattern: ansible-pylibssh-${{ matrix.version }}-*-manylinux_riscv64

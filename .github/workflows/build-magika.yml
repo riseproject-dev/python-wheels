@@ -10,22 +10,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'magika version to build (git tag without the python-v prefix, e.g. 1.0.3)'
-        required: true
-        default: '1.0.3'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/magika.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-magika.yml'
+      - 'docs/packages/magika.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-magika.yml'
+      - 'docs/packages/magika.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.0.3' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  MAGIKA_VERSION: ${{ inputs.version || '1.0.3' }}
   # Upstream builds in manylinux 2_28; this is the only riscv64 manylinux image.
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   # The version upstream's maturin-action used for the 1.0.3 wheels.
@@ -34,12 +40,23 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: magika
+      version: ${{ inputs.version }}
 
   build_wheel:
     needs: [setup]
-    name: Build magika ${{ inputs.version || '1.0.3' }} py3-none-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build magika ${{ matrix.version }} py3-none-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 1440  # 24h: ONNX Runtime is built from source
+
+    env:
+      MAGIKA_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout magika python-v${{ env.MAGIKA_VERSION }}
@@ -117,14 +134,19 @@ jobs:
           if-no-files-found: error
 
   test_wheel:
-    name: Test magika ${{ inputs.version || '1.0.3' }} ${{ matrix.python }}
+    name: Test magika ${{ matrix.version }} ${{ matrix.python }}
     needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      MAGIKA_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout magika python-v${{ env.MAGIKA_VERSION }}
@@ -191,11 +213,16 @@ jobs:
             bash /magika_src/riscv64-test.sh
 
   publish:
-    name: Publish magika ${{ inputs.version || '1.0.3' }}
+    name: Publish magika ${{ matrix.version }}
     needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: magika-${{ inputs.version || '1.0.3' }}-*-manylinux_riscv64
+      artifact-pattern: magika-${{ matrix.version }}-*-manylinux_riscv64

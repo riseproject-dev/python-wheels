@@ -9,37 +9,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pact-python-ffi version to build (git tag suffix, e.g. 0.5.4.1)'
-        required: true
-        default: '0.5.4.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pact-python-ffi.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pact-python-ffi.yml'
+      - 'docs/packages/pact-python-ffi.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pact-python-ffi.yml'
+      - 'docs/packages/pact-python-ffi.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.5.4.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.5.4.1 there.
-  PACT_PYTHON_FFI_VERSION: ${{ inputs.version || '0.5.4.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pact-python-ffi
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build pact-python-ffi ${{ inputs.version || '0.5.4.1' }} ${{ matrix.tag }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pact-python-ffi ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           # hatch_build.py tags the wheel cp<building-interpreter>-abi3, same as
           # upstream's own release job (CIBW_BUILD: cp310-*); building on our
@@ -49,6 +59,9 @@ jobs:
             build: >-
               cp312-manylinux_riscv64 cp313-manylinux_riscv64
               cp314-manylinux_riscv64
+
+    env:
+      PACT_PYTHON_FFI_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pact-python-ffi ${{ env.PACT_PYTHON_FFI_VERSION }}
@@ -130,11 +143,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pact-python-ffi ${{ inputs.version || '0.5.4.1' }}
+    name: Publish pact-python-ffi ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pact-python-ffi-${{ inputs.version || '0.5.4.1' }}-*-manylinux_riscv64
+      artifact-pattern: pact-python-ffi-${{ matrix.version }}-*-manylinux_riscv64

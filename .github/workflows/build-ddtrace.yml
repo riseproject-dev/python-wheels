@@ -9,22 +9,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'ddtrace version to build (git tag without leading v, e.g. 4.13.1)'
-        required: true
-        default: '4.13.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ddtrace.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-ddtrace.yml'
+      - 'docs/packages/ddtrace.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ddtrace.yml'
+      - 'docs/packages/ddtrace.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '4.13.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  DDTRACE_VERSION: ${{ inputs.version || '4.13.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   # setup.py's LIBDDWAF_VERSION. Upstream downloads a prebuilt libddwaf, which
   # is published for aarch64/x86_64 only, so riscv64 compiles it from source.
@@ -33,17 +39,25 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: ddtrace
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build ddtrace ${{ inputs.version || '4.13.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build ddtrace ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 720
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Upstream skips cp314t and publishes no free-threaded wheel anywhere.
         python: ["cp312", "cp313", "cp314"]
+
+    env:
+      DDTRACE_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout dd-trace-py v${{ env.DDTRACE_VERSION }}
@@ -114,11 +128,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish ddtrace ${{ inputs.version || '4.13.1' }}
+    name: Publish ddtrace ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: ddtrace-${{ inputs.version || '4.13.1' }}-*-manylinux_riscv64
+      artifact-pattern: ddtrace-${{ matrix.version }}-*-manylinux_riscv64

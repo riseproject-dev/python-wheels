@@ -9,40 +9,54 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'netifaces-plus version to build (e.g. 0.12.5)'
-        required: true
-        default: '0.12.5'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/netifaces-plus.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-netifaces-plus.yml'
+      - 'docs/packages/netifaces-plus.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-netifaces-plus.yml'
+      - 'docs/packages/netifaces-plus.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.12.5' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  NETIFACES_PLUS_VERSION: ${{ inputs.version || '0.12.5' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: netifaces-plus
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build netifaces-plus ${{ inputs.version || '0.12.5' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build netifaces-plus ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python:
           - "cp312"
           - "cp313"
           - "cp314"
           - "cp314t"
+
+    env:
+      NETIFACES_PLUS_VERSION: ${{ matrix.version }}
 
     steps:
       # netifaces-plus tags releases as release_X_Y_Z, not the PyPI version (gotcha 274).
@@ -83,11 +97,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish netifaces-plus ${{ inputs.version || '0.12.5' }}
+    name: Publish netifaces-plus ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: netifaces-plus-${{ inputs.version || '0.12.5' }}-*-manylinux_riscv64
+      artifact-pattern: netifaces-plus-${{ matrix.version }}-*-manylinux_riscv64

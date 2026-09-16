@@ -8,40 +8,53 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'cbor2 version to build (git tag, e.g. 6.1.4)'
-        required: true
-        default: '6.1.4'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cbor2.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-cbor2.yml'
+      - 'docs/packages/cbor2.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cbor2.yml'
+      - 'docs/packages/cbor2.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '6.1.4' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 6.1.4 there.
-  CBOR2_VERSION: ${{ inputs.version || '6.1.4' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: cbor2
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build cbor2 ${{ inputs.version || '6.1.4' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cbor2 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # pyo3 is built per-interpreter here (no abi3 feature), matching the
         # cpXY-cpXY wheels upstream publishes.
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      CBOR2_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout cbor2 ${{ env.CBOR2_VERSION }}
@@ -73,11 +86,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish cbor2 ${{ inputs.version || '6.1.4' }}
+    name: Publish cbor2 ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: cbor2-${{ inputs.version || '6.1.4' }}-*-manylinux_riscv64
+      artifact-pattern: cbor2-${{ matrix.version }}-*-manylinux_riscv64

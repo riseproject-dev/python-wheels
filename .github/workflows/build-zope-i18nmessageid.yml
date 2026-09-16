@@ -8,41 +8,55 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'zope.i18nmessageid version to build (git tag, e.g. 8.3)'
-        required: true
-        default: '8.3'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/zope-i18nmessageid.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-zope-i18nmessageid.yml'
+      - 'docs/packages/zope-i18nmessageid.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-zope-i18nmessageid.yml'
+      - 'docs/packages/zope-i18nmessageid.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '8.3' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  ZOPE_I18NMESSAGEID_VERSION: ${{ inputs.version || '8.3' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: zope-i18nmessageid
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build zope-i18nmessageid ${{ inputs.version || '8.3' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build zope-i18nmessageid ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python:
           - "cp312"
           - "cp313"
           - "cp314"
           - "cp314t"
+
+    env:
+      ZOPE_I18NMESSAGEID_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout zope.i18nmessageid ${{ env.ZOPE_I18NMESSAGEID_VERSION }}
@@ -74,11 +88,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish zope-i18nmessageid ${{ inputs.version || '8.3' }}
+    name: Publish zope-i18nmessageid ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: zope-i18nmessageid-${{ inputs.version || '8.3' }}-*-manylinux_riscv64
+      artifact-pattern: zope-i18nmessageid-${{ matrix.version }}-*-manylinux_riscv64

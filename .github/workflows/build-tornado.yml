@@ -8,22 +8,27 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'tornado version to build (git tag without leading v)'
-        required: true
-        default: '6.5.8'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/tornado.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-tornado.yml'
+      - 'docs/packages/tornado.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tornado.yml'
+      - 'docs/packages/tornado.yaml'
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 6.5.8 there.
-  TORNADO_VERSION: ${{ inputs.version || '6.5.8' }}
   UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
   UV_INDEX_STRATEGY: unsafe-best-match
   UV_ONLY_BINARY: ':all:'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '6.5.8' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
@@ -32,17 +37,25 @@ permissions:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: tornado
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
     name: Build wheels on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # remove other os, and keep only riscv64
         # os: [ubuntu-22.04, ubuntu-22.04-arm, windows-2022, macos-15]
         os: [ubuntu-24.04-riscv]
+
+    env:
+      TORNADO_VERSION: ${{ matrix.version }}
 
     steps:
       # we need to checkout upstream source
@@ -87,8 +100,13 @@ jobs:
           path: ./wheelhouse/*.whl
 
   publish:
-    name: Publish tornado ${{ inputs.version || '6.5.8' }}
+    name: Publish tornado ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write

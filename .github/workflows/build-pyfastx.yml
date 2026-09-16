@@ -9,39 +9,53 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pyfastx version/tag to build, e.g. 2.3.1'
-        required: true
-        default: '2.3.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyfastx.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pyfastx.yml'
+      - 'docs/packages/pyfastx.yaml'
+      - 'patches/pyfastx/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyfastx.yml'
+      - 'docs/packages/pyfastx.yaml'
       - 'patches/pyfastx/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.3.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 2.3.1 there.
-  PYFASTX_VERSION: ${{ inputs.version || '2.3.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyfastx
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build pyfastx ${{ inputs.version || '2.3.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyfastx ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      PYFASTX_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pyfastx ${{ env.PYFASTX_VERSION }}
@@ -97,11 +111,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pyfastx ${{ inputs.version || '2.3.1' }}
+    name: Publish pyfastx ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pyfastx-${{ inputs.version || '2.3.1' }}-*-manylinux_riscv64
+      artifact-pattern: pyfastx-${{ matrix.version }}-*-manylinux_riscv64

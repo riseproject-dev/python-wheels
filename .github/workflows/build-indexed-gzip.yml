@@ -10,28 +10,36 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'indexed-gzip version to build (git tag without leading v, e.g. 1.10.3)'
-        required: true
-        default: '1.10.3'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/indexed-gzip.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-indexed-gzip.yml'
+      - 'docs/packages/indexed-gzip.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-indexed-gzip.yml'
+      - 'docs/packages/indexed-gzip.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.10.3' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.10.3 there.
-  INDEXED_GZIP_VERSION: ${{ inputs.version || '1.10.3' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: indexed-gzip
+      version: ${{ inputs.version }}
 
   # setup.py computes stable_abi from (interpreter >= 3.11) and Cython >= 3.1,
   # both true here, and hardcodes the wheel tag to cp311-abi3 regardless of
@@ -41,9 +49,17 @@ jobs:
   # matches upstream's own single-build recipe (gotcha 96).
   build_abi3:
     needs: [setup]
-    name: Build indexed-gzip ${{ inputs.version || '1.10.3' }} cp311-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build indexed-gzip ${{ matrix.version }} cp311-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
+    env:
+      INDEXED_GZIP_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout indexed_gzip v${{ env.INDEXED_GZIP_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -82,9 +98,17 @@ jobs:
   # offers no cp313t build identifier on any platform (gotcha 204).
   build_freethreaded:
     needs: [setup]
-    name: Build indexed-gzip ${{ inputs.version || '1.10.3' }} cp314t-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build indexed-gzip ${{ matrix.version }} cp314t-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
+    env:
+      INDEXED_GZIP_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout indexed_gzip v${{ env.INDEXED_GZIP_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -117,11 +141,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish indexed-gzip ${{ inputs.version || '1.10.3' }}
+    name: Publish indexed-gzip ${{ matrix.version }}
     needs: [setup, build_abi3, build_freethreaded]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: indexed-gzip-${{ inputs.version || '1.10.3' }}-*-manylinux_riscv64
+      artifact-pattern: indexed-gzip-${{ matrix.version }}-*-manylinux_riscv64

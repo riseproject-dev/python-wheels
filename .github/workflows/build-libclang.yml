@@ -8,33 +8,50 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'libclang version to build (LLVM release tag without the llvm- prefix, e.g. 18.1.1)'
-        required: true
-        default: '18.1.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/libclang.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-libclang.yml'
+      - 'docs/packages/libclang.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-libclang.yml'
+      - 'docs/packages/libclang.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '18.1.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  LIBCLANG_VERSION: ${{ inputs.version || '18.1.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: libclang
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build libclang ${{ inputs.version || '18.1.1' }} py2.py3-none-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build libclang ${{ matrix.version }} py2.py3-none-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 1440  # full LLVM/Clang compile from source
+
+    env:
+      LIBCLANG_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout libclang llvm-${{ env.LIBCLANG_VERSION }}
@@ -104,8 +121,16 @@ jobs:
 
   gpl_sources:
     needs: [setup]
-    name: Collect GPL sources (gcc) for libclang ${{ inputs.version || '18.1.1' }}
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources (gcc) for libclang ${{ matrix.version }}
     runs-on: ubuntu-24.04-riscv
+    env:
+      LIBCLANG_VERSION: ${{ matrix.version }}
+
     steps:
       # -static-libgcc/-static-libstdc++ embeds the image's gcc runtime into libclang.so.
       - name: Collect gcc source RPM from manylinux_riscv64
@@ -122,13 +147,18 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish libclang ${{ inputs.version || '18.1.1' }}
+    name: Publish libclang ${{ matrix.version }}
     needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: libclang-${{ inputs.version || '18.1.1' }}-*-manylinux_riscv64
-      gpl-sources-artifact: libclang-${{ inputs.version || '18.1.1' }}-gpl-sources
+      artifact-pattern: libclang-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: libclang-${{ matrix.version }}-gpl-sources
       gpl-sources-description: gcc

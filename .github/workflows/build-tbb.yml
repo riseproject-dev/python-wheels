@@ -10,33 +10,50 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'tbb version to build (oneTBB git tag is v<version>)'
-        required: true
-        default: '2023.1.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/tbb.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-tbb.yml'
+      - 'docs/packages/tbb.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tbb.yml'
+      - 'docs/packages/tbb.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2023.1.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  TBB_VERSION: ${{ inputs.version || '2023.1.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: tbb
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build tbb ${{ inputs.version || '2023.1.0' }} py2.py3-none-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build tbb ${{ matrix.version }} py2.py3-none-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
+
+    env:
+      TBB_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout oneTBB v${{ env.TBB_VERSION }}
@@ -112,11 +129,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish tbb ${{ inputs.version || '2023.1.0' }}
+    name: Publish tbb ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: tbb-${{ inputs.version || '2023.1.0' }}-*-manylinux_riscv64
+      artifact-pattern: tbb-${{ matrix.version }}-*-manylinux_riscv64

@@ -9,27 +9,36 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'unicorn version/tag to build (e.g. 2.1.4)'
-        required: true
-        default: '2.1.4'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/unicorn.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-unicorn.yml'
+      - 'docs/packages/unicorn.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-unicorn.yml'
+      - 'docs/packages/unicorn.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.1.4' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  UNICORN_VERSION: ${{ inputs.version || '2.1.4' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: unicorn
+      version: ${{ inputs.version }}
 
   # setup.py forces has_ext_modules + py_limited_api=cp37 (a bdist_wheel-option
   # abi3 floor, gotcha 34), so one build serves cp312/cp313/cp314. setuptools
@@ -37,9 +46,17 @@ jobs:
   # guard), so upstream ships no cp314t wheel for any platform; we drop it too.
   build_wheels:
     needs: [setup]
-    name: Build unicorn ${{ inputs.version || '2.1.4' }} cp37-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build unicorn ${{ matrix.version }} cp37-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
+
+    env:
+      UNICORN_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout unicorn ${{ env.UNICORN_VERSION }}
@@ -93,11 +110,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish unicorn ${{ inputs.version || '2.1.4' }}
+    name: Publish unicorn ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: unicorn-${{ inputs.version || '2.1.4' }}-*-manylinux_riscv64
+      artifact-pattern: unicorn-${{ matrix.version }}-*-manylinux_riscv64

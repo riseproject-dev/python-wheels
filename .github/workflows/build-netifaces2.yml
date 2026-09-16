@@ -9,37 +9,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'netifaces2 version to build (git tag without the leading V, e.g. 0.0.22)'
-        required: true
-        default: '0.0.22'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/netifaces2.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-netifaces2.yml'
+      - 'docs/packages/netifaces2.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-netifaces2.yml'
+      - 'docs/packages/netifaces2.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.0.22' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.0.22 there.
-  NETIFACES2_VERSION: ${{ inputs.version || '0.0.22' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: netifaces2
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build netifaces2 ${{ inputs.version || '0.0.22' }} ${{ matrix.tag }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build netifaces2 ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           # pyo3's abi3-py37 feature is on unconditionally (Cargo.toml), so one
           # abi3 wheel serves every GIL-ful interpreter in our matrix; cp314t is
@@ -51,6 +61,9 @@ jobs:
             build: >-
               cp312-manylinux_riscv64 cp313-manylinux_riscv64
               cp314-manylinux_riscv64
+
+    env:
+      NETIFACES2_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout netifaces-2 V${{ env.NETIFACES2_VERSION }}
@@ -90,11 +103,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish netifaces2 ${{ inputs.version || '0.0.22' }}
+    name: Publish netifaces2 ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: netifaces2-${{ inputs.version || '0.0.22' }}-*-manylinux_riscv64
+      artifact-pattern: netifaces2-${{ matrix.version }}-*-manylinux_riscv64

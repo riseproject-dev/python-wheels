@@ -8,39 +8,50 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'snowflake-connector-python version to build (git tag without the leading v, e.g. 4.7.2)'
-        required: true
-        default: '4.7.2'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/snowflake-connector-python.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-snowflake-connector-python.yml'
+      - 'docs/packages/snowflake-connector-python.yaml'
+      - 'patches/snowflake-connector-python/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-snowflake-connector-python.yml'
+      - 'docs/packages/snowflake-connector-python.yaml'
       - 'patches/snowflake-connector-python/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '4.7.2' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 4.7.2 there.
-  SNOWFLAKE_CONNECTOR_VERSION: ${{ inputs.version || '4.7.2' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   WIREMOCK_VERSION: '3.11.0'
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: snowflake-connector-python
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build snowflake-connector-python ${{ inputs.version || '4.7.2' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build snowflake-connector-python ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Per-interpreter (not abi3): the Cython extension links the version-specific ABI.
         include:
           - python: "cp312"
@@ -53,6 +64,9 @@ jobs:
           # free-threaded interpreter, so run this one in-process.
           - python: "cp314t"
             pytest_dist: "-n 0"
+
+    env:
+      SNOWFLAKE_CONNECTOR_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout snowflake-connector-python v${{ env.SNOWFLAKE_CONNECTOR_VERSION }}
@@ -155,11 +169,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish snowflake-connector-python ${{ inputs.version || '4.7.2' }}
+    name: Publish snowflake-connector-python ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: snowflake-connector-python-${{ inputs.version || '4.7.2' }}-*-manylinux_riscv64
+      artifact-pattern: snowflake-connector-python-${{ matrix.version }}-*-manylinux_riscv64

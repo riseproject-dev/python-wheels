@@ -15,23 +15,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'espeakng-loader version to build (e.g. 0.2.4)'
-        required: true
-        default: '0.2.4'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/espeakng-loader.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-espeakng-loader.yml'
+      - 'docs/packages/espeakng-loader.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-espeakng-loader.yml'
+      - 'docs/packages/espeakng-loader.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.2.4' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.2.4 there.
-  ESPEAKNG_LOADER_VERSION: ${{ inputs.version || '0.2.4' }}
   # Upstream cuts releases without git tags, so pin the release commit: this is
   # "bump version to 0.2.4", whose tree matches the published 0.2.4 wheels
   # (pyproject.toml is byte-identical to main). Update it alongside
@@ -43,12 +48,23 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: espeakng-loader
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build espeakng-loader ${{ inputs.version || '0.2.4' }} py3-none-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build espeakng-loader ${{ matrix.version }} py3-none-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
+
+    env:
+      ESPEAKNG_LOADER_VERSION: ${{ matrix.version }}
 
     steps:
       # espeak-ng is a gitlink in this tree with no corresponding .gitmodules
@@ -174,8 +190,16 @@ jobs:
 
   gpl_sources:
     needs: [setup]
-    name: Collect GPL sources (eSpeak NG) for espeakng-loader ${{ inputs.version || '0.2.4' }}
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources (eSpeak NG) for espeakng-loader ${{ matrix.version }}
     runs-on: ubuntu-latest
+    env:
+      ESPEAKNG_LOADER_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout eSpeak NG ${{ env.ESPEAK_NG_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -195,18 +219,23 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: espeakng-loader-${{ inputs.version || '0.2.4' }}-gpl-sources
+          name: espeakng-loader-${{ matrix.version }}-gpl-sources
           path: gpl-sources.tar
           if-no-files-found: error
 
   publish:
-    name: Publish espeakng-loader ${{ inputs.version || '0.2.4' }}
+    name: Publish espeakng-loader ${{ matrix.version }}
     needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: espeakng-loader-${{ inputs.version || '0.2.4' }}-*-manylinux_riscv64
-      gpl-sources-artifact: espeakng-loader-${{ inputs.version || '0.2.4' }}-gpl-sources
+      artifact-pattern: espeakng-loader-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: espeakng-loader-${{ matrix.version }}-gpl-sources
       gpl-sources-description: eSpeak NG (compiled from source; see build.sh)

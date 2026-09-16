@@ -7,35 +7,49 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'cchardet version to build (e.g. 2.1.7)'
-        required: true
-        default: '2.1.7'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cchardet.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-cchardet.yml'
+      - 'docs/packages/cchardet.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cchardet.yml'
+      - 'docs/packages/cchardet.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.1.7' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  CCHARDET_VERSION: ${{ inputs.version || '2.1.7' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: cchardet
+      version: ${{ inputs.version }}
 
   build_sdist:
     needs: [setup]
-    name: Build cchardet ${{ inputs.version || '2.1.7' }} sdist
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build cchardet ${{ matrix.version }} sdist
     runs-on: ubuntu-latest
-    outputs:
-      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
-      package_version: ${{ steps.sdist.outputs.package_version }}
+    env:
+      CCHARDET_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout cChardet ${{ env.CCHARDET_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -62,10 +76,6 @@ jobs:
           uv pip install cython setuptools wheel build twine
           python -m build --sdist --no-isolation
           twine check dist/*
-          sdists=(dist/*.tar.gz)
-          sdist_name="$(basename "${sdists[0]}")"
-          echo "sdist_name=${sdist_name}" >> "$GITHUB_OUTPUT"
-          echo "package_version=$(echo "${sdist_name}" | sed -En 's/cchardet-(.+)\.tar\.gz/\1/p')" >> "$GITHUB_OUTPUT"
 
       - name: Upload sdist artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -76,13 +86,18 @@ jobs:
 
   build_wheels:
     needs: [setup, build_sdist]
-    name: Build cchardet ${{ inputs.version || '2.1.7' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cchardet ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      CCHARDET_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Download sdist
@@ -97,7 +112,7 @@ jobs:
         # against the same bundled testdata/samples.
         run: |
           mkdir pkg
-          tar xzf dist/${{ needs.build_sdist.outputs.sdist_name }} --strip-components=1 -C pkg
+          tar xzf dist/*.tar.gz --strip-components=1 -C pkg
           cat > pkg/riscv64_test_cchardet.py <<'EOF'
           import glob
           import os
@@ -198,16 +213,21 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: cchardet-${{ needs.build_sdist.outputs.package_version }}-${{ matrix.python }}-manylinux_riscv64
+          name: cchardet-${{ matrix.version }}-${{ matrix.python }}-manylinux_riscv64
           path: wheelhouse/*.whl
           if-no-files-found: error
 
   publish:
-    name: Publish cchardet ${{ inputs.version || '2.1.7' }}
+    name: Publish cchardet ${{ matrix.version }}
     needs: [setup, build_sdist, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: cchardet-${{ needs.build_sdist.outputs.package_version }}-*-manylinux_riscv64
+      artifact-pattern: cchardet-${{ matrix.version }}-*-manylinux_riscv64

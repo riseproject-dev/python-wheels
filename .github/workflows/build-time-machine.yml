@@ -9,36 +9,50 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'time-machine version to build (git tag, e.g. 3.5.0)'
-        required: true
-        default: '3.5.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/time-machine.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-time-machine.yml'
+      - 'docs/packages/time-machine.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-time-machine.yml'
+      - 'docs/packages/time-machine.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '3.5.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  TIME_MACHINE_VERSION: ${{ inputs.version || '3.5.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: time-machine
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build time-machine ${{ inputs.version || '3.5.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build time-machine ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      TIME_MACHINE_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout time-machine ${{ env.TIME_MACHINE_VERSION }}
@@ -88,11 +102,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish time-machine ${{ inputs.version || '3.5.0' }}
+    name: Publish time-machine ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: time-machine-${{ inputs.version || '3.5.0' }}-*-manylinux_riscv64
+      artifact-pattern: time-machine-${{ matrix.version }}-*-manylinux_riscv64

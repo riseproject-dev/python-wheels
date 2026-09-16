@@ -12,22 +12,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'fiona version to build (git tag, e.g. 1.10.1)'
-        required: true
-        default: '1.10.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/fiona.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-fiona.yml'
+      - 'docs/packages/fiona.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fiona.yml'
+      - 'docs/packages/fiona.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.10.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  FIONA_VERSION: ${{ inputs.version || '1.10.1' }}
   GDAL_VERSION: '3.12.4'
   GEOS_VERSION: '3.13.1'
   PROJ_VERSION: '9.6.2'
@@ -38,12 +44,23 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: fiona
+      version: ${{ inputs.version }}
 
   build_image:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build the GDAL build image
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 600
+
+    env:
+      FIONA_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout python-wheels
@@ -247,18 +264,23 @@ jobs:
           BUILDKIT_PROGRESS: plain
 
   build_wheels:
-    name: Build fiona ${{ inputs.version || '1.10.1' }} ${{ matrix.python }}-manylinux_riscv64
+    name: Build fiona ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     needs: [setup, build_image]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 600
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # fiona's own build-system.requires pins cython~=3.0.2, whose last 3.0.x release
         # (3.0.12) publishes no cp314 wheel and adds only "some adaptations" for cp313
         # compilation; PyPI's own fiona 1.10.1 wheels stop at cp313 for exactly this reason
         # (gotcha 118: check upstream's own published wheel tags before writing the matrix).
         python: ["cp312", "cp313"]
+
+    env:
+      FIONA_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout fiona ${{ env.FIONA_VERSION }}
@@ -523,11 +545,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish fiona ${{ inputs.version || '1.10.1' }}
+    name: Publish fiona ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: fiona-${{ inputs.version || '1.10.1' }}-*-manylinux_riscv64
+      artifact-pattern: fiona-${{ matrix.version }}-*-manylinux_riscv64

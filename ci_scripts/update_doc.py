@@ -3,9 +3,13 @@
 # SPDX-FileCopyrightText: 2026 The RISE Project
 # SPDX-License-Identifier: MIT
 """
-Extract metadata from a just-built riscv64 wheel, add or update the
-corresponding docs/packages/<name>.yaml entry with the new version, and open
-a pull request with the change.
+Extract metadata from a just-built riscv64 wheel, record its release under the
+matching version entry of docs/packages/<name>.yaml, and open a pull request
+with the change.
+
+The version entry must already be declared (the porter or the nightly upgrade
+adds a bare `- version:` line, which is what the build workflow builds); this
+script only fills in `tag`/`files`, or replaces them on a rebuild.
 
 generate_packages_doc.py renders this YAML into the published
 Markdown pages, so this script only needs to maintain the YAML source of
@@ -16,7 +20,6 @@ import difflib
 import hashlib
 import os
 import re
-import string
 import subprocess
 import sys
 import zipfile
@@ -45,15 +48,6 @@ def normalize_name(name):
     https://packaging.python.org/en/latest/specifications/name-normalization/#name-normalization
     """
     return re.sub(r"[-_.]+", "-", name).lower()
-
-
-def normalize_label(label):
-    """
-    https://packaging.python.org/en/latest/specifications/well-known-project-urls/#label-normalization
-    """
-    chars_to_remove = string.punctuation + string.whitespace
-    removal_map = str.maketrans("", "", chars_to_remove)
-    return label.translate(removal_map).lower()
 
 
 # "License :: OSI Approved :: BSD License" -> "BSD"
@@ -102,33 +96,6 @@ VAGUE_LICENSES = frozenset(
 )
 
 
-def extract_source_code_url(message):
-    # Collect all "Project-URL" lines
-    project_urls = message.get_all("Project-URL", [])
-    well_known_labels = ["source", "repository", "sourcecode", "github"]
-
-    for entry in project_urls:
-        try:
-            label, url = map(str.strip, entry.split(",", 1))
-            if normalize_label(label) in well_known_labels:
-                return url
-        except ValueError:
-            continue  # skip malformed lines
-
-    # A lot of projects use homepage as source code url. Done in a second
-    # loop so a homepage entry appearing before a well-known source label
-    # doesn't win by accident.
-    for entry in project_urls:
-        try:
-            label, url = map(str.strip, entry.split(",", 1))
-            if normalize_label(label) == "homepage":
-                return url
-        except ValueError:
-            continue
-
-    return message.get("Home-page")  # deprecated fallback, may be None
-
-
 def extract_metadata_from_whl(whl_path):
     """
     Extract metadata according to https://packaging.python.org/en/latest/specifications/core-metadata/
@@ -141,7 +108,6 @@ def extract_metadata_from_whl(whl_path):
             "name": message.get("Name"),
             "version": message.get("Version"),
             "license": extract_license(message),
-            "source_code": extract_source_code_url(message),
             "filename": whl_path.name,
             "sha256": hashlib.sha256(whl_path.read_bytes()).hexdigest(),
             "requires-python": message.get("Requires-Python"),
@@ -186,37 +152,30 @@ def yaml_line(key, value):
     ).rstrip("\n")
 
 
-def render_new_yaml(
-    slug, source_code, license, version, patch_dir, publication, comment=None
-):
-    """Render a brand-new docs/packages/<slug>.yaml for a package's first version."""
-    lines = [yaml_line("package-name", slug)]
-    if source_code:
-        lines.append(yaml_line("source-code", source_code))
-    lines.append(yaml_line("license", license))
-    lines.append("versions:")
-    lines.append(f"- {yaml_line('version', version)}")
-    if patch_dir is not None:
-        lines.append("  patched: true")
-    if comment:
-        lines.append(f"  {yaml_line('comment', comment)}")
-    publication_yaml = yaml.safe_dump(
-        publication, sort_keys=False, allow_unicode=True
-    ).rstrip("\n")
-    lines.extend(f"  {line}" for line in publication_yaml.splitlines())
-    return "\n".join(lines) + "\n"
+def version_blocks(lines):
+    """Yield the [start, end) line ranges of each `versions:` list item."""
+    start = None
+    for i, line in enumerate(lines):
+        if line.startswith("- "):
+            if start is not None:
+                yield start, i
+            start = i
+    if start is not None:
+        yield start, len(lines)
 
 
 def append_version(
     content, package_data, version, license, patch_dir, publication, comment=None
 ):
     """
-    Append a new version entry to the end of an existing package YAML file's
-    `versions:` list, preserving the rest of the file byte-for-byte.
+    Fill in the publication metadata of the declared `versions:` entry for
+    this version, preserving the rest of the file byte-for-byte.
 
-    An existing version's publication metadata is replaced by the latest tag.
-    Older immutable GitHub Releases remain available for tracking, but only the
-    latest release is exposed through the package YAML and Simple API.
+    A pending entry (no tag/files yet) gets the publication block spliced in
+    right after its own lines. An already-released entry has its publication
+    metadata replaced by the latest tag: older immutable GitHub Releases remain
+    available for tracking, but only the latest release is exposed through the
+    package YAML and Simple API.
     """
     existing_version = next(
         (
@@ -226,8 +185,14 @@ def append_version(
         ),
         None,
     )
-    if existing_version is not None:
-        publication_keys = ("tag", "files", "gpl-sources")
+    if existing_version is None:
+        raise SystemExit(
+            f"version {version} is not declared in the package YAML; add a "
+            f"`- version: {version}` entry under `versions:` and rebuild"
+        )
+
+    publication_keys = ("tag", "files", "gpl-sources")
+    if any(key in existing_version for key in publication_keys):
         current = {
             key: existing_version[key]
             for key in publication_keys
@@ -240,28 +205,55 @@ def append_version(
         existing_version.update(publication)
         return yaml.safe_dump(package_data, sort_keys=False, allow_unicode=True)
 
+    lines = content.splitlines()
+    block = next(
+        (
+            (start, end)
+            for start, end in version_blocks(lines)
+            if str(yaml.safe_load("\n".join(lines[start:end]))[0].get("version"))
+            == str(version)
+        ),
+        None,
+    )
+    if block is None:
+        raise SystemExit(f"could not locate the `- version: {version}` entry")
+    start, end = block
+    while end > start and not lines[end - 1].strip():
+        end -= 1
+
     top_level_license = package_data.get("license")
-    lines = [f"- {yaml_line('version', version)}"]
-    if patch_dir is not None:
-        lines.append("  patched: true")
-    if license and license != top_level_license and license not in VAGUE_LICENSES:
-        lines.append(f"  {yaml_line('license', license)}")
-    if comment:
-        lines.append(f"  {yaml_line('comment', comment)}")
+    new_lines = []
+    if patch_dir is not None and "patched" not in existing_version:
+        new_lines.append("  patched: true")
+    if (
+        license
+        and license != top_level_license
+        and license not in VAGUE_LICENSES
+        and "license" not in existing_version
+    ):
+        new_lines.append(f"  {yaml_line('license', license)}")
+    if comment and "comment" not in existing_version:
+        new_lines.append(f"  {yaml_line('comment', comment)}")
     publication_yaml = yaml.safe_dump(
         publication, sort_keys=False, allow_unicode=True
     ).rstrip("\n")
-    lines.extend(f"  {line}" for line in publication_yaml.splitlines())
+    new_lines.extend(f"  {line}" for line in publication_yaml.splitlines())
 
-    return content.rstrip("\n") + "\n" + "\n".join(lines) + "\n"
+    lines[end:end] = new_lines
+    return "\n".join(lines) + "\n"
 
 
-def add_to_packages_file(slug):
+def read_packages_file():
+    """Return (header lines, package entries) of ci_scripts/packages.txt."""
     lines = PACKAGES_FILE.read_text().splitlines()
     header_end = next(
         i for i, line in enumerate(lines) if line and not line.startswith("#")
     )
-    header, entries = lines[:header_end], [line for line in lines[header_end:] if line]
+    return lines[:header_end], [line for line in lines[header_end:] if line]
+
+
+def add_to_packages_file(slug):
+    header, entries = read_packages_file()
     entries = sorted(set(entries) | {slug}, key=str.casefold)
     PACKAGES_FILE.write_text("\n".join(header + entries) + "\n")
 
@@ -348,7 +340,6 @@ def main():
     display_name = metadata["name"]
     version = metadata["version"]
     license = metadata["license"]
-    source_code = metadata["source_code"]
     publication = publication_metadata(
         RELEASE_TAG, wheel_metadata, GPL_SOURCES_DESCRIPTION
     )
@@ -362,24 +353,24 @@ def main():
     pr_title = "docs: Update projects"
 
     def compute_content():
-        """Read the current YAML (if any) and return (is_new, old_content, new_content)."""
-        is_new = not yaml_path.exists()
-        old_content = None if is_new else yaml_path.read_text()
-        if is_new:
-            new_content = render_new_yaml(
-                slug, source_code, license, version, patch_dir, publication, comment
+        """Read the current YAML and return (is_new, old_content, new_content)."""
+        if not yaml_path.exists():
+            raise SystemExit(
+                f"{yaml_path} does not exist; a package's first PR must add it "
+                "(see docs/development.md)"
             )
-        else:
-            package_data = yaml.safe_load(old_content) or {}
-            new_content = append_version(
-                old_content,
-                package_data,
-                version,
-                license,
-                patch_dir,
-                publication,
-                comment,
-            )
+        is_new = slug not in read_packages_file()[1]
+        old_content = yaml_path.read_text()
+        package_data = yaml.safe_load(old_content) or {}
+        new_content = append_version(
+            old_content,
+            package_data,
+            version,
+            license,
+            patch_dir,
+            publication,
+            comment,
+        )
         return is_new, old_content, new_content
 
     if DRY_RUN:

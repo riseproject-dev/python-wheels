@@ -9,37 +9,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'brotlicffi version to build (git tag without leading v, e.g. 1.2.0.2)'
-        required: true
-        default: '1.2.0.2'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/brotlicffi.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-brotlicffi.yml'
+      - 'docs/packages/brotlicffi.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-brotlicffi.yml'
+      - 'docs/packages/brotlicffi.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.2.0.2' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.2.0.2 there.
-  BROTLICFFI_VERSION: ${{ inputs.version || '1.2.0.2' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: brotlicffi
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build brotlicffi ${{ inputs.version || '1.2.0.2' }} ${{ matrix.tag }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build brotlicffi ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Upstream's `CIBW_BUILD: cp39-* pp*-* cp314t-*`, without PyPy. musllinux
         # is dropped because upstream skips it too.
         include:
@@ -54,6 +64,9 @@ jobs:
           # limited API under Py_GIL_DISABLED.
           - tag: cp314t
             build: cp314t-manylinux_riscv64
+
+    env:
+      BROTLICFFI_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout brotlicffi v${{ env.BROTLICFFI_VERSION }}
@@ -109,11 +122,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish brotlicffi ${{ inputs.version || '1.2.0.2' }}
+    name: Publish brotlicffi ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: brotlicffi-${{ inputs.version || '1.2.0.2' }}-*-manylinux_riscv64
+      artifact-pattern: brotlicffi-${{ matrix.version }}-*-manylinux_riscv64

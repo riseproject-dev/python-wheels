@@ -16,7 +16,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
 - **158** — Editing a PR's *description* is free on a parked port; pushing a commit is not
 - **163** — A maintainer hold that *names* a condition is an instruction to come back and
 - **173** — `gh pr list --state open --head <pkg>` does not see a *merged* PR, so a finished
-- **208** — A fresh `main` publish dispatch finishing green does not mean
+- **208** — A fresh `main` publish run finishing green does not mean
 - **357** — A single combined-interpreter build job's artifact name needs to match the
 - **380** — A project that splits every release into two independently-named PyPI
 - **370** — `.queue.yml` lives on `main` in a checkout shared by every concurrently
@@ -24,12 +24,12 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
 ---
 
 45. **A brand-new `build-<pkg>.yml` cannot be dispatched from a PR — GitHub only knows
-    a workflow that has already run at least once.** The `Trigger: <pkg>:<ver>` line makes
-    `pr-trigger.yml` run `gh workflow run build-<pkg>.yml --ref <branch>`, which resolves
-    the file name through `POST /repos/.../actions/workflows/{file}/dispatches`. That
+    a workflow that has already run at least once.** `gh workflow run build-<pkg>.yml
+    --ref <branch> -f version=<glob>` resolves the file name through
+    `POST /repos/.../actions/workflows/{file}/dispatches`. That
     lookup only sees workflows in the repository's *registry*, and a file that has never
     produced a run is not in it: the call dies with `HTTP 404: workflow build-<pkg>.yml
-    not found on the default branch`, the trigger job goes red, and no build ever starts.
+    not found on the default branch`, and no build ever starts.
     Not a permissions or ref problem — the same call succeeds for every other open port
     PR, because those workflows were registered by a run under the `pull_request` trigger
     that `workflows: rework triggering behaviour` (#364) removed.
@@ -38,12 +38,11 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
       -q '.workflows[].path' | grep <pkg>`. Living on `main` is sufficient but not
       necessary — `build-scipy.yml`/`build-shapely.yml` are listed while existing only on
       their PR branches.
-    - **Nothing inside the port fixes it**, so don't burn cycles rewording the `Trigger:`
-      line or re-pushing: only a first run registers a workflow, and no trigger the file is
-      allowed to declare can produce one. Validate everything locally, open the PR, and
-      report the blocker — the workflow has to reach `main` (or `pr-trigger.yml` needs a
-      path+ref dispatch that doesn't go through the workflow registry) before CI can be
-      driven green.
+    - **Nothing inside the port fixes it**, so don't burn cycles re-dispatching or
+      re-pushing: only a first run registers a workflow, and no trigger the file is
+      allowed to declare can produce one except `pull_request: paths`. Validate everything
+      locally, open the PR with both files, and let that first `pull_request` run register
+      the workflow — it also builds every pending version, so a dispatch is rarely needed.
 
 54. **A `build-<pkg>.yml` that is not yet on the default branch cannot be
     `workflow_dispatch`-ed at all, so a brand-new package needs the `pull_request:
@@ -51,16 +50,14 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
     by its file name *on the default branch*; for a file that only exists on your PR
     branch it answers `HTTP 404: workflow build-<pkg>.yml not found on the default
     branch`, and `gh api repos/<repo>/actions/workflows` does not list it (no id has
-    been assigned). That is true of `gh workflow run --ref <branch>` **and** of
-    `pr-trigger.yml`, which is just `gh workflow run` behind a `Trigger: <pkg>:<ver>`
-    line in the PR body — so on a new-package PR the trigger job fails and no build ever
+    been assigned), so `gh workflow run --ref <branch>` fails and no build ever
     starts. The `pull_request: paths` trigger is what registers the workflow: once one
     run exists the workflow gets an id, and `workflow_dispatch` on the branch starts
     working (that is why an in-flight package PR shows a `pull_request` run first and
-    `workflow_dispatch` runs only after). Keep both triggers on a new workflow, as every
-    workflow on `main` does — the `workflow_dispatch`-only rework (#364) was reverted by
-    #391 for exactly this reason. `Trigger:` lines remain the way to build a *different
-    version* of a workflow that already exists on `main`.
+    `workflow_dispatch` runs only after). Keep all three triggers on a new workflow, as
+    every workflow on `main` does — the `workflow_dispatch`-only rework (#364) was reverted
+    by #391 for exactly this reason. To build a *different version*, declare it in
+    `docs/packages/<pkg>.yaml`: the next `pull_request` run builds every pending entry.
 
 62. **A multi-hour job's log can be dropped by GitHub entirely — quiet the build tool
     and tee to an artifact *before* you spend the cycle (the ray/bazel case).** A build
@@ -137,8 +134,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
 
 80. **When a maintainer parks a port, stop pushing to the branch entirely — the
     `pull_request: paths` trigger makes *every* push restart the riscv64 build (the sglang
-    follow-up).** Gotcha 48 says a stripped `Trigger:` line or a human-cancelled run is a
-    stop signal and not a flake, but it only warns against re-adding the `Trigger:` line.
+    follow-up).** Gotcha 48 says a human-cancelled run is a stop signal and not a flake,
+    but it only warns against re-dispatching.
     That is not enough: gotcha 54 requires a new workflow to keep `pull_request: paths`, so
     on a parked PR an *ordinary* commit — even one that only fixes the triggers, rebases
     onto `main`, or tidies a comment — dispatches the full matrix onto the shared
@@ -185,8 +182,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
     GitHub's default `pull_request` activity types are `opened`, `synchronize` and
     `reopened`, and **`edited` is not among them**, so `gh pr edit --body-file` fires no
     build at all. Confirmed empirically here — three body edits on a parked PR produced
-    only skipped `pr-trigger.yml` runs and left the green `Build ... (riscv64)` run from
-    the previous day as the newest one on the branch.
+    no run at all and left the green `Build ... (riscv64)` run from the previous day as
+    the newest one on the branch.
     - **So when resuming an older port (gotcha 65), bring the description up to the
       current template even when you must not push.** Convention drifts in *both* files:
       check the branch's `on:`/header against a recently merged sibling **and** the PR body
@@ -194,15 +191,15 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
       been added or rewritten after the PR was opened.
     - **Verify the branch is genuinely undrifted before concluding there is nothing to
       push.** Being tens of commits behind `main` is not by itself drift — a port that adds
-      only new files (`build-<pkg>.yml`, `patches/<pkg>/**`) cannot conflict, so a rebase
+      only new files (`build-<pkg>.yml`, `docs/packages/<pkg>.yaml`, `patches/<pkg>/**`) cannot conflict, so a rebase
       buys nothing and costs a full matrix re-run. Diff the conventions, not the commit
       count.
     - **A merged dependency PR is not a landed dependency.** The registry check
       (`curl --max-redirs 0 .../simple/<dep>/` → 302) stays authoritative long after the
-      merge: publishing needs a separate `main` dispatch, and for a heavy package that run
-      itself takes hours (pyarrow's is a 24h-timeout Arrow C++ build). Read the *publish
-      run's* status, not the PR's `mergedAt`, before deciding a blocked port can be
-      unblocked.
+      merge: publishing happens in the `push` run the merge triggers, and for a heavy
+      package that run itself takes hours (pyarrow's is a 24h-timeout Arrow C++ build).
+      Read the *publish run's* status, not the PR's `mergedAt`, before deciding a blocked
+      port can be unblocked.
 
 163. **A maintainer hold that *names* a condition is an instruction to come back and
     re-test it, not a permanent park (the positive case gotchas 48/80/158 leave out).**
@@ -242,40 +239,37 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
     machine still looks mid-flight: the local branch exists, the worktree is still there at
     its pre-merge commit, and `git log` in it shows a normal-looking WIP commit. Starting
     over from that state duplicates a merged workflow and, if it gets as far as a second
-    `main` dispatch, re-uploads files GitLab already has (`HTTPError: 400 Bad Request`,
-    after a full multi-hour build). Three cheap calls settle it before any research:
+    `main` run, creates a second release for a version that already has one (after a full
+    multi-hour build). Three cheap calls settle it before any research:
     ```bash
     gh pr list --state all --search <pkg> --json number,state,headRefName,url
     curl -s -o /dev/null -w '%{http_code}\n' --max-redirs 0 https://pypi.riseproject.dev/simple/<pkg>/
     git log --oneline origin/main -- .github/workflows/build-<pkg>.yml
     ```
-    A `200` from the registry plus a merged PR means the work is done including the publish
-    dispatch; verify the post-merge bookkeeping (issue, `closingIssuesReferences`, project
-    Status) rather than the port.
-    - **An `origin/github-actions/add-doc-for-<pkg>` branch is the strongest single tell**,
-      and it shows up in a plain `git branch -a | grep <pkg>` before you have asked GitHub
-      anything: only `_publish-wheel.yml` creates it, and only on a run whose ref was `main`.
-      Its existence proves the wheels reached the registry. The matching `docs: add <pkg>`
-      PR is the maintainer's to merge, not yours.
-    - **`docs/packages/<pkg>.yaml` missing from `main` is not evidence the port is
-      incomplete** — it arrives through that separate docs PR, so it lags the wheels by
-      however long the maintainer takes.
+    A `200` from the registry plus a merged PR means the work is done including the publish;
+    verify the post-merge bookkeeping (issue, `closingIssuesReferences`, project Status)
+    rather than the port.
+    - **A `docs/packages/<pkg>.yaml` entry that still has no `tag:`/`files:` on `main` is
+      not evidence the port is unpublished** — the release metadata arrives through the
+      shared `github-actions/update-doc` docs PR, which only `_publish-wheel.yml` pushes
+      to, and only on a run whose ref was `main`. Read the `push` run's conclusion and
+      the docs PR; the YAML on `main` lags the wheels by however long the maintainer takes.
 
-208. **A fresh `main` publish dispatch finishing green does not mean
+208. **A fresh `main` publish run finishing green does not mean
     `pypi.riseproject.dev/simple/<pkg>/` is live yet — it can 404 for a while first.**
     Gotcha 30's 200-vs-302 check assumes the package is already on the registry or never
     will be; it misses a third, transient state. Right after `_publish-wheel.yml` runs on
     `main` and reports success (draft release created, "Verify release is immutable"
     green, `docs/packages/<pkg>.yaml` written), the endpoint can still answer `404` —
-    tree-sitter-yaml's did, immediately after its own dispatch, while a same-day publish
+    tree-sitter-yaml's did, immediately after its own publish, while a same-day publish
     from two hours earlier (pyyaml-ft) was already `200`, and two more from the prior
     30 minutes (pylsqpack, opencv-contrib-python) were still `404` too. The index that
     backs `/simple/` is rebuilt on its own schedule, decoupled from the GitHub Release.
-    Don't read a post-dispatch `404` as a failed publish and don't re-dispatch to "fix"
-    it — re-running `build-<pkg>.yml` on `main` after a successful run just hits
-    gotcha 173's `HTTPError: 400 Bad Request` re-upload for no reason. Confirm the
-    dispatch worked from the run's own conclusion and the release, not from the index;
-    a `404` a few minutes old is not yet evidence of anything.
+    Don't read a post-publish `404` as a failed publish and don't re-dispatch to "fix"
+    it — re-running `build-<pkg>.yml` on `main` after a successful run just creates a
+    second release for the same version for no reason. Confirm the publish worked from
+    the run's own conclusion and the release, not from the index; a `404` a few minutes
+    old is not yet evidence of anything.
 
 357. **A single combined-interpreter build job's artifact name needs to match the
     `publish` job's `artifact-pattern` exactly — the usual `-*-` wildcard assumes a

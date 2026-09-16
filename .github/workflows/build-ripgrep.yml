@@ -9,33 +9,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'ripgrep version to build (git tag, e.g. 15.1.0)'
-        required: true
-        default: '15.1.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ripgrep.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-ripgrep.yml'
+      - 'docs/packages/ripgrep.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ripgrep.yml'
+      - 'docs/packages/ripgrep.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '15.1.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  # `inputs.version` is empty on pull_request events; default to 15.1.0 there.
-  RIPGREP_VERSION: ${{ inputs.version || '15.1.0' }}
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: ripgrep
+      version: ${{ inputs.version }}
 
   build_wheel:
     needs: [setup]
-    name: Build ripgrep ${{ inputs.version || '15.1.0' }} manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build ripgrep ${{ matrix.version }} manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
+
+    env:
+      RIPGREP_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout ripgrep v${{ env.RIPGREP_VERSION }}
@@ -114,17 +128,20 @@ jobs:
           if-no-files-found: error
 
   test_wheel:
-    name: Test ripgrep ${{ inputs.version || '15.1.0' }} on Python ${{ matrix.python-version }}
+    name: Test ripgrep ${{ matrix.version }} on Python ${{ matrix.python-version }}
     needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 30
     env:
+      RIPGREP_VERSION: ${{ matrix.version }}
       # Without this uv would reuse the runner image's system CPython for 3.12
       # and download a standalone build for the others.
       UV_PYTHON_PREFERENCE: only-managed
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # This repo's default interpreter matrix (gotcha in workflow-anatomy.md);
         # the wheel is interpreter-agnostic (bindings = "bin"), so every
         # interpreter -- including free-threaded -- exercises the same binary.
@@ -193,11 +210,16 @@ jobs:
           [ "$(rg -l hello .)" = "./sub/a.txt" ]
 
   publish:
-    name: Publish ripgrep ${{ inputs.version || '15.1.0' }}
+    name: Publish ripgrep ${{ matrix.version }}
     needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: ripgrep-${{ inputs.version || '15.1.0' }}-manylinux_riscv64
+      artifact-pattern: ripgrep-${{ matrix.version }}-manylinux_riscv64

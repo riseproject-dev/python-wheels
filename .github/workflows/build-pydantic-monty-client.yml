@@ -9,47 +9,60 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pydantic-monty-client version to build (git tag, e.g. v0.0.21)'
-        required: true
-        default: 'v0.0.21'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pydantic-monty-client.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pydantic-monty-client.yml'
+      - 'docs/packages/pydantic-monty-client.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pydantic-monty-client.yml'
+      - 'docs/packages/pydantic-monty-client.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || 'v0.0.21' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to v0.0.21 there.
-  MONTY_VERSION: ${{ inputs.version || 'v0.0.21' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pydantic-monty-client
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build pydantic-monty-client ${{ inputs.version || 'v0.0.21' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pydantic-monty-client ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # No abi3 feature on pyo3 in Cargo.toml, so upstream ships one wheel
         # per interpreter (matches PyPI's cp3xx-cp3xx tags).
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      MONTY_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout monty ${{ env.MONTY_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: pydantic/monty
-          ref: ${{ env.MONTY_VERSION }}
+          ref: v${{ env.MONTY_VERSION }}
           persist-credentials: false
 
       # `crates/monty-python`'s pyproject.toml has no `license-files`, so
@@ -101,11 +114,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pydantic-monty-client ${{ inputs.version || 'v0.0.21' }}
+    name: Publish pydantic-monty-client ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pydantic-monty-client-${{ inputs.version || 'v0.0.21' }}-*-manylinux_riscv64
+      artifact-pattern: pydantic-monty-client-${{ matrix.version }}-*-manylinux_riscv64

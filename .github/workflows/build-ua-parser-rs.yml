@@ -9,37 +9,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'ua-parser-rs version to build (git tag without the ua-parser-rs- prefix, e.g. 0.1.5)'
-        required: true
-        default: '0.1.5'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ua-parser-rs.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-ua-parser-rs.yml'
+      - 'docs/packages/ua-parser-rs.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ua-parser-rs.yml'
+      - 'docs/packages/ua-parser-rs.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.1.5' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.1.5 there.
-  UA_PARSER_RS_VERSION: ${{ inputs.version || '0.1.5' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: ua-parser-rs
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build ua-parser-rs ${{ inputs.version || '0.1.5' }} ${{ matrix.tag }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build ua-parser-rs ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           # pyo3's abi3-py310 feature is on unconditionally, so one abi3 wheel
           # serves every GIL-ful interpreter; pyo3 disables abi3 under
@@ -54,6 +64,9 @@ jobs:
               cp314-manylinux_riscv64
           - tag: cp314t
             build: cp314t-manylinux_riscv64
+
+    env:
+      UA_PARSER_RS_VERSION: ${{ matrix.version }}
 
     steps:
       # ua-parser-rs is a pyo3/maturin wheel living at `ua-parser-rs/` inside
@@ -108,11 +121,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish ua-parser-rs ${{ inputs.version || '0.1.5' }}
+    name: Publish ua-parser-rs ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: ua_parser_rs-${{ inputs.version || '0.1.5' }}-*-manylinux_riscv64
+      artifact-pattern: ua_parser_rs-${{ matrix.version }}-*-manylinux_riscv64

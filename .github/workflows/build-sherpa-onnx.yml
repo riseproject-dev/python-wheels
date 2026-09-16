@@ -8,23 +8,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'sherpa-onnx version to build (git tag, e.g. 1.13.6)'
-        required: true
-        default: '1.13.6'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/sherpa-onnx.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-sherpa-onnx.yml'
+      - 'docs/packages/sherpa-onnx.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sherpa-onnx.yml'
+      - 'docs/packages/sherpa-onnx.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.13.6' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.13.6 there.
-  SHERPA_ONNX_VERSION: ${{ inputs.version || '1.13.6' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   # Upstream's own riscv64 onnxruntime (csukuangfj/onnxruntime-libs v1.14.1) is
   # cross-compiled for the T-Head XuanTie ABI (needs ld-linux-riscv64xthead-lp64d.so.1,
@@ -35,15 +40,20 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: sherpa-onnx
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build sherpa-onnx ${{ inputs.version || '1.13.6' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build sherpa-onnx ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 1440
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Per-interpreter (not abi3): the pybind11 extension links the version-specific ABI.
         # cp314t dropped: sherpa-onnx's CMake/pybind11 extension-suffix detection
         # misidentifies the free-threaded 3.14t interpreter's ABI tag, naming the
@@ -56,6 +66,9 @@ jobs:
           - "cp312"
           - "cp313"
           - "cp314"
+
+    env:
+      SHERPA_ONNX_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout sherpa-onnx v${{ env.SHERPA_ONNX_VERSION }}
@@ -144,11 +157,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish sherpa-onnx ${{ inputs.version || '1.13.6' }}
+    name: Publish sherpa-onnx ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: sherpa-onnx-${{ inputs.version || '1.13.6' }}-*-manylinux_riscv64
+      artifact-pattern: sherpa-onnx-${{ matrix.version }}-*-manylinux_riscv64

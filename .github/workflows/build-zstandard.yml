@@ -5,24 +5,30 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'zstandard version to build (git tag, e.g. 0.25.0)'
-        required: true
-        default: '0.25.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/zstandard.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-zstandard.yml'
+      - 'docs/packages/zstandard.yaml'
+      - 'patches/zstandard/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-zstandard.yml'
+      - 'docs/packages/zstandard.yaml'
       - 'patches/zstandard/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.25.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.25.0 there.
-  ZSTANDARD_VERSION: ${{ inputs.version || '0.25.0' }}
   UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
   UV_INDEX_STRATEGY: unsafe-best-match
   UV_ONLY_BINARY: ':all:'
@@ -33,15 +39,23 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: zstandard
+      version: ${{ inputs.version }}
 
   linux:
     needs: [setup]
-    name: Build zstandard ${{ inputs.version || '0.25.0' }} ${{ matrix.py }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build zstandard ${{ matrix.version }} ${{ matrix.py }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         py: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      ZSTANDARD_VERSION: ${{ matrix.version }}
 
     steps:
       # zstandard tags releases without a leading `v` (e.g. `0.25.0`), so the ref
@@ -98,11 +112,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish zstandard ${{ inputs.version || '0.25.0' }}
+    name: Publish zstandard ${{ matrix.version }}
     needs: [setup, linux]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: zstandard-${{ inputs.version || '0.25.0' }}-*-manylinux_riscv64
+      artifact-pattern: zstandard-${{ matrix.version }}-*-manylinux_riscv64

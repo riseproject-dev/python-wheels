@@ -9,38 +9,51 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'arc4 version to build (git tag, e.g. 0.5.0)'
-        required: true
-        default: '0.5.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/arc4.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-arc4.yml'
+      - 'docs/packages/arc4.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-arc4.yml'
+      - 'docs/packages/arc4.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.5.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.5.0 there.
-  ARC4_VERSION: ${{ inputs.version || '0.5.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: arc4
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build arc4 ${{ inputs.version || '0.5.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build arc4 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      ARC4_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout arc4 ${{ env.ARC4_VERSION }}
@@ -69,11 +82,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish arc4 ${{ inputs.version || '0.5.0' }}
+    name: Publish arc4 ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: arc4-${{ inputs.version || '0.5.0' }}-*-manylinux_riscv64
+      artifact-pattern: arc4-${{ matrix.version }}-*-manylinux_riscv64

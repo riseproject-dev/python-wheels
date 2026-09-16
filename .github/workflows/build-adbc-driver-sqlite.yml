@@ -18,37 +18,53 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'adbc-driver-sqlite version to build (PyPI version, e.g. 1.12.0)'
-        required: true
-        default: '1.12.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/adbc-driver-sqlite.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-adbc-driver-sqlite.yml'
+      - 'docs/packages/adbc-driver-sqlite.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-adbc-driver-sqlite.yml'
+      - 'docs/packages/adbc-driver-sqlite.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.12.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.12.0 there.
-  ADBC_VERSION: ${{ inputs.version || '1.12.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: adbc-driver-sqlite
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build adbc-driver-sqlite ${{ inputs.version || '1.12.0' }} py3-none-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build adbc-driver-sqlite ${{ matrix.version }} py3-none-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     # numpy/pandas/pyarrow/adbc-driver-manager download for the test step alone takes
     # ~an hour on this runner (same as adbc-driver-postgresql's identical install line),
     # even though the driver build itself is fast with no vcpkg compile involved.
     timeout-minutes: 90
+
+    env:
+      ADBC_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout apache/arrow-adbc v${{ env.ADBC_VERSION }}
@@ -138,11 +154,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish adbc-driver-sqlite ${{ inputs.version || '1.12.0' }}
+    name: Publish adbc-driver-sqlite ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: adbc-driver-sqlite-${{ inputs.version || '1.12.0' }}-*-manylinux_riscv64
+      artifact-pattern: adbc-driver-sqlite-${{ matrix.version }}-*-manylinux_riscv64

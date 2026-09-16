@@ -8,24 +8,30 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'h5py version to build (git tag, e.g. 3.16.0)'
-        required: true
-        default: '3.16.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/h5py.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-h5py.yml'
+      - 'docs/packages/h5py.yaml'
+      - 'patches/h5py/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-h5py.yml'
+      - 'docs/packages/h5py.yaml'
       - 'patches/h5py/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '3.16.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 3.16.0 there.
-  H5PY_VERSION: ${{ inputs.version || '3.16.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   # Upstream's Linux wheels are built in ghcr.io/h5py/manylinux_2_28_<arch>-hdf5,
   # which has no riscv64 variant, so the same libraries are built into the
@@ -37,16 +43,24 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: h5py
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build h5py ${{ inputs.version || '3.16.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build h5py ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 420
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      H5PY_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout h5py ${{ env.H5PY_VERSION }}
@@ -147,11 +161,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish h5py ${{ inputs.version || '3.16.0' }}
+    name: Publish h5py ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: h5py-${{ inputs.version || '3.16.0' }}-*-manylinux_riscv64
+      artifact-pattern: h5py-${{ matrix.version }}-*-manylinux_riscv64

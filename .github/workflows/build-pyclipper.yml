@@ -9,40 +9,54 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pyclipper version to build (git tag, e.g. 1.4.0)'
-        required: true
-        default: '1.4.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyclipper.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pyclipper.yml'
+      - 'docs/packages/pyclipper.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyclipper.yml'
+      - 'docs/packages/pyclipper.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.4.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  PYCLIPPER_VERSION: ${{ inputs.version || '1.4.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyclipper
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build pyclipper ${{ inputs.version || '1.4.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyclipper ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
 
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Upstream builds no free-threaded Linux wheel, and the extension does not
         # declare free-threading support, so cp314t is excluded.
         python: ["cp312", "cp313", "cp314"]
+
+    env:
+      PYCLIPPER_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pyclipper ${{ env.PYCLIPPER_VERSION }}
@@ -69,11 +83,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pyclipper ${{ inputs.version || '1.4.0' }}
+    name: Publish pyclipper ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pyclipper-${{ inputs.version || '1.4.0' }}-*-manylinux_riscv64
+      artifact-pattern: pyclipper-${{ matrix.version }}-*-manylinux_riscv64

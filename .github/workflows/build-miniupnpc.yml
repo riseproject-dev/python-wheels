@@ -11,41 +11,54 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'miniupnpc version to build (PyPI version, e.g. 2.3.3)'
-        required: true
-        default: '2.3.3'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/miniupnpc.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-miniupnpc.yml'
+      - 'docs/packages/miniupnpc.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-miniupnpc.yml'
+      - 'docs/packages/miniupnpc.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.3.3' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 2.3.3 there.
-  MINIUPNPC_VERSION: ${{ inputs.version || '2.3.3' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: miniupnpc
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build miniupnpc ${{ inputs.version || '2.3.3' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build miniupnpc ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Plain PyModuleDef C extension, not abi3, matching upstream's per-interpreter wheels.
         python: ["cp312", "cp313", "cp314", "cp314t"]
         libc: [manylinux, musllinux]
+
+    env:
+      MINIUPNPC_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Compute git tag
@@ -81,11 +94,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish miniupnpc ${{ inputs.version || '2.3.3' }}
+    name: Publish miniupnpc ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: miniupnpc-${{ inputs.version || '2.3.3' }}-*riscv64
+      artifact-pattern: miniupnpc-${{ matrix.version }}-*riscv64

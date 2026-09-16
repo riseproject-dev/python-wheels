@@ -9,23 +9,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'vhacdx version to build (e.g. 0.0.10)'
-        required: true
-        default: '0.0.10'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/vhacdx.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-vhacdx.yml'
+      - 'docs/packages/vhacdx.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-vhacdx.yml'
+      - 'docs/packages/vhacdx.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.0.10' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.0.10 there.
-  VHACDX_VERSION: ${{ inputs.version || '0.0.10' }}
   # Upstream cuts releases without git tags, so pin the release commit: `main`
   # HEAD is byte-identical (source-wise) to the 0.0.10 PyPI sdist. Update it
   # alongside VHACDX_VERSION.
@@ -36,18 +41,26 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: vhacdx
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build vhacdx ${{ inputs.version || '0.0.10' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build vhacdx ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Per-interpreter (not abi3): upstream ships cp3x-cp3x wheels.
         python: ["cp312", "cp313", "cp314", "cp314t"]
         libc: [manylinux, musllinux]
+
+    env:
+      VHACDX_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout vhacdx ${{ env.VHACDX_VERSION }}
@@ -75,11 +88,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish vhacdx ${{ inputs.version || '0.0.10' }}
+    name: Publish vhacdx ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: vhacdx-${{ inputs.version || '0.0.10' }}-*riscv64
+      artifact-pattern: vhacdx-${{ matrix.version }}-*riscv64

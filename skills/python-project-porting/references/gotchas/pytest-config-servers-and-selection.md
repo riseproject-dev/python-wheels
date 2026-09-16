@@ -87,11 +87,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
       sglang's cargo workspace needs >1.5h per interpreter at
       `opt-level=3`/`codegen-units=1`, times four jobs, on the handful of
       `ubuntu-24.04-riscv` runners every other open port is queued on. Maintainers
-      cancelled the run twice and **deleted the `Trigger:` line from the PR
-      description**. A stripped `Trigger:` line or a human-cancelled run is a stop
-      signal, not a flake — re-adding it just takes the runners back. Land the
-      workflow, report plainly that CI was never proven green, and leave the dispatch
-      to the maintainers.
+      cancelled the run twice. A human-cancelled run is a stop signal, not a flake —
+      re-dispatching or pushing again just takes the runners back. Land the workflow,
+      report plainly that CI was never proven green, and leave the rebuild to the
+      maintainers.
 
 64. **A daemon that refuses to run as root is usually a packaging question, not a patch
     (the mysql-connector-python case), and QEMU cannot verify it locally.** Gotcha 39 notes

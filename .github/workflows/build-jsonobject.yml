@@ -9,39 +9,53 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'jsonobject version/tag to build (e.g. 2.3.1)'
-        required: true
-        default: '2.3.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/jsonobject.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-jsonobject.yml'
+      - 'docs/packages/jsonobject.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-jsonobject.yml'
+      - 'docs/packages/jsonobject.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.3.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  JSONOBJECT_VERSION: ${{ inputs.version || '2.3.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: jsonobject
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build jsonobject ${{ inputs.version || '2.3.1' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build jsonobject ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
         libc: [manylinux, musllinux]
+
+    env:
+      JSONOBJECT_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout jsonobject v${{ env.JSONOBJECT_VERSION }}
@@ -73,11 +87,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish jsonobject ${{ inputs.version || '2.3.1' }}
+    name: Publish jsonobject ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: jsonobject-${{ inputs.version || '2.3.1' }}-*riscv64
+      artifact-pattern: jsonobject-${{ matrix.version }}-*riscv64

@@ -9,37 +9,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'protobuf-py-ext version to build (git tag without leading v, e.g. 0.3.0)'
-        required: true
-        default: '0.3.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/protobuf-py-ext.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-protobuf-py-ext.yml'
+      - 'docs/packages/protobuf-py-ext.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-protobuf-py-ext.yml'
+      - 'docs/packages/protobuf-py-ext.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.3.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.3.0 there.
-  PROTOBUF_PY_EXT_VERSION: ${{ inputs.version || '0.3.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: protobuf-py-ext
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build protobuf-py-ext ${{ inputs.version || '0.3.0' }} ${{ matrix.tag }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build protobuf-py-ext ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           # pyproject.toml declares no abi3 default and the crate's own
           # [dependencies] pyo3 carries no abi3-pyNN feature either, so upstream's
@@ -63,6 +73,9 @@ jobs:
           - tag: cp314t
             build: cp314t-manylinux_riscv64
             features: ''
+
+    env:
+      PROTOBUF_PY_EXT_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout protobuf-py v${{ env.PROTOBUF_PY_EXT_VERSION }}
@@ -186,11 +199,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish protobuf-py-ext ${{ inputs.version || '0.3.0' }}
+    name: Publish protobuf-py-ext ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: protobuf-py-ext-${{ inputs.version || '0.3.0' }}-*-manylinux_riscv64
+      artifact-pattern: protobuf-py-ext-${{ matrix.version }}-*-manylinux_riscv64

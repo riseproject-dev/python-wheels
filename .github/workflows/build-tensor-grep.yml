@@ -9,33 +9,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'tensor-grep version to build (git tag without the v prefix, e.g. 1.118.0)'
-        required: true
-        default: '1.118.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/tensor-grep.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-tensor-grep.yml'
+      - 'docs/packages/tensor-grep.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tensor-grep.yml'
+      - 'docs/packages/tensor-grep.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.118.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  # `inputs.version` is empty on pull_request events; default to 1.118.0 there.
-  TENSOR_GREP_VERSION: ${{ inputs.version || '1.118.0' }}
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: tensor-grep
+      version: ${{ inputs.version }}
 
   build_wheel:
     needs: [setup]
-    name: Build tensor-grep ${{ inputs.version || '1.118.0' }} cp311-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build tensor-grep ${{ matrix.version }} cp311-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 240
+
+    env:
+      TENSOR_GREP_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout tensor-grep v${{ env.TENSOR_GREP_VERSION }}
@@ -76,11 +90,13 @@ jobs:
           if-no-files-found: error
 
   test_wheel:
-    name: Test tensor-grep ${{ inputs.version || '1.118.0' }} on Python ${{ matrix.python-version }}
+    name: Test tensor-grep ${{ matrix.version }} on Python ${{ matrix.python-version }}
     needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 30
     env:
+      TENSOR_GREP_VERSION: ${{ matrix.version }}
       # Without this uv would reuse the runner image's system CPython for 3.12
       # and download a standalone build for the others.
       UV_PYTHON_PREFERENCE: only-managed
@@ -94,6 +110,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # No 3.14t: the wheel is cp311-abi3, and pyo3 disables abi3 under
         # Py_GIL_DISABLED, so a free-threaded interpreter can't install it
         # (upstream ships no free-threaded wheel either).
@@ -134,11 +151,16 @@ jobs:
           ! grep -q 'something else' <<<"$out"
 
   publish:
-    name: Publish tensor-grep ${{ inputs.version || '1.118.0' }}
+    name: Publish tensor-grep ${{ matrix.version }}
     needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: tensor-grep-${{ inputs.version || '1.118.0' }}-cp311-abi3-manylinux_riscv64
+      artifact-pattern: tensor-grep-${{ matrix.version }}-cp311-abi3-manylinux_riscv64

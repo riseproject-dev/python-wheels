@@ -13,35 +13,49 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'sspilib version to build (git tag, e.g. 0.6.0)'
-        required: true
-        default: '0.6.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/sspilib.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-sspilib.yml'
+      - 'docs/packages/sspilib.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sspilib.yml'
+      - 'docs/packages/sspilib.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.6.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  SSPILIB_VERSION: ${{ inputs.version || '0.6.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: sspilib
+      version: ${{ inputs.version }}
 
   build_sdist:
     needs: [setup]
-    name: Build sspilib ${{ inputs.version || '0.6.0' }} sdist
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build sspilib ${{ matrix.version }} sdist
     runs-on: ubuntu-latest
-    outputs:
-      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
-      package_version: ${{ steps.sdist.outputs.package_version }}
+    env:
+      SSPILIB_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout sspilib v${{ env.SSPILIB_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -67,17 +81,11 @@ jobs:
           uv pip install build
           python -m build --sdist --outdir dist
 
-          sdist_name="$(ls dist)"
-          {
-            echo "sdist_name=${sdist_name}"
-            echo "package_version=$(echo "${sdist_name}" | sed -En 's/sspilib-(.+)\.tar\.gz/\1/p')"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Upload sdist artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: ${{ steps.sdist.outputs.sdist_name }}
-          path: dist/${{ steps.sdist.outputs.sdist_name }}
+          name: sspilib-${{ env.SSPILIB_VERSION }}-sdist
+          path: dist/*.tar.gz
           if-no-files-found: error
 
   # One cp311-abi3 wheel (setup.py hardcodes the limited-api floor to cp311):
@@ -85,20 +93,31 @@ jobs:
   # (find_compatible_wheel), so all three tags share one wheel.
   build_abi3:
     needs: [setup, build_sdist]
-    name: Build sspilib ${{ inputs.version || '0.6.0' }} cp311-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build sspilib ${{ matrix.version }} cp311-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
+    env:
+      SSPILIB_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Download sdist
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: ${{ needs.build_sdist.outputs.sdist_name }}
+          name: sspilib-${{ env.SSPILIB_VERSION }}-sdist
           path: dist/
+
+      - id: sdist_path
+        run: echo "path=$(echo dist/*.tar.gz)" >> "$GITHUB_OUTPUT"
 
       - name: Build and test wheel
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
-          package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}
+          package-dir: ${{ steps.sdist_path.outputs.path }}
         env:
           CIBW_ARCHS: riscv64
           CIBW_BUILD: 'cp312-* cp313-* cp314-*'
@@ -117,20 +136,31 @@ jobs:
   # so this is a per-interpreter build. Only cp314t - the riscv64 image has no cp313t.
   build_freethreaded:
     needs: [setup, build_sdist]
-    name: Build sspilib ${{ inputs.version || '0.6.0' }} cp314t-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build sspilib ${{ matrix.version }} cp314t-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
+    env:
+      SSPILIB_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Download sdist
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: ${{ needs.build_sdist.outputs.sdist_name }}
+          name: sspilib-${{ env.SSPILIB_VERSION }}-sdist
           path: dist/
+
+      - id: sdist_path
+        run: echo "path=$(echo dist/*.tar.gz)" >> "$GITHUB_OUTPUT"
 
       - name: Build and test wheel
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
-          package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}
+          package-dir: ${{ steps.sdist_path.outputs.path }}
         env:
           CIBW_ARCHS: riscv64
           CIBW_BUILD: 'cp314t-*'
@@ -146,11 +176,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish sspilib ${{ inputs.version || '0.6.0' }}
+    name: Publish sspilib ${{ matrix.version }}
     needs: [setup, build_sdist, build_abi3, build_freethreaded]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: sspilib-${{ needs.build_sdist.outputs.package_version }}-*-manylinux_riscv64
+      artifact-pattern: sspilib-${{ matrix.version }}-*-manylinux_riscv64

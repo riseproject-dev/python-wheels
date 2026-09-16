@@ -7,23 +7,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'atomic-dict version to build (e.g. 0.5.0)'
-        required: true
-        default: '0.5.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/atomic-dict.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-atomic-dict.yml'
+      - 'docs/packages/atomic-dict.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-atomic-dict.yml'
+      - 'docs/packages/atomic-dict.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.5.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.5.0 there.
-  ATOMIC_DICT_VERSION: ${{ inputs.version || '0.5.0' }}
   # Upstream never pushed a git tag, so pin the release commit: its tree is
   # byte-identical to the 0.5.0 PyPI sdist. Update alongside ATOMIC_DICT_VERSION.
   ATOMIC_DICT_REF: 2480deb60eec9e85d49c65ce05812d659bf6e441
@@ -33,17 +38,25 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: atomic-dict
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build atomic-dict ${{ inputs.version || '0.5.0' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build atomic-dict ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
         libc: [manylinux, musllinux]
+
+    env:
+      ATOMIC_DICT_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout atomic-dict ${{ env.ATOMIC_DICT_VERSION }}
@@ -74,11 +87,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish atomic-dict ${{ inputs.version || '0.5.0' }}
+    name: Publish atomic-dict ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: atomic-dict-${{ inputs.version || '0.5.0' }}-*riscv64
+      artifact-pattern: atomic-dict-${{ matrix.version }}-*riscv64

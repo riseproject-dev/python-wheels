@@ -8,39 +8,53 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'test-results-parser version to build (git tag without leading v, e.g. 0.6.1)'
-        required: true
-        default: '0.6.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/test-results-parser.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-test-results-parser.yml'
+      - 'docs/packages/test-results-parser.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-test-results-parser.yml'
+      - 'docs/packages/test-results-parser.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.6.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  TEST_RESULTS_PARSER_VERSION: ${{ inputs.version || '0.6.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: test-results-parser
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build test-results-parser ${{ inputs.version || '0.6.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build test-results-parser ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # No abi3 feature on pyo3 in Cargo.toml, so upstream ships one wheel
         # per interpreter (matches PyPI's cp3xx-cp3xx tags).
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      TEST_RESULTS_PARSER_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout test-results-parser v${{ env.TEST_RESULTS_PARSER_VERSION }}
@@ -76,11 +90,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish test-results-parser ${{ inputs.version || '0.6.1' }}
+    name: Publish test-results-parser ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: test-results-parser-${{ inputs.version || '0.6.1' }}-*-manylinux_riscv64
+      artifact-pattern: test-results-parser-${{ matrix.version }}-*-manylinux_riscv64

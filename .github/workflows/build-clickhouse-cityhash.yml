@@ -9,22 +9,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'clickhouse-cityhash version to build (e.g. 1.0.2.6)'
-        required: true
-        default: '1.0.2.6'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/clickhouse-cityhash.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-clickhouse-cityhash.yml'
+      - 'docs/packages/clickhouse-cityhash.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-clickhouse-cityhash.yml'
+      - 'docs/packages/clickhouse-cityhash.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.0.2.6' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  CLICKHOUSE_CITYHASH_VERSION: ${{ inputs.version || '1.0.2.6' }}
   # Upstream's "1.0.2.6" tag predates the setup.py version bump (still reads
   # VERSION = '1.0.2.5'); the bump landed one commit later, tagged "1.0.2.6post1".
   # Update alongside CLICKHOUSE_CITYHASH_VERSION.
@@ -35,19 +41,27 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: clickhouse-cityhash
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build clickhouse-cityhash ${{ inputs.version || '1.0.2.6' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build clickhouse-cityhash ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # cp314t dropped: upstream's pinned Cython<3.1 generates __pyx_vectorcallfunc
         # code that doesn't compile against the free-threaded CPython headers.
         python: ["cp312", "cp313", "cp314"]
         libc: [manylinux, musllinux]
+
+    env:
+      CLICKHOUSE_CITYHASH_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout clickhouse-cityhash ${{ env.CLICKHOUSE_CITYHASH_REF }}
@@ -78,11 +92,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish clickhouse-cityhash ${{ inputs.version || '1.0.2.6' }}
+    name: Publish clickhouse-cityhash ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: clickhouse-cityhash-${{ inputs.version || '1.0.2.6' }}-*riscv64
+      artifact-pattern: clickhouse-cityhash-${{ matrix.version }}-*riscv64

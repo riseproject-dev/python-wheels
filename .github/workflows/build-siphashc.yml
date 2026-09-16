@@ -9,43 +9,56 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'siphashc version to build (git tag without leading v, e.g. 2.8)'
-        required: true
-        default: '2.8'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/siphashc.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-siphashc.yml'
+      - 'docs/packages/siphashc.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-siphashc.yml'
+      - 'docs/packages/siphashc.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.8' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 2.8 there.
-  SIPHASHC_VERSION: ${{ inputs.version || '2.8' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: siphashc
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build siphashc ${{ inputs.version || '2.8' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build siphashc ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # setup.py hardcodes py_limited_api="cp310" for every non-free-threaded build, so
         # cp310 is the only regular build needed (gotcha 96: build on the floor interpreter
         # its abi3 tag claims). Free-threaded builds have no limited-API target and fall
         # back to per-interpreter wheels; upstream's own CI tests 3.14t and 3.15t (not
         # 3.13t), and the manylinux_riscv64 image has no cp313t anyway.
         python: ["cp310", "cp314t", "cp315t"]
+
+    env:
+      SIPHASHC_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout siphashc v${{ env.SIPHASHC_VERSION }}
@@ -70,11 +83,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish siphashc ${{ inputs.version || '2.8' }}
+    name: Publish siphashc ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: siphashc-${{ inputs.version || '2.8' }}-*-manylinux_riscv64
+      artifact-pattern: siphashc-${{ matrix.version }}-*-manylinux_riscv64

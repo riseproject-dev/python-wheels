@@ -9,36 +9,50 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'fastnumbers version to build (git tag, e.g. 5.2.0)'
-        required: true
-        default: '5.2.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/fastnumbers.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-fastnumbers.yml'
+      - 'docs/packages/fastnumbers.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fastnumbers.yml'
+      - 'docs/packages/fastnumbers.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '5.2.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  FASTNUMBERS_VERSION: ${{ inputs.version || '5.2.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: fastnumbers
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build fastnumbers ${{ inputs.version || '5.2.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build fastnumbers ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      FASTNUMBERS_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout fastnumbers ${{ env.FASTNUMBERS_VERSION }}
@@ -83,11 +97,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish fastnumbers ${{ inputs.version || '5.2.0' }}
+    name: Publish fastnumbers ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: fastnumbers-${{ inputs.version || '5.2.0' }}-*-manylinux_riscv64
+      artifact-pattern: fastnumbers-${{ matrix.version }}-*-manylinux_riscv64

@@ -8,23 +8,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pycocotools version to build (e.g. 2.0.11)'
-        required: true
-        default: '2.0.11'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pycocotools.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pycocotools.yml'
+      - 'docs/packages/pycocotools.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pycocotools.yml'
+      - 'docs/packages/pycocotools.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.0.11' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 2.0.11 there.
-  PYCOCOTOOLS_VERSION: ${{ inputs.version || '2.0.11' }}
   # Upstream cuts releases without git tags, so pin the release commit: this is
   # "bump version" (setup.py version='2.0.11'), whose tree is byte-identical to
   # the 2.0.11 PyPI sdist. Update it alongside PYCOCOTOOLS_VERSION.
@@ -34,14 +39,25 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pycocotools
+      version: ${{ inputs.version }}
 
   # One cp312-abi3 wheel: setup.py enables the limited API from cp312 up, so
   # cibuildwheel builds it once and reuses+tests it on cp313/cp314.
   build_abi3:
     needs: [setup]
-    name: Build pycocotools ${{ inputs.version || '2.0.11' }} cp312-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pycocotools ${{ matrix.version }} cp312-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
+    env:
+      PYCOCOTOOLS_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout cocoapi ${{ env.PYCOCOTOOLS_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -93,9 +109,17 @@ jobs:
   # later decision to drop 3.13t support (PR #35, not in this release).
   build_freethreaded:
     needs: [setup]
-    name: Build pycocotools ${{ inputs.version || '2.0.11' }} cp314t-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pycocotools ${{ matrix.version }} cp314t-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
+    env:
+      PYCOCOTOOLS_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout cocoapi ${{ env.PYCOCOTOOLS_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -137,11 +161,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pycocotools ${{ inputs.version || '2.0.11' }}
+    name: Publish pycocotools ${{ matrix.version }}
     needs: [setup, build_abi3, build_freethreaded]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pycocotools-${{ inputs.version || '2.0.11' }}-*-manylinux_riscv64
+      artifact-pattern: pycocotools-${{ matrix.version }}-*-manylinux_riscv64

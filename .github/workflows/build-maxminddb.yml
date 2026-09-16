@@ -9,37 +9,51 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'maxminddb version to build (git tag without leading v, e.g. 3.1.1)'
-        required: true
-        default: '3.1.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/maxminddb.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-maxminddb.yml'
+      - 'docs/packages/maxminddb.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-maxminddb.yml'
+      - 'docs/packages/maxminddb.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '3.1.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  MAXMINDDB_VERSION: ${{ inputs.version || '3.1.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: maxminddb
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build maxminddb ${{ inputs.version || '3.1.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build maxminddb ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      MAXMINDDB_VERSION: ${{ matrix.version }}
 
     steps:
       # Submodules carry the bundled libmaxminddb sources and the test databases.
@@ -90,11 +104,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish maxminddb ${{ inputs.version || '3.1.1' }}
+    name: Publish maxminddb ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: maxminddb-${{ inputs.version || '3.1.1' }}-*-manylinux_riscv64
+      artifact-pattern: maxminddb-${{ matrix.version }}-*-manylinux_riscv64

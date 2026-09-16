@@ -12,42 +12,56 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'imagecodecs version to build (git tag, e.g. 2026.8.16)'
-        required: true
-        default: '2026.8.16'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/imagecodecs.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-imagecodecs.yml'
+      - 'docs/packages/imagecodecs.yaml'
+      - 'patches/imagecodecs/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-imagecodecs.yml'
+      - 'docs/packages/imagecodecs.yaml'
       - 'patches/imagecodecs/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2026.8.16' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 2026.8.16 there.
-  IMAGECODECS_VERSION: ${{ inputs.version || '2026.8.16' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: imagecodecs
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build imagecodecs ${{ inputs.version || '2026.8.16' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build imagecodecs ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # setup.py's own py_limited_api collapses every GIL interpreter into one
         # cp312-abi3 wheel, built on our floor (cp312); Py_GIL_DISABLED forces its
         # own non-abi3 build for cp314t.
         python: ["cp312", "cp314t"]
+
+    env:
+      IMAGECODECS_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout imagecodecs v${{ env.IMAGECODECS_VERSION }}
@@ -139,11 +153,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish imagecodecs ${{ inputs.version || '2026.8.16' }}
+    name: Publish imagecodecs ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: imagecodecs-${{ inputs.version || '2026.8.16' }}-*-manylinux_riscv64
+      artifact-pattern: imagecodecs-${{ matrix.version }}-*-manylinux_riscv64

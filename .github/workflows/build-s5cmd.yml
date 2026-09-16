@@ -9,37 +9,56 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 's5cmd version to build (git tag of ImagingDataCommons/s5cmd-python-distributions, e.g. 0.3.3)'
-        required: true
-        default: '0.3.3'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/s5cmd.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-s5cmd.yml'
+      - 'docs/packages/s5cmd.yaml'
+      - 'patches/s5cmd/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-s5cmd.yml'
+      - 'docs/packages/s5cmd.yaml'
       - 'patches/s5cmd/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.3.3' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.3.3 there.
-  S5CMD_VERSION: ${{ inputs.version || '0.3.3' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: s5cmd
+      version: ${{ inputs.version }}
 
   build_wheel:
     needs: [setup]
-    name: Build s5cmd ${{ inputs.version || '0.3.3' }} manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build s5cmd ${{ matrix.version }} manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
+    # Job outputs are not per matrix leg: with several pending versions the last
+    # leg's value wins, so publish s5cmd one version at a time.
     outputs:
       pinned-version: ${{ steps.pinned.outputs.version }}
+
+    env:
+      S5CMD_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout s5cmd-python-distributions v${{ env.S5CMD_VERSION }}
@@ -133,11 +152,13 @@ jobs:
           if-no-files-found: error
 
   test_wheel:
-    name: Test s5cmd ${{ inputs.version || '0.3.3' }} on Python ${{ matrix.python-version }}
+    name: Test s5cmd ${{ matrix.version }} on Python ${{ matrix.python-version }}
     needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 15
     env:
+      S5CMD_VERSION: ${{ matrix.version }}
       # Without this uv would reuse the runner image's system CPython for 3.12
       # and download a standalone build for the others.
       UV_PYTHON_PREFERENCE: only-managed
@@ -145,6 +166,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # This repo's default interpreter matrix (gotcha in workflow-anatomy.md);
         # the wheel is interpreter-agnostic (wheel.py-api = "py3"), so every
         # interpreter -- including free-threaded -- exercises the same binary.
@@ -192,11 +214,16 @@ jobs:
           echo "$out" | grep -q 'sub/'
 
   publish:
-    name: Publish s5cmd ${{ inputs.version || '0.3.3' }}
+    name: Publish s5cmd ${{ matrix.version }}
     needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: s5cmd-${{ inputs.version || '0.3.3' }}-manylinux_riscv64
+      artifact-pattern: s5cmd-${{ matrix.version }}-manylinux_riscv64

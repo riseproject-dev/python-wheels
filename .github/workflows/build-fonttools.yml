@@ -8,23 +8,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'fonttools version to build (git tag, e.g. 4.63.0)'
-        required: true
-        default: '4.63.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/fonttools.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-fonttools.yml'
+      - 'docs/packages/fonttools.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fonttools.yml'
+      - 'docs/packages/fonttools.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '4.63.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 4.63.0 there.
-  FONTTOOLS_VERSION: ${{ inputs.version || '4.63.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   # Pin below Cython 3.3.0, which enforces PEP-484 arg annotations as strict type
   # checks and breaks qu2cu; fonttools pins Cython nowhere, so a build grabs latest.
@@ -33,21 +38,29 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: fonttools
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build fonttools ${{ inputs.version || '4.63.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build fonttools ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Per-interpreter (not abi3): the extensions link the version-specific ABI.
         python:
           - "cp312"
           - "cp313"
           - "cp314"
           - "cp314t"
+
+    env:
+      FONTTOOLS_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout fonttools ${{ env.FONTTOOLS_VERSION }}
@@ -83,11 +96,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish fonttools ${{ inputs.version || '4.63.0' }}
+    name: Publish fonttools ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: fonttools-${{ inputs.version || '4.63.0' }}-*-manylinux_riscv64
+      artifact-pattern: fonttools-${{ matrix.version }}-*-manylinux_riscv64

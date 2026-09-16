@@ -8,23 +8,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'samplerate version to build (git tag without leading v, e.g. 0.2.4)'
-        required: true
-        default: '0.2.4'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/samplerate.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-samplerate.yml'
+      - 'docs/packages/samplerate.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-samplerate.yml'
+      - 'docs/packages/samplerate.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.2.4' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.2.4 there.
-  SAMPLERATE_VERSION: ${{ inputs.version || '0.2.4' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   # external/CMakeLists.txt FetchContent-pulls these two at build time and
   # statically links them in; bump alongside SAMPLERATE_VERSION if upstream
@@ -35,18 +40,26 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: samplerate
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build samplerate ${{ inputs.version || '0.2.4' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build samplerate ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Mirrors upstream's own CIBW_BUILD (a per-interpreter .so, not abi3);
         # musllinux is dropped because upstream's own CI skips it too.
         python: ["cp39", "cp310", "cp311", "cp312", "cp313", "cp314"]
+
+    env:
+      SAMPLERATE_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout samplerate v${{ env.SAMPLERATE_VERSION }}
@@ -100,11 +113,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish samplerate ${{ inputs.version || '0.2.4' }}
+    name: Publish samplerate ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: samplerate-${{ inputs.version || '0.2.4' }}-*-manylinux_riscv64
+      artifact-pattern: samplerate-${{ matrix.version }}-*-manylinux_riscv64

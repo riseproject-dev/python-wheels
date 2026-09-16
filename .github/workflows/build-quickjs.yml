@@ -9,31 +9,45 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'quickjs version to build (git tag, e.g. 1.19.4)'
-        required: true
-        default: '1.19.4'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/quickjs.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-quickjs.yml'
+      - 'docs/packages/quickjs.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-quickjs.yml'
+      - 'docs/packages/quickjs.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.19.4' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  QUICKJS_VERSION: ${{ inputs.version || '1.19.4' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: quickjs
+      version: ${{ inputs.version }}
 
   build_sdist:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     # The checkout's pyproject.toml declares [build-system] requires = ["poetry"]
     # (used only for the dev environment) with no build-backend; a PEP 517
     # frontend run against the checkout installs the whole poetry dependency
@@ -42,13 +56,13 @@ jobs:
     # poetry.lock from the released sdist for exactly this reason, so build the
     # sdist once here (arch-independent, gotcha 4) with plain `setup.py sdist`
     # (bypasses pyproject.toml entirely) and feed that to cibuildwheel below.
-    name: Build quickjs ${{ inputs.version || '1.19.4' }} sdist
+    name: Build quickjs ${{ matrix.version }} sdist
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    outputs:
-      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
-      package_version: ${{ steps.sdist.outputs.package_version }}
+    env:
+      QUICKJS_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout quickjs ${{ env.QUICKJS_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -70,10 +84,6 @@ jobs:
         run: |
           uv pip install setuptools
           python setup.py sdist
-          sdists=(dist/*.tar.gz)
-          sdist_name=$(basename "${sdists[0]}")
-          echo "sdist_name=${sdist_name}" >> "$GITHUB_OUTPUT"
-          echo "package_version=$(echo "${sdist_name}" | sed -En 's/quickjs-(.+)\.tar\.gz/\1/p')" >> "$GITHUB_OUTPUT"
 
       - name: Upload sdist artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -84,14 +94,19 @@ jobs:
 
   build_wheels:
     needs: [setup, build_sdist]
-    name: Build quickjs ${{ inputs.version || '1.19.4' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build quickjs ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
         libc: [manylinux, musllinux]
+
+    env:
+      QUICKJS_VERSION: ${{ matrix.version }}
 
     steps:
       # actions/checkout defaults to clean: true (git clean -ffdx on the whole
@@ -136,11 +151,11 @@ jobs:
       # Extracting it ourselves and pointing package-dir at the directory keeps
       # Path.cwd() at the workspace root for the whole build.
       - name: Extract sdist
-        run: tar zxf "dist/${{ needs.build_sdist.outputs.sdist_name }}" -C dist
+        run: tar zxf dist/*.tar.gz -C dist
 
       - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
-          package-dir: dist/quickjs-${{ needs.build_sdist.outputs.package_version }}
+          package-dir: dist/quickjs-${{ matrix.version }}
           output-dir: wheelhouse/
         env:
           CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
@@ -169,11 +184,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish quickjs ${{ inputs.version || '1.19.4' }}
+    name: Publish quickjs ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: quickjs-${{ inputs.version || '1.19.4' }}-*riscv64
+      artifact-pattern: quickjs-${{ matrix.version }}-*riscv64

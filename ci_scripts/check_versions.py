@@ -22,6 +22,7 @@ from typing import Dict, List, Optional
 from packaging import version
 from pathlib import Path
 import requests
+import yaml
 
 
 REGISTRY_URL = "https://pypi.riseproject.dev/simple/"
@@ -33,7 +34,7 @@ REPO = "riseproject-dev/python-wheels"
 # build — a distinct ABI from "3.14", so it needs its own wheel.
 TARGET_PYTHON_VERSIONS = ["3.12", "3.13", "3.14", "3.14t"]
 
-# Cap on how many new versions get dispatched per upgrade PR. When the registry
+# Cap on how many new versions get declared per upgrade PR. When the registry
 # drifts far behind PyPI, an unbounded loop could kick off dozens of workflow
 # runs per package. Three keeps the retry cost bounded while still covering the
 # common "we missed one or two point releases" case.
@@ -341,28 +342,6 @@ def create_deprecation_pr(package: str, reason: str) -> Optional[str]:
         return None
 
 
-def dispatch_workflow(workflow: str, ref: str, version_input: str) -> bool:
-    """
-    Dispatch a workflow_dispatch workflow with a version input.
-
-    Strips any leading `v`/`V` from version_input; build workflows already
-    prepend `v` when constructing git refs (e.g. `ref: v${{ env.VERSION }}`),
-    so passing `v2.5.1` would produce `vv2.5.1`.
-    """
-    version_input = version_input.lstrip("vV")
-    try:
-        subprocess.run([
-            "gh", "workflow", "run", workflow,
-            "--repo", REPO,
-            "--ref", ref,
-            "-f", f"version={version_input}",
-        ], check=True, capture_output=True, text=True)
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"    [!] Failed to dispatch {workflow}: {e.stderr or e}")
-        return False
-
-
 def get_new_versions(package_info: Dict, registry_version: str) -> List[str]:
     """
     Return sorted list of stable PyPI versions strictly greater than
@@ -370,9 +349,9 @@ def get_new_versions(package_info: Dict, registry_version: str) -> List[str]:
     versions.
 
     Result is truncated to the newest MAX_NEW_VERSIONS_PER_PR entries so a
-    stale registry does not spawn dozens of workflow dispatches per package.
-    Older skipped versions can still be triggered manually by editing the PR
-    body to add more `Trigger:` directives.
+    stale registry does not queue dozens of builds per package.
+    Older skipped versions can still be built by declaring them in
+    docs/packages/<pkg>.yaml by hand.
     """
     try:
         reg_ver = version.parse(registry_version)
@@ -397,61 +376,33 @@ def get_new_versions(package_info: Dict, registry_version: str) -> List[str]:
     return result[-MAX_NEW_VERSIONS_PER_PR:]
 
 
-def find_workflow_default_version(content: str) -> Optional[str]:
+def declare_versions(yaml_file: Path, new_versions: List[str]) -> List[str]:
     """
-    Return the value of `default:` under `workflow_dispatch.inputs.version`.
+    Append a bare `- version:` entry for each version not yet listed in the
+    package YAML, and return the versions that were added.
 
-    Uses a simple heuristic: the first `default:` after `workflow_dispatch:`.
-    This holds for the current build-<pkg>.yml template.
+    An entry without `tag`/`files` is what the build workflow builds, so this
+    is all an upgrade PR has to change.
     """
-    marker = re.search(r"workflow_dispatch:", content)
-    if not marker:
-        return None
-    m = re.search(
-        r"^\s*default:\s*(['\"]?)([^'\"\n\r]+?)\1\s*$",
-        content[marker.end():],
-        re.MULTILINE,
-    )
-    return m.group(2).strip() if m else None
-
-
-def bump_workflow_version(path: Path, new_version: str) -> bool:
-    """
-    Update the workflow_dispatch default version in a workflow file, and
-    replace every quoted literal of the old version elsewhere in the file
-    (concurrency group, env defaults, job names).
-
-    Returns True if the file was modified.
-    """
-    content = path.read_text()
-    current = find_workflow_default_version(content)
-    if current is None or current == new_version:
-        return False
-    updated = re.sub(
-        r"(['\"])" + re.escape(current) + r"\1",
-        lambda m: f"{m.group(1)}{new_version}{m.group(1)}",
-        content,
-    )
-    if updated == content:
-        return False
-    path.write_text(updated)
-    return True
+    content = yaml_file.read_text()
+    declared = set(re.findall(r"^- version: ['\"]?([^'\"\n]+)", content, re.M))
+    added = [v for v in new_versions if v not in declared]
+    if not added:
+        return []
+    lines = [content.rstrip("\n")]
+    for v in added:
+        lines.append(yaml.safe_dump([{"version": v}], default_flow_style=False).rstrip("\n"))
+    yaml_file.write_text("\n".join(lines) + "\n")
+    return added
 
 
 def create_upgrade_pr(package: str, package_info: Dict, new_versions: List[str]) -> Optional[str]:
     """
-    Create a PR to trigger builds for each new package version.
+    Create a PR that declares each new version in docs/packages/<pkg>.yaml.
 
-    - Bumps the `default:` version in build-<pkg>.yml (and test-<pkg>.yml if
-      present) to the latest new version.
-    - PR body includes a `Trigger: <package>:<version>` line for every new
-      version so the pr-trigger workflow (or a human editing the body) can
-      re-dispatch builds.
-    - Script also directly dispatches build-<pkg>.yml (and test-<pkg>.yml if
-      present) once per new version, because PRs authored by GITHUB_TOKEN do
-      not fire pull_request workflows.
-    - If build workflow is missing, PR body contains boilerplate asking the
-      reviewer to create it.
+    The PR's own pull_request run of build-<pkg>.yml builds every version the
+    YAML declares without a release, so nothing is dispatched here. If the
+    build workflow is missing, the PR body asks the reviewer to create it.
     """
     if not new_versions:
         return None
@@ -470,76 +421,45 @@ def create_upgrade_pr(package: str, package_info: Dict, new_versions: List[str])
         git_run("fetch", "origin")
         git_run("switch", "main")
 
+        yaml_file = Path(f"docs/packages/{package}.yaml")
+        if not yaml_file.exists():
+            print(f"    [!] {yaml_file} does not exist")
+            return None
+
         git_run("switch", "-c", branch)
 
         pypi_package_url = get_pypi_package_url(package_info)
         build_workflow = Path(f".github/workflows/build-{package}.yml")
-        test_workflow = Path(f".github/workflows/test-{package}.yml")
 
-        bumped: List[Path] = []
-        if build_workflow.exists() and bump_workflow_version(build_workflow, latest_version):
-            git_run("add", str(build_workflow))
-            bumped.append(build_workflow)
-        if test_workflow.exists() and bump_workflow_version(test_workflow, latest_version):
-            git_run("add", str(test_workflow))
-            bumped.append(test_workflow)
+        added = declare_versions(yaml_file, new_versions)
+        if not added:
+            print(f"    [=] {package}: {', '.join(new_versions)} already declared in {yaml_file}")
+            return None
 
-        if bumped:
-            commit_message = f"{package}: upgrade to v{latest_version}"
-            git_run("commit", "-m", commit_message)
-        else:
-            # This block should only run if either:
-            #
-            # 1. No workflows exist for the package
-            # 2. The workflows don't need a bump for the detected version
-            #
-            # In the latter case, we want an empty PR to indicate that a new
-            # build should be triggered to add the latest version to the
-            # registry. Trigger directives are added for the empty PR so we can
-            # run a test build and ensure no tweaks need to be made before
-            # running the workflow from main.
-            commit_message = f"DO NOT MERGE: {package}: trigger builds for v{latest_version}"
-            git_run("commit", "--allow-empty", "-m", commit_message)
-
+        git_run("add", str(yaml_file))
+        git_run("commit", "-m", f"{package}: upgrade to v{latest_version}")
         git_run("push", "origin", branch)
 
-        versions_list = ", ".join(f"v{v}" for v in new_versions)
+        versions_list = ", ".join(f"v{v}" for v in added)
         body_lines = [
             f"Automatically generated PR to upgrade {package} — new versions detected: {versions_list}.",
             "",
             f"Link to [PyPI]({pypi_package_url}).",
             "",
+            f"Declares {versions_list} in `{yaml_file}`; the build workflow builds every declared version that has no release yet.",
+            "",
         ]
-
-        if bumped:
-            bumped_list = ", ".join(f"`{p}`" for p in bumped)
-            body_lines += [
-                f"Bumped default `version` input to v{latest_version} in {bumped_list}.",
-                "",
-            ]
 
         if build_workflow.exists():
             body_lines += [
-                "Build (and test, if present) workflows dispatched automatically for each version listed below.",
-                "",
-                "Trigger directives (re-dispatch by editing the PR body):",
-                "",
-            ]
-            body_lines += [f"Trigger: {package}:{v}" for v in new_versions]
-            body_lines += [
-                "",
-                "If all builds succeed without modification, merge this PR and re-trigger the workflow(s) from `main` to publish.",
-                "If changes are needed, force-push this branch and re-dispatch.",
+                "If all builds succeed without modification, merge this PR: the push to `main` publishes the wheels and opens the docs PR.",
+                "If changes are needed, force-push this branch.",
             ]
         else:
             body_lines += [
                 f"No build workflow found at `.github/workflows/build-{package}.yml`.",
                 "Please create one (and optionally a matching `test-*.yml`) before merging.",
-                "",
-                "Once the workflow exists, edit this PR body to re-fire the `Trigger:` directives:",
-                "",
             ]
-            body_lines += [f"Trigger: {package}:{v}" for v in new_versions]
 
         body = "\n".join(body_lines) + "\n"
 
@@ -553,19 +473,7 @@ def create_upgrade_pr(package: str, package_info: Dict, new_versions: List[str])
             "--body", body,
         ], capture_output=True, text=True, check=True)
 
-        pr_url = extract_pr_url(result.stdout) or f"PR created for {package} (URL not found in output)"
-
-        if build_workflow.exists():
-            for v in new_versions:
-                print(f"    [+] Dispatching build-{package}.yml on {branch} for v{v}")
-                dispatch_workflow(f"build-{package}.yml", branch, v)
-                if test_workflow.exists():
-                    print(f"    [+] Dispatching test-{package}.yml on {branch} for v{v}")
-                    dispatch_workflow(f"test-{package}.yml", branch, v)
-        else:
-            print(f"    [!] No build workflow for {package}; skipping dispatch")
-
-        return pr_url
+        return extract_pr_url(result.stdout) or f"PR created for {package} (URL not found in output)"
 
     except subprocess.CalledProcessError as e:
         print(f"    [X] Error creating upgrade PR for {package}: {e.stderr or e}")

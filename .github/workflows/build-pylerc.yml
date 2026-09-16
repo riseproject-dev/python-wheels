@@ -14,34 +14,50 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pylerc version to build (matches the lerc git tag, e.g. 4.2.0)'
-        required: true
-        default: '4.2.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pylerc.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pylerc.yml'
+      - 'docs/packages/pylerc.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pylerc.yml'
+      - 'docs/packages/pylerc.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '4.2.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 4.2.0 there.
-  PYLERC_VERSION: ${{ inputs.version || '4.2.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pylerc
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build pylerc ${{ inputs.version || '4.2.0' }} py3-none-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pylerc ${{ matrix.version }} py3-none-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
+
+    env:
+      PYLERC_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout lerc v${{ env.PYLERC_VERSION }}
@@ -140,11 +156,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pylerc ${{ inputs.version || '4.2.0' }}
+    name: Publish pylerc ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pylerc-${{ inputs.version || '4.2.0' }}-*-manylinux_riscv64
+      artifact-pattern: pylerc-${{ matrix.version }}-*-manylinux_riscv64

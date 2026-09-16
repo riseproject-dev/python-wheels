@@ -9,32 +9,41 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'rigour version to build (git tag without leading v, e.g. 2.4.1)'
-        required: true
-        default: '2.4.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/rigour.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-rigour.yml'
+      - 'docs/packages/rigour.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-rigour.yml'
+      - 'docs/packages/rigour.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.4.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 2.4.1 there.
-  RIGOUR_VERSION: ${{ inputs.version || '2.4.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: rigour
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build rigour ${{ inputs.version || '2.4.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build rigour ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     # Siblings on the same dependency graph finish in ~35-40 minutes; cp312
     # was cancelled at 90 minutes stuck mid-compile on a small crate
@@ -45,6 +54,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # rigour's pyo3 dependency has a plain `pyo3/extension-module` feature
         # (no abi3-pyNN in [tool.maturin] features), so every interpreter needs
         # its own build. Upstream builds cp310-cp314 only (no cp314t), so the
@@ -67,6 +77,9 @@ jobs:
             pytest_k: ""
           - python: cp314
             pytest_k: ""
+
+    env:
+      RIGOUR_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout rigour v${{ env.RIGOUR_VERSION }}
@@ -119,11 +132,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish rigour ${{ inputs.version || '2.4.1' }}
+    name: Publish rigour ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: rigour-${{ inputs.version || '2.4.1' }}-*-manylinux_riscv64
+      artifact-pattern: rigour-${{ matrix.version }}-*-manylinux_riscv64

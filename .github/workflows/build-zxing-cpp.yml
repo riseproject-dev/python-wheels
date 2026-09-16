@@ -10,36 +10,48 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'zxing-cpp version/tag to build (git tag without leading v, e.g. 3.1.1)'
-        required: true
-        default: '3.1.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/zxing-cpp.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-zxing-cpp.yml'
+      - 'docs/packages/zxing-cpp.yaml'
+      - 'patches/zxing-cpp/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-zxing-cpp.yml'
+      - 'docs/packages/zxing-cpp.yaml'
       - 'patches/zxing-cpp/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '3.1.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  ZXING_CPP_VERSION: ${{ inputs.version || '3.1.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: zxing-cpp
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build zxing-cpp ${{ inputs.version || '3.1.1' }} ${{ matrix.build }}
+    if: needs.setup.outputs.versions != '[]'
+    name: Build zxing-cpp ${{ matrix.version }} ${{ matrix.build }}
     runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # wrappers/python/pyproject.toml builds a STABLE_ABI nanobind module tagged
         # cp312-abi3, so one cp312 build covers cp312/cp313/cp314; only the
         # FREE_THREADED cp314t build needs its own wheel (upstream's own build list is
@@ -47,6 +59,9 @@ jobs:
         build:
           - "cp312-manylinux_riscv64"
           - "cp314t-manylinux_riscv64"
+
+    env:
+      ZXING_CPP_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout zxing-cpp v${{ env.ZXING_CPP_VERSION }}
@@ -80,11 +95,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish zxing-cpp ${{ inputs.version || '3.1.1' }}
+    name: Publish zxing-cpp ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: zxing-cpp-${{ inputs.version || '3.1.1' }}-*-manylinux_riscv64
+      artifact-pattern: zxing-cpp-${{ matrix.version }}-*-manylinux_riscv64

@@ -8,39 +8,53 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'cmeel-boost version to build (e.g. 1.90.0); checks out git tag v<version>.c0'
-        required: true
-        default: '1.90.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cmeel-boost.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-cmeel-boost.yml'
+      - 'docs/packages/cmeel-boost.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cmeel-boost.yml'
+      - 'docs/packages/cmeel-boost.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.90.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  CMEEL_BOOST_VERSION: ${{ inputs.version || '1.90.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: cmeel-boost
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build cmeel-boost ${{ inputs.version || '1.90.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cmeel-boost ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 480
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Per-interpreter (not abi3): boost_python/boost_numpy link against the
         # version-specific CPython ABI. Upstream doesn't build cp314t either.
         python: ["cp312", "cp313", "cp314"]
+
+    env:
+      CMEEL_BOOST_VERSION: ${{ matrix.version }}
 
     steps:
       # cmeel-boost's own release tags carry a trailing packaging-revision
@@ -85,11 +99,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish cmeel-boost ${{ inputs.version || '1.90.0' }}
+    name: Publish cmeel-boost ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: cmeel-boost-${{ inputs.version || '1.90.0' }}-*-manylinux_riscv64
+      artifact-pattern: cmeel-boost-${{ matrix.version }}-*-manylinux_riscv64

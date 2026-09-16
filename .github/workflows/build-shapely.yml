@@ -8,22 +8,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'shapely version to build (git tag, e.g. 2.1.2)'
-        required: true
-        default: '2.1.2'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/shapely.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-shapely.yml'
+      - 'docs/packages/shapely.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-shapely.yml'
+      - 'docs/packages/shapely.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.1.2' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  SHAPELY_VERSION: ${{ inputs.version || '2.1.2' }}
   GEOS_VERSION: '3.13.1'
   BASEIMAGE: manylinux_2_39_riscv64
   BASETAG: '2026.08.24-1'
@@ -31,16 +37,24 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: shapely
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build shapely ${{ inputs.version || '2.1.2' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build shapely ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      SHAPELY_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout shapely ${{ env.SHAPELY_VERSION }}
@@ -110,11 +124,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish shapely ${{ inputs.version || '2.1.2' }}
+    name: Publish shapely ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: shapely-${{ inputs.version || '2.1.2' }}-*-manylinux_riscv64
+      artifact-pattern: shapely-${{ matrix.version }}-*-manylinux_riscv64

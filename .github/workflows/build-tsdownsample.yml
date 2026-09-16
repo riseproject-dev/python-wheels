@@ -9,22 +9,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'tsdownsample version to build (e.g. 0.1.5.1)'
-        required: true
-        default: '0.1.5.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/tsdownsample.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-tsdownsample.yml'
+      - 'docs/packages/tsdownsample.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tsdownsample.yml'
+      - 'docs/packages/tsdownsample.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.1.5.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  TSDOWNSAMPLE_VERSION: ${{ inputs.version || '0.1.5.1' }}
   # Upstream cuts releases without git tags (`git ls-remote --tags` tops out at
   # v0.1.4.1); this commit's tree is byte-identical to the released 0.1.5.1
   # sdist. Update alongside TSDOWNSAMPLE_VERSION for a newer release.
@@ -34,19 +40,27 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: tsdownsample
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build tsdownsample ${{ inputs.version || '0.1.5.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build tsdownsample ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # pyo3 builds one wheel per interpreter here (no abi3 feature).
         # Upstream doesn't publish a cp314t wheel either (no Py_GIL_DISABLED
         # support declared), so it's dropped to match.
         python: ["cp312", "cp313", "cp314"]
+
+    env:
+      TSDOWNSAMPLE_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout tsdownsample ${{ env.TSDOWNSAMPLE_REF }}
@@ -92,11 +106,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish tsdownsample ${{ inputs.version || '0.1.5.1' }}
+    name: Publish tsdownsample ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: tsdownsample-${{ inputs.version || '0.1.5.1' }}-*-manylinux_riscv64
+      artifact-pattern: tsdownsample-${{ matrix.version }}-*-manylinux_riscv64

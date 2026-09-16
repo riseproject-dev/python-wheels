@@ -63,16 +63,18 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
     PR #246, which fixed broken doc links from exactly this). Whatever version ends
     up in the `.whl` filename (driven by `BUILD_VERSION`) must match, byte for byte:
     (1) the wheel filename, (2) the `docs/packages/<pkg>.yaml` `version:` key
-    (auto-populated by `update_doc.py` from the wheel), and (3) the
+    (declared by the port; `update_doc.py` refuses a wheel whose version is not
+    declared), and (3) the
     `patches/<pkg>/<version>/` directory name — `generate_packages_doc.py`
     links patches as the literal path `patches/{name}/{version}`, so a mismatch is a
     404. torch ships a **local segment** (`2.13.0+cpu`, pytorch's CPU-index
     convention) so its patches live under `patches/torch/2.13.0+cpu/`.
     **Match upstream's own PyPI filename convention** — if a package ships plain
     `X.Y.Z` on PyPI, build plain `X.Y.Z` (no `+cpu` or other local segment).
-    Decoupled from all this: the nightly `check_versions.py` compares the workflow's
-    `version:` **input default** against PyPI — keep that the plain upstream version,
-    regardless of any local segment `BUILD_VERSION` adds.
+    Decoupled from all this: the nightly `check_versions.py` compares the registry's
+    latest version against PyPI and appends the plain upstream version to the YAML,
+    so a workflow that adds a local segment must map the declared version to its
+    tag itself (`build-torch.yml` strips `+cpu` before checking out).
 
 22. **A release-branch checkout can carry `[egg_info] tag_build = dev` in
     `setup.cfg`, poisoning the wheel version with `.dev0`** (the SQLAlchemy variant

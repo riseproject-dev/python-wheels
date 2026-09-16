@@ -11,22 +11,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'semgrep version to build (git tag without leading v, e.g. 1.174.0)'
-        required: true
-        default: '1.174.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/semgrep.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-semgrep.yml'
+      - 'docs/packages/semgrep.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-semgrep.yml'
+      - 'docs/packages/semgrep.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.174.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  SEMGREP_VERSION: ${{ inputs.version || '1.174.0' }}
   # Upstream builds semgrep-core on a bare distro image (alpine, see their
   # Dockerfile). Ubuntu is the riscv64 equivalent here: Rocky 10, the base of
   # the manylinux_riscv64 image, ships no libunwind-devel, which semgrep's
@@ -38,14 +44,25 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: semgrep
+      version: ${{ inputs.version }}
 
   build_wheel:
     needs: [setup]
-    name: Build semgrep ${{ inputs.version || '1.174.0' }} manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build semgrep ${{ matrix.version }} manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     # The OCaml compiler, ~250 opam packages, 36 tree-sitter grammars and
     # 300k lines of OCaml are all compiled from source on the riscv64 runner.
     timeout-minutes: 1440
+
+    env:
+      SEMGREP_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout semgrep v${{ env.SEMGREP_VERSION }}
@@ -259,13 +276,18 @@ jobs:
           compression-level: 0
 
   publish:
-    name: Publish semgrep ${{ inputs.version || '1.174.0' }}
+    name: Publish semgrep ${{ matrix.version }}
     needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: semgrep-${{ inputs.version || '1.174.0' }}-*-manylinux_riscv64
-      gpl-sources-artifact: semgrep-${{ inputs.version || '1.174.0' }}-gpl-sources
+      artifact-pattern: semgrep-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: semgrep-${{ matrix.version }}-gpl-sources
       gpl-sources-description: the shared libraries bundled next to semgrep-core

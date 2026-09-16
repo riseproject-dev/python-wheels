@@ -9,41 +9,56 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'ncompress version/tag to build (git tag without leading v, e.g. 1.0.2)'
-        required: true
-        default: '1.0.2'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ncompress.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-ncompress.yml'
+      - 'docs/packages/ncompress.yaml'
+      - 'patches/ncompress/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ncompress.yml'
+      - 'docs/packages/ncompress.yaml'
       - 'patches/ncompress/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.0.2' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  NCOMPRESS_VERSION: ${{ inputs.version || '1.0.2' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: ncompress
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build ncompress ${{ inputs.version || '1.0.2' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build ncompress ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # cp312 wheel is abi3, so only cp314t needs a separate build
         python: ["cp312", "cp314t"]
         libc: [manylinux, musllinux]
+
+    env:
+      NCOMPRESS_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout ncompress v${{ env.NCOMPRESS_VERSION }}
@@ -92,11 +107,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish ncompress ${{ inputs.version || '1.0.2' }}
+    name: Publish ncompress ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: ncompress-${{ inputs.version || '1.0.2' }}-*riscv64
+      artifact-pattern: ncompress-${{ matrix.version }}-*riscv64

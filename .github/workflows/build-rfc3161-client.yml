@@ -9,37 +9,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'rfc3161-client version to build (git tag without the leading v, e.g. 1.0.8)'
-        required: true
-        default: '1.0.8'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/rfc3161-client.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-rfc3161-client.yml'
+      - 'docs/packages/rfc3161-client.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-rfc3161-client.yml'
+      - 'docs/packages/rfc3161-client.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.0.8' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.0.8 there.
-  RFC3161_CLIENT_VERSION: ${{ inputs.version || '1.0.8' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: rfc3161-client
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build rfc3161-client ${{ inputs.version || '1.0.8' }} ${{ matrix.tag }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build rfc3161-client ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           # pyo3 is built with the `abi3-py39` feature ([tool.maturin] features
           # in pyproject.toml), so one abi3 wheel serves every GIL-ful
@@ -49,6 +59,9 @@ jobs:
             build: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
           - tag: cp314t
             build: cp314t-manylinux_riscv64
+
+    env:
+      RFC3161_CLIENT_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout rfc3161-client v${{ env.RFC3161_CLIENT_VERSION }}
@@ -101,11 +114,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish rfc3161-client ${{ inputs.version || '1.0.8' }}
+    name: Publish rfc3161-client ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: rfc3161-client-${{ inputs.version || '1.0.8' }}-*-manylinux_riscv64
+      artifact-pattern: rfc3161-client-${{ matrix.version }}-*-manylinux_riscv64

@@ -8,44 +8,58 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'scs version to build (git tag, e.g. 3.2.11)'
-        required: true
-        default: '3.2.11'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/scs.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-scs.yml'
+      - 'docs/packages/scs.yaml'
+      - 'patches/scs/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-scs.yml'
+      - 'docs/packages/scs.yaml'
       - 'patches/scs/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '3.2.11' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 3.2.11 there.
-  SCS_VERSION: ${{ inputs.version || '3.2.11' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: scs
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build scs ${{ inputs.version || '3.2.11' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build scs ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # cp314t is dropped: numpy and scipy, which scs needs to build and to
         # test, have no free-threaded riscv64 wheels on PyPI or our registry.
         python:
           - "cp312"
           - "cp313"
           - "cp314"
+
+    env:
+      SCS_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout scs ${{ env.SCS_VERSION }}
@@ -106,8 +120,16 @@ jobs:
 
   gpl_sources:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Collect GPL sources
     runs-on: ubuntu-24.04-riscv
+
+    env:
+      SCS_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout python-wheels
@@ -130,13 +152,18 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish scs ${{ inputs.version || '3.2.11' }}
+    name: Publish scs ${{ matrix.version }}
     needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: scs-${{ inputs.version || '3.2.11' }}-*-manylinux_riscv64
-      gpl-sources-artifact: scs-${{ inputs.version || '3.2.11' }}-gpl-sources
+      artifact-pattern: scs-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: scs-${{ matrix.version }}-gpl-sources
       gpl-sources-description: gcc

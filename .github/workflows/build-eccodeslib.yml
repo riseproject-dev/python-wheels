@@ -15,22 +15,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'eccodeslib version to build (e.g. 2.48.0.26); the eccodes git tag is this with the trailing build-counter component dropped'
-        required: true
-        default: '2.48.0.26'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/eccodeslib.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-eccodeslib.yml'
+      - 'docs/packages/eccodeslib.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-eccodeslib.yml'
+      - 'docs/packages/eccodeslib.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.48.0.26' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  PACKAGE_VERSION: ${{ inputs.version || '2.48.0.26' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   ECBUILD_VERSION: '3.15.2'
   OPENJPEG_VERSION: '2.5.2'
@@ -39,12 +45,23 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: eccodeslib
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build eccodeslib ${{ inputs.version || '2.48.0.26' }} py3-none-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build eccodeslib ${{ matrix.version }} py3-none-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 420
+    env:
+      PACKAGE_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Derive the eccodes git tag from the package version
         run: echo "ECCODES_VERSION=$(echo "$PACKAGE_VERSION" | sed -E 's/\.[0-9]+$//')" >> "$GITHUB_ENV"
@@ -226,16 +243,21 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: eccodeslib-${{ inputs.version || '2.48.0.26' }}-py3-none-manylinux_riscv64
+          name: eccodeslib-${{ matrix.version }}-py3-none-manylinux_riscv64
           path: wheelhouse/*.whl
           if-no-files-found: error
 
   publish:
-    name: Publish eccodeslib ${{ inputs.version || '2.48.0.26' }}
+    name: Publish eccodeslib ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: eccodeslib-${{ inputs.version || '2.48.0.26' }}-*-manylinux_riscv64
+      artifact-pattern: eccodeslib-${{ matrix.version }}-*-manylinux_riscv64

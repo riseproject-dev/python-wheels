@@ -9,33 +9,50 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'openlineage-sql version to build (git tag, e.g. 1.53.0)'
-        required: true
-        default: '1.53.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/openlineage-sql.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-openlineage-sql.yml'
+      - 'docs/packages/openlineage-sql.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-openlineage-sql.yml'
+      - 'docs/packages/openlineage-sql.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.53.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  OPENLINEAGE_SQL_VERSION: ${{ inputs.version || '1.53.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: openlineage-sql
+      version: ${{ inputs.version }}
 
   test_impl:
     needs: [setup]
-    name: Test openlineage-sql ${{ inputs.version || '1.53.0' }} impl crate
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Test openlineage-sql ${{ matrix.version }} impl crate
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 30
+    env:
+      OPENLINEAGE_SQL_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout OpenLineage ${{ env.OPENLINEAGE_SQL_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -56,12 +73,14 @@ jobs:
 
   build_wheels:
     needs: [setup]
-    name: Build openlineage-sql ${{ inputs.version || '1.53.0' }} ${{ matrix.tag }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build openlineage-sql ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           # pyo3's abi3-py310 feature is on unconditionally, so one abi3 wheel
           # serves every GIL-ful interpreter; pyo3 disables abi3 under
@@ -73,6 +92,9 @@ jobs:
               cp314-manylinux_riscv64
           - tag: cp314t
             build: cp314t-manylinux_riscv64
+
+    env:
+      OPENLINEAGE_SQL_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout OpenLineage ${{ env.OPENLINEAGE_SQL_VERSION }}
@@ -123,11 +145,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish openlineage-sql ${{ inputs.version || '1.53.0' }}
+    name: Publish openlineage-sql ${{ matrix.version }}
     needs: [setup, test_impl, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: openlineage-sql-${{ inputs.version || '1.53.0' }}-*-manylinux_riscv64
+      artifact-pattern: openlineage-sql-${{ matrix.version }}-*-manylinux_riscv64

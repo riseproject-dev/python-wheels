@@ -23,8 +23,8 @@ lives in the reference files linked at the bottom — load them as the task call
 
 Builds riscv64 wheels for packages that don't ship them on public PyPI, and
 publishes them to `pypi.riseproject.dev`. Each package gets a
-`.github/workflows/build-<pkg>.yml`. Wheels are consumed on `ubuntu-24.04-riscv`
-self-hosted runners.
+`.github/workflows/build-<pkg>.yml` and a `docs/packages/<pkg>.yaml` that declares the
+versions to build. Wheels are consumed on `ubuntu-24.04-riscv` self-hosted runners.
 
 Four structural goals (from the [development guide](https://pypi.riseproject.dev/python-wheels/development.html)):
 1. give users a simple index to install riscv64 wheels from;
@@ -47,7 +47,8 @@ or a repeated ask. Follow them exactly; the reference files explain the why.
   files in `.git/pw-scratch/<pkg>`, local lock state in `.git/pw-locks/`. No files in `$HOME`,
   `~/.local/bin`, `/tmp`, or sibling directories, and **no installing software** on the host
   (brew/apt/dnf/npm/pip). If you think you need either, ask first.
-- **A port adds files only under `.github/workflows/` and `patches/<pkg>/<version>/`.** Never
+- **A port adds files only under `.github/workflows/`, `docs/packages/<pkg>.yaml` and
+  `patches/<pkg>/<version>/`.** Never
   create a `ci/` directory or any helper script, Dockerfile, or test file elsewhere — not for
   a build step, not for a smoke test, not "just this once." Anything a job needs that is not a
   patch is **written by the workflow at run time** from a `run:` heredoc (gotcha 7). Treat a
@@ -58,10 +59,15 @@ or a repeated ask. Follow them exactly; the reference files explain the why.
   the address from your own session context — it differs). A `pre-commit` hook rejects any
   other identity and any workflow adding `BUILD_VERBOSITY`; if it fires, fix the command,
   don't bypass the hook.
-- **Both workflow triggers, always** (`workflow_dispatch` **and** `pull_request: paths`). The
+- **All three workflow triggers, always** (`workflow_dispatch`, `pull_request: paths` **and**
+  `push: paths`, the last two listing both the workflow and `docs/packages/<pkg>.yaml`). The
   `pull_request` trigger is the only thing that registers a new workflow with GitHub; without
-  it dispatch and `Trigger:` lines both 404 (gotchas 45/54). Shipping `workflow_dispatch`
-  alone is why #364 was reverted by #391.
+  it a dispatch 404s (gotchas 45/54). Shipping `workflow_dispatch` alone is why #364 was
+  reverted by #391. The `push` trigger is what publishes after the merge.
+- **The version to build lives in `docs/packages/<pkg>.yaml`, never in the workflow.** A
+  `- version:` entry without `tag:`/`files:` is pending; `_setup.yml` turns the pending set
+  into the `matrix.version` every job iterates over, and the publish fills the entry in. The
+  workflow derives the git tag from `matrix.version`, not the other way round.
 - **Default to NO comments in workflows** — they are read as reference. One "why" line only for
   a genuine non-obvious deviation; never narrate standard steps.
 - **Never set `CIBW_BUILD_VERBOSITY`** — drop it if you inherit it from a template.
@@ -80,15 +86,17 @@ name, repo, version, upstream build docs — come from the invoking prompt):
    **`.claude/worktrees/<pkg>`** inside this repo (locally ignored via `.git/info/exclude`).
    Never put a worktree — or anything else — outside the repository.
 2. Add `.github/workflows/build-<pkg>.yml` following the playbook below and
-   [references/workflow-anatomy.md](references/workflow-anatomy.md).
+   [references/workflow-anatomy.md](references/workflow-anatomy.md), **and**
+   `docs/packages/<pkg>.yaml` with `package-name`, `source-code`, `license` and one
+   pending `- version: <wheel version>` entry (no `tag:`/`files:` — the publish adds them).
+   For an upgrade of an existing package, only the `- version:` line is new.
 3. Validate locally (gotcha 9), then push to `origin` and open a PR. The
    `pull_request: paths` trigger is what produces the **first** run of a new workflow, and
-   that run is what registers it with GitHub. **A `Trigger:` line alone cannot start a new
-   package's build** — dispatch resolves the workflow through the registry and answers
-   `HTTP 404` until a `pull_request` run exists (gotcha 54). Once the workflow is
-   registered (or already on `main`), a `Trigger: <pkg>:<tag>` line in the **PR
-   description** — one per version, `Trigger: numpy:v2.5.1` — lets `pr-trigger.yml` build
-   a different version without editing the workflow.
+   that run is what registers it with GitHub; it builds every pending version of the YAML.
+   A `workflow_dispatch` resolves the workflow through the registry and answers `HTTP 404`
+   until a `pull_request` run exists (gotcha 54). Once registered, `gh workflow run
+   build-<pkg>.yml --ref <branch> -f version='<glob>'` rebuilds any declared version,
+   released or not.
 4. Watch CI, triage failures, iterate until every matrix job is green and the
    `publish` job dry-runs cleanly.
 5. When the wheels build and tests pass, reply to any review threads, then
@@ -136,7 +144,7 @@ name, repo, version, upstream build docs — come from the invoking prompt):
 6. **Wire up real testing** — mirror how upstream tests its wheels (gotcha 6).
 
 7. **Validate locally, then push** (gotcha 9). Open a PR; the `pull_request` path
-   trigger runs CI. Watch, triage, iterate.
+   trigger runs CI for every pending version. Watch, triage, iterate.
 
 ## Reference files
 
@@ -155,7 +163,7 @@ Load these on demand — they are one level deep from here.
   patch is justified, the `patches/<pkg>/<version>/` mechanics, the five `Upstream-Status:`
   types, and licence/GPL-sources compliance (the `gpl_sources` job).
 - **[references/pr-and-publishing.md](references/pr-and-publishing.md)** — the post-merge
-  publish/issue/project steps, the PR description template (use it verbatim), and the PR/CI
+  publish check/issue/project steps, the PR description template (use it verbatim), and the PR/CI
   conventions (draft status, no hard-wrapping, dry-run checks).
 - **[references/environment-and-auth.md](references/environment-and-auth.md)** — where files
   may and may not go, commit identity, token scopes, and remotes.
@@ -183,7 +191,7 @@ that matches your current step** rather than loading them all — each file open
    - `test-failures-and-flakes.md` — a job fails/segfaults/flakes: refcount bugs, xdist crashes, slow-runner races, libgomp/OpenMP, numeric divergence, native backtraces.
    - `licensing-and-gpl.md` — vendored-dep LICENSE files, PEP 639 vs setuptools globs, REUSE `LICENSES/`, the `gpl_sources` job, SBOMs.
    - `local-validation-and-rehearsal.md` — local `pip wheel`, QEMU, the aarch64 rehearsal and its traps, `pip download` resolution checks.
-   - `pr-ci-and-maintainer.md` — registering a new workflow, `Trigger:` lines, action-SHA pins, maintainer holds/cancellations, post-merge publish.
+   - `pr-ci-and-maintainer.md` — registering a new workflow, version globs, action-SHA pins, maintainer holds/cancellations, post-merge publish.
 2. **By number** — a "gotcha N" citation (in these files or in workflow comments). Find its
    file in the number→file table of [references/gotchas-index.md](references/gotchas-index.md),
    then `grep -n '^N\. ' references/gotchas/<file>`.

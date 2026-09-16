@@ -9,34 +9,50 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'chromadb version to build (git tag, e.g. 1.5.9)'
-        required: true
-        default: '1.5.9'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/chromadb.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-chromadb.yml'
+      - 'docs/packages/chromadb.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-chromadb.yml'
+      - 'docs/packages/chromadb.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.5.9' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.5.9 there.
-  CHROMADB_VERSION: ${{ inputs.version || '1.5.9' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: chromadb
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build chromadb ${{ inputs.version || '1.5.9' }} cp39-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build chromadb ${{ matrix.version }} cp39-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 1440
+
+    env:
+      CHROMADB_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout chromadb ${{ env.CHROMADB_VERSION }}
@@ -155,11 +171,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish chromadb ${{ inputs.version || '1.5.9' }}
+    name: Publish chromadb ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: chromadb-${{ inputs.version || '1.5.9' }}-*-manylinux_riscv64
+      artifact-pattern: chromadb-${{ matrix.version }}-*-manylinux_riscv64

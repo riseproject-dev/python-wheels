@@ -8,24 +8,30 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'netCDF4 version to build (e.g. 1.7.4)'
-        required: true
-        default: '1.7.4'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/netcdf4.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-netcdf4.yml'
+      - 'docs/packages/netcdf4.yaml'
+      - 'patches/netcdf4/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-netcdf4.yml'
+      - 'docs/packages/netcdf4.yaml'
       - 'patches/netcdf4/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.7.4' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.7.4 there.
-  NETCDF4_VERSION: ${{ inputs.version || '1.7.4' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   # Upstream's Linux wheels are built in ghcr.io/ocefpaf/manylinux_2_28_<arch>-netcdf,
   # which has no riscv64 variant, so the same libraries are built into the
@@ -40,16 +46,24 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: netcdf4
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build netCDF4 ${{ inputs.version || '1.7.4' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build netCDF4 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 600
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      NETCDF4_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout netcdf4-python ${{ env.NETCDF4_VERSION }}
@@ -213,11 +227,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish netCDF4 ${{ inputs.version || '1.7.4' }}
+    name: Publish netCDF4 ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: netcdf4-${{ inputs.version || '1.7.4' }}-*-manylinux_riscv64
+      artifact-pattern: netcdf4-${{ matrix.version }}-*-manylinux_riscv64

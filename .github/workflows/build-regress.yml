@@ -8,40 +8,53 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'regress version to build (git tag without the leading v, e.g. 2025.10.1)'
-        required: true
-        default: '2025.10.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/regress.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-regress.yml'
+      - 'docs/packages/regress.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-regress.yml'
+      - 'docs/packages/regress.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2025.10.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 2025.10.1 there.
-  REGRESS_VERSION: ${{ inputs.version || '2025.10.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: regress
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build regress ${{ inputs.version || '2025.10.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build regress ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # PyO3 extension built per-interpreter (upstream ships cp3x-cp3x
         # wheels, no abi3).
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      REGRESS_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout regress ${{ env.REGRESS_VERSION }}
@@ -75,11 +88,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish regress ${{ inputs.version || '2025.10.1' }}
+    name: Publish regress ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: regress-${{ inputs.version || '2025.10.1' }}-*-manylinux_riscv64
+      artifact-pattern: regress-${{ matrix.version }}-*-manylinux_riscv64

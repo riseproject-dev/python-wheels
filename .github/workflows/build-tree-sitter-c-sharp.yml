@@ -9,33 +9,50 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'tree-sitter-c-sharp version to build (git tag without leading v, e.g. 0.23.5)'
-        required: true
-        default: '0.23.5'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/tree-sitter-c-sharp.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-tree-sitter-c-sharp.yml'
+      - 'docs/packages/tree-sitter-c-sharp.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tree-sitter-c-sharp.yml'
+      - 'docs/packages/tree-sitter-c-sharp.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.23.5' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  TREE_SITTER_C_SHARP_VERSION: ${{ inputs.version || '0.23.5' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: tree-sitter-c-sharp
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build tree-sitter-c-sharp ${{ inputs.version || '0.23.5' }} cp310-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build tree-sitter-c-sharp ${{ matrix.version }} cp310-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
+
+    env:
+      TREE_SITTER_C_SHARP_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout tree-sitter-c-sharp v${{ env.TREE_SITTER_C_SHARP_VERSION }}
@@ -61,11 +78,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish tree-sitter-c-sharp ${{ inputs.version || '0.23.5' }}
+    name: Publish tree-sitter-c-sharp ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: tree-sitter-c-sharp-${{ inputs.version || '0.23.5' }}-*-manylinux_riscv64
+      artifact-pattern: tree-sitter-c-sharp-${{ matrix.version }}-*-manylinux_riscv64

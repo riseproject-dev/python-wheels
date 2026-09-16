@@ -9,32 +9,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'rtree version/tag to build'
-        required: true
-        default: '1.4.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/rtree.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-rtree.yml'
+      - 'docs/packages/rtree.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-rtree.yml'
+      - 'docs/packages/rtree.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.4.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  RTREE_VERSION: ${{ inputs.version || '1.4.1' }}
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: rtree
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build rtree ${{ inputs.version || '1.4.1' }} py3-none-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build rtree ${{ matrix.version }} py3-none-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
+
+    env:
+      RTREE_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout rtree ${{ env.RTREE_VERSION }}
@@ -95,11 +110,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish rtree ${{ inputs.version || '1.4.1' }}
+    name: Publish rtree ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: rtree-${{ inputs.version || '1.4.1' }}-*-manylinux_riscv64
+      artifact-pattern: rtree-${{ matrix.version }}-*-manylinux_riscv64

@@ -10,36 +10,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'debugpy version to build (e.g. 1.8.21)'
-        required: true
-        default: '1.8.21'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/debugpy.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-debugpy.yml'
+      - 'docs/packages/debugpy.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-debugpy.yml'
+      - 'docs/packages/debugpy.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.8.21' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  DEBUGPY_VERSION: ${{ inputs.version || '1.8.21' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: debugpy
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build debugpy ${{ inputs.version || '1.8.21' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build debugpy ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # pydevd's Cython speedups are plain per-interpreter extensions, and
         # upstream ships no free-threaded wheel (tox envlist stops at py314).
         include:
@@ -48,6 +59,9 @@ jobs:
           - {python: cp312, pytest_k: 'not attach_pid'}
           - {python: cp313, pytest_k: 'not attach_pid'}
           - {python: cp314, pytest_k: ''}
+
+    env:
+      DEBUGPY_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout debugpy ${{ env.DEBUGPY_VERSION }}
@@ -101,11 +115,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish debugpy ${{ inputs.version || '1.8.21' }}
+    name: Publish debugpy ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: debugpy-${{ inputs.version || '1.8.21' }}-*-manylinux_riscv64
+      artifact-pattern: debugpy-${{ matrix.version }}-*-manylinux_riscv64

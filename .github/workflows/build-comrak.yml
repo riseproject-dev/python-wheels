@@ -9,37 +9,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'comrak version to build (git tag without the py- prefix, e.g. 0.0.16)'
-        required: true
-        default: '0.0.16'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/comrak.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-comrak.yml'
+      - 'docs/packages/comrak.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-comrak.yml'
+      - 'docs/packages/comrak.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.0.16' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.0.16 there.
-  COMRAK_VERSION: ${{ inputs.version || '0.0.16' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: comrak
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build comrak ${{ inputs.version || '0.0.16' }} ${{ matrix.tag }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build comrak ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           # pyo3's abi3/abi3t features carry no fixed pyNN floor (Cargo.toml:
           # features = ["abi3", "abi3t", ...]), so pyo3-build-config floors the
@@ -51,6 +61,9 @@ jobs:
             build: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
           - tag: cp314t
             build: cp314t-manylinux_riscv64
+
+    env:
+      COMRAK_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout comrak py-${{ env.COMRAK_VERSION }}
@@ -88,11 +101,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish comrak ${{ inputs.version || '0.0.16' }}
+    name: Publish comrak ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: comrak-${{ inputs.version || '0.0.16' }}-*-manylinux_riscv64
+      artifact-pattern: comrak-${{ matrix.version }}-*-manylinux_riscv64

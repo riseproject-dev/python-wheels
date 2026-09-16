@@ -6,16 +6,73 @@ Standard triggers (copy from an existing workflow):
 on:
   workflow_dispatch:
     inputs:
-      version: { description: '<pkg> version/tag', required: true, default: '<latest stable>' }
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/<pkg>.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
-    paths: ['.github/workflows/build-<pkg>.yml']   # CI runs when you edit the workflow itself
+    branches: [main]
+    paths: ['.github/workflows/build-<pkg>.yml', 'docs/packages/<pkg>.yaml']
+  push:
+    branches: [main]
+    paths: ['.github/workflows/build-<pkg>.yml', 'docs/packages/<pkg>.yaml']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
 ```
 
-**Both triggers, always.** `pull_request: paths` is not optional and is not redundant with
-`workflow_dispatch`: it is the only thing that can produce a new workflow's first run, and
-without it the workflow is never registered, so `workflow_dispatch` and `Trigger:` both
-fail with `HTTP 404` (gotcha 54; this is why #364 was reverted by #391). Never ship a
-`build-<pkg>.yml` with `workflow_dispatch` alone.
+**All three triggers, always.** `pull_request: paths` is not optional and is not redundant
+with `workflow_dispatch`: it is the only thing that can produce a new workflow's first run,
+and without it the workflow is never registered, so `workflow_dispatch` fails with
+`HTTP 404` (gotcha 54; this is why #364 was reverted by #391). `push` is what builds and
+publishes the pending versions once the PR merges. Never ship a `build-<pkg>.yml` with
+`workflow_dispatch` alone, and never bake a version literal into the workflow.
+
+**The versions come from `docs/packages/<pkg>.yaml`.** A port adds that file alongside the
+workflow:
+
+```yaml
+package-name: <pkg>
+source-code: <repo url>
+license: <SPDX id>
+versions:
+- version: <wheel version>
+```
+
+An entry with neither `tag:` nor `files:` is pending. The `setup` job hands the pending
+versions (or the ones matching the dispatch glob) to every other job as `matrix.version`:
+
+```yaml
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: <pkg>
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'     # GHA rejects an empty matrix vector
+    name: Build <pkg> ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+    env:
+      <PKG>_VERSION: ${{ matrix.version }}       # steps keep using env.<PKG>_VERSION
+```
+
+Every job that consumes the matrix carries the `if:` guard, the `version:` vector and (for
+`runs-on` jobs) the `env:` line; a `uses:` job (publish) takes no `env:`. `version` is the
+version the **wheel** will carry — `update_doc.py` refuses to document a wheel whose version
+is not declared — so the workflow derives the git ref from it (`ref: v${{ env.X_VERSION }}`,
+or a small `run:` step for irregular tags, see `build-rtoml.yml`/`build-torch.yml`), never the
+reverse. **Job outputs are not per matrix leg**: never pass the sdist filename or version
+through `outputs:`; name the artifact `<pkg>-${{ env.X_VERSION }}-sdist`, upload
+`dist/*.tar.gz`, and resolve it on the consumer side with a `steps.sdist_path` echo (see
+`build-bcrypt.yml`).
 
 UV env vars (`UV_EXTRA_INDEX_URL`, `UV_INDEX_STRATEGY`, `UV_ONLY_BINARY`) are **only** needed
 if the workflow has steps that actually invoke `uv` (e.g. an sdist-build job on `ubuntu-latest`
@@ -83,7 +140,7 @@ either, which is the expected consequence.
 Two build shapes exist in the repo — pick based on the package:
 
 - **sdist → bdist** (see `build-cffi.yml`, `build-protobuf.yml`): job 1 produces
-  an sdist and uploads it + exposes `package_version` as a job output; job 2 (a
+  an sdist and uploads it as `<pkg>-<version>-sdist`; job 2 (a
   matrix over `cp312/cp313/cp314/cp314t`) downloads the sdist, extracts it, and
   runs `cibuildwheel ./extracted`; job 3 publishes. cibuildwheel also accepts the
   sdist tarball directly as `package-dir` (it extracts internally), so you can skip
@@ -112,17 +169,24 @@ The `publish` job always calls the shared reusable workflow — it dry-runs off
 
 ```yaml
 publish:
-  needs: [<build jobs>]
+  name: Publish <pkg> ${{ matrix.version }}
+  needs: [setup, <build jobs>]
+  if: needs.setup.outputs.versions != '[]'
+  strategy:
+    fail-fast: false
+    matrix:
+      version: ${{ fromJSON(needs.setup.outputs.versions) }}
   permissions: { contents: write, pull-requests: write }
   uses: $/.github/workflows/_publish-wheel.yml
   with:
-    artifact-pattern: <pkg>-${{ needs.<sdist-job>.outputs.package_version }}-*-manylinux_riscv64
+    artifact-pattern: <pkg>-${{ matrix.version }}-*-manylinux_riscv64
 ```
 
-`_publish-wheel.yml` auto-creates `docs/packages/<pkg>.yaml` from the wheel metadata on
-first publish (`ci_scripts/update_doc.py`). Nightly checks and docs are driven off
-that YAML, so **a new package needs no manual registration anywhere** — just the
-workflow. Don't hand-write the docs YAML unless you need a `comment`/`warning`.
-`permissions` needs `contents: write` **and** `pull-requests: write` (not `contents: read`)
-because that docs step pushes a branch and opens a PR with the default `GITHUB_TOKEN`.
+`_publish-wheel.yml` fills the version's entry of `docs/packages/<pkg>.yaml` with the
+release tag and wheel files (`ci_scripts/update_doc.py`) and adds the package to
+`ci_scripts/packages.txt` on first publish, so beyond the YAML **a new package needs no
+manual registration anywhere**. Per-version `patched: true`, `comment:` and `warning:` keys
+may be pre-filled on the pending entry. `permissions` needs `contents: write` **and**
+`pull-requests: write` (not `contents: read`) because that docs step pushes a branch and
+opens a PR with the default `GITHUB_TOKEN`.
 

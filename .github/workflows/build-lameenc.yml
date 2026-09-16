@@ -8,24 +8,30 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'lameenc version to build (git tag without leading v, e.g. 1.8.4)'
-        required: true
-        default: '1.8.4'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/lameenc.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-lameenc.yml'
+      - 'docs/packages/lameenc.yaml'
+      - 'patches/lameenc/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-lameenc.yml'
+      - 'docs/packages/lameenc.yaml'
       - 'patches/lameenc/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.8.4' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.8.4 there.
-  LAMEENC_VERSION: ${{ inputs.version || '1.8.4' }}
   LAME_VERSION: '3.100'
   LAME_SHA256: ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
@@ -33,15 +39,23 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: lameenc
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build lameenc ${{ inputs.version || '1.8.4' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build lameenc ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp310", "cp311", "cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      LAMEENC_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout lameenc v${{ env.LAMEENC_VERSION }}
@@ -116,8 +130,16 @@ jobs:
 
   gpl_sources:
     needs: [setup]
-    name: Collect GPL sources for lameenc ${{ inputs.version || '1.8.4' }}
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources for lameenc ${{ matrix.version }}
     runs-on: ubuntu-latest
+
+    env:
+      LAMEENC_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Download and verify the LAME ${{ env.LAME_VERSION }} source
@@ -129,18 +151,23 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: lameenc-${{ inputs.version || '1.8.4' }}-gpl-sources
+          name: lameenc-${{ matrix.version }}-gpl-sources
           path: gpl-sources.tar
           if-no-files-found: error
 
   publish:
-    name: Publish lameenc ${{ inputs.version || '1.8.4' }}
+    name: Publish lameenc ${{ matrix.version }}
     needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: lameenc-${{ inputs.version || '1.8.4' }}-*-manylinux_riscv64
-      gpl-sources-artifact: lameenc-${{ inputs.version || '1.8.4' }}-gpl-sources
+      artifact-pattern: lameenc-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: lameenc-${{ matrix.version }}-gpl-sources
       gpl-sources-description: LAME 3.100 (LGPL-2.0, statically linked)

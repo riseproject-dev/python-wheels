@@ -11,25 +11,32 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'tink version to build (e.g. 1.16.1)'
-        required: true
-        default: '1.16.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/tink.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-tink.yml'
+      - 'docs/packages/tink.yaml'
+      - 'patches/tink/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tink.yml'
+      - 'docs/packages/tink.yaml'
       - 'patches/tink/**'
 
-run-name: build-tink - ${{ inputs.version || '1.16.1' }}
+run-name: build-tink ${{ inputs.version && format('- {0}', inputs.version) || '' }}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.16.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 env:
-  TINK_VERSION: ${{ inputs.version || '1.16.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   # Upstream fetches this through bazelisk, which publishes no riscv64 binary,
   # so it is bootstrapped from the dist archive instead. Matches .bazelversion
@@ -39,12 +46,23 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: tink
+      version: ${{ inputs.version }}
 
   bazel:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Bootstrap bazel (riscv64)
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 720
+
+    env:
+      TINK_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Restore bazel binary
@@ -90,20 +108,25 @@ jobs:
           if-no-files-found: error
 
   build_wheels:
-    name: Build tink ${{ inputs.version || '1.16.1' }} ${{ matrix.tag }}-manylinux_riscv64
+    name: Build tink ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 720
     needs: [setup, bazel]
+    if: needs.setup.outputs.versions != '[]'
 
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           - {tag: cp310, python: '3.10'}
           - {tag: cp311, python: '3.11'}
           - {tag: cp312, python: '3.12'}
           - {tag: cp313, python: '3.13'}
           - {tag: cp314, python: '3.14'}
+
+    env:
+      TINK_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout tink v${{ env.TINK_VERSION }}
@@ -255,11 +278,16 @@ jobs:
           SCRIPT
 
   publish:
-    name: Publish tink ${{ inputs.version || '1.16.1' }}
+    name: Publish tink ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: tink-${{ inputs.version || '1.16.1' }}-*-manylinux_riscv64
+      artifact-pattern: tink-${{ matrix.version }}-*-manylinux_riscv64

@@ -8,33 +8,50 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'glfw version/tag to build'
-        required: true
-        default: '2.10.2'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/glfw.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-glfw.yml'
+      - 'docs/packages/glfw.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-glfw.yml'
+      - 'docs/packages/glfw.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.10.2' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  GLFW_VERSION: ${{ inputs.version || '2.10.2' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: glfw
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build glfw ${{ inputs.version || '2.10.2' }} py2.py3-none-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build glfw ${{ matrix.version }} py2.py3-none-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
+
+    env:
+      GLFW_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pyGLFW v${{ env.GLFW_VERSION }}
@@ -108,11 +125,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish glfw ${{ inputs.version || '2.10.2' }}
+    name: Publish glfw ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: glfw-${{ inputs.version || '2.10.2' }}-*-manylinux_riscv64
+      artifact-pattern: glfw-${{ matrix.version }}-*-manylinux_riscv64

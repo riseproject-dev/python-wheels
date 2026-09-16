@@ -9,23 +9,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'texture2ddecoder version to build (e.g. 1.0.6)'
-        required: true
-        default: '1.0.6'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/texture2ddecoder.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-texture2ddecoder.yml'
+      - 'docs/packages/texture2ddecoder.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-texture2ddecoder.yml'
+      - 'docs/packages/texture2ddecoder.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.0.6' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.0.6 there.
-  TEXTURE2DDECODER_VERSION: ${{ inputs.version || '1.0.6' }}
   # Upstream cuts releases without git tags, so pin the release commit: this is
   # "feat: use Py_buffer, remove 3.7 support (cibuildwheel), make 3.11 use abi3",
   # whose tree is byte-identical to the 1.0.6 PyPI sdist. Update it alongside
@@ -36,12 +41,23 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: texture2ddecoder
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build texture2ddecoder ${{ inputs.version || '1.0.6' }} cp311-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build texture2ddecoder ${{ matrix.version }} cp311-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
+
+    env:
+      TEXTURE2DDECODER_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout texture2ddecoder ${{ env.TEXTURE2DDECODER_VERSION }}
@@ -82,11 +98,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish texture2ddecoder ${{ inputs.version || '1.0.6' }}
+    name: Publish texture2ddecoder ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: texture2ddecoder-${{ inputs.version || '1.0.6' }}-*-manylinux_riscv64
+      artifact-pattern: texture2ddecoder-${{ matrix.version }}-*-manylinux_riscv64

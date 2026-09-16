@@ -12,23 +12,30 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pysqlite3-binary version to build, e.g. 0.5.4.post2'
-        required: true
-        default: '0.5.4.post2'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pysqlite3-binary.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pysqlite3-binary.yml'
+      - 'docs/packages/pysqlite3-binary.yaml'
+      - 'patches/pysqlite3-binary/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pysqlite3-binary.yml'
+      - 'docs/packages/pysqlite3-binary.yaml'
       - 'patches/pysqlite3-binary/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.5.4.post2' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  PYSQLITE3_BINARY_VERSION: ${{ inputs.version || '0.5.4.post2' }}
   # pysqlite3-binary 0.5.4.post2 has no matching git tag: it is the 0.5.4 tag's
   # source rebuilt under a different distribution name (see patches/).
   PYSQLITE3_BINARY_REF: '0.5.4'
@@ -37,16 +44,24 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pysqlite3-binary
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build pysqlite3-binary ${{ inputs.version || '0.5.4.post2' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pysqlite3-binary ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      PYSQLITE3_BINARY_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pysqlite3 ${{ env.PYSQLITE3_BINARY_REF }}
@@ -104,11 +119,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pysqlite3-binary ${{ inputs.version || '0.5.4.post2' }}
+    name: Publish pysqlite3-binary ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pysqlite3-binary-${{ inputs.version || '0.5.4.post2' }}-*-manylinux_riscv64
+      artifact-pattern: pysqlite3-binary-${{ matrix.version }}-*-manylinux_riscv64

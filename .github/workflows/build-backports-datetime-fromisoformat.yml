@@ -9,38 +9,51 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'backports-datetime-fromisoformat version to build (git tag without leading v, e.g. 2.0.3)'
-        required: true
-        default: '2.0.3'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/backports-datetime-fromisoformat.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-backports-datetime-fromisoformat.yml'
+      - 'docs/packages/backports-datetime-fromisoformat.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-backports-datetime-fromisoformat.yml'
+      - 'docs/packages/backports-datetime-fromisoformat.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.0.3' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 2.0.3 there.
-  BACKPORTS_DATETIME_FROMISOFORMAT_VERSION: ${{ inputs.version || '2.0.3' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: backports-datetime-fromisoformat
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build backports-datetime-fromisoformat ${{ inputs.version || '2.0.3' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build backports-datetime-fromisoformat ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      BACKPORTS_DATETIME_FROMISOFORMAT_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout backports.datetime_fromisoformat v${{ env.BACKPORTS_DATETIME_FROMISOFORMAT_VERSION }}
@@ -67,11 +80,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish backports-datetime-fromisoformat ${{ inputs.version || '2.0.3' }}
+    name: Publish backports-datetime-fromisoformat ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: backports-datetime-fromisoformat-${{ inputs.version || '2.0.3' }}-*-manylinux_riscv64
+      artifact-pattern: backports-datetime-fromisoformat-${{ matrix.version }}-*-manylinux_riscv64

@@ -9,34 +9,50 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'html-to-markdown version to build (git tag without the leading v, e.g. 3.12.0)'
-        required: true
-        default: '3.12.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/html-to-markdown.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-html-to-markdown.yml'
+      - 'docs/packages/html-to-markdown.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-html-to-markdown.yml'
+      - 'docs/packages/html-to-markdown.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '3.12.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 3.12.0 there.
-  HTML_TO_MARKDOWN_VERSION: ${{ inputs.version || '3.12.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: html-to-markdown
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build html-to-markdown ${{ inputs.version || '3.12.0' }} cp310-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build html-to-markdown ${{ matrix.version }} cp310-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
+    env:
+      HTML_TO_MARKDOWN_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout html-to-markdown v${{ env.HTML_TO_MARKDOWN_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -96,11 +112,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish html-to-markdown ${{ inputs.version || '3.12.0' }}
+    name: Publish html-to-markdown ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: html-to-markdown-${{ inputs.version || '3.12.0' }}-*-manylinux_riscv64
+      artifact-pattern: html-to-markdown-${{ matrix.version }}-*-manylinux_riscv64

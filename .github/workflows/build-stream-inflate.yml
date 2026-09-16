@@ -9,31 +9,41 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'stream-inflate version to build (git tag without leading v, e.g. 0.0.43)'
-        required: true
-        default: '0.0.43'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/stream-inflate.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-stream-inflate.yml'
+      - 'docs/packages/stream-inflate.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-stream-inflate.yml'
+      - 'docs/packages/stream-inflate.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.0.43' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  STREAM_INFLATE_VERSION: ${{ inputs.version || '0.0.43' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: stream-inflate
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build stream-inflate ${{ inputs.version || '0.0.43' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build stream-inflate ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     # test_stream_inflate.py's parametrized fuzz suite (1956 cases, up to 8MB of
     # byte-chunked data) needs up to ~2h15m here.
@@ -41,7 +51,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      STREAM_INFLATE_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout stream-inflate v${{ env.STREAM_INFLATE_VERSION }}
@@ -78,11 +92,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish stream-inflate ${{ inputs.version || '0.0.43' }}
+    name: Publish stream-inflate ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: stream-inflate-${{ inputs.version || '0.0.43' }}-*-manylinux_riscv64
+      artifact-pattern: stream-inflate-${{ matrix.version }}-*-manylinux_riscv64

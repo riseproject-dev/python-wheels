@@ -9,46 +9,60 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'webrtcvad-wheels version/tag to build (e.g. v2.0.14)'
-        required: true
-        default: 'v2.0.14'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/webrtcvad-wheels.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-webrtcvad-wheels.yml'
+      - 'docs/packages/webrtcvad-wheels.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-webrtcvad-wheels.yml'
+      - 'docs/packages/webrtcvad-wheels.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || 'v2.0.14' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  WEBRTCVAD_VERSION: ${{ inputs.version || 'v2.0.14' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: webrtcvad-wheels
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build webrtcvad-wheels ${{ inputs.version || 'v2.0.14' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build webrtcvad-wheels ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
         libc: [manylinux, musllinux]
+
+    env:
+      WEBRTCVAD_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout py-webrtcvad-wheels ${{ env.WEBRTCVAD_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: daanzu/py-webrtcvad-wheels
-          ref: ${{ env.WEBRTCVAD_VERSION }}
+          ref: v${{ env.WEBRTCVAD_VERSION }}
           persist-credentials: false
 
       - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
@@ -67,11 +81,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish webrtcvad-wheels ${{ inputs.version || 'v2.0.14' }}
+    name: Publish webrtcvad-wheels ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: webrtcvad-wheels-${{ inputs.version || 'v2.0.14' }}-*riscv64
+      artifact-pattern: webrtcvad-wheels-${{ matrix.version }}-*riscv64

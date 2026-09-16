@@ -8,24 +8,30 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'tree-sitter-languages version to build (git tag without the leading v, e.g. 1.10.2)'
-        required: true
-        default: '1.10.2'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/tree-sitter-languages.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-tree-sitter-languages.yml'
+      - 'docs/packages/tree-sitter-languages.yaml'
+      - 'patches/tree-sitter-languages/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tree-sitter-languages.yml'
+      - 'docs/packages/tree-sitter-languages.yaml'
       - 'patches/tree-sitter-languages/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.10.2' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.10.2 there.
-  TREE_SITTER_LANGUAGES_VERSION: ${{ inputs.version || '1.10.2' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   # build.py needs Language.build_library and core.pyx needs Language(path, name);
   # both were removed in tree-sitter 0.22.
@@ -40,16 +46,24 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: tree-sitter-languages
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build tree-sitter-languages ${{ inputs.version || '1.10.2' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build tree-sitter-languages ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      TREE_SITTER_LANGUAGES_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout tree-sitter-languages v${{ env.TREE_SITTER_LANGUAGES_VERSION }}
@@ -95,11 +109,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish tree-sitter-languages ${{ inputs.version || '1.10.2' }}
+    name: Publish tree-sitter-languages ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: tree-sitter-languages-${{ inputs.version || '1.10.2' }}-*-manylinux_riscv64
+      artifact-pattern: tree-sitter-languages-${{ matrix.version }}-*-manylinux_riscv64

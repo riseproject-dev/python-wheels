@@ -9,32 +9,41 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'apache-sedona version to build (git tag without leading sedona-, e.g. 1.9.1)'
-        required: true
-        default: '1.9.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/apache-sedona.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-apache-sedona.yml'
+      - 'docs/packages/apache-sedona.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-apache-sedona.yml'
+      - 'docs/packages/apache-sedona.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.9.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.9.1 there.
-  SEDONA_VERSION: ${{ inputs.version || '1.9.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: apache-sedona
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build apache-sedona ${{ inputs.version || '1.9.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build apache-sedona ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     # pyspark (a test-only dependency, pulled in via the "spark" extra) ships no
     # wheel anywhere and is a ~400MB sdist; give the download/install room.
@@ -42,12 +51,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # sedona.spark.utils.geomserde_speedup is a plain CPython C extension
         # (not abi3), so every interpreter needs its own build, matching
         # upstream's own per-version wheels. musllinux is skipped: shapely (a
         # hard runtime dependency, pulled in when the wheel is installed) has
         # no riscv64 musllinux wheel anywhere, only manylinux.
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      SEDONA_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout apache/sedona sedona-${{ env.SEDONA_VERSION }}
@@ -104,11 +117,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish apache-sedona ${{ inputs.version || '1.9.1' }}
+    name: Publish apache-sedona ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: apache-sedona-${{ inputs.version || '1.9.1' }}-*-manylinux_riscv64
+      artifact-pattern: apache-sedona-${{ matrix.version }}-*-manylinux_riscv64

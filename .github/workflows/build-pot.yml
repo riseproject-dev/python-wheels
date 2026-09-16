@@ -8,32 +8,43 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pot version to build (git tag, e.g. 0.9.7.post1)'
-        required: true
-        default: '0.9.7.post1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pot.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pot.yml'
+      - 'docs/packages/pot.yaml'
+      - 'patches/pot/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pot.yml'
+      - 'docs/packages/pot.yaml'
       - 'patches/pot/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.9.7.post1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  POT_VERSION: ${{ inputs.version || '0.9.7.post1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pot
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build pot ${{ inputs.version || '0.9.7.post1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pot ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     # 60m was too tight: cp314t's free-threaded build was still running tests
     # (no failures) when cancelled at exactly 60m, while cp312/313/314 finish
@@ -43,6 +54,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
         include:
           # test_BaseEstimator hits a real bug in ot.utils.BaseEstimator.get_params():
@@ -55,6 +67,9 @@ jobs:
           # class of free-threading-exposed fragility as this session's asv port).
           - python: "cp314t"
             extra_deselect: '--deselect "test/test_utils.py::test_BaseEstimator"'
+
+    env:
+      POT_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout POT ${{ env.POT_VERSION }}
@@ -116,8 +131,16 @@ jobs:
 
   gpl_sources:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Collect GPL sources
     runs-on: ubuntu-24.04-riscv
+
+    env:
+      POT_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout python-wheels
@@ -140,13 +163,18 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pot ${{ inputs.version || '0.9.7.post1' }}
+    name: Publish pot ${{ matrix.version }}
     needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pot-${{ inputs.version || '0.9.7.post1' }}-*-manylinux_riscv64
-      gpl-sources-artifact: pot-${{ inputs.version || '0.9.7.post1' }}-gpl-sources
+      artifact-pattern: pot-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: pot-${{ matrix.version }}-gpl-sources
       gpl-sources-description: gcc

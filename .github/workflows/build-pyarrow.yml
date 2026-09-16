@@ -9,22 +9,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pyarrow version to build (git tag without the apache-arrow- prefix, e.g. 25.0.1)'
-        required: true
-        default: '25.0.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyarrow.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pyarrow.yml'
+      - 'docs/packages/pyarrow.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyarrow.yml'
+      - 'docs/packages/pyarrow.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '25.0.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 env:
-  PYARROW_VERSION: ${{ inputs.version || '25.0.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   # build/test deps (numpy, libcst, pandas) have no public-PyPI riscv64 wheels
   PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
@@ -51,21 +57,29 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyarrow
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build pyarrow ${{ inputs.version || '25.0.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyarrow ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 1440  # 24h — Arrow C++ + all deps built from source on riscv64
     strategy:
       fail-fast: false
       # one job per interpreter so a single failure doesn't block the rest; ccache warms across them
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python:
           - cp312-cp312
           - cp313-cp313
           - cp314-cp314
           - cp314-cp314t
+
+    env:
+      PYARROW_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout apache/arrow apache-arrow-${{ env.PYARROW_VERSION }}
@@ -314,11 +328,16 @@ jobs:
           PYARROW_TEST_EOF
 
   publish:
-    name: Publish pyarrow ${{ inputs.version || '25.0.1' }}
+    name: Publish pyarrow ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pyarrow-${{ inputs.version || '25.0.1' }}-*-manylinux_riscv64
+      artifact-pattern: pyarrow-${{ matrix.version }}-*-manylinux_riscv64

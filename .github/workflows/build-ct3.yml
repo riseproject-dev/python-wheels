@@ -7,38 +7,52 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'ct3 version to build (e.g. 3.4.0.post5)'
-        required: true
-        default: '3.4.0.post5'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ct3.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-ct3.yml'
+      - 'docs/packages/ct3.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ct3.yml'
+      - 'docs/packages/ct3.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '3.4.0.post5' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  CT3_VERSION: ${{ inputs.version || '3.4.0.post5' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: ct3
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build ct3 ${{ inputs.version || '3.4.0.post5' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build ct3 ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
     runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
         libc: [manylinux, musllinux]
+
+    env:
+      CT3_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout ct3 ${{ env.CT3_VERSION }}
@@ -68,11 +82,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish ct3 ${{ inputs.version || '3.4.0.post5' }}
+    name: Publish ct3 ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: ct3-${{ inputs.version || '3.4.0.post5' }}-*riscv64
+      artifact-pattern: ct3-${{ matrix.version }}-*riscv64

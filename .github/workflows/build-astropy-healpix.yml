@@ -10,38 +10,49 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'astropy-healpix version to build (git tag without leading v, e.g. 2.0.1)'
-        required: true
-        default: '2.0.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/astropy-healpix.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-astropy-healpix.yml'
+      - 'docs/packages/astropy-healpix.yaml'
+      - 'patches/astropy-healpix/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-astropy-healpix.yml'
+      - 'docs/packages/astropy-healpix.yaml'
       - 'patches/astropy-healpix/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.0.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 2.0.1 there.
-  ASTROPY_HEALPIX_VERSION: ${{ inputs.version || '2.0.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: astropy-healpix
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build astropy-healpix ${{ inputs.version || '2.0.1' }} ${{ matrix.tag }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build astropy-healpix ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           # setup.cfg pins `[bdist_wheel] py_limited_api = cp310`, overridden here to
           # our cp312 floor via EXTENSION_HELPERS_PY_LIMITED_API; built on cp312, the
@@ -65,6 +76,9 @@ jobs:
             limited_api: ''
             test_skip: '*'
             timeout: 45
+
+    env:
+      ASTROPY_HEALPIX_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout astropy-healpix v${{ env.ASTROPY_HEALPIX_VERSION }}
@@ -130,11 +144,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish astropy-healpix ${{ inputs.version || '2.0.1' }}
+    name: Publish astropy-healpix ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: astropy-healpix-${{ inputs.version || '2.0.1' }}-*-manylinux_riscv64
+      artifact-pattern: astropy-healpix-${{ matrix.version }}-*-manylinux_riscv64

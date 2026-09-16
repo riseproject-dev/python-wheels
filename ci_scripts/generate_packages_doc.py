@@ -27,6 +27,19 @@ def normalize_package_name(package_name):
     return PACKAGE_NORMALIZE_RE.sub("-", package_name).lower()
 
 
+def released_versions(package_data):
+    """
+    Versions that have been published. An entry without `tag`/`files` is a
+    version the build workflow has yet to release; the docs and the Simple API
+    must not advertise it.
+    """
+    return [
+        version
+        for version in package_data.get("versions") or []
+        if "tag" in version and "files" in version
+    ]
+
+
 def rst_to_md(text):
     """Convert the subset of RST inline syntax used in YAML comments to Markdown."""
     if not text:
@@ -56,6 +69,9 @@ def generate_simple_page(yaml_file, output_html):
     if not package_name:
         print(f"Error reading {yaml_file}: package-name is missing")
         return None, None
+    versions = released_versions(package_data)
+    if not versions:
+        return None, None
 
     lines = [
         "<!DOCTYPE html>",
@@ -67,14 +83,9 @@ def generate_simple_page(yaml_file, output_html):
         "  <body>",
         f"    <h1>Links for {html.escape(package_name)}</h1>",
     ]
-    for version in package_data.get("versions", []):
-        tag = version.get("tag")
-        files = version.get("files")
-        if tag is None or files is None:
-            raise ValueError(
-                f"{yaml_file}: version {version.get('version')} has no tag or files"
-            )
-        for file_data in files:
+    for version in versions:
+        tag = version["tag"]
+        for file_data in version["files"]:
             filename = file_data["filename"]
             href = (
                 "https://github.com/riseproject-dev/python-wheels/releases/"
@@ -122,7 +133,10 @@ def generate_md_page(yaml_file, output_md):
     source_code = package_data.get("source-code")
     comment = package_data.get("comment")
     warning = package_data.get("warning")
-    versions = package_data.get("versions", [])
+    versions = released_versions(package_data)
+    if not versions:
+        print(f"Skipping {yaml_file}: no released version yet")
+        return None, None
 
     versions.sort(
         key=lambda v: packaging_version.parse(str(v["version"])), reverse=True

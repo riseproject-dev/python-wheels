@@ -9,38 +9,49 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'protovalidate version to build (git tag without the leading v, e.g. 2.0.0)'
-        required: true
-        default: '2.0.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/protovalidate.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-protovalidate.yml'
+      - 'docs/packages/protovalidate.yaml'
+      - 'patches/protovalidate/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-protovalidate.yml'
+      - 'docs/packages/protovalidate.yaml'
       - 'patches/protovalidate/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.0.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 2.0.0 there.
-  PROTOVALIDATE_VERSION: ${{ inputs.version || '2.0.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: protovalidate
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build protovalidate ${{ inputs.version || '2.0.0' }} ${{ matrix.tag }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build protovalidate ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           # [tool.maturin] features already lists pyo3/abi3-py310, so one
           # abi3 wheel serves every GIL-ful interpreter; pyo3 disables abi3
@@ -53,6 +64,9 @@ jobs:
               cp314-manylinux_riscv64
           - tag: cp314t
             build: cp314t-manylinux_riscv64
+
+    env:
+      PROTOVALIDATE_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout protovalidate-py v${{ env.PROTOVALIDATE_VERSION }}
@@ -108,11 +122,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish protovalidate ${{ inputs.version || '2.0.0' }}
+    name: Publish protovalidate ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: protovalidate-${{ inputs.version || '2.0.0' }}-*-manylinux_riscv64
+      artifact-pattern: protovalidate-${{ matrix.version }}-*-manylinux_riscv64

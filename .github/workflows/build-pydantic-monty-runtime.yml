@@ -9,40 +9,54 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pydantic-monty-runtime version to build (git tag, e.g. v0.0.21)'
-        required: true
-        default: 'v0.0.21'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pydantic-monty-runtime.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pydantic-monty-runtime.yml'
+      - 'docs/packages/pydantic-monty-runtime.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pydantic-monty-runtime.yml'
+      - 'docs/packages/pydantic-monty-runtime.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || 'v0.0.21' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  # `inputs.version` is empty on pull_request events; default to v0.0.21 there.
-  MONTY_VERSION: ${{ inputs.version || 'v0.0.21' }}
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pydantic-monty-runtime
+      version: ${{ inputs.version }}
 
   build_wheel:
     needs: [setup]
-    name: Build pydantic-monty-runtime ${{ inputs.version || 'v0.0.21' }} manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pydantic-monty-runtime ${{ matrix.version }} manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
+
+    env:
+      MONTY_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout monty ${{ env.MONTY_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: pydantic/monty
-          ref: ${{ env.MONTY_VERSION }}
+          ref: v${{ env.MONTY_VERSION }}
           persist-credentials: false
 
       # `crates/monty-runtime`'s pyproject.toml has no `license-files`, so
@@ -74,17 +88,20 @@ jobs:
           if-no-files-found: error
 
   test_wheel:
-    name: Test pydantic-monty-runtime ${{ inputs.version || 'v0.0.21' }} on Python ${{ matrix.python-version }}
+    name: Test pydantic-monty-runtime ${{ matrix.version }} on Python ${{ matrix.python-version }}
     needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 30
     env:
+      MONTY_VERSION: ${{ matrix.version }}
       # Without this uv would reuse the runner image's system CPython for 3.12
       # and download a standalone build for the others.
       UV_PYTHON_PREFERENCE: only-managed
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # This repo's default interpreter matrix (gotcha in workflow-anatomy.md);
         # the wheel is interpreter-agnostic (bindings = "bin"), so every
         # interpreter -- including free-threaded -- exercises the same binary.
@@ -161,11 +178,16 @@ jobs:
           echo "$err" | grep -q "OSError: disk write limit of 4 bytes exceeded"
 
   publish:
-    name: Publish pydantic-monty-runtime ${{ inputs.version || 'v0.0.21' }}
+    name: Publish pydantic-monty-runtime ${{ matrix.version }}
     needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pydantic-monty-runtime-${{ inputs.version || 'v0.0.21' }}-manylinux_riscv64
+      artifact-pattern: pydantic-monty-runtime-${{ matrix.version }}-manylinux_riscv64

@@ -13,22 +13,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pyyaml-ft version to build (git tag without leading v, e.g. 8.0.0)'
-        required: true
-        default: '8.0.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyyaml-ft.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pyyaml-ft.yml'
+      - 'docs/packages/pyyaml-ft.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyyaml-ft.yml'
+      - 'docs/packages/pyyaml-ft.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '8.0.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  PYYAML_FT_VERSION: ${{ inputs.version || '8.0.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   # libyaml ref matches upstream ci.yaml's own LIBYAML_REF default.
   BEFORE_ALL_LIBYAML: >-
@@ -43,14 +49,22 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyyaml-ft
+      version: ${{ inputs.version }}
 
   build_sdist:
     needs: [setup]
-    name: Build pyyaml-ft ${{ inputs.version || '8.0.0' }} sdist
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pyyaml-ft ${{ matrix.version }} sdist
     runs-on: ubuntu-latest
-    outputs:
-      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
-      package_version: ${{ steps.sdist.outputs.package_version }}
+    env:
+      PYYAML_FT_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout pyyaml-ft ${{ env.PYYAML_FT_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -77,36 +91,41 @@ jobs:
           uv pip install build
           python -m build --sdist --outdir dist
 
-          sdist_name="$(ls dist)"
-          {
-            echo "sdist_name=${sdist_name}"
-            echo "package_version=$(echo "${sdist_name}" | sed -En 's/pyyaml_ft-(.+)\.tar\.gz/\1/p')"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Upload sdist artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: ${{ steps.sdist.outputs.sdist_name }}
-          path: dist/${{ steps.sdist.outputs.sdist_name }}
+          name: pyyaml-ft-${{ env.PYYAML_FT_VERSION }}-sdist
+          path: dist/*.tar.gz
           if-no-files-found: error
 
   # Mirrors upstream's cp313 (GIL) build.
   build_gil:
     needs: [setup, build_sdist]
-    name: Build pyyaml-ft ${{ inputs.version || '8.0.0' }} cp313-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pyyaml-ft ${{ matrix.version }} cp313-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
+    env:
+      PYYAML_FT_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Download sdist
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: ${{ needs.build_sdist.outputs.sdist_name }}
+          name: pyyaml-ft-${{ env.PYYAML_FT_VERSION }}-sdist
           path: dist/
+
+      - id: sdist_path
+        run: echo "path=$(echo dist/*.tar.gz)" >> "$GITHUB_OUTPUT"
 
       - name: Build and test wheel
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
-          package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}
+          package-dir: ${{ steps.sdist_path.outputs.path }}
         env:
           CIBW_ARCHS: riscv64
           CIBW_BUILD: 'cp313-*'
@@ -128,20 +147,31 @@ jobs:
   # (gotcha 11), even though upstream's own matrix targets cp313t.
   build_freethreaded:
     needs: [setup, build_sdist]
-    name: Build pyyaml-ft ${{ inputs.version || '8.0.0' }} cp314t-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pyyaml-ft ${{ matrix.version }} cp314t-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
+    env:
+      PYYAML_FT_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Download sdist
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: ${{ needs.build_sdist.outputs.sdist_name }}
+          name: pyyaml-ft-${{ env.PYYAML_FT_VERSION }}-sdist
           path: dist/
+
+      - id: sdist_path
+        run: echo "path=$(echo dist/*.tar.gz)" >> "$GITHUB_OUTPUT"
 
       - name: Build and test wheel
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
-          package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}
+          package-dir: ${{ steps.sdist_path.outputs.path }}
         env:
           CIBW_ARCHS: riscv64
           CIBW_BUILD: 'cp314t-*'
@@ -160,11 +190,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pyyaml-ft ${{ inputs.version || '8.0.0' }}
+    name: Publish pyyaml-ft ${{ matrix.version }}
     needs: [setup, build_sdist, build_gil, build_freethreaded]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pyyaml-ft-${{ needs.build_sdist.outputs.package_version }}-*-manylinux_riscv64
+      artifact-pattern: pyyaml-ft-${{ matrix.version }}-*-manylinux_riscv64

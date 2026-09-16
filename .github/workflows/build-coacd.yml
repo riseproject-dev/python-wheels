@@ -9,36 +9,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'coacd version to build (git tag, e.g. 1.0.14)'
-        required: true
-        default: '1.0.14'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/coacd.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-coacd.yml'
+      - 'docs/packages/coacd.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-coacd.yml'
+      - 'docs/packages/coacd.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.0.14' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  COACD_VERSION: ${{ inputs.version || '1.0.14' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: coacd
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build coacd ${{ inputs.version || '1.0.14' }} ${{ matrix.tag }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build coacd ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           # setup.py's bdist_wheel_abi3.get_tag() tags the wheel abi3 at the
           # building interpreter's version (matches upstream's published
@@ -52,6 +63,9 @@ jobs:
             build: >-
               cp39-manylinux_riscv64 cp312-manylinux_riscv64
               cp313-manylinux_riscv64 cp314-manylinux_riscv64
+
+    env:
+      COACD_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout CoACD ${{ env.COACD_VERSION }}
@@ -118,8 +132,16 @@ jobs:
 
   gpl_sources:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Collect GPL sources
     runs-on: ubuntu-24.04-riscv
+
+    env:
+      COACD_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout python-wheels
@@ -142,13 +164,18 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish coacd ${{ inputs.version || '1.0.14' }}
+    name: Publish coacd ${{ matrix.version }}
     needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: coacd-${{ inputs.version || '1.0.14' }}-*-manylinux_riscv64
-      gpl-sources-artifact: coacd-${{ inputs.version || '1.0.14' }}-gpl-sources
+      artifact-pattern: coacd-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: coacd-${{ matrix.version }}-gpl-sources
       gpl-sources-description: gcc

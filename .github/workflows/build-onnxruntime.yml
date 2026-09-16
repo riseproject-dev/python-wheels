@@ -9,39 +9,53 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'onnxruntime version to build (git tag without leading v, e.g. 1.29.0)'
-        required: true
-        default: '1.29.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/onnxruntime.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-onnxruntime.yml'
+      - 'docs/packages/onnxruntime.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-onnxruntime.yml'
+      - 'docs/packages/onnxruntime.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.29.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  ONNXRUNTIME_VERSION: ${{ inputs.version || '1.29.0' }}
   # Upstream's AzureCR build image isn't public; manylinux is the closest equivalent.
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: onnxruntime
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build onnxruntime ${{ inputs.version || '1.29.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build onnxruntime ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 1440  # 24h
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # onnxruntime is not abi3: upstream publishes one wheel per interpreter.
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      ONNXRUNTIME_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout onnxruntime v${{ env.ONNXRUNTIME_VERSION }}
@@ -166,11 +180,16 @@ jobs:
             bash /onnxruntime_src/riscv64-build-and-test.sh test
 
   publish:
-    name: Publish onnxruntime ${{ inputs.version || '1.29.0' }}
+    name: Publish onnxruntime ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: onnxruntime-${{ inputs.version || '1.29.0' }}-*-manylinux_riscv64
+      artifact-pattern: onnxruntime-${{ matrix.version }}-*-manylinux_riscv64

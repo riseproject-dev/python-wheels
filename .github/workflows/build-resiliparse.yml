@@ -9,23 +9,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'resiliparse version to build (git tag without leading v, e.g. 1.0.9)'
-        required: true
-        default: '1.0.9'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/resiliparse.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-resiliparse.yml'
+      - 'docs/packages/resiliparse.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-resiliparse.yml'
+      - 'docs/packages/resiliparse.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.0.9' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.0.9 there.
-  RESILIPARSE_VERSION: ${{ inputs.version || '1.0.9' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   # abseil-cpp version pinned by re2's MODULE.bazel at this tag (matches
   # build-google-re2.yml, already proven on riscv64 in this repo).
@@ -41,21 +46,29 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: resiliparse
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build resiliparse ${{ inputs.version || '1.0.9' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build resiliparse ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Per-interpreter: the Cython extensions link the version-specific ABI.
         python:
           - "cp312"
           - "cp313"
           - "cp314"
           - "cp314t"
+
+    env:
+      RESILIPARSE_VERSION: ${{ matrix.version }}
 
     steps:
       # resiliparse-py is a subdirectory of the chatnoir-resiliparse monorepo;
@@ -186,11 +199,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish resiliparse ${{ inputs.version || '1.0.9' }}
+    name: Publish resiliparse ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: resiliparse-${{ inputs.version || '1.0.9' }}-*-manylinux_riscv64
+      artifact-pattern: resiliparse-${{ matrix.version }}-*-manylinux_riscv64

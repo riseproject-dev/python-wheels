@@ -10,39 +10,53 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'mypy version to build (PyPI version, e.g. 2.3.1)'
-        required: true
-        default: '2.3.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/mypy.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-mypy.yml'
+      - 'docs/packages/mypy.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mypy.yml'
+      - 'docs/packages/mypy.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.3.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 env:
-  MYPY_VERSION: ${{ inputs.version || '2.3.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: mypy
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build mypy ${{ inputs.version || '2.3.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build mypy ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     # mypy self-compiles ~230 modules at -O3 (~40min alone on fast hardware), then runs its full test suite; both are much slower on the riscv runner.
     timeout-minutes: 720
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # mypyc emits per-interpreter (non-abi3) wheels, so each CPython builds separately.
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      MYPY_VERSION: ${{ matrix.version }}
 
     steps:
       # Tag is v-prefixed; the wheel version (mypy/version.py) is the plain MYPY_VERSION.
@@ -81,11 +95,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish mypy ${{ inputs.version || '2.3.1' }}
+    name: Publish mypy ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: mypy-${{ inputs.version || '2.3.1' }}-*-manylinux_riscv64
+      artifact-pattern: mypy-${{ matrix.version }}-*-manylinux_riscv64
