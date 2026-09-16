@@ -25,7 +25,7 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
 - **A job fails/segfaults/flakes: refcount bugs, xdist crashes, slow-runner races, libgomp/OpenMP, arch-specific numeric divergence, native backtraces** → [`gotchas/test-failures-and-flakes.md`](gotchas/test-failures-and-flakes.md)
 - **Licensing: vendored-dep LICENSE files, PEP 639 vs setuptools globs, REUSE `LICENSES/`, the `gpl_sources` job, SBOMs** → [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 - **Validate before pushing: local `pip wheel`, QEMU, the aarch64 rehearsal and its traps, `pip download` resolution checks** → [`gotchas/local-validation-and-rehearsal.md`](gotchas/local-validation-and-rehearsal.md)
-- **PR/CI/publishing: registering a new workflow, `Trigger:` lines, action-SHA pins, maintainer holds/cancellations, post-merge publish** → [`gotchas/pr-ci-and-maintainer.md`](gotchas/pr-ci-and-maintainer.md)
+- **PR/CI/publishing: registering a new workflow, version globs, action-SHA pins, maintainer holds/cancellations, post-merge publish** → [`gotchas/pr-ci-and-maintainer.md`](gotchas/pr-ci-and-maintainer.md)
 
 ## Number → file (every gotcha)
 

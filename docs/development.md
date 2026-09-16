@@ -35,15 +35,54 @@ The general process:
 2. Create a copy of the upstream build workflow in the `python-wheels` repo at
    `.github/workflows/build-<package>.yml`, where `<package>` matches the
    project name (e.g. `build-numpy.yml` for NumPy`).
-3. Remove any workflow logic not related to the Linux glibc and musl (if
+3. Create `docs/packages/<package>.yaml` declaring the version to build (see
+   [Declaring Versions](#declaring-versions)).
+4. Remove any workflow logic not related to the Linux glibc and musl (if
    present) build processes, support for other architectures and operating
    systems (e.g. Windows, Mac OS). This includes the sdist build (unless it is
    consumed by a build or test step).
-4. Repeat steps #2 and #3 for the corresponding test workflow, if it is separate
+5. Repeat steps #2 and #4 for the corresponding test workflow, if it is separate
    from the upstream build file.
 
 From this point, some customizations are required to enable builds targeting
 riscv64.
+
+## Declaring Versions
+
+`docs/packages/<package>.yaml` is the source of truth for what a workflow
+builds. A brand-new package starts with:
+
+```yaml
+package-name: <package>
+source-code: <repository URL>
+license: <SPDX identifier>
+versions:
+- version: <version>
+```
+
+`version` is the version the built wheel will carry (its `METADATA` version,
+not necessarily the git tag: the workflow derives the tag from it). An entry
+with no `tag:` and no `files:` is **pending**: it has not been released yet.
+`_setup.yml` reads the YAML at the start of every run and hands the list of
+pending versions to the build jobs as a matrix, so:
+
+- a `pull_request` run builds every pending version and dry-runs the publish;
+- a `push` to `main` builds every pending version and publishes it;
+- a `workflow_dispatch` with a `version` glob (e.g. `2.5.*`) rebuilds every
+  matching version, released or not, and republishes it from `main`;
+- a run with nothing pending (typically the push that lands `tag:`/`files:`)
+  skips every job and stays green.
+
+Publishing fills in `tag:`/`files:` under that entry through the documentation
+PR (`ci_scripts/update_doc.py`), which retires it from the pending set. The
+wheel's version must match a declared entry byte for byte, or the publish
+fails: a `setuptools_scm` dev version (`1.0.1.dev0+g...`) where `1.0.0` was
+declared is a bug in the build, not something to document.
+
+To **upgrade** an existing package, append a `- version: <new version>` line to
+its YAML and open a PR; no workflow change is needed unless the new version
+needs one. The nightly `check_versions.py` opens exactly that PR
+automatically.
 
 ## Workflow Customizations for riscv64
 
@@ -129,26 +168,81 @@ when invoked.
 ### Using the python-wheels Repository in Workflows
 
 The `python-wheels` repository contains reusable workflows and patch files to
-apply for certain projects. Every `build-<package>.yml` workflow calls
-`_publish-wheel.yml`, which performs the following steps:
+apply for certain projects. Every `build-<package>.yml` workflow starts with a
+`setup` job that calls `_setup.yml` to turn the package YAML into the version
+matrix, and every other job iterates over that matrix:
+
+```
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/numpy.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-numpy.yml'
+      - 'docs/packages/numpy.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-numpy.yml'
+      - 'docs/packages/numpy.yaml'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: numpy
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build numpy ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+    env:
+      NUMPY_VERSION: ${{ matrix.version }}
+    ...
+```
+
+The `if:` guard is required: GitHub Actions rejects a job whose matrix vector is
+empty, and `versions` is `[]` whenever nothing is pending. Job outputs are not
+per matrix leg, so a job must not hand its version to another through
+`outputs:`; use `matrix.version` (or an artifact named after it) instead.
+
+Every `build-<package>.yml` workflow ends with a call to `_publish-wheel.yml`,
+which performs the following steps:
 
 1. Downloads the built wheel(s) from the previous job
 2. Creates an immutable GitHub Release containing the wheels
-3. Opens a PR against `docs/packages/<name>.yaml` documenting the new version
-   (via `ci_scripts/update_doc.py`), which `ci_scripts/generate_packages_doc.py`
-   later renders into the published Markdown page. With it in place, the
-   `build-numpy.yml` script's `publish` job looks like this:
+3. Opens a PR against `docs/packages/<name>.yaml` recording the release under
+   the version's entry (via `ci_scripts/update_doc.py`), which
+   `ci_scripts/generate_packages_doc.py` later renders into the published
+   Markdown page. With it in place, the `build-numpy.yml` script's `publish`
+   job looks like this:
 
 ```
 publish:
-  name: Publish numpy ${{ inputs.version || '2.5.0' }}
-  needs: build_wheels
+  name: Publish numpy ${{ matrix.version }}
+  needs: [setup, build_wheels]
+  if: needs.setup.outputs.versions != '[]'
+  strategy:
+    fail-fast: false
+    matrix:
+      version: ${{ fromJSON(needs.setup.outputs.versions) }}
   permissions:
     contents: write
     pull-requests: write
   uses: $/.github/workflows/_publish-wheel.yml
   with:
-    artifact-pattern: numpy-${{ inputs.version || '2.5.0' }}-*-manylinux_riscv64
+    artifact-pattern: numpy-${{ matrix.version }}-*-manylinux_riscv64
 ```
 
 `permissions` needs `contents: write` and `pull-requests: write` here (not just
@@ -161,15 +255,16 @@ the example.
 
 ## Testing a New Workflow
 
-Open a new draft PR with the workflow(s) included, and include a `Trigger:` line
-in the PR description with a version for each package version you want to build,
-like so:
+Open a new draft PR with the workflow and the package YAML. The `pull_request`
+trigger runs the workflow, which builds every version the YAML declares as
+pending; to build additional versions, add more `- version:` lines. To force a
+rebuild of an already released version, dispatch the workflow on the PR branch
+with a version glob:
 
-`Trigger: numpy:v2.5.0`
-`Trigger: numpy:v2.5.1`
+`gh workflow run build-numpy.yml --ref <branch> -f version='2.5.*'`
 
-The repository's automation logic will pick up on and trigger the appropriate
-build workflows for each version. Achieving a passing (green) build may require
+(A brand-new workflow can only be dispatched once its first `pull_request` run
+has registered it with GitHub.) Achieving a passing (green) build may require
 several attempts including rework and possible patches, depending on the nature
 of the failure.
 
@@ -222,9 +317,9 @@ in dry-run mode. Review the publish job and confirm that it selected exactly the
 expected wheels and derived the expected normalized package name and version.
 Pull request runs never create releases or documentation pull requests.
 
-Merging the pull request does not publish its artifacts. After merge, a
-maintainer must dispatch the package workflow again from the `main` branch with
-the reviewed version. The successful `main` run:
+Merging the pull request pushes the pending version to `main`, which triggers
+the package workflow again through its `push` trigger. The successful `main`
+run:
 
 1. creates a draft GitHub Release targeting the workflow's commit;
 2. names the release `<normalized-package>-v<version>` and gives its tag a UTC
@@ -232,12 +327,19 @@ the reviewed version. The successful `main` run:
 3. uploads all selected wheels and any required `gpl-sources.tar` asset;
 4. publishes the release, at which point repository-level immutable releases
    freeze its tag and assets; and
-5. opens or updates the shared documentation pull request with the release tag,
-   wheel filenames, SHA-256 hashes, and `Requires-Python` metadata.
+5. opens or updates the shared documentation pull request, filling in the
+   version's entry with the release tag, wheel filenames, SHA-256 hashes, and
+   `Requires-Python` metadata.
 
 Every `main` run creates a new release; existing releases are never reused or
 modified. Its description links back to the workflow run that produced it.
-Publishing fails if immutable releases are disabled.
+Publishing fails if immutable releases are disabled, or if the wheel's version
+is not declared in the package YAML.
+
+Merging the documentation pull request pushes the now-released entry to `main`
+and triggers the workflow once more; with nothing left pending, that run skips
+every job. Until then the version is still pending, so any other push touching
+the workflow or its YAML rebuilds and re-releases it.
 
 The generated `/simple/` package index reads only `docs/packages/*.yaml`. The
 new release does not become discoverable through pip until the generated

@@ -1,22 +1,20 @@
 ## After a PR is merged (the maintainer merges, not you)
 
-Merging changes nothing on the registry. Four steps, all scriptable — `.git/pw-postmerge.py <pr> <pkg>`
-does them and is idempotent (`--no-trigger` skips the publish):
+Merging pushes the pending `- version:` entry to `main`, and the workflow's `push` trigger
+builds and publishes it — **do not dispatch anything**. Four steps remain, all scriptable —
+`.git/pw-postmerge.py <pr> <pkg>` does them and is idempotent (`--no-trigger` is now the only
+mode that makes sense):
 
-1. **Publish**: `gh workflow run build-<pkg>.yml --ref main -f version=<v>`. Only a run whose ref is
-   `main` performs the real twine upload; every other ref dry-runs. Take `<v>` from the workflow's
-   `version` input default. Confirm afterwards with
+1. **Check the publish**: `gh run list --workflow build-<pkg>.yml --branch main --limit 3`
+   must show the `push` run; when it is green, the docs PR (`github-actions/update-doc`) holds
+   the version's `tag:`/`files:`. A dispatch is only for a *re*build:
+   `gh workflow run build-<pkg>.yml --ref main -f version=<glob>` re-releases every matching
+   version, so never fire one while the `push` run is still going. Only a run whose ref is
+   `main` publishes; every other ref dry-runs. Confirm afterwards with
    `curl -s -o /dev/null -w '%{http_code}' --max-redirs 0 https://pypi.riseproject.dev/simple/<pkg>/`:
    **200 means we host it, 302 means we do not** (gotcha 30). Do not follow the redirect and grep
    for `riscv64` — the redirect lands on PyPI, so any package whose upstream ships riscv64 wheels
    (hypothesis' abi3 ones, say) reads as already published when it is not.
-   **Check for an existing `main` run first.** These workflows have no `push` trigger, but a
-   dispatch is usually fired within seconds of the merge, so a second one re-uploads files that
-   are already there and GitLab answers `HTTPError: 400 Bad Request` — after the full build has
-   run. `gh run list --workflow build-<pkg>.yml --branch main --limit 3` plus the registry check
-   settles it: dispatch only when there is no successful `main` run, or the last one failed.
-   If you start a redundant one, `gh run cancel` it rather than letting it hold the riscv64
-   runners for hours to fail at the last step.
 2. **Issue**: one titled exactly `<pkg> riscv64 support`, label `wheel`, body in the
    `.github/ISSUE_TEMPLATE/package-request.yml` form shape. **Search before creating** —
    146 already exist, titles are not always the PyPI name (`SGLang`, `LibCST`, `PyNaCl`), and
@@ -101,15 +99,16 @@ shape (it is in the diff), or any debugging history. Do not hard-wrap (see PR / 
 - **Never hard-wrap a PR description.** Write each paragraph and each bullet as one long
   line and let the GitHub UI wrap it; manual line breaks reflow badly at any other width.
   This applies to the PR body only — workflow YAML and patch commit messages still wrap.
-- `pr-checks.yml` rejects commits starting with `revertme`/`revert me`/`DO NOT MERGE`
+- `pr-checks.yml` rejects commits starting with `revertme`/`revert me`/`DO NOT MERGE`,
+  lints every changed `docs/packages/*.yaml` (a `build-<pkg>.yml` without one fails),
   and validates `Upstream-Status:` headers in added/modified patches under `patches/`.
 - Sanity that the `publish` job **dry-ran** on your PR branch (grep its log for
   "Dry run (not on main branch …)"); it should list the wheels it *would* upload
   without uploading.
-- **Merging does not publish.** `_publish-wheel.yml` only does the real thing
+- **Merging is what publishes.** `_publish-wheel.yml` only does the real thing
   (immutable GitHub Release and docs PR) when the run's ref is `main`; on any other
   ref it prints a dry run — resolved artifacts, release details, and the branch/PR title
   `update_doc.py` would have used. That is deliberate: only reviewed, merged workflows push
-  packages. After your PR merges, **re-trigger the workflow from `main`** for the wheels to
-  actually reach the registry.
+  packages. The merge's push to `main` runs the workflow for every still-pending version;
+  nothing needs to be re-triggered by hand.
 
