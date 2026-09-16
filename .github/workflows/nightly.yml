@@ -29,17 +29,43 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v7
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
         with:
-          python-version: '3'
+          enable-cache: false
 
-      - name: Install Python dependencies
-        run: pip install requests packaging pyyaml
-
-      - name: Check versions and open PRs
+      - name: Check versions and declare upgrades
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python3 ci_scripts/check_versions.py --summary${{ github.event_name != 'pull_request' && ' --create-prs' || '' }}
+          SINCE: "2026-09-01"
+        run: uv run --with-requirements ci_scripts/requirements.txt python3 ci_scripts/check_versions.py --summary --report "$RUNNER_TEMP/report.md" ${{ github.event_name != 'pull_request' && '--declare' || '' }}
+
+      - name: Open or update the upgrade PR
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: github-actions/nightly-upgrades
+        run: |
+          if git diff --quiet -- docs/packages ci_scripts/packages.txt ci_scripts/deprecated.txt; then
+            echo "Nothing to declare"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --create "$BRANCH"
+          git add docs/packages ci_scripts/packages.txt ci_scripts/deprecated.txt
+          git commit -s -m "packages: Update versions and status"
+          git push --force origin "$BRANCH"
+
+          pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json url --jq '.[0].url')
+          if [ -n "$pr" ]; then
+            gh pr edit "$pr" --body-file "$RUNNER_TEMP/report.md"
+            echo "Updated $pr"
+          else
+            gh pr create --draft --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" \
+              --reviewer threexc,justeph,luhenry \
+              --title "packages: Update versions and status" \
+              --body-file "$RUNNER_TEMP/report.md"
+          fi
 
   check_deprecated_packages:
     runs-on: ubuntu-latest

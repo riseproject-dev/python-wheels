@@ -16,29 +16,27 @@ https://gitlab.com/riseproject/python/wheel_builder/-/blob/main/ci_scripts/check
 import re
 import subprocess
 import sys
-import os
 import time
-from typing import Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional, Set
 from packaging import version
 from pathlib import Path
 import requests
 import yaml
 
+from update_doc import normalize_name, version_blocks
 
-REGISTRY_URL = "https://pypi.riseproject.dev/simple/"
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+DOCS_DIR = ROOT_DIR / "docs" / "packages"
 PACKAGES_FILE = "ci_scripts/packages.txt"
+DEPRECATED_FILE = "ci_scripts/deprecated.txt"
 REPO = "riseproject-dev/python-wheels"
 
 # Python versions (interpreter tags) a package must have upstream riscv64
 # wheels for before we deprecate our own build. "3.14t" is the free-threaded
 # build — a distinct ABI from "3.14", so it needs its own wheel.
 TARGET_PYTHON_VERSIONS = ["3.12", "3.13", "3.14", "3.14t"]
-
-# Cap on how many new versions get declared per upgrade PR. When the registry
-# drifts far behind PyPI, an unbounded loop could kick off dozens of workflow
-# runs per package. Three keeps the retry cost bounded while still covering the
-# common "we missed one or two point releases" case.
-MAX_NEW_VERSIONS_PER_PR = 3
 
 
 def read_packages() -> List[str]:
@@ -56,36 +54,37 @@ def read_packages() -> List[str]:
     return packages
 
 
-def get_registry_latest_version(package: str, retries: int = 3) -> Optional[str]:
-    """Get the latest version available in the riscv64 registry, retrying on transient failures."""
-    for attempt in range(retries):
+def package_yaml(package: str) -> Path:
+    # packages.txt keeps PyPI's spelling (PyYAML), the YAMLs use the normalized name.
+    return DOCS_DIR / f"{normalize_name(package)}.yaml"
+
+
+def load_package_yaml(package: str) -> Optional[Dict]:
+    yaml_file = package_yaml(package)
+    if not yaml_file.exists():
+        return None
+    return yaml.safe_load(yaml_file.read_text()) or {}
+
+
+def declared_versions(package_data: Dict) -> Set[str]:
+    return {str(e.get("version", "")).strip() for e in package_data.get("versions") or []}
+
+
+def get_registry_latest_version(package_data: Dict) -> Optional[str]:
+    """
+    Latest version published to the riscv64 registry, read from the package
+    YAML. Entries without `files` are declared but not built yet.
+    """
+    released = []
+    for entry in package_data.get("versions") or []:
+        if "files" not in entry:
+            continue
+        raw = str(entry["version"])
         try:
-            result = subprocess.run([
-                "pip", "index", "versions", package,
-                "--index-url", REGISTRY_URL,
-                "--platform", "manylinux_2_34_riscv64",
-                "--platform", "manylinux_2_35_riscv64",
-                "--platform", "manylinux_2_39_riscv64",
-                "--python-version", "3.12"
-            ], capture_output=True, text=True, timeout=30)
-
-            if result.returncode != 0:
-                if attempt < retries - 1:
-                    time.sleep(2 * (attempt + 1))
-                    continue
-                return None
-
-            for line in result.stdout.split('\n'):
-                if "Available versions:" in line:
-                    versions_part = line.split("Available versions:")[1].strip()
-                    if versions_part:
-                        versions = [v.strip() for v in versions_part.split(',')]
-                        return versions[0] if versions else None
-            return None
-        except (subprocess.TimeoutExpired, subprocess.SubprocessError):
-            if attempt < retries - 1:
-                time.sleep(2 * (attempt + 1))
-    return None
+            released.append((version.parse(raw), raw))
+        except version.InvalidVersion:
+            continue
+    return max(released)[1] if released else None
 
 
 def get_pypi_package_info(package: str, retries: int = 3) -> Optional[Dict]:
@@ -173,10 +172,6 @@ def is_pure_python_wheel(package_info: Dict, target_version: str) -> bool:
     return has_wheels
 
 
-def git_run(*args, subdir: str = None) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=subdir, check=True, capture_output=True, text=True)
-
-
 def find_upstream_issue(package: str) -> Optional[str]:
     """
     Find issue for a package in the wheel_builder's Upstream milestone.
@@ -205,141 +200,31 @@ def find_upstream_issue(package: str) -> Optional[str]:
         return None
 
 
-def configure_git_identity():
-    git_run("config", "user.name", "github-actions[bot]")
-    git_run("config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com")
+def deprecate_package(package: str) -> bool:
+    """
+    Deprecate our wheel in the working tree: prefix docs/packages/<pkg>.yaml
+    with `deprecated:`, drop the package from packages.txt and add it to
+    deprecated.txt. Returns False when it is already deprecated.
+    """
+    yaml_file = package_yaml(package)
+    content = yaml_file.read_text()
+    if content.startswith("deprecated:"):
+        return False
+    yaml_file.write_text(f"deprecated:\n{content}")
 
+    packages_file = Path(PACKAGES_FILE)
+    lines = [line for line in packages_file.read_text().splitlines() if line.strip() != package]
+    packages_file.write_text("\n".join(lines) + "\n")
 
-def extract_pr_url(stdout: str) -> Optional[str]:
-    for line in stdout.split('\n'):
-        line = line.strip()
-        if "github.com" in line and "/pull/" in line:
-            return line
-    return None
-
-
-def find_open_pr_for_branch(branch: str, retries: int = 3) -> Optional[str]:
-    """Return the URL of an open PR with the given head branch, if any. Retries on transient failures."""
-    for attempt in range(retries):
-        try:
-            result = subprocess.run([
-                "gh", "pr", "list",
-                "--repo", REPO,
-                "--head", branch,
-                "--state", "open",
-                "--json", "url",
-                "--jq", ".[0].url",
-            ], capture_output=True, text=True, timeout=30)
-
-            if result.returncode != 0:
-                if attempt < retries - 1:
-                    time.sleep(2 * (attempt + 1))
-                    continue
-                return None
-
-            return result.stdout.strip() or None
-
-        except (subprocess.TimeoutExpired, subprocess.SubprocessError):
-            if attempt < retries - 1:
-                time.sleep(2 * (attempt + 1))
-    return None
-
-
-def create_deprecation_pr(package: str, reason: str) -> Optional[str]:
-    """Create a pull request to deprecate a package."""
-    branch = f"github-actions/deprecate-{package}"
-
-    existing_pr = find_open_pr_for_branch(branch)
-    if existing_pr:
-        print(f"    [=] PR already open for {package}: {existing_pr}")
-        return existing_pr
-
-    try:
-        git_run("fetch", "origin")
-        git_run("switch", "main")
-
-        yaml_file = Path(f"docs/packages/{package}.yaml")
-        if not yaml_file.exists():
-            print(f"    [!] YAML file for {package} does not exist")
-            return None
-
-        content = yaml_file.read_text()
-
-        if content.startswith("deprecated:"):
-            print(f"    [!] {package} is already deprecated")
-            return None
-
-        new_content = f"deprecated:\n{content}"
-
-        upstream_issue = find_upstream_issue(package)
-        if upstream_issue:
-            print(f"    [+] Found upstream issue #{upstream_issue} for {package}")
-        else:
-            print(f"    [!] No upstream issue found for {package}")
-
-        configure_git_identity()
-        git_run("switch", "-c", branch)
-
-        yaml_file.write_text(new_content)
-
-        packages_file = Path("ci_scripts/packages.txt")
-        if packages_file.exists():
-            lines = packages_file.read_text().splitlines()
-            updated_lines = []
-            for line in lines:
-                stripped_line = line.strip()
-                if stripped_line and not stripped_line.startswith('#') and stripped_line == package:
-                    continue
-                updated_lines.append(line)
-            packages_file.write_text('\n'.join(updated_lines) + '\n')
-
-        deprecated_file = Path("ci_scripts/deprecated.txt")
-        lines = deprecated_file.read_text().splitlines()
-
-        i = next(
-                i for i, line in enumerate(lines)
-                if line.strip() and not line.lstrip().startswith("#")
-        )
-
-        comments = lines[:i]
-        deprecated_packages = lines[i:]
-
-        if package not in deprecated_packages:
-            deprecated_packages.append(package)
-            deprecated_packages.sort(key=lambda s: s.lower())
-            updated_lines = comments + deprecated_packages
-            deprecated_file.write_text('\n'.join(updated_lines) + '\n')
-
-        commit_title = f"{package}: deprecate our wheel"
-        fix_tag = f"Fixes: #{upstream_issue}\n\n" if upstream_issue else ""
-
-        git_run("add", str(yaml_file))
-        git_run("add", str(packages_file))
-        git_run("add", str(deprecated_file))
-        git_run("commit", "-s", "-m", f"{commit_title}\n\n{reason}\n\n{fix_tag}")
-
-        git_run("push", "origin", branch)
-
-        result = subprocess.run([
-            "gh", "pr", "create", "--draft",
-            "--repo", REPO,
-            "--base", "main",
-            "--head", branch,
-            "--reviewer", "threexc,justeph",
-            "--title", f"{package}: deprecate our wheel",
-            "--body", f"Automatically generated PR to deprecate {package}.\n\n{reason}\n\n{fix_tag}",
-        ], capture_output=True, text=True, check=True)
-
-        return extract_pr_url(result.stdout) or f"PR created for {package} (URL not found in output)"
-
-    except subprocess.CalledProcessError as e:
-        print(f"    [X] Error creating PR for {package}: {e.stderr or e}")
-        print(f"    [?] Could not confirm whether a PR already exists for {package} "
-              "— please check open PRs manually")
-        return None
-    except Exception as e:
-        print(f"    [X] Unexpected error creating PR for {package}: {e}")
-        return None
+    deprecated_file = Path(DEPRECATED_FILE)
+    lines = deprecated_file.read_text().splitlines()
+    i = next(i for i, line in enumerate(lines) if line.strip() and not line.lstrip().startswith("#"))
+    comments, deprecated_packages = lines[:i], lines[i:]
+    if package not in deprecated_packages:
+        deprecated_packages.append(package)
+        deprecated_packages.sort(key=str.lower)
+        deprecated_file.write_text("\n".join(comments + deprecated_packages) + "\n")
+    return True
 
 
 def get_new_versions(package_info: Dict, registry_version: str) -> List[str]:
@@ -347,11 +232,6 @@ def get_new_versions(package_info: Dict, registry_version: str) -> List[str]:
     Return sorted list of stable PyPI versions strictly greater than
     registry_version. Skips prereleases, dev releases, and fully yanked
     versions.
-
-    Result is truncated to the newest MAX_NEW_VERSIONS_PER_PR entries so a
-    stale registry does not queue dozens of builds per package.
-    Older skipped versions can still be built by declaring them in
-    docs/packages/<pkg>.yaml by hand.
     """
     try:
         reg_ver = version.parse(registry_version)
@@ -373,7 +253,52 @@ def get_new_versions(package_info: Dict, registry_version: str) -> List[str]:
         result.append(raw)
 
     result.sort(key=version.parse)
-    return result[-MAX_NEW_VERSIONS_PER_PR:]
+    return result
+
+
+def parse_since(value: str) -> datetime:
+    """Accept a YYYY-MM-DD date or a duration such as 12m / 90d, in UTC."""
+    now = datetime.now(timezone.utc)
+    m = re.fullmatch(r"(\d+)([dm])", value)
+    if not m:
+        return datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
+    n, unit = int(m.group(1)), m.group(2)
+    if unit == "d":
+        return now - timedelta(days=n)
+    total = now.year * 12 + now.month - 1 - n
+    year, month = divmod(total, 12)
+    # Clamp the day so e.g. Mar 31 - 1 month lands on Feb 28/29.
+    for day in range(now.day, 0, -1):
+        try:
+            return now.replace(year=year, month=month + 1, day=day)
+        except ValueError:
+            continue
+
+
+def get_versions_since(package_info: Dict, declared: Set[str], since: datetime) -> List[str]:
+    """
+    Return sorted list of stable PyPI versions first uploaded at or after
+    `since` that are not yet declared in the package YAML. Unlike
+    get_new_versions this is not capped and not relative to the registry
+    version: an old release line that saw a point release recently counts.
+    """
+    result = []
+    for raw, files in (package_info.get("releases") or {}).items():
+        if raw in declared or not files or all(f.get("yanked") for f in files):
+            continue
+        try:
+            v = version.parse(raw)
+        except version.InvalidVersion:
+            continue
+        if v.is_prerelease or v.is_devrelease:
+            continue
+        uploaded = min(
+            datetime.fromisoformat(f["upload_time_iso_8601"].replace("Z", "+00:00"))
+            for f in files if f.get("upload_time_iso_8601")
+        )
+        if uploaded >= since:
+            result.append(raw)
+    return sorted(result, key=version.parse)
 
 
 def declare_versions(yaml_file: Path, new_versions: List[str]) -> List[str]:
@@ -396,93 +321,49 @@ def declare_versions(yaml_file: Path, new_versions: List[str]) -> List[str]:
     return added
 
 
-def create_upgrade_pr(package: str, package_info: Dict, new_versions: List[str]) -> Optional[str]:
+def get_yanked_versions(package_info: Dict, package_data: Dict) -> List[str]:
     """
-    Create a PR that declares each new version in docs/packages/<pkg>.yaml.
-
-    The PR's own pull_request run of build-<pkg>.yml builds every version the
-    YAML declares without a release, so nothing is dispatched here. If the
-    build workflow is missing, the PR body asks the reviewer to create it.
+    Released versions of the YAML whose PyPI release is fully yanked and that
+    are not yet marked `yanked: true` locally.
     """
-    if not new_versions:
-        return None
+    releases = package_info.get("releases") or {}
+    yanked = []
+    for entry in package_data.get("versions") or []:
+        if "files" not in entry:
+            continue
+        raw = str(entry["version"])
+        files = releases.get(raw) or []
+        if not files or not all(f.get("yanked") for f in files):
+            continue
+        if "yanked" in entry:
+            continue
+        yanked.append(raw)
+    return yanked
 
-    latest_version = new_versions[-1]
-    branch = f"github-actions/upgrade-{package}-{latest_version}"
 
-    existing_pr = find_open_pr_for_branch(branch)
-    if existing_pr:
-        print(f"    [=] PR already open for {package}: {existing_pr}")
-        return existing_pr
-
-    try:
-        configure_git_identity()
-
-        git_run("fetch", "origin")
-        git_run("switch", "main")
-
-        yaml_file = Path(f"docs/packages/{package}.yaml")
-        if not yaml_file.exists():
-            print(f"    [!] {yaml_file} does not exist")
-            return None
-
-        git_run("switch", "-c", branch)
-
-        pypi_package_url = get_pypi_package_url(package_info)
-        build_workflow = Path(f".github/workflows/build-{package}.yml")
-
-        added = declare_versions(yaml_file, new_versions)
-        if not added:
-            print(f"    [=] {package}: {', '.join(new_versions)} already declared in {yaml_file}")
-            return None
-
-        git_run("add", str(yaml_file))
-        git_run("commit", "-m", f"{package}: upgrade to v{latest_version}")
-        git_run("push", "origin", branch)
-
-        versions_list = ", ".join(f"v{v}" for v in added)
-        body_lines = [
-            f"Automatically generated PR to upgrade {package} — new versions detected: {versions_list}.",
-            "",
-            f"Link to [PyPI]({pypi_package_url}).",
-            "",
-            f"Declares {versions_list} in `{yaml_file}`; the build workflow builds every declared version that has no release yet.",
-            "",
-        ]
-
-        if build_workflow.exists():
-            body_lines += [
-                "If all builds succeed without modification, merge this PR: the push to `main` publishes the wheels and opens the docs PR.",
-                "If changes are needed, force-push this branch.",
-            ]
-        else:
-            body_lines += [
-                f"No build workflow found at `.github/workflows/build-{package}.yml`.",
-                "Please create one (and optionally a matching `test-*.yml`) before merging.",
-            ]
-
-        body = "\n".join(body_lines) + "\n"
-
-        result = subprocess.run([
-            "gh", "pr", "create", "--draft",
-            "--repo", REPO,
-            "--base", "main",
-            "--head", branch,
-            "--reviewer", "threexc,justeph",
-            "--title", f"Upgrade {package} to v{latest_version}",
-            "--body", body,
-        ], capture_output=True, text=True, check=True)
-
-        return extract_pr_url(result.stdout) or f"PR created for {package} (URL not found in output)"
-
-    except subprocess.CalledProcessError as e:
-        print(f"    [X] Error creating upgrade PR for {package}: {e.stderr or e}")
-        print(f"    [?] Could not confirm whether a PR already exists for {package} "
-              "— please check open PRs manually")
-        return None
-    except Exception as e:
-        print(f"    [X] Unexpected error creating upgrade PR for {package}: {e}")
-        return None
+def mark_yanked(yaml_file: Path, yanked: List[str]) -> List[str]:
+    """
+    Add `yanked: true` right after `tag:` of each given version, preserving
+    the rest of the file byte-for-byte, and return the versions that were
+    marked. The Simple API renders it as PEP 592's data-yanked.
+    """
+    lines = yaml_file.read_text().splitlines()
+    marked = []
+    # Bottom-up so earlier block ranges stay valid after inserts.
+    for start, end in reversed(list(version_blocks(lines))):
+        raw = str(yaml.safe_load("\n".join(lines[start:end]))[0].get("version"))
+        if raw not in yanked:
+            continue
+        if any(line.startswith("  yanked:") for line in lines[start:end]):
+            continue
+        tag = next((i for i in range(start, end) if lines[i].startswith("  tag:")), None)
+        if tag is None:
+            continue
+        lines.insert(tag + 1, "  yanked: true")
+        marked.append(raw)
+    if marked:
+        yaml_file.write_text("\n".join(lines) + "\n")
+    return marked[::-1]
 
 
 def compare_versions(registry_version: str, pypi_version: str) -> int:
@@ -494,32 +375,110 @@ def compare_versions(registry_version: str, pypi_version: str) -> int:
     return 0
 
 
-def check_package(package: str, create_prs: bool = False) -> Dict[str, any]:
-    """Check a single package version and optionally create PRs."""
+def check_package(
+    package: str,
+    since: Optional[datetime] = None,
+    declare: bool = False,
+) -> Dict[str, any]:
+    """
+    Check a single package against PyPI and optionally apply the outcome to
+    the working tree.
 
-    registry_version = get_registry_latest_version(package)
+    With `since`, every stable release uploaded since that date and missing
+    from the YAML counts as an upgrade, not just the ones newer than the
+    registry. With `declare`, the upgrade, deprecation or yanked marking is
+    written to docs/packages/<pkg>.yaml (and packages.txt/deprecated.txt) for
+    the caller to commit. Versions yanked upstream are reported in the
+    result's `yanked` alongside the upgrade/deprecation status.
+    """
+
+    package_data = load_package_yaml(package)
+    if package_data is None:
+        print(f"[X] No {package_yaml(package).relative_to(ROOT_DIR)}")
+        return {"status": "error", "package": package, "error": "No docs/packages YAML"}
+
+    registry_version = get_registry_latest_version(package_data)
     if registry_version is None:
-        print(f"[X] Could not get registry version for {package}")
-        return {"status": "error", "package": package, "error": "Could not get registry version"}
+        print(f"[X] No released version in {package_yaml(package).relative_to(ROOT_DIR)}")
+        return {"status": "error", "package": package, "error": "No released version in YAML"}
 
     pypi_info = get_pypi_package_info(package)
     if pypi_info is None:
         print(f"[X] Could not get PyPI info for {package}")
         return {"status": "error", "package": package, "error": "Could not get PyPI info"}
 
+    yanked = get_yanked_versions(pypi_info, package_data)
+    if yanked:
+        print(f"[!] {package} {', '.join(f'v{v}' for v in yanked)} yanked on PyPI")
+        if declare:
+            marked = mark_yanked(package_yaml(package), yanked)
+            print(f"    [+] marked {', '.join(f'v{v}' for v in marked)} yanked in {package_yaml(package).relative_to(ROOT_DIR)}")
+
+    result = check_upgrade(package, package_data, pypi_info, registry_version, since, declare)
+    result["yanked"] = yanked
+    return result
+
+
+def check_upgrade(
+    package: str,
+    package_data: Dict,
+    pypi_info: Dict,
+    registry_version: str,
+    since: Optional[datetime],
+    declare: bool,
+) -> Dict[str, any]:
+    """Classify the package as up to date, deprecatable or upgradable, and act on it."""
     pypi_version = get_pypi_latest_version(pypi_info)
     pypi_package_url = get_pypi_package_url(pypi_info)
 
-    if compare_versions(registry_version, pypi_version) == 0:
+    up_to_date = {
+        "status": "up_to_date",
+        "package": package,
+        "registry_version": registry_version,
+        "pypi_version": pypi_version,
+    }
+    behind = compare_versions(registry_version, pypi_version) < 0
+
+    if not behind and since is None:
         print(f"[+] {package} v{pypi_version} is up to date")
+        return up_to_date
+
+    declared = declared_versions(package_data)
+    if since is not None:
+        candidates = get_versions_since(pypi_info, declared, since)
+    else:
+        candidates = [v for v in get_new_versions(pypi_info, registry_version) or [pypi_version] if v not in declared]
+
+    # We provide wheels up to the point where upstream does: a version that
+    # already has riscv64 wheels for every target Python, or that went pure
+    # Python, is never built here, but every gap before it is.
+    upstream = [v for v in candidates if has_riscv64_wheel(pypi_info, v) or is_pure_python_wheel(pypi_info, v)]
+    new_versions = [v for v in candidates if v not in upstream]
+    if upstream:
+        print(f"    [=] {package}: skipping {', '.join(f'v{v}' for v in upstream)}, "
+              f"riscv64 or pure Python wheels on PyPI for Python {', '.join(TARGET_PYTHON_VERSIONS)}")
+
+    if new_versions:
+        print(f"[^] {package} can be upgraded: v{registry_version} -> {', '.join(f'v{v}' for v in new_versions)}")
+        if declare:
+            added = declare_versions(package_yaml(package), new_versions)
+            print(f"    [+] declared {', '.join(f'v{v}' for v in added)} in {package_yaml(package).relative_to(ROOT_DIR)}")
         return {
-            "status": "up_to_date",
+            "status": "need_upgrade",
             "package": package,
             "registry_version": registry_version,
-            "pypi_version": pypi_version
+            "pypi_version": pypi_version,
+            "new_versions": new_versions,
         }
 
-    if has_riscv64_wheel(pypi_info, pypi_version):
+    # Only retire the package once every declared version has been built, so
+    # the registry really does reach up to upstream's first riscv64 release.
+    pending = [str(e["version"]) for e in package_data.get("versions") or [] if "files" not in e]
+    if pending:
+        print(f"[+] {package}: {', '.join(f'v{v}' for v in pending)} already declared, waiting for the build")
+        return up_to_date
+
+    if behind and has_riscv64_wheel(pypi_info, pypi_version):
         py_list = ", ".join(TARGET_PYTHON_VERSIONS)
         wheels_by_version = matching_riscv64_wheels(pypi_info, pypi_version)
         print(f"[-] {package} v{pypi_version} has riscv64 wheels on PyPI for Python {py_list}. Can be deprecated.")
@@ -530,39 +489,31 @@ def check_package(package: str, create_prs: bool = False) -> Dict[str, any]:
             f"{package} v{pypi_version} has riscv64 wheels on PyPI for Python {py_list}: "
             f"{pypi_package_url}\n\n" + "\n".join(wheel_lines)
         )
-        pr_url = create_deprecation_pr(package, reason) if create_prs else None
-        return {
-            "status": "can_deprecate",
-            "package": package,
-            "registry_version": registry_version,
-            "pypi_version": pypi_version,
-            "reason": reason,
-            "pr_url": pr_url,
-        }
+        return deprecation_result(package, registry_version, pypi_version, reason, declare)
 
-    if is_pure_python_wheel(pypi_info, pypi_version):
+    if behind and is_pure_python_wheel(pypi_info, pypi_version):
         print(f"[-] {package} v{pypi_version} switched to pure Python wheels only. Can be deprecated.")
         reason = f"{package} v{pypi_version} switched to pure Python wheels only: {pypi_package_url}"
-        pr_url = create_deprecation_pr(package, reason) if create_prs else None
-        return {
-            "status": "can_deprecate",
-            "package": package,
-            "registry_version": registry_version,
-            "pypi_version": pypi_version,
-            "reason": reason,
-            "pr_url": pr_url,
-        }
+        return deprecation_result(package, registry_version, pypi_version, reason, declare)
 
-    new_versions = get_new_versions(pypi_info, registry_version) or [pypi_version]
-    print(f"[^] {package} can be upgraded: v{registry_version} -> {', '.join(f'v{v}' for v in new_versions)}")
-    pr_url = create_upgrade_pr(package, pypi_info, new_versions) if create_prs else None
+    if since is not None:
+        print(f"[+] {package}: every release since {since:%Y-%m-%d} is declared or shipped upstream")
+    else:
+        print(f"[+] {package} v{pypi_version} is up to date")
+    return up_to_date
+
+
+def deprecation_result(package: str, registry_version: str, pypi_version: str, reason: str, declare: bool) -> Dict[str, any]:
+    upstream_issue = find_upstream_issue(package)
+    if declare and deprecate_package(package):
+        print(f"    [+] deprecated {package} in {package_yaml(package).relative_to(ROOT_DIR)}, packages.txt and deprecated.txt")
     return {
-        "status": "need_upgrade",
+        "status": "can_deprecate",
         "package": package,
         "registry_version": registry_version,
         "pypi_version": pypi_version,
-        "new_versions": new_versions,
-        "pr_url": pr_url,
+        "reason": reason,
+        "upstream_issue": upstream_issue,
     }
 
 
@@ -598,8 +549,6 @@ def print_summary(results: List[Dict[str, any]]):
             reg_version = f"v{result['registry_version']}"
             pypi_version = f"v{result['pypi_version']}"
             print(f"    {result['package']:<{max_name_len}} {reg_version:>{max_reg_version_len}} -> {pypi_version} ({result['reason']})")
-            if result.get('pr_url'):
-                print(f"    {'':<{max_name_len}} {'':<{max_reg_version_len}}    PR: {result['pr_url']}")
     else:
         print("    (none)")
 
@@ -611,10 +560,15 @@ def print_summary(results: List[Dict[str, any]]):
             reg_version = f"v{result['registry_version']}"
             pypi_version = f"v{result['pypi_version']}"
             print(f"    {result['package']:<{max_name_len}} {reg_version:>{max_reg_version_len}} -> {pypi_version}")
-            if result.get('pr_url'):
-                print(f"    PR: {result['pr_url']}")
     else:
         print("    (none)")
+
+    yanked = [r for r in results if r.get("yanked")]
+    if yanked:
+        print(f"\n[!] YANKED UPSTREAM ({len(yanked)} packages):")
+        max_name_len = max(len(r["package"]) for r in yanked)
+        for result in sorted(yanked, key=lambda x: x["package"]):
+            print(f"    {result['package']:<{max_name_len}} {', '.join(f'v{v}' for v in result['yanked'])}")
 
     if errors:
         print(f"\n[X] ERRORS ({len(errors)} packages):")
@@ -623,6 +577,41 @@ def print_summary(results: List[Dict[str, any]]):
             print(f"    {result['package']:<{max_name_len}} {result['error']}")
 
     print("\n" + "=" * 80)
+
+
+def write_report(results: List[Dict[str, any]], path: Path):
+    """Markdown summary of what --declare changed, used as the nightly PR body."""
+    upgrades = sorted((r for r in results if r["status"] == "need_upgrade"), key=lambda r: r["package"])
+    deprecations = sorted((r for r in results if r["status"] == "can_deprecate"), key=lambda r: r["package"])
+    yanked = sorted((r for r in results if r.get("yanked")), key=lambda r: r["package"])
+    errors = sorted((r for r in results if r["status"] == "error"), key=lambda r: r["package"])
+
+    lines = [
+        "Automatically generated by the nightly `check_versions.py` run. Each `- version:` "
+        "entry below is built by this PR's own `build-<pkg>.yml` run; merging publishes the wheels.",
+        "",
+    ]
+    if upgrades:
+        lines += [f"## Upgrades ({len(upgrades)})", ""]
+        lines += [f"- **{r['package']}** v{r['registry_version']} -> "
+                  + ", ".join(f"v{v}" for v in r["new_versions"]) for r in upgrades]
+        lines.append("")
+    if deprecations:
+        lines += [f"## Deprecations ({len(deprecations)})", "",
+                  "Upstream now ships riscv64 wheels; our build is retired.", ""]
+        for r in deprecations:
+            lines += [f"### {r['package']}", "", r["reason"], ""]
+            if r.get("upstream_issue"):
+                lines += [f"Fixes #{r['upstream_issue']}", ""]
+    if yanked:
+        lines += [f"## Yanked upstream ({len(yanked)})", ""]
+        lines += [f"- **{r['package']}** " + ", ".join(f"v{v}" for v in r["yanked"]) for r in yanked]
+        lines.append("")
+    if errors:
+        lines += [f"## Errors ({len(errors)})", ""]
+        lines += [f"- **{r['package']}**: {r['error']}" for r in errors]
+        lines.append("")
+    path.write_text("\n".join(lines))
 
 
 def _self_test():
@@ -658,7 +647,13 @@ def main():
 
     parser = argparse.ArgumentParser(description="Check package versions between riscv64 registry and PyPI")
     parser.add_argument("packages", nargs="*", help="Specific packages to check (default: all packages from packages.txt)")
-    parser.add_argument("--create-prs", action="store_true", help="Create pull requests for packages that can be deprecated or upgraded")
+    parser.add_argument("--since", type=parse_since, metavar="DATE|Nd|Nm",
+                        help="Treat every stable release uploaded since this date (YYYY-MM-DD) or duration (e.g. 12m, 90d) "
+                             "that docs/packages/<pkg>.yaml does not list as a version to add, uncapped")
+    parser.add_argument("--declare", action="store_true",
+                        help="Apply the outcome to the working tree: declare new versions and mark yanked ones in "
+                             "docs/packages/<pkg>.yaml, deprecate packages in the YAML, packages.txt and deprecated.txt")
+    parser.add_argument("--report", type=Path, metavar="FILE", help="Write a Markdown summary suitable as a PR body")
     parser.add_argument("--summary", action="store_true", help="Show detailed summary at the end")
     parser.add_argument("--self-test", action="store_true", help="Run internal sanity checks and exit")
 
@@ -676,14 +671,10 @@ def main():
         print("Checking package versions between riscv64 registry and PyPI...")
         print(f"Found {len(packages)} packages to check")
 
-    if args.create_prs and not os.environ.get("GH_TOKEN"):
-        print("[!] Warning: --create-prs specified but GH_TOKEN not set")
-        args.create_prs = False
-
     results = []
     for package in packages:
         try:
-            results.append(check_package(package, create_prs=args.create_prs))
+            results.append(check_package(package, since=args.since, declare=args.declare))
         except KeyboardInterrupt:
             print("\n[!] Interrupted by user")
             sys.exit(1)
@@ -694,20 +685,11 @@ def main():
     if args.summary or len(packages) > 5:
         print_summary(results)
 
+    if args.report:
+        write_report(results, args.report)
+
     if any(r["status"] == "error" for r in results):
         sys.exit(1)
-
-    if args.create_prs:
-        pr_failures = [
-            r for r in results
-            if r["status"] in ("need_upgrade", "can_deprecate") and r.get("pr_url") is None
-        ]
-        if pr_failures:
-            print(f"\n[?] Could not create (or confirm an existing) PR for "
-                  f"{len(pr_failures)} package(s): "
-                  + ", ".join(r["package"] for r in pr_failures))
-            print("    Please review open PRs to check whether one already exists "
-                  "for these packages.")
 
 
 if __name__ == "__main__":
