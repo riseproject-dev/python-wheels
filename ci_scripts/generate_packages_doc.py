@@ -85,6 +85,7 @@ def generate_simple_page(yaml_file, output_html):
     ]
     for version in versions:
         tag = version["tag"]
+        yanked = version.get("yanked")
         for file_data in version["files"]:
             filename = file_data["filename"]
             href = (
@@ -99,10 +100,8 @@ def generate_simple_page(yaml_file, output_html):
                     'data-requires-python="'
                     f'{html.escape(str(requires_python), quote=True)}"'
                 )
-            if "yanked" in file_data:
-                rendered_attrs.append(
-                    f'data-yanked="{html.escape(str(file_data["yanked"] or ""), quote=True)}"'
-                )
+            if yanked:
+                rendered_attrs.append('data-yanked=""')
             lines.append(
                 f"    <a {' '.join(rendered_attrs)}>{html.escape(filename)}</a>"
             )
