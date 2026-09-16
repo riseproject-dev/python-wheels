@@ -9,35 +9,49 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'ndindex version/tag to build (e.g. 1.10.1)'
-        required: true
-        default: '1.10.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ndindex.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-ndindex.yml'
+      - 'docs/packages/ndindex.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ndindex.yml'
+      - 'docs/packages/ndindex.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.10.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 env:
-  NDINDEX_VERSION: ${{ inputs.version || '1.10.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: ndindex
+      version: ${{ inputs.version }}
 
   build_sdist:
     needs: [setup]
-    name: Build ndindex ${{ inputs.version || '1.10.1' }} sdist
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build ndindex ${{ matrix.version }} sdist
     runs-on: ubuntu-latest
-    outputs:
-      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
-      package_version: ${{ steps.sdist.outputs.package_version }}
+    env:
+      NDINDEX_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout ndindex ${{ env.NDINDEX_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -61,10 +75,6 @@ jobs:
           uv pip install build twine
           python -m build --sdist .
           twine check --strict dist/*
-          sdists=(dist/*.tar.gz)
-          sdist_name="$(basename "${sdists[0]}")"
-          echo "sdist_name=$sdist_name" >> "$GITHUB_OUTPUT"
-          echo "package_version=$(echo "$sdist_name" | sed -En 's/ndindex-(.+)\.tar\.gz/\1/p')" >> "$GITHUB_OUTPUT"
 
       - name: Upload sdist artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -75,15 +85,20 @@ jobs:
 
   build_wheels:
     needs: [setup, build_sdist]
-    name: Build ndindex ${{ inputs.version || '1.10.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build ndindex ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Upstream also builds musllinux; dropped here because we publish no
         # musllinux_riscv64 numpy or hypothesis wheel to test against.
         python: ["cp312", "cp313", "cp314", "cp314t"]
+    env:
+      NDINDEX_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Download sdist
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
@@ -94,7 +109,7 @@ jobs:
       # Extracted at the workspace root so cibuildwheel's cwd is the sdist tree
       # and CIBW_TEST_SOURCES can stage upstream's conftest.py.
       - name: Extract sdist
-        run: tar zxf dist/${{ needs.build_sdist.outputs.sdist_name }} --strip-components=1
+        run: tar zxf dist/*.tar.gz --strip-components=1
 
       - name: Build wheels
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
@@ -126,16 +141,21 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: ndindex-${{ needs.build_sdist.outputs.package_version }}-${{ matrix.python }}-manylinux_riscv64
+          name: ndindex-${{ matrix.version }}-${{ matrix.python }}-manylinux_riscv64
           path: ./wheelhouse/*.whl
           if-no-files-found: error
 
   publish:
-    name: Publish ndindex ${{ inputs.version || '1.10.1' }}
+    name: Publish ndindex ${{ matrix.version }}
     needs: [setup, build_sdist, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: ndindex-${{ needs.build_sdist.outputs.package_version }}-*-manylinux_riscv64
+      artifact-pattern: ndindex-${{ matrix.version }}-*-manylinux_riscv64

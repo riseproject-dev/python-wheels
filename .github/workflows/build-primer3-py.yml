@@ -9,47 +9,60 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'primer3-py version to build (git tag, e.g. v2.3.0)'
-        required: true
-        default: 'v2.3.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/primer3-py.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-primer3-py.yml'
+      - 'docs/packages/primer3-py.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-primer3-py.yml'
+      - 'docs/packages/primer3-py.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || 'v2.3.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to v2.3.0 there.
-  PRIMER3_PY_VERSION: ${{ inputs.version || 'v2.3.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: primer3-py
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build primer3-py ${{ inputs.version || 'v2.3.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build primer3-py ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Per-interpreter (not abi3): setup.py's Cython extensions link the
         # version-specific ABI, matching upstream's per-Python-version wheels.
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      PRIMER3_PY_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout primer3-py ${{ env.PRIMER3_PY_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: libnano/primer3-py
-          ref: ${{ env.PRIMER3_PY_VERSION }}
+          ref: v${{ env.PRIMER3_PY_VERSION }}
           persist-credentials: false
 
       - name: Build wheels
@@ -79,11 +92,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish primer3-py ${{ inputs.version || 'v2.3.0' }}
+    name: Publish primer3-py ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: primer3-py-${{ inputs.version || 'v2.3.0' }}-*-manylinux_riscv64
+      artifact-pattern: primer3-py-${{ matrix.version }}-*-manylinux_riscv64

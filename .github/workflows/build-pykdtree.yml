@@ -8,38 +8,53 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pykdtree version to build (git tag without the leading v, e.g. 1.4.3)'
-        required: true
-        default: '1.4.3'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pykdtree.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pykdtree.yml'
+      - 'docs/packages/pykdtree.yaml'
+      - 'patches/pykdtree/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pykdtree.yml'
+      - 'docs/packages/pykdtree.yaml'
       - 'patches/pykdtree/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.4.3' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  PYKDTREE_VERSION: ${{ inputs.version || '1.4.3' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pykdtree
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build pykdtree ${{ inputs.version || '1.4.3' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pykdtree ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      PYKDTREE_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pykdtree v${{ env.PYKDTREE_VERSION }}
@@ -95,8 +110,16 @@ jobs:
 
   gpl_sources:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Collect GPL sources
     runs-on: ubuntu-24.04-riscv
+
+    env:
+      PYKDTREE_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout python-wheels
@@ -119,13 +142,18 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pykdtree ${{ inputs.version || '1.4.3' }}
+    name: Publish pykdtree ${{ matrix.version }}
     needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pykdtree-${{ inputs.version || '1.4.3' }}-*-manylinux_riscv64
-      gpl-sources-artifact: pykdtree-${{ inputs.version || '1.4.3' }}-gpl-sources
+      artifact-pattern: pykdtree-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: pykdtree-${{ matrix.version }}-gpl-sources
       gpl-sources-description: gcc

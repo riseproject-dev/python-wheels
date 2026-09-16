@@ -9,42 +9,55 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pyspeex-noise version to build (git tag without leading v, e.g. 2.0.1)'
-        required: true
-        default: '2.0.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyspeex-noise.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pyspeex-noise.yml'
+      - 'docs/packages/pyspeex-noise.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyspeex-noise.yml'
+      - 'docs/packages/pyspeex-noise.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.0.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 2.0.1 there.
-  PYSPEEX_NOISE_VERSION: ${{ inputs.version || '2.0.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyspeex-noise
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build pyspeex-noise ${{ inputs.version || '2.0.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyspeex-noise ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # setup.cfg hardcodes py_limited_api=cp39 (single abi3 wheel for all
         # 3.9+), and upstream's own wheels.yml only builds cp39-* (gotcha 96:
         # build on the floor interpreter its abi3 tag claims). No free-threaded
         # variant is published upstream either.
         python: ["cp39"]
+
+    env:
+      PYSPEEX_NOISE_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pyspeex-noise v${{ env.PYSPEEX_NOISE_VERSION }}
@@ -71,11 +84,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pyspeex-noise ${{ inputs.version || '2.0.1' }}
+    name: Publish pyspeex-noise ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pyspeex-noise-${{ inputs.version || '2.0.1' }}-*-manylinux_riscv64
+      artifact-pattern: pyspeex-noise-${{ matrix.version }}-*-manylinux_riscv64

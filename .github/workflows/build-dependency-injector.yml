@@ -8,22 +8,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'dependency-injector version to build (git tag, e.g. 4.49.1)'
-        required: true
-        default: '4.49.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/dependency-injector.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-dependency-injector.yml'
+      - 'docs/packages/dependency-injector.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-dependency-injector.yml'
+      - 'docs/packages/dependency-injector.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '4.49.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  DEPENDENCY_INJECTOR_VERSION: ${{ inputs.version || '4.49.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   # Mirrors upstream's tox testenv deps (tox.ini [testenv]).
   TEST_REQUIRES: >-
@@ -34,12 +40,23 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: dependency-injector
+      version: ${{ inputs.version }}
 
   build_abi3:
     needs: [setup]
-    name: Build dependency-injector ${{ inputs.version || '4.49.1' }} cp310-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build dependency-injector ${{ matrix.version }} cp310-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
+
+    env:
+      DEPENDENCY_INJECTOR_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout dependency-injector ${{ env.DEPENDENCY_INJECTOR_VERSION }}
@@ -106,9 +123,17 @@ jobs:
   # cp3??t-* in CIBW_SKIP, so this has no upstream wheel to mirror.
   build_freethreaded:
     needs: [setup]
-    name: Build dependency-injector ${{ inputs.version || '4.49.1' }} cp314t-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build dependency-injector ${{ matrix.version }} cp314t-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
+
+    env:
+      DEPENDENCY_INJECTOR_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout dependency-injector ${{ env.DEPENDENCY_INJECTOR_VERSION }}
@@ -141,11 +166,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish dependency-injector ${{ inputs.version || '4.49.1' }}
+    name: Publish dependency-injector ${{ matrix.version }}
     needs: [setup, build_abi3, build_freethreaded]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: dependency-injector-${{ inputs.version || '4.49.1' }}-*-manylinux_riscv64
+      artifact-pattern: dependency-injector-${{ matrix.version }}-*-manylinux_riscv64

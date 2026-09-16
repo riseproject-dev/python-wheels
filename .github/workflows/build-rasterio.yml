@@ -9,23 +9,30 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'rasterio version to build (git tag, e.g. 1.5.1)'
-        required: true
-        default: '1.5.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/rasterio.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-rasterio.yml'
+      - 'docs/packages/rasterio.yaml'
+      - 'patches/rasterio/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-rasterio.yml'
+      - 'docs/packages/rasterio.yaml'
       - 'patches/rasterio/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.5.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  RASTERIO_VERSION: ${{ inputs.version || '1.5.1' }}
   GDAL_VERSION: '3.12.4'
   GEOS_VERSION: '3.13.1'
   PROJ_VERSION: '9.6.2'
@@ -36,12 +43,23 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: rasterio
+      version: ${{ inputs.version }}
 
   build_image:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build the GDAL build image
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 600
+
+    env:
+      RASTERIO_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout python-wheels
@@ -252,14 +270,19 @@ jobs:
           BUILDKIT_PROGRESS: plain
 
   build_wheels:
-    name: Build rasterio ${{ inputs.version || '1.5.1' }} ${{ matrix.python }}-manylinux_riscv64
+    name: Build rasterio ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     needs: [setup, build_image]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 600
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t", "cp315", "cp315t"]
+
+    env:
+      RASTERIO_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout rasterio ${{ env.RASTERIO_VERSION }}
@@ -539,11 +562,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish rasterio ${{ inputs.version || '1.5.1' }}
+    name: Publish rasterio ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: rasterio-${{ inputs.version || '1.5.1' }}-*-manylinux_riscv64
+      artifact-pattern: rasterio-${{ matrix.version }}-*-manylinux_riscv64

@@ -9,32 +9,41 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'obstore version to build (git tag without the leading py-v, e.g. 0.11.1)'
-        required: true
-        default: '0.11.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/obstore.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-obstore.yml'
+      - 'docs/packages/obstore.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-obstore.yml'
+      - 'docs/packages/obstore.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.11.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.11.1 there.
-  OBSTORE_VERSION: ${{ inputs.version || '0.11.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: obstore
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build obstore ${{ inputs.version || '0.11.1' }} ${{ matrix.tag }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build obstore ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     # 360 wasn't enough: cp311-abi3 stalled compiling the full arrow +
     # object_store + reqwest/rustls stack under runner contention and hit
@@ -43,6 +52,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           # Upstream builds one abi3 wheel with `-i 3.11 --features abi3-py311`
           # plus per-interpreter wheels for 3.10, free-threaded and pypy.
@@ -59,6 +69,9 @@ jobs:
           - tag: cp314t
             build: cp314t-manylinux_riscv64
             features: --features pyo3/extension-module
+
+    env:
+      OBSTORE_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout obstore py-v${{ env.OBSTORE_VERSION }}
@@ -119,11 +132,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish obstore ${{ inputs.version || '0.11.1' }}
+    name: Publish obstore ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: obstore-${{ inputs.version || '0.11.1' }}-*-manylinux_riscv64
+      artifact-pattern: obstore-${{ matrix.version }}-*-manylinux_riscv64

@@ -15,40 +15,53 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'black version to build (git tag, e.g. 26.5.1)'
-        required: true
-        default: '26.5.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/black.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-black.yml'
+      - 'docs/packages/black.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-black.yml'
+      - 'docs/packages/black.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '26.5.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default there.
-  BLACK_VERSION: ${{ inputs.version || '26.5.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: black
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build black ${{ inputs.version || '26.5.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build black ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # mypyc emits per-interpreter (non-abi3) wheels; upstream skips free-threaded
         # ("mypyc doesn't have great support for free threaded builds"), so no cp314t.
         python: ["cp312", "cp313", "cp314"]
+
+    env:
+      BLACK_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout black ${{ env.BLACK_VERSION }}
@@ -72,11 +85,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish black ${{ inputs.version || '26.5.1' }}
+    name: Publish black ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: black-${{ inputs.version || '26.5.1' }}-*-manylinux_riscv64
+      artifact-pattern: black-${{ matrix.version }}-*-manylinux_riscv64

@@ -8,34 +8,50 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'asammdf version to build (git tag, e.g. 8.8.25)'
-        required: true
-        default: '8.8.25'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/asammdf.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-asammdf.yml'
+      - 'docs/packages/asammdf.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-asammdf.yml'
+      - 'docs/packages/asammdf.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '8.8.25' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 8.8.25 there.
-  ASAMMDF_VERSION: ${{ inputs.version || '8.8.25' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: asammdf
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build asammdf ${{ inputs.version || '8.8.25' }} cp310-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build asammdf ${{ matrix.version }} cp310-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
+    env:
+      ASAMMDF_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout asammdf ${{ env.ASAMMDF_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -69,11 +85,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish asammdf ${{ inputs.version || '8.8.25' }}
+    name: Publish asammdf ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: asammdf-${{ inputs.version || '8.8.25' }}-*-manylinux_riscv64
+      artifact-pattern: asammdf-${{ matrix.version }}-*-manylinux_riscv64

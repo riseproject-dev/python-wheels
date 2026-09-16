@@ -10,37 +10,52 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'simplejpeg version to build (git tag, e.g. 1.9.0)'
-        required: true
-        default: '1.9.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/simplejpeg.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-simplejpeg.yml'
+      - 'docs/packages/simplejpeg.yaml'
+      - 'patches/simplejpeg/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-simplejpeg.yml'
+      - 'docs/packages/simplejpeg.yaml'
       - 'patches/simplejpeg/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.9.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  SIMPLEJPEG_VERSION: ${{ inputs.version || '1.9.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: simplejpeg
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build simplejpeg ${{ inputs.version || '1.9.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build simplejpeg ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314"]
+
+    env:
+      SIMPLEJPEG_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout simplejpeg v${{ env.SIMPLEJPEG_VERSION }}
@@ -93,11 +108,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish simplejpeg ${{ inputs.version || '1.9.0' }}
+    name: Publish simplejpeg ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: simplejpeg-${{ inputs.version || '1.9.0' }}-*-manylinux_riscv64
+      artifact-pattern: simplejpeg-${{ matrix.version }}-*-manylinux_riscv64

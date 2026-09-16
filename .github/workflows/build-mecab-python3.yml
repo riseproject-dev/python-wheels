@@ -8,42 +8,56 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'mecab-python3 version to build (git tag without leading v, e.g. 1.0.12)'
-        required: true
-        default: '1.0.12'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/mecab-python3.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-mecab-python3.yml'
+      - 'docs/packages/mecab-python3.yaml'
+      - 'patches/mecab-python3/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mecab-python3.yml'
+      - 'docs/packages/mecab-python3.yaml'
       - 'patches/mecab-python3/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.0.12' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.0.12 there.
-  MECAB_PYTHON3_VERSION: ${{ inputs.version || '1.0.12' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: mecab-python3
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build mecab-python3 ${{ inputs.version || '1.0.12' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build mecab-python3 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Upstream builds no cp314t Linux wheel yet (only macOS); the extension
         # declares no free-threading support either way, so cp314t just re-enables
         # the GIL on import (CLAUDE.md gotcha 127) rather than failing.
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      MECAB_PYTHON3_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout mecab-python3 ${{ env.MECAB_PYTHON3_VERSION }}
@@ -98,11 +112,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish mecab-python3 ${{ inputs.version || '1.0.12' }}
+    name: Publish mecab-python3 ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: mecab-python3-${{ inputs.version || '1.0.12' }}-*-manylinux_riscv64
+      artifact-pattern: mecab-python3-${{ matrix.version }}-*-manylinux_riscv64

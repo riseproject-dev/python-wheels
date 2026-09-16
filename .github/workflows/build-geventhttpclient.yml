@@ -10,42 +10,56 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'geventhttpclient version to build (git tag, e.g. 2.3.9)'
-        required: true
-        default: '2.3.9'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/geventhttpclient.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-geventhttpclient.yml'
+      - 'docs/packages/geventhttpclient.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-geventhttpclient.yml'
+      - 'docs/packages/geventhttpclient.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.3.9' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  GEVENTHTTPCLIENT_VERSION: ${{ inputs.version || '2.3.9' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: geventhttpclient
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build geventhttpclient ${{ inputs.version || '2.3.9' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build geventhttpclient ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
         include:
           # gevent, a hard runtime dependency, publishes no free-threaded wheel on
           # any platform, so the cp314t wheel cannot be installed to be tested.
           - python: "cp314t"
             test_skip: "*"
+
+    env:
+      GEVENTHTTPCLIENT_VERSION: ${{ matrix.version }}
 
     steps:
       # The llhttp parser is a submodule; setup.py compiles its sources directly.
@@ -105,11 +119,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish geventhttpclient ${{ inputs.version || '2.3.9' }}
+    name: Publish geventhttpclient ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: geventhttpclient-${{ inputs.version || '2.3.9' }}-*-manylinux_riscv64
+      artifact-pattern: geventhttpclient-${{ matrix.version }}-*-manylinux_riscv64

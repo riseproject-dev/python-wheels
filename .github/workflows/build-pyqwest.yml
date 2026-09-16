@@ -9,37 +9,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pyqwest version to build (git tag without the leading v, e.g. 0.10.0)'
-        required: true
-        default: '0.10.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyqwest.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pyqwest.yml'
+      - 'docs/packages/pyqwest.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyqwest.yml'
+      - 'docs/packages/pyqwest.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.10.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.10.0 there.
-  PYQWEST_VERSION: ${{ inputs.version || '0.10.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyqwest
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build pyqwest ${{ inputs.version || '0.10.0' }} ${{ matrix.tag }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyqwest ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           # pyo3/abi3-py310 is an opt-in feature upstream's own release job adds
           # only on top of a `pyo3/extension-module`-only build (its second
@@ -57,6 +67,9 @@ jobs:
           - tag: cp314t
             build: cp314t-manylinux_riscv64
             features: --features pyo3/extension-module
+
+    env:
+      PYQWEST_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pyqwest v${{ env.PYQWEST_VERSION }}
@@ -128,11 +141,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pyqwest ${{ inputs.version || '0.10.0' }}
+    name: Publish pyqwest ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pyqwest-${{ inputs.version || '0.10.0' }}-*-manylinux_riscv64
+      artifact-pattern: pyqwest-${{ matrix.version }}-*-manylinux_riscv64

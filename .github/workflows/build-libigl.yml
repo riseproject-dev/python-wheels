@@ -9,42 +9,57 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'libigl version to build (git tag, e.g. 2.6.3)'
-        required: true
-        default: '2.6.3'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/libigl.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-libigl.yml'
+      - 'docs/packages/libigl.yaml'
+      - 'patches/libigl/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-libigl.yml'
+      - 'docs/packages/libigl.yaml'
       - 'patches/libigl/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.6.3' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  LIBIGL_VERSION: ${{ inputs.version || '2.6.3' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: libigl
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build libigl ${{ inputs.version || '2.6.3' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build libigl ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # pyproject sets wheel.py-api = "cp312" (nanobind STABLE_ABI), so the
         # single cp312 build is loadable on 3.12/3.13/3.14; only the
         # free-threaded cp314t build needs its own wheel (build-apache-tvm-ffi.yml
         # is the same shape).
         python: [cp312, cp314t]
+
+    env:
+      LIBIGL_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout libigl-python-bindings ${{ env.LIBIGL_VERSION }}
@@ -135,11 +150,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish libigl ${{ inputs.version || '2.6.3' }}
+    name: Publish libigl ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: libigl-${{ inputs.version || '2.6.3' }}-*-manylinux_riscv64
+      artifact-pattern: libigl-${{ matrix.version }}-*-manylinux_riscv64

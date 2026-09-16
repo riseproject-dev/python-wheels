@@ -9,22 +9,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'scikit-learn version to build (git tag, e.g. 1.9.0)'
-        required: true
-        default: '1.9.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/scikit-learn.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-scikit-learn.yml'
+      - 'docs/packages/scikit-learn.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-scikit-learn.yml'
+      - 'docs/packages/scikit-learn.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.9.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  SKLEARN_VERSION: ${{ inputs.version || '1.9.0' }}
   # Pinned explicitly so the gpl_sources job pulls the same image the wheels were built in.
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   # On 3.14 joblib's loky workers die unpickling their call item here with
@@ -38,15 +44,20 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: scikit-learn
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build scikit-learn ${{ inputs.version || '1.9.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build scikit-learn ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 720
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
         # pandas publishes no free-threaded wheel on any platform, so the tests that
         # use it skip on cp314t instead of the whole test phase failing to install.
@@ -60,6 +71,9 @@ jobs:
             loky_broken: true
           - python: "cp314t"
             loky_broken: true
+
+    env:
+      SKLEARN_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout scikit-learn ${{ env.SKLEARN_VERSION }}
@@ -96,10 +110,18 @@ jobs:
 
   gpl_sources:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     # auditwheel vendors the image's libgomp into the wheel, as upstream's own
     # build_tools/wheels/LICENSE_linux.txt documents.
-    name: Collect GPL sources (gcc) for scikit-learn ${{ inputs.version || '1.9.0' }}
+    name: Collect GPL sources (gcc) for scikit-learn ${{ matrix.version }}
     runs-on: ubuntu-24.04-riscv
+
+    env:
+      SKLEARN_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Collect gcc source RPM from manylinux_riscv64
@@ -116,13 +138,18 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish scikit-learn ${{ inputs.version || '1.9.0' }}
+    name: Publish scikit-learn ${{ matrix.version }}
     needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: scikit-learn-${{ inputs.version || '1.9.0' }}-*-manylinux_riscv64
-      gpl-sources-artifact: scikit-learn-${{ inputs.version || '1.9.0' }}-gpl-sources
+      artifact-pattern: scikit-learn-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: scikit-learn-${{ matrix.version }}-gpl-sources
       gpl-sources-description: gcc

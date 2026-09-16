@@ -14,23 +14,30 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'tcmlib version to build'
-        required: true
-        default: '1.5.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/tcmlib.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-tcmlib.yml'
+      - 'docs/packages/tcmlib.yaml'
+      - 'patches/tcmlib/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tcmlib.yml'
+      - 'docs/packages/tcmlib.yaml'
       - 'patches/tcmlib/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.5.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  TCM_VERSION: ${{ inputs.version || '1.5.0' }}
   # oneTBB commit that introduced TCM at version 1.5.0 (git-subtree merge of TCM's own
   # history, one day before the matching PyPI upload). Update alongside TCM_VERSION.
   TCM_REF: 7bc8577403df32b69b25157caad45677a8552861
@@ -40,12 +47,23 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: tcmlib
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build tcmlib ${{ inputs.version || '1.5.0' }} py2.py3-none-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build tcmlib ${{ matrix.version }} py2.py3-none-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
+
+    env:
+      TCM_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout oneTBB @ TCM ${{ env.TCM_VERSION }} (thread_composability_manager)
@@ -136,11 +154,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish tcmlib ${{ inputs.version || '1.5.0' }}
+    name: Publish tcmlib ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: tcmlib-${{ inputs.version || '1.5.0' }}-*-manylinux_riscv64
+      artifact-pattern: tcmlib-${{ matrix.version }}-*-manylinux_riscv64

@@ -11,24 +11,30 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'array_record version to build'
-        required: true
-        default: '0.8.3'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/array-record.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-array-record.yml'
+      - 'docs/packages/array-record.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-array-record.yml'
+      - 'docs/packages/array-record.yaml'
 
-run-name: build-array-record - ${{ inputs.version || '0.8.3' }}
+run-name: build-array-record ${{ inputs.version && format('- {0}', inputs.version) || '' }}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.8.3' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 env:
-  ARRAY_RECORD_VERSION: ${{ inputs.version || '0.8.3' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   # Upstream pins 7.2.1, fetched from the bazel releases, which publish no
   # riscv64 binary; 7.5.0 is the version this repo bootstraps from source.
@@ -40,12 +46,23 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: array-record
+      version: ${{ inputs.version }}
 
   bazel:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Bootstrap bazel (riscv64)
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 720
+
+    env:
+      ARRAY_RECORD_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Restore bazel binary
@@ -108,22 +125,27 @@ jobs:
           if-no-files-found: error
 
   build_wheels:
-    name: Build array-record ${{ inputs.version || '0.8.3' }} ${{ matrix.tag }}-manylinux_riscv64
+    name: Build array-record ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 720
     needs: [setup, bazel]
+    if: needs.setup.outputs.versions != '[]'
 
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Upstream supports 3.11-3.14 and publishes no free-threaded wheel.
         include:
           - {tag: cp312, python: '3.12'}
           - {tag: cp313, python: '3.13'}
           - {tag: cp314, python: '3.14'}
 
+    env:
+      ARRAY_RECORD_VERSION: ${{ matrix.version }}
+
     steps:
-      - name: Checkout array_record ${{ inputs.version || '0.8.3' }}
+      - name: Checkout array_record ${{ matrix.version }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: google/array_record
@@ -311,11 +333,16 @@ jobs:
           SCRIPT
 
   publish:
-    name: Publish array-record ${{ inputs.version || '0.8.3' }}
+    name: Publish array-record ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: array-record-${{ inputs.version || '0.8.3' }}-*-manylinux_riscv64
+      artifact-pattern: array-record-${{ matrix.version }}-*-manylinux_riscv64

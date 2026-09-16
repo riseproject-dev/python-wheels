@@ -11,25 +11,32 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'labmaze version to build'
-        required: true
-        default: '1.0.6'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/labmaze.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-labmaze.yml'
+      - 'docs/packages/labmaze.yaml'
+      - 'patches/labmaze/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-labmaze.yml'
+      - 'docs/packages/labmaze.yaml'
       - 'patches/labmaze/**'
 
-run-name: build-labmaze - ${{ inputs.version || '1.0.6' }}
+run-name: build-labmaze ${{ inputs.version && format('- {0}', inputs.version) || '' }}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.0.6' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 env:
-  LABMAZE_VERSION: ${{ inputs.version || '1.0.6' }}
   # Upstream never tagged the 1.0.6 release (google-deepmind/labmaze#5); this is
   # master's tip, proven byte-identical to the PyPI 1.0.6 sdist. Move together.
   LABMAZE_REF: 6d7e8f058428025cd4253f1ef6a1ed6618d9b0ea
@@ -44,12 +51,23 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: labmaze
+      version: ${{ inputs.version }}
 
   bazel:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Bootstrap bazel (riscv64)
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 720
+
+    env:
+      LABMAZE_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Restore bazel binary
@@ -113,20 +131,25 @@ jobs:
           if-no-files-found: error
 
   build_wheels:
-    name: Build labmaze ${{ inputs.version || '1.0.6' }} ${{ matrix.python }}-manylinux_riscv64
+    name: Build labmaze ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 720
     needs: [setup, bazel]
+    if: needs.setup.outputs.versions != '[]'
 
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Upstream has published no wheel past cp312 (last release: Nov 2022);
         # this port follows the registry's current default matrix instead.
         python: ["cp312", "cp313", "cp314", "cp314t"]
 
+    env:
+      LABMAZE_VERSION: ${{ matrix.version }}
+
     steps:
-      - name: Checkout labmaze ${{ inputs.version || '1.0.6' }}
+      - name: Checkout labmaze ${{ matrix.version }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: google-deepmind/labmaze
@@ -264,11 +287,16 @@ jobs:
           SCRIPT
 
   publish:
-    name: Publish labmaze ${{ inputs.version || '1.0.6' }}
+    name: Publish labmaze ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: labmaze-${{ inputs.version || '1.0.6' }}-*-manylinux_riscv64
+      artifact-pattern: labmaze-${{ matrix.version }}-*-manylinux_riscv64

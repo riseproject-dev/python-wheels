@@ -9,37 +9,51 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'sqlean-py version/tag to build, e.g. 3.50.4.5'
-        required: true
-        default: '3.50.4.5'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/sqlean-py.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-sqlean-py.yml'
+      - 'docs/packages/sqlean-py.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sqlean-py.yml'
+      - 'docs/packages/sqlean-py.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '3.50.4.5' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  SQLEAN_PY_VERSION: ${{ inputs.version || '3.50.4.5' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: sqlean-py
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build sqlean-py ${{ inputs.version || '3.50.4.5' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build sqlean-py ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      SQLEAN_PY_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout sqlean-py ${{ env.SQLEAN_PY_VERSION }}
@@ -81,11 +95,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish sqlean-py ${{ inputs.version || '3.50.4.5' }}
+    name: Publish sqlean-py ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: sqlean-py-${{ inputs.version || '3.50.4.5' }}-*-manylinux_riscv64
+      artifact-pattern: sqlean-py-${{ matrix.version }}-*-manylinux_riscv64

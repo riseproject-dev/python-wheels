@@ -8,33 +8,50 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'clang-format version to build (git tag without the leading v, e.g. 23.1.0)'
-        required: true
-        default: '23.1.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/clang-format.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-clang-format.yml'
+      - 'docs/packages/clang-format.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-clang-format.yml'
+      - 'docs/packages/clang-format.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '23.1.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  CLANG_FORMAT_VERSION: ${{ inputs.version || '23.1.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: clang-format
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build clang-format ${{ inputs.version || '23.1.0' }} py2.py3-none-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build clang-format ${{ matrix.version }} py2.py3-none-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 1440  # clang-format is compiled from the full LLVM release source
+
+    env:
+      CLANG_FORMAT_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout clang-format-wheel v${{ env.CLANG_FORMAT_VERSION }}
@@ -65,11 +82,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish clang-format ${{ inputs.version || '23.1.0' }}
+    name: Publish clang-format ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: clang-format-${{ inputs.version || '23.1.0' }}-*-manylinux_riscv64
+      artifact-pattern: clang-format-${{ matrix.version }}-*-manylinux_riscv64

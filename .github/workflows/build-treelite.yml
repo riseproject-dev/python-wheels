@@ -10,22 +10,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'treelite version to build (git tag, e.g. 4.7.2)'
-        required: true
-        default: '4.7.2'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/treelite.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-treelite.yml'
+      - 'docs/packages/treelite.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-treelite.yml'
+      - 'docs/packages/treelite.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '4.7.2' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  TREELITE_VERSION: ${{ inputs.version || '4.7.2' }}
   # Pinned explicitly so the gpl_sources job pulls the same image the wheel's
   # vendored libgomp came from.
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
@@ -33,12 +39,23 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: treelite
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build treelite ${{ inputs.version || '4.7.2' }} py3-none-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build treelite ${{ matrix.version }} py3-none-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
+
+    env:
+      TREELITE_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout treelite ${{ env.TREELITE_VERSION }}
@@ -92,8 +109,16 @@ jobs:
 
   gpl_sources:
     needs: [setup]
-    name: Collect GPL sources (gcc) for treelite ${{ inputs.version || '4.7.2' }}
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources (gcc) for treelite ${{ matrix.version }}
     runs-on: ubuntu-24.04-riscv
+    env:
+      TREELITE_VERSION: ${{ matrix.version }}
+
     steps:
       # auditwheel vendors the image's libgomp.so.1 into the wheel.
       - name: Collect gcc source RPM from manylinux_riscv64
@@ -110,13 +135,18 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish treelite ${{ inputs.version || '4.7.2' }}
+    name: Publish treelite ${{ matrix.version }}
     needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: treelite-${{ inputs.version || '4.7.2' }}-*-manylinux_riscv64
-      gpl-sources-artifact: treelite-${{ inputs.version || '4.7.2' }}-gpl-sources
+      artifact-pattern: treelite-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: treelite-${{ matrix.version }}-gpl-sources
       gpl-sources-description: gcc

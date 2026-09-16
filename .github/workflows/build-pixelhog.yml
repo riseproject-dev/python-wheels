@@ -8,33 +8,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pixelhog version to build (git tag without leading v, e.g. 1.2.0)'
-        required: true
-        default: '1.2.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pixelhog.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pixelhog.yml'
+      - 'docs/packages/pixelhog.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pixelhog.yml'
+      - 'docs/packages/pixelhog.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.2.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  # `inputs.version` is empty on pull_request events; default to 1.2.0 there.
-  PIXELHOG_VERSION: ${{ inputs.version || '1.2.0' }}
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pixelhog
+      version: ${{ inputs.version }}
 
   build_wheel:
     needs: [setup]
-    name: Build pixelhog ${{ inputs.version || '1.2.0' }} cp312-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pixelhog ${{ matrix.version }} cp312-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
+
+    env:
+      PIXELHOG_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pixelhog v${{ env.PIXELHOG_VERSION }}
@@ -80,11 +94,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pixelhog ${{ inputs.version || '1.2.0' }}
+    name: Publish pixelhog ${{ matrix.version }}
     needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pixelhog-${{ inputs.version || '1.2.0' }}-*-manylinux_riscv64
+      artifact-pattern: pixelhog-${{ matrix.version }}-*-manylinux_riscv64

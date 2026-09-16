@@ -9,34 +9,50 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'c2pa-python version to build (git tag without leading v, e.g. 0.37.10)'
-        required: true
-        default: '0.37.10'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/c2pa-python.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-c2pa-python.yml'
+      - 'docs/packages/c2pa-python.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-c2pa-python.yml'
+      - 'docs/packages/c2pa-python.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.37.10' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.37.10 there.
-  C2PA_PYTHON_VERSION: ${{ inputs.version || '0.37.10' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: c2pa-python
+      version: ${{ inputs.version }}
 
   build_wheel:
     needs: [setup]
-    name: Build c2pa-python ${{ inputs.version || '0.37.10' }} py3-none-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build c2pa-python ${{ matrix.version }} py3-none-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
+    env:
+      C2PA_PYTHON_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout c2pa-python v${{ env.C2PA_PYTHON_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -116,11 +132,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish c2pa-python ${{ inputs.version || '0.37.10' }}
+    name: Publish c2pa-python ${{ matrix.version }}
     needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: c2pa-python-${{ inputs.version || '0.37.10' }}-*-manylinux_riscv64
+      artifact-pattern: c2pa-python-${{ matrix.version }}-*-manylinux_riscv64

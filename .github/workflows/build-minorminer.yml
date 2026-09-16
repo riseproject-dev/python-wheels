@@ -10,41 +10,54 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'minorminer version to build (PyPI version, e.g. 0.2.22)'
-        required: true
-        default: '0.2.22'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/minorminer.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-minorminer.yml'
+      - 'docs/packages/minorminer.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-minorminer.yml'
+      - 'docs/packages/minorminer.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.2.22' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.2.22 there.
-  MINORMINER_VERSION: ${{ inputs.version || '0.2.22' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: minorminer
+      version: ${{ inputs.version }}
 
   build_sdist:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     # The sdist packages the source tree plus the vendored glasgow-subgraph-solver and
     # portable-snippets headers (git submodules). It's architecture-independent, so
     # build it once on x86 instead of burning a scarce riscv runner (CLAUDE.md gotcha 4).
-    name: Build minorminer ${{ inputs.version || '0.2.22' }} sdist
+    name: Build minorminer ${{ matrix.version }} sdist
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    outputs:
-      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
-      package_version: ${{ steps.sdist.outputs.package_version }}
+    env:
+      MINORMINER_VERSION: ${{ matrix.version }}
+
     steps:
       # .gitmodules pins submodules via git@github.com: SSH URLs; no deploy key is
       # configured on our runners, so rewrite to HTTPS before actions/checkout resolves them.
@@ -84,9 +97,6 @@ jobs:
           uv pip install build twine
           python -m build --sdist
           twine check --strict dist/*.tar.gz
-          sdists=(dist/*.tar.gz)
-          echo "sdist_name=$(basename "${sdists[0]}")" >> "$GITHUB_OUTPUT"
-          echo "package_version=$(basename "${sdists[0]}" | sed -En 's/minorminer-(.+)\.tar\.gz/\1/p')" >> "$GITHUB_OUTPUT"
 
       - name: Upload sdist artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -97,14 +107,19 @@ jobs:
 
   build_wheels:
     needs: [setup, build_sdist]
-    name: Build minorminer ${{ inputs.version || '0.2.22' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build minorminer ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      MINORMINER_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Download sdist
@@ -113,10 +128,13 @@ jobs:
           name: minorminer-${{ env.MINORMINER_VERSION }}-sdist
           path: dist/
 
+      - id: sdist_path
+        run: echo "path=$(echo dist/*.tar.gz)" >> "$GITHUB_OUTPUT"
+
       - name: Build wheels
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
-          package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}
+          package-dir: ${{ steps.sdist_path.outputs.path }}
         env:
           CIBW_BUILD: ${{ matrix.python }}-*
           CIBW_ARCHS: riscv64
@@ -141,11 +159,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish minorminer ${{ inputs.version || '0.2.22' }}
+    name: Publish minorminer ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: minorminer-${{ inputs.version || '0.2.22' }}-*-manylinux_riscv64
+      artifact-pattern: minorminer-${{ matrix.version }}-*-manylinux_riscv64

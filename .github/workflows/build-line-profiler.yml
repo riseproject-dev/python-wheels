@@ -9,41 +9,55 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'line-profiler version to build (git tag without leading v, e.g. 5.0.2)'
-        required: true
-        default: '5.0.2'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/line-profiler.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-line-profiler.yml'
+      - 'docs/packages/line-profiler.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-line-profiler.yml'
+      - 'docs/packages/line-profiler.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '5.0.2' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  LINE_PROFILER_VERSION: ${{ inputs.version || '5.0.2' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: line-profiler
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build line-profiler ${{ inputs.version || '5.0.2' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build line-profiler ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # cp314t is excluded: upstream's own `[tool.cibuildwheel] build` list
         # doesn't build it either.
         python: ["cp312", "cp313", "cp314"]
         libc: [manylinux, musllinux]
+
+    env:
+      LINE_PROFILER_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout line_profiler v${{ env.LINE_PROFILER_VERSION }}
@@ -73,11 +87,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish line-profiler ${{ inputs.version || '5.0.2' }}
+    name: Publish line-profiler ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: line-profiler-${{ inputs.version || '5.0.2' }}-*riscv64
+      artifact-pattern: line-profiler-${{ matrix.version }}-*riscv64

@@ -5,15 +5,17 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pillow version to test (git tag without leading v, e.g. 12.3.0)'
-        required: true
-        default: '12.3.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pillow.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/test-pillow.yml'
+      - 'docs/packages/pillow.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '12.3.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
@@ -22,21 +24,32 @@ permissions:
 env:
   FORCE_COLOR: 1
   PIP_DISABLE_PIP_VERSION_CHECK: 1
-  PILLOW_VERSION: ${{ inputs.version || '12.3.0' }}
 
 jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pillow
+      version: ${{ inputs.version }}
+
   test:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
     permissions:
       contents: read
-    name: "Test pillow ${{ inputs.version || '12.3.0' }} — Python ${{ matrix.python-version }} on ${{ matrix.os }}"
+    name: "Test pillow ${{ matrix.version }} — Python ${{ matrix.python-version }} on ${{ matrix.os }}"
     runs-on: ${{ matrix.os }}
 
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           - os: ubuntu-24.04-riscv
             python-version: '3.12'
+
+    env:
+      PILLOW_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pillow v${{ env.PILLOW_VERSION }}

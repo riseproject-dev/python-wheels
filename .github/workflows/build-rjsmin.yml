@@ -9,30 +9,44 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'rjsmin version/tag to build (e.g. 1.2.5)'
-        required: true
-        default: '1.2.5'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/rjsmin.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-rjsmin.yml'
+      - 'docs/packages/rjsmin.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-rjsmin.yml'
+      - 'docs/packages/rjsmin.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.2.5' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  RJSMIN_VERSION: ${{ inputs.version || '1.2.5' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: rjsmin
+      version: ${{ inputs.version }}
 
   build_sdist:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     # The sdist is architecture-independent, so build it once on x86 instead of
     # a scarce riscv runner. It also excludes debug.unix.cflags, a
     # coverage/-Werror dev-build flag file that MANIFEST.in doesn't ship in the
@@ -40,12 +54,13 @@ jobs:
     # version of this workflow did) picks that file up and fails cp314t with
     # "ISO C90 forbids mixed declarations and code" from CPython's own
     # free-threaded refcount.h.
-    name: Build rjsmin ${{ inputs.version || '1.2.5' }} sdist
+    name: Build rjsmin ${{ matrix.version }} sdist
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    outputs:
-      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
+    env:
+      RJSMIN_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout rjsmin ${{ env.RJSMIN_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -65,8 +80,6 @@ jobs:
         run: |
           uv pip install build
           python -m build --sdist
-          sdists=(dist/*.tar.gz)
-          echo "sdist_name=$(basename "${sdists[0]}")" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -76,13 +89,18 @@ jobs:
 
   build_wheels:
     needs: [setup, build_sdist]
-    name: Build rjsmin ${{ inputs.version || '1.2.5' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build rjsmin ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      RJSMIN_VERSION: ${{ matrix.version }}
 
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
@@ -90,9 +108,12 @@ jobs:
           name: rjsmin-${{ env.RJSMIN_VERSION }}-sdist
           path: dist/
 
+      - id: sdist_path
+        run: echo "path=$(echo dist/*.tar.gz)" >> "$GITHUB_OUTPUT"
+
       - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
-          package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}
+          package-dir: ${{ steps.sdist_path.outputs.path }}
         env:
           CIBW_ARCHS: riscv64
           CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
@@ -113,11 +134,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish rjsmin ${{ inputs.version || '1.2.5' }}
+    name: Publish rjsmin ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: rjsmin-${{ inputs.version || '1.2.5' }}-*-manylinux_riscv64
+      artifact-pattern: rjsmin-${{ matrix.version }}-*-manylinux_riscv64

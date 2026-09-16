@@ -9,42 +9,55 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pycrdt version to build (git tag, e.g. 0.14.4)'
-        required: true
-        default: '0.14.4'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pycrdt.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pycrdt.yml'
+      - 'docs/packages/pycrdt.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pycrdt.yml'
+      - 'docs/packages/pycrdt.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.14.4' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.14.4 there.
-  PYCRDT_VERSION: ${{ inputs.version || '0.14.4' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pycrdt
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build pycrdt ${{ inputs.version || '0.14.4' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pycrdt ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # pyo3 has no abi3 feature enabled here, so upstream builds and
         # publishes one wheel per interpreter (-i 3.10 3.11 3.12 3.13 3.14
         # pypy3.11); pypy is dropped (this repo doesn't build PyPy wheels)
         # and musllinux with it (rustup.rs ships no riscv64 musl toolchain).
         python: ["cp310", "cp311", "cp312", "cp313", "cp314"]
+
+    env:
+      PYCRDT_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pycrdt ${{ env.PYCRDT_VERSION }}
@@ -82,11 +95,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pycrdt ${{ inputs.version || '0.14.4' }}
+    name: Publish pycrdt ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pycrdt-${{ inputs.version || '0.14.4' }}-*-manylinux_riscv64
+      artifact-pattern: pycrdt-${{ matrix.version }}-*-manylinux_riscv64

@@ -9,36 +9,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'anycrc version/tag to build (e.g. 2.0.0)'
-        required: true
-        default: '2.0.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/anycrc.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-anycrc.yml'
+      - 'docs/packages/anycrc.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-anycrc.yml'
+      - 'docs/packages/anycrc.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.0.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  ANYCRC_VERSION: ${{ inputs.version || '2.0.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: anycrc
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build anycrc ${{ inputs.version || '2.0.0' }} ${{ matrix.tag }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build anycrc ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           # setup.py tags every non-free-threaded CPython wheel cp311-abi3, so
           # one build serves them all; the free-threaded build cannot use the
@@ -49,6 +60,9 @@ jobs:
               cp313-manylinux_riscv64 cp314-manylinux_riscv64
           - tag: cp314t
             build: cp314t-manylinux_riscv64
+
+    env:
+      ANYCRC_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout anycrc ${{ env.ANYCRC_VERSION }}
@@ -82,11 +96,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish anycrc ${{ inputs.version || '2.0.0' }}
+    name: Publish anycrc ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: anycrc-${{ inputs.version || '2.0.0' }}-*-manylinux_riscv64
+      artifact-pattern: anycrc-${{ matrix.version }}-*-manylinux_riscv64

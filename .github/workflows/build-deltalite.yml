@@ -10,23 +10,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'deltalite version to build (e.g. 0.1.7)'
-        required: true
-        default: '0.1.7'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/deltalite.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-deltalite.yml'
+      - 'docs/packages/deltalite.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-deltalite.yml'
+      - 'docs/packages/deltalite.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.1.7' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.1.7 there.
-  DELTALITE_VERSION: ${{ inputs.version || '0.1.7' }}
   # deltalite lives in the PostHog/posthog monorepo and is never tagged on its
   # own; this is the commit whose rust/deltalite/ tree is byte-for-byte the
   # 0.1.7 PyPI sdist (verified by diff). Update alongside the version.
@@ -40,12 +45,23 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: deltalite
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build deltalite ${{ inputs.version || '0.1.7' }} cp312-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build deltalite ${{ matrix.version }} cp312-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 1440
+
+    env:
+      DELTALITE_VERSION: ${{ matrix.version }}
 
     steps:
       # posthog/posthog is a multi-GB application monorepo; rust/ (plus the
@@ -137,11 +153,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish deltalite ${{ inputs.version || '0.1.7' }}
+    name: Publish deltalite ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: deltalite-${{ inputs.version || '0.1.7' }}-*-manylinux_riscv64
+      artifact-pattern: deltalite-${{ matrix.version }}-*-manylinux_riscv64

@@ -9,37 +9,51 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'mmh3 version to build (git tag without leading v, e.g. 5.3.0)'
-        required: true
-        default: '5.3.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/mmh3.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-mmh3.yml'
+      - 'docs/packages/mmh3.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mmh3.yml'
+      - 'docs/packages/mmh3.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '5.3.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  MMH3_VERSION: ${{ inputs.version || '5.3.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: mmh3
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build mmh3 ${{ inputs.version || '5.3.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build mmh3 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      MMH3_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout mmh3 v${{ env.MMH3_VERSION }}
@@ -67,11 +81,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish mmh3 ${{ inputs.version || '5.3.0' }}
+    name: Publish mmh3 ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: mmh3-${{ inputs.version || '5.3.0' }}-*-manylinux_riscv64
+      artifact-pattern: mmh3-${{ matrix.version }}-*-manylinux_riscv64

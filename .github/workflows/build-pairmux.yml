@@ -9,34 +9,49 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pairmux version to build (git tag without the leading v, e.g. 0.5.2)'
-        required: true
-        default: '0.5.2'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pairmux.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pairmux.yml'
+      - 'docs/packages/pairmux.yaml'
+      - 'patches/pairmux/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pairmux.yml'
+      - 'docs/packages/pairmux.yaml'
       - 'patches/pairmux/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.5.2' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  # `inputs.version` is empty on pull_request events; default to 0.5.2 there.
-  PAIRMUX_VERSION: ${{ inputs.version || '0.5.2' }}
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pairmux
+      version: ${{ inputs.version }}
 
   build_wheel:
     needs: [setup]
-    name: Build pairmux ${{ inputs.version || '0.5.2' }} manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pairmux ${{ matrix.version }} manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 30
+
+    env:
+      PAIRMUX_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pairmux v${{ env.PAIRMUX_VERSION }}
@@ -83,17 +98,20 @@ jobs:
           if-no-files-found: error
 
   test_wheel:
-    name: Test pairmux ${{ inputs.version || '0.5.2' }} on Python ${{ matrix.python-version }}
+    name: Test pairmux ${{ matrix.version }} on Python ${{ matrix.python-version }}
     needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 15
     env:
+      PAIRMUX_VERSION: ${{ matrix.version }}
       # Without this uv would reuse the runner image's system CPython for 3.12
       # and download a standalone build for the others.
       UV_PYTHON_PREFERENCE: only-managed
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # This repo's default interpreter matrix (gotcha in workflow-anatomy.md);
         # the wheel carries a single native binary, so every interpreter --
         # including free-threaded -- exercises the same binary.
@@ -137,11 +155,16 @@ jobs:
           pairmux --json kill demo
 
   publish:
-    name: Publish pairmux ${{ inputs.version || '0.5.2' }}
+    name: Publish pairmux ${{ matrix.version }}
     needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pairmux-${{ inputs.version || '0.5.2' }}-manylinux_riscv64
+      artifact-pattern: pairmux-${{ matrix.version }}-manylinux_riscv64

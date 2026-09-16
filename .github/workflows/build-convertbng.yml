@@ -8,23 +8,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'convertbng version to build (git tag without the leading v, e.g. 1.0.0)'
-        required: true
-        default: '1.0.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/convertbng.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-convertbng.yml'
+      - 'docs/packages/convertbng.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-convertbng.yml'
+      - 'docs/packages/convertbng.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.0.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.0.0 there.
-  CONVERTBNG_VERSION: ${{ inputs.version || '1.0.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   # The urschrei/lonlat_bng tag that was latest when convertbng 1.0.0 shipped.
   # Upstream's own CI fetches whatever tag is latest at release time; it has no
@@ -34,15 +39,20 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: convertbng
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build convertbng ${{ inputs.version || '1.0.0' }} ${{ matrix.tag }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build convertbng ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           # wheel.py-api = "cp311" collapses cp312/cp313/cp314 into one abi3
           # build; the newer interpreters re-test that wheel via find_compatible_wheel.
@@ -54,6 +64,9 @@ jobs:
           # SKBUILD_SABI_VERSION is empty under Py_GIL_DISABLED).
           - tag: cp314t
             build: cp314t-manylinux_riscv64
+
+    env:
+      CONVERTBNG_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout convertbng v${{ env.CONVERTBNG_VERSION }}
@@ -96,11 +109,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish convertbng ${{ inputs.version || '1.0.0' }}
+    name: Publish convertbng ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: convertbng-${{ inputs.version || '1.0.0' }}-*-manylinux_riscv64
+      artifact-pattern: convertbng-${{ matrix.version }}-*-manylinux_riscv64

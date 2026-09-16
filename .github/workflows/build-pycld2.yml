@@ -9,22 +9,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pycld2 version to build (e.g. 0.42)'
-        required: true
-        default: '0.42'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pycld2.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pycld2.yml'
+      - 'docs/packages/pycld2.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pycld2.yml'
+      - 'docs/packages/pycld2.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.42' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  PYCLD2_VERSION: ${{ inputs.version || '0.42' }}
   # No git tag was ever pushed for the 0.42 PyPI release (upstream tagged this
   # commit v0.3.0 while PYCLD2_VERSION in bindings/pycldmodule.cc already read
   # "0.42"); pin the commit proven byte-identical to the released sdist and
@@ -36,17 +42,25 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pycld2
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build pycld2 ${{ inputs.version || '0.42' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pycld2 ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
         libc: [manylinux, musllinux]
+
+    env:
+      PYCLD2_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pycld2 ${{ env.PYCLD2_VERSION }}
@@ -77,11 +91,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pycld2 ${{ inputs.version || '0.42' }}
+    name: Publish pycld2 ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pycld2-${{ inputs.version || '0.42' }}-*riscv64
+      artifact-pattern: pycld2-${{ matrix.version }}-*riscv64

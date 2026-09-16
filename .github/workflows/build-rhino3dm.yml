@@ -9,24 +9,30 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'rhino3dm version to build (e.g. 8.32.1)'
-        required: true
-        default: '8.32.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/rhino3dm.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-rhino3dm.yml'
+      - 'docs/packages/rhino3dm.yaml'
+      - 'patches/rhino3dm/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-rhino3dm.yml'
+      - 'docs/packages/rhino3dm.yaml'
       - 'patches/rhino3dm/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '8.32.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 8.32.1 there.
-  RHINO3DM_VERSION: ${{ inputs.version || '8.32.1' }}
   # rhino3dm.py 8.32.1 was never tagged in git (8.32.0 and 8.32.2 were); this is
   # the commit whose setup.py/src tree is byte-identical to the released sdist.
   RHINO3DM_REF: 56daf09ab774cc02b69a1de2e17a1c8746550778
@@ -35,16 +41,24 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: rhino3dm
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build rhino3dm ${{ inputs.version || '8.32.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build rhino3dm ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      RHINO3DM_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout rhino3dm ${{ env.RHINO3DM_VERSION }}
@@ -116,11 +130,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish rhino3dm ${{ inputs.version || '8.32.1' }}
+    name: Publish rhino3dm ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: rhino3dm-${{ inputs.version || '8.32.1' }}-*-manylinux_riscv64
+      artifact-pattern: rhino3dm-${{ matrix.version }}-*-manylinux_riscv64

@@ -11,37 +11,51 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'SQLAlchemy version to build (PyPI version, e.g. 2.0.52)'
-        required: true
-        default: '2.0.52'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/sqlalchemy.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-sqlalchemy.yml'
+      - 'docs/packages/sqlalchemy.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sqlalchemy.yml'
+      - 'docs/packages/sqlalchemy.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.0.52' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  SQLALCHEMY_VERSION: ${{ inputs.version || '2.0.52' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: sqlalchemy
+      version: ${{ inputs.version }}
 
   build_sdist:
     needs: [setup]
-    name: Build sqlalchemy ${{ inputs.version || '2.0.52' }} sdist
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build sqlalchemy ${{ matrix.version }} sdist
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    outputs:
-      sdist_name: ${{ steps.sdist.outputs.sdist_name }}
-      package_version: ${{ steps.sdist.outputs.package_version }}
+    env:
+      SQLALCHEMY_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Compute git tag
         id: tag
@@ -74,10 +88,6 @@ jobs:
           python -m build --sdist
           twine check dist/*
 
-          sdist_name="$(ls dist)"
-          echo "sdist_name=${sdist_name}" >> "$GITHUB_OUTPUT"
-          echo "package_version=$(echo "$sdist_name" | sed -En 's/sqlalchemy-(.+)\.tar\.gz/\1/p')" >> "$GITHUB_OUTPUT"
-
       - name: Upload sdist artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -87,15 +97,20 @@ jobs:
 
   build_wheels:
     needs: [setup, build_sdist]
-    name: Build sqlalchemy ${{ inputs.version || '2.0.52' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build sqlalchemy ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # cyextension is a plain per-interpreter C ext (not abi3), so one wheel each.
         python: [cp312, cp313, cp314, cp314t]
+    env:
+      SQLALCHEMY_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Download sdist
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
@@ -103,10 +118,13 @@ jobs:
           name: sqlalchemy-${{ env.SQLALCHEMY_VERSION }}-sdist
           path: dist/
 
+      - id: sdist_path
+        run: echo "path=$(echo dist/*.tar.gz)" >> "$GITHUB_OUTPUT"
+
       - name: Build wheels
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
-          package-dir: dist/${{ needs.build_sdist.outputs.sdist_name }}
+          package-dir: ${{ steps.sdist_path.outputs.path }}
         env:
           CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
           CIBW_ARCHS: riscv64  # override pyproject's x86_64+aarch64 pin
@@ -126,11 +144,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish sqlalchemy ${{ inputs.version || '2.0.52' }}
+    name: Publish sqlalchemy ${{ matrix.version }}
     needs: [setup, build_sdist, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: sqlalchemy-${{ needs.build_sdist.outputs.package_version }}-*-manylinux_riscv64
+      artifact-pattern: sqlalchemy-${{ matrix.version }}-*-manylinux_riscv64

@@ -9,30 +9,44 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'tree-sitter-swift version to build (git tag, e.g. 0.7.3)'
-        required: true
-        default: '0.7.3'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/tree-sitter-swift.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-tree-sitter-swift.yml'
+      - 'docs/packages/tree-sitter-swift.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tree-sitter-swift.yml'
+      - 'docs/packages/tree-sitter-swift.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.7.3' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  TREE_SITTER_SWIFT_VERSION: ${{ inputs.version || '0.7.3' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: tree-sitter-swift
+      version: ${{ inputs.version }}
 
   generate_parser:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     # Unlike the other tree-sitter-* ports, alex-pinkus/tree-sitter-swift does not
     # commit the generated src/parser.c at its release tags (only at the separate
     # "<version>-with-generated-files" tags, which lag behind and carry a stale
@@ -40,10 +54,13 @@ jobs:
     # `tree-sitter generate` before building, so we do the same here, once on x86
     # (generation is architecture-independent and the CLI has no riscv64 build),
     # then hand the completed checkout to the riscv64 job as a tarball.
-    name: Generate tree-sitter-swift ${{ inputs.version || '0.7.3' }} parser
+    name: Generate tree-sitter-swift ${{ matrix.version }} parser
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      TREE_SITTER_SWIFT_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout tree-sitter-swift ${{ env.TREE_SITTER_SWIFT_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -71,9 +88,17 @@ jobs:
 
   build_wheels:
     needs: [setup, generate_parser]
-    name: Build tree-sitter-swift ${{ inputs.version || '0.7.3' }} cp38-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build tree-sitter-swift ${{ matrix.version }} cp38-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
+
+    env:
+      TREE_SITTER_SWIFT_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Download checkout artifact
@@ -100,11 +125,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish tree-sitter-swift ${{ inputs.version || '0.7.3' }}
+    name: Publish tree-sitter-swift ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: tree-sitter-swift-${{ inputs.version || '0.7.3' }}-*-manylinux_riscv64
+      artifact-pattern: tree-sitter-swift-${{ matrix.version }}-*-manylinux_riscv64

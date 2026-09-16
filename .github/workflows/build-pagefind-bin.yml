@@ -20,34 +20,50 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pagefind-bin version to build (git tag of pagefind/pagefind without the leading v, e.g. 1.5.2)'
-        required: true
-        default: '1.5.2'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pagefind-bin.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pagefind-bin.yml'
+      - 'docs/packages/pagefind-bin.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pagefind-bin.yml'
+      - 'docs/packages/pagefind-bin.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.5.2' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.5.2 there.
-  PAGEFIND_VERSION: ${{ inputs.version || '1.5.2' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pagefind-bin
+      version: ${{ inputs.version }}
 
   build_web_assets:
     needs: [setup]
-    name: Build pagefind ${{ inputs.version || '1.5.2' }} web assets
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pagefind ${{ matrix.version }} web assets
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      PAGEFIND_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout pagefind v${{ env.PAGEFIND_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -114,9 +130,17 @@ jobs:
 
   build_wheel:
     needs: [setup, build_web_assets]
-    name: Build pagefind-bin ${{ inputs.version || '1.5.2' }} manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pagefind-bin ${{ matrix.version }} manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
+    env:
+      PAGEFIND_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout pagefind v${{ env.PAGEFIND_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -183,17 +207,20 @@ jobs:
           if-no-files-found: error
 
   test_wheel:
-    name: Test pagefind-bin ${{ inputs.version || '1.5.2' }} on Python ${{ matrix.python-version }}
+    name: Test pagefind-bin ${{ matrix.version }} on Python ${{ matrix.python-version }}
     needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 30
     env:
+      PAGEFIND_VERSION: ${{ matrix.version }}
       # Without this uv would reuse the runner image's system CPython for 3.12
       # and download a standalone build for the others.
       UV_PYTHON_PREFERENCE: only-managed
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # This repo's default interpreter matrix (gotcha in workflow-anatomy.md);
         # the wheel is interpreter-agnostic (py3-none), so every interpreter --
         # including free-threaded -- exercises the same binary.
@@ -244,11 +271,16 @@ jobs:
           [ -f "$work/public/pagefind/pagefind-entry.json" ]
 
   publish:
-    name: Publish pagefind-bin ${{ inputs.version || '1.5.2' }}
+    name: Publish pagefind-bin ${{ matrix.version }}
     needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pagefind-bin-${{ inputs.version || '1.5.2' }}-manylinux_riscv64
+      artifact-pattern: pagefind-bin-${{ matrix.version }}-manylinux_riscv64

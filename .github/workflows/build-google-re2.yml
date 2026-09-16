@@ -9,22 +9,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'google-re2 version to build (e.g. 1.1.20251105)'
-        required: true
-        default: '1.1.20251105'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/google-re2.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-google-re2.yml'
+      - 'docs/packages/google-re2.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-google-re2.yml'
+      - 'docs/packages/google-re2.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.1.20251105' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  GOOGLE_RE2_VERSION: ${{ inputs.version || '1.1.20251105' }}
   # abseil-cpp version that re2's MODULE.bazel pins at this tag.
   ABSEIL_VERSION: '20250512.1'
   # Upstream's Bazel build uses pybind11 2.13.6, which predates CPython 3.14 support.
@@ -34,19 +40,27 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: google-re2
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build google-re2 ${{ inputs.version || '1.1.20251105' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build google-re2 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python:
           - "cp312"
           - "cp313"
           - "cp314"
           - "cp314t"
+
+    env:
+      GOOGLE_RE2_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Derive the upstream tag from the version
@@ -116,11 +130,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish google-re2 ${{ inputs.version || '1.1.20251105' }}
+    name: Publish google-re2 ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: google-re2-${{ inputs.version || '1.1.20251105' }}-*-manylinux_riscv64
+      artifact-pattern: google-re2-${{ matrix.version }}-*-manylinux_riscv64

@@ -9,22 +9,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pyogrio version to build (git tag without the v, e.g. 0.13.0)'
-        required: true
-        default: '0.13.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyogrio.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pyogrio.yml'
+      - 'docs/packages/pyogrio.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyogrio.yml'
+      - 'docs/packages/pyogrio.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.13.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  PYOGRIO_VERSION: ${{ inputs.version || '0.13.0' }}
   GDAL_VERSION: '3.12.4'
   GEOS_VERSION: '3.13.1'
   PROJ_VERSION: '9.6.2'
@@ -35,12 +41,23 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyogrio
+      version: ${{ inputs.version }}
 
   build_image:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Build the GDAL build image
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 600
+
+    env:
+      PYOGRIO_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout python-wheels
@@ -238,13 +255,15 @@ jobs:
           BUILDKIT_PROGRESS: plain
 
   build_wheels:
-    name: Build pyogrio ${{ inputs.version || '0.13.0' }} ${{ matrix.wheel_tag }}-manylinux_riscv64
+    name: Build pyogrio ${{ matrix.version }} ${{ matrix.wheel_tag }}-manylinux_riscv64
     needs: [setup, build_image]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 600
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           # setup.py builds against the limited API for CPython >= 3.11, so the
           # single abi3 wheel covers every non-free-threaded interpreter and the
@@ -259,6 +278,9 @@ jobs:
             # geopandas needs pandas, which publishes no free-threaded riscv64
             # wheel; upstream skips it on 3.14t for the same reason.
             before_test: 'true'
+
+    env:
+      PYOGRIO_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pyogrio ${{ env.PYOGRIO_VERSION }}
@@ -515,11 +537,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pyogrio ${{ inputs.version || '0.13.0' }}
+    name: Publish pyogrio ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pyogrio-${{ inputs.version || '0.13.0' }}-*-manylinux_riscv64
+      artifact-pattern: pyogrio-${{ matrix.version }}-*-manylinux_riscv64

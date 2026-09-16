@@ -9,37 +9,51 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'fnv-hash-fast version to build (git tag without leading v, e.g. 2.0.3)'
-        required: true
-        default: '2.0.3'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/fnv-hash-fast.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-fnv-hash-fast.yml'
+      - 'docs/packages/fnv-hash-fast.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fnv-hash-fast.yml'
+      - 'docs/packages/fnv-hash-fast.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.0.3' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  FNV_HASH_FAST_VERSION: ${{ inputs.version || '2.0.3' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: fnv-hash-fast
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build fnv-hash-fast ${{ inputs.version || '2.0.3' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build fnv-hash-fast ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      FNV_HASH_FAST_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout fnv-hash-fast v${{ env.FNV_HASH_FAST_VERSION }}
@@ -71,11 +85,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish fnv-hash-fast ${{ inputs.version || '2.0.3' }}
+    name: Publish fnv-hash-fast ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: fnv-hash-fast-${{ inputs.version || '2.0.3' }}-*-manylinux_riscv64
+      artifact-pattern: fnv-hash-fast-${{ matrix.version }}-*-manylinux_riscv64

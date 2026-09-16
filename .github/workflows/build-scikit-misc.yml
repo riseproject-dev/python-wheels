@@ -9,37 +9,51 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'scikit-misc version to build (git tag without the leading v, e.g. 0.5.2)'
-        required: true
-        default: '0.5.2'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/scikit-misc.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-scikit-misc.yml'
+      - 'docs/packages/scikit-misc.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-scikit-misc.yml'
+      - 'docs/packages/scikit-misc.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.5.2' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  SCIKIT_MISC_VERSION: ${{ inputs.version || '0.5.2' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: scikit-misc
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build scikit-misc ${{ inputs.version || '0.5.2' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build scikit-misc ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      SCIKIT_MISC_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout scikit-misc v${{ env.SCIKIT_MISC_VERSION }}
@@ -69,10 +83,18 @@ jobs:
 
   gpl_sources:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     # scikit-misc compiles real Fortran (blas_lite.f, linpack_lite.f, loessf.f)
     # with the image's gfortran, so auditwheel vendors its libgfortran runtime.
-    name: Collect GPL sources (gcc) for scikit-misc ${{ inputs.version || '0.5.2' }}
+    name: Collect GPL sources (gcc) for scikit-misc ${{ matrix.version }}
     runs-on: ubuntu-24.04-riscv
+
+    env:
+      SCIKIT_MISC_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Collect gcc source RPM from manylinux_riscv64
@@ -84,18 +106,23 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: scikit-misc-${{ inputs.version || '0.5.2' }}-gpl-sources
+          name: scikit-misc-${{ matrix.version }}-gpl-sources
           path: gpl-sources.tar
           if-no-files-found: error
 
   publish:
-    name: Publish scikit-misc ${{ inputs.version || '0.5.2' }}
+    name: Publish scikit-misc ${{ matrix.version }}
     needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: scikit-misc-${{ inputs.version || '0.5.2' }}-*-manylinux_riscv64
-      gpl-sources-artifact: scikit-misc-${{ inputs.version || '0.5.2' }}-gpl-sources
+      artifact-pattern: scikit-misc-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: scikit-misc-${{ matrix.version }}-gpl-sources
       gpl-sources-description: gcc

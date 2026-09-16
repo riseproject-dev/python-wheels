@@ -8,18 +8,26 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'torch version to build (git tag without leading v)'
-        required: true
-        default: '2.14.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/torch.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-torch.yml'
+      - 'docs/packages/torch.yaml'
+      - 'patches/torch/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-torch.yml'
+      - 'docs/packages/torch.yaml'
       - 'patches/torch/**'
 
-run-name: build-torch - ${{ inputs.version || '2.14.0' }}
+run-name: build-torch ${{ inputs.version && format('- {0}', inputs.version) || '' }}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.14.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
@@ -30,30 +38,42 @@ defaults:
   run:
     shell: bash --noprofile --norc -exo pipefail {0}
 
-env:
-  TORCH_VERSION: ${{ inputs.version || '2.14.0' }}
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: torch
+      version: ${{ inputs.version }}
 
   docker-builds:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 360  # 6h
     permissions:
       packages: write
     env:
+      TORCH_VERSION: ${{ matrix.version }}
       DOCKER_IMAGE_NAME: manylinux2_39_riscv64-builder:cpu-riscv64
+    # Job outputs are not per matrix leg: with several pending versions the last
+    # leg's image wins, so publish torch one version at a time.
     outputs:
       docker-image: ${{ steps.tag.outputs.docker-image }}
 
     steps:
-      - name: Checkout pytorch v${{ env.TORCH_VERSION }}
+      # The wheel carries pytorch's CPU-index local segment (2.14.0+cpu); the tag does not.
+      - id: ref
+        run: echo "ref=v${TORCH_VERSION%+cpu}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout pytorch ${{ steps.ref.outputs.ref }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: pytorch/pytorch
-          ref: v${{ env.TORCH_VERSION }}
+          ref: ${{ steps.ref.outputs.ref }}
           path: pytorch
           submodules: false
           persist-credentials: false
@@ -67,7 +87,7 @@ jobs:
       - name: Patch pytorch source
         working-directory: pytorch
         run: |
-          git apply ../python-wheels/patches/torch/${{ env.TORCH_VERSION }}+cpu/*.patch
+          git apply ../python-wheels/patches/torch/${{ env.TORCH_VERSION }}/*.patch
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
@@ -104,19 +124,22 @@ jobs:
           docker push "${DOCKER_IMAGE}"
 
   build_wheels:
-    name: Build torch ${{ inputs.version || '2.14.0' }} ${{ matrix.python-version }}-manylinux_riscv64
+    name: Build torch ${{ matrix.version }} ${{ matrix.python-version }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 1440  # 24h
     needs:
       - setup
       - docker-builds
+    if: needs.setup.outputs.versions != '[]'
     container:
       image: ${{ needs.docker-builds.outputs.docker-image }}
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python-version: ["3.12", "3.13", "3.14", "3.14t"]
     env:
+      TORCH_VERSION: ${{ matrix.version }}
       BUILD_ENVIRONMENT: linux-riscv64-binary-manywheel
       PYTORCH_ROOT: ${{ github.workspace }}/pytorch
       BINARY_ENV_FILE: /tmp/env
@@ -131,11 +154,15 @@ jobs:
       BUILD_NAME_SUFFIX: "-cpu-riscv64"
 
     steps:
-      - name: Checkout pytorch v${{ env.TORCH_VERSION }}
+      # The wheel carries pytorch's CPU-index local segment (2.14.0+cpu); the tag does not.
+      - id: ref
+        run: echo "ref=v${TORCH_VERSION%+cpu}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout pytorch ${{ steps.ref.outputs.ref }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: pytorch/pytorch
-          ref: v${{ env.TORCH_VERSION }}
+          ref: ${{ steps.ref.outputs.ref }}
           path: pytorch
           submodules: recursive
           persist-credentials: false
@@ -149,7 +176,7 @@ jobs:
       - name: Patch pytorch source
         working-directory: pytorch
         run: |
-          git apply ../python-wheels/patches/torch/${{ env.TORCH_VERSION }}+cpu/*.patch
+          git apply ../python-wheels/patches/torch/${{ env.TORCH_VERSION }}/*.patch
 
       - name: Populate binary env
         working-directory: pytorch
@@ -190,11 +217,16 @@ jobs:
           path: ${{ steps.artifact-name.outputs.wheel-dir }}/*.whl
 
   publish:
-    name: Publish torch ${{ inputs.version || '2.14.0' }}
+    name: Publish torch ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: torch-${{ inputs.version || '2.14.0' }}-*-manylinux_riscv64
+      artifact-pattern: torch-${{ matrix.version }}-*-manylinux_riscv64

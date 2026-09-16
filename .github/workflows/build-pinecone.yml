@@ -9,23 +9,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pinecone version/tag to build (e.g. 9.1.0)'
-        required: true
-        default: '9.1.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pinecone.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pinecone.yml'
+      - 'docs/packages/pinecone.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pinecone.yml'
+      - 'docs/packages/pinecone.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '9.1.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 9.1.0 there.
-  PINECONE_VERSION: ${{ inputs.version || '9.1.0' }}
   UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
   UV_INDEX_STRATEGY: unsafe-best-match
   UV_ONLY_BINARY: ':all:'
@@ -33,12 +38,23 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pinecone
+      version: ${{ inputs.version }}
 
   build_wheel:
     needs: [setup]
-    name: Build pinecone ${{ inputs.version || '9.1.0' }} cp310-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pinecone ${{ matrix.version }} cp310-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
+
+    env:
+      PINECONE_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pinecone v${{ env.PINECONE_VERSION }}
@@ -118,11 +134,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pinecone ${{ inputs.version || '9.1.0' }}
+    name: Publish pinecone ${{ matrix.version }}
     needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pinecone-${{ inputs.version || '9.1.0' }}-*-manylinux_riscv64
+      artifact-pattern: pinecone-${{ matrix.version }}-*-manylinux_riscv64

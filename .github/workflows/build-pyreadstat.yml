@@ -9,39 +9,52 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pyreadstat version to build (git tag, e.g. 1.3.6)'
-        required: true
-        default: '1.3.6'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyreadstat.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pyreadstat.yml'
+      - 'docs/packages/pyreadstat.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyreadstat.yml'
+      - 'docs/packages/pyreadstat.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.3.6' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.3.6 there.
-  PYREADSTAT_VERSION: ${{ inputs.version || '1.3.6' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyreadstat
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build pyreadstat ${{ inputs.version || '1.3.6' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyreadstat ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Matches upstream's own PyPI wheel matrix (cp310-cp314, no free-threaded build).
         python: ["cp310", "cp311", "cp312", "cp313", "cp314"]
+
+    env:
+      PYREADSTAT_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pyreadstat v${{ env.PYREADSTAT_VERSION }}
@@ -100,11 +113,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pyreadstat ${{ inputs.version || '1.3.6' }}
+    name: Publish pyreadstat ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pyreadstat-${{ inputs.version || '1.3.6' }}-*-manylinux_riscv64
+      artifact-pattern: pyreadstat-${{ matrix.version }}-*-manylinux_riscv64

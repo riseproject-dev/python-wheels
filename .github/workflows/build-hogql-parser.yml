@@ -8,23 +8,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'hogql-parser version to build (posthog monorepo version, e.g. 1.3.84)'
-        required: true
-        default: '1.3.84'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/hogql-parser.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-hogql-parser.yml'
+      - 'docs/packages/hogql-parser.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-hogql-parser.yml'
+      - 'docs/packages/hogql-parser.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.3.84' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.3.84 there.
-  HOGQL_PARSER_VERSION: ${{ inputs.version || '1.3.84' }}
   # PostHog/posthog never tags this package; pin the commit that bumped
   # common/hogql_parser/setup.py to 1.3.84 (matches the PyPI sdist). Same
   # commit hogql-parser-rs (build-hogql-parser-rs.yml) is pinned to.
@@ -34,19 +39,27 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: hogql-parser
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build hogql-parser ${{ inputs.version || '1.3.84' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build hogql-parser ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # setup.py builds a plain per-interpreter Extension (no abi3), matching
         # upstream's own coverage for this version (cp310-cp313; cp314 support
         # landed after 1.3.84).
         python: ["cp310", "cp311", "cp312", "cp313"]
+
+    env:
+      HOGQL_PARSER_VERSION: ${{ matrix.version }}
 
     steps:
       # common/hogql_parser's checked-in generated ANTLR sources make this a
@@ -110,11 +123,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish hogql-parser ${{ inputs.version || '1.3.84' }}
+    name: Publish hogql-parser ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: hogql-parser-${{ inputs.version || '1.3.84' }}-*-manylinux_riscv64
+      artifact-pattern: hogql-parser-${{ matrix.version }}-*-manylinux_riscv64

@@ -9,23 +9,30 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'wandb version to build (git tag without leading v, e.g. 0.28.2)'
-        required: true
-        default: '0.28.2'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/wandb.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-wandb.yml'
+      - 'docs/packages/wandb.yaml'
+      - 'patches/wandb/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-wandb.yml'
+      - 'docs/packages/wandb.yaml'
       - 'patches/wandb/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.28.2' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  WANDB_VERSION: ${{ inputs.version || '0.28.2' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   # Pinned by upstream for reproducible release artifacts; keep in sync with
   # RUST_TOOLCHAIN in release-sdk.yml.
@@ -34,15 +41,24 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: wandb
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build wandb ${{ inputs.version || '0.28.2' }} py3-none-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build wandb ${{ matrix.version }} py3-none-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     # musllinux is dropped: rustup ships no riscv64 musl host toolchain, and the
     # musl wheels additionally need CGO, i.e. a riscv64 musl C toolchain.
 
     env:
+      WANDB_VERSION: ${{ matrix.version }}
       # wandb pulls protobuf and PyYAML at test time; neither publishes riscv64
       # wheels on PyPI.
       PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
@@ -135,11 +151,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish wandb ${{ inputs.version || '0.28.2' }}
+    name: Publish wandb ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: wandb-${{ inputs.version || '0.28.2' }}-*-manylinux_riscv64
+      artifact-pattern: wandb-${{ matrix.version }}-*-manylinux_riscv64

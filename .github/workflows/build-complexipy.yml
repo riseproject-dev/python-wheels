@@ -9,41 +9,54 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'complexipy version to build (git tag, e.g. 8.0.0)'
-        required: true
-        default: '8.0.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/complexipy.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-complexipy.yml'
+      - 'docs/packages/complexipy.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-complexipy.yml'
+      - 'docs/packages/complexipy.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '8.0.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 8.0.0 there.
-  COMPLEXIPY_VERSION: ${{ inputs.version || '8.0.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: complexipy
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build complexipy ${{ inputs.version || '8.0.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build complexipy ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # complexipy is a PyO3 extension built per-interpreter (not abi3 -
         # upstream ships cp3x-cp3x wheels, no abi3 feature on the pyo3
         # dependency), so every Python version needs its own build.
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      COMPLEXIPY_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout complexipy ${{ env.COMPLEXIPY_VERSION }}
@@ -89,11 +102,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish complexipy ${{ inputs.version || '8.0.0' }}
+    name: Publish complexipy ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: complexipy-${{ inputs.version || '8.0.0' }}-*-manylinux_riscv64
+      artifact-pattern: complexipy-${{ matrix.version }}-*-manylinux_riscv64

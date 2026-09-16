@@ -8,37 +8,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'numpy-rms version to build (git tag, e.g. 0.7.0)'
-        required: true
-        default: '0.7.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/numpy-rms.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-numpy-rms.yml'
+      - 'docs/packages/numpy-rms.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-numpy-rms.yml'
+      - 'docs/packages/numpy-rms.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.7.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.7.0 there.
-  NUMPY_RMS_VERSION: ${{ inputs.version || '0.7.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: numpy-rms
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build numpy-rms ${{ inputs.version || '0.7.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build numpy-rms ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Per-interpreter (not abi3): the cffi API-mode extension links the
         # version-specific ABI. Matches upstream's own published matrix exactly
         # (cp310-cp314 plus cp314t; no cp313t is built there either).
@@ -49,6 +59,9 @@ jobs:
           - "cp313"
           - "cp314"
           - "cp314t"
+
+    env:
+      NUMPY_RMS_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout numpy-rms ${{ env.NUMPY_RMS_VERSION }}
@@ -96,11 +109,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish numpy-rms ${{ inputs.version || '0.7.0' }}
+    name: Publish numpy-rms ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: numpy-rms-${{ inputs.version || '0.7.0' }}-*-manylinux_riscv64
+      artifact-pattern: numpy-rms-${{ matrix.version }}-*-manylinux_riscv64

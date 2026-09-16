@@ -9,35 +9,48 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'sphn version to build (git tag, e.g. 0.2.1)'
-        required: true
-        default: '0.2.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/sphn.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-sphn.yml'
+      - 'docs/packages/sphn.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sphn.yml'
+      - 'docs/packages/sphn.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.2.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.2.1 there.
-  SPHN_VERSION: ${{ inputs.version || '0.2.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: sphn
+      version: ${{ inputs.version }}
 
   python_sdist:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     runs-on: ubuntu-latest
-    outputs:
-      sdist_artifact_name: ${{ steps.build_sdist.outputs.sdist_artifact_name }}
-      package_version: ${{ steps.build_sdist.outputs.package_version }}
+    env:
+      SPHN_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout sphn ${{ env.SPHN_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -62,37 +75,36 @@ jobs:
           uv pip install 'maturin>=1.4,<2.0' build
           python -m build --sdist --outdir dist
 
-          sdist_name="$(ls dist)"
-          {
-            echo "sdist_artifact_name=${sdist_name}"
-            echo "package_version=$(echo "${sdist_name}" | sed -En 's/sphn-(.+)\.tar\.gz/\1/p')"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Upload sdist artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: ${{ steps.build_sdist.outputs.sdist_artifact_name }}
-          path: dist/${{ steps.build_sdist.outputs.sdist_artifact_name }}
+          name: sphn-${{ env.SPHN_VERSION }}-sdist
+          path: dist/*.tar.gz
           if-no-files-found: error
 
   build_wheels:
     needs: [setup, python_sdist]
-    name: Build sphn ${{ inputs.version || '0.2.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build sphn ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # sphn's pyo3 dependency has a plain `features = ["extension-module"]`
         # (no abi3-pyNN), so every interpreter needs its own build.
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      SPHN_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Fetch sdist artifact
         id: fetch_sdist
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: ${{ needs.python_sdist.outputs.sdist_artifact_name }}
+          name: sphn-${{ env.SPHN_VERSION }}-sdist
 
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
@@ -151,7 +163,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir sphn
-          tar zxf "${{ steps.fetch_sdist.outputs.download-path }}/${{ needs.python_sdist.outputs.sdist_artifact_name }}" \
+          tar zxf "${{ steps.fetch_sdist.outputs.download-path }}"/*.tar.gz \
             --strip-components=1 -C sphn
           uv pip install --upgrade cibuildwheel
           python -m cibuildwheel --output-dir wheelhouse ./sphn
@@ -163,11 +175,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish sphn ${{ inputs.version || '0.2.1' }}
+    name: Publish sphn ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: sphn-${{ inputs.version || '0.2.1' }}-*-manylinux_riscv64
+      artifact-pattern: sphn-${{ matrix.version }}-*-manylinux_riscv64

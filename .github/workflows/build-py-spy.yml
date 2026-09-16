@@ -8,37 +8,52 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'py-spy version to build (git tag without leading v, e.g. 0.4.2)'
-        required: true
-        default: '0.4.2'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/py-spy.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-py-spy.yml'
+      - 'docs/packages/py-spy.yaml'
+      - 'patches/py-spy/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-py-spy.yml'
+      - 'docs/packages/py-spy.yaml'
       - 'patches/py-spy/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.4.2' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  # `inputs.version` is empty on pull_request events; default to 0.4.2 there.
-  PY_SPY_VERSION: ${{ inputs.version || '0.4.2' }}
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: py-spy
+      version: ${{ inputs.version }}
 
   build_wheel:
     needs: [setup]
-    name: Build py-spy ${{ inputs.version || '0.4.2' }} manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build py-spy ${{ matrix.version }} manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
 
+    env:
+      PY_SPY_VERSION: ${{ matrix.version }}
+
     steps:
-      - name: Checkout py-spy v${{ inputs.version || '0.4.2' }}
+      - name: Checkout py-spy v${{ matrix.version }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: benfred/py-spy
@@ -78,11 +93,13 @@ jobs:
           if-no-files-found: error
 
   test_wheel:
-    name: Test py-spy ${{ inputs.version || '0.4.2' }} on Python ${{ matrix.python-version }}
+    name: Test py-spy ${{ matrix.version }} on Python ${{ matrix.python-version }}
     needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 30
     env:
+      PY_SPY_VERSION: ${{ matrix.version }}
       # Upstream provisions each interpreter with setup-python; without this uv
       # would reuse the runner image's system CPython for 3.12 and download a
       # standalone build for the others.
@@ -90,6 +107,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Upstream's test matrix trimmed to the interpreters this registry
         # targets; it carries no free-threaded entry.
         include:
@@ -107,7 +125,7 @@ jobs:
               TestPyspy.test_shell_completions
 
     steps:
-      - name: Checkout py-spy v${{ inputs.version || '0.4.2' }}
+      - name: Checkout py-spy v${{ matrix.version }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: benfred/py-spy
@@ -155,11 +173,16 @@ jobs:
         if: steps.test1.outcome == 'failure'
 
   publish:
-    name: Publish py-spy ${{ inputs.version || '0.4.2' }}
+    name: Publish py-spy ${{ matrix.version }}
     needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: py-spy-${{ inputs.version || '0.4.2' }}-manylinux_riscv64
+      artifact-pattern: py-spy-${{ matrix.version }}-manylinux_riscv64

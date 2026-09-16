@@ -8,23 +8,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'flpc version to build (e.g. 0.2.5)'
-        required: true
-        default: '0.2.5'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/flpc.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-flpc.yml'
+      - 'docs/packages/flpc.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-flpc.yml'
+      - 'docs/packages/flpc.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.2.5' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.2.5 there.
-  FLPC_VERSION: ${{ inputs.version || '0.2.5' }}
   # Upstream cuts releases without git tags, so pin the release commit: this is
   # "Update pyproject.toml" bumping to 0.2.5, whose tree is byte-identical to
   # the 0.2.5 PyPI sdist. Update it alongside FLPC_VERSION.
@@ -34,19 +39,27 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: flpc
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build flpc ${{ inputs.version || '0.2.5' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build flpc ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # PyO3 extension built per-interpreter (upstream ships cp3x-cp3x
         # wheels, no abi3). cp314t is dropped: pyo3 0.22 predates PEP 703 and
         # has no Py_GIL_DISABLED support.
         python: ["cp312", "cp313", "cp314"]
+
+    env:
+      FLPC_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout flpc ${{ env.FLPC_VERSION }}
@@ -112,11 +125,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish flpc ${{ inputs.version || '0.2.5' }}
+    name: Publish flpc ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: flpc-${{ inputs.version || '0.2.5' }}-*-manylinux_riscv64
+      artifact-pattern: flpc-${{ matrix.version }}-*-manylinux_riscv64

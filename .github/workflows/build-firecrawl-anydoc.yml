@@ -9,33 +9,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'firecrawl-anydoc version/tag to build (e.g. 0.2.4)'
-        required: true
-        default: '0.2.4'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/firecrawl-anydoc.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-firecrawl-anydoc.yml'
+      - 'docs/packages/firecrawl-anydoc.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-firecrawl-anydoc.yml'
+      - 'docs/packages/firecrawl-anydoc.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.2.4' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
-env:
-  # `inputs.version` is empty on pull_request events; default to 0.2.4 there.
-  FIRECRAWL_ANYDOC_VERSION: ${{ inputs.version || '0.2.4' }}
-
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: firecrawl-anydoc
+      version: ${{ inputs.version }}
 
   build_wheel:
     needs: [setup]
-    name: Build firecrawl-anydoc ${{ inputs.version || '0.2.4' }} cp310-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build firecrawl-anydoc ${{ matrix.version }} cp310-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
+
+    env:
+      FIRECRAWL_ANYDOC_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout anydoc v${{ env.FIRECRAWL_ANYDOC_VERSION }}
@@ -86,11 +100,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish firecrawl-anydoc ${{ inputs.version || '0.2.4' }}
+    name: Publish firecrawl-anydoc ${{ matrix.version }}
     needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: firecrawl_anydoc-${{ inputs.version || '0.2.4' }}-*-manylinux_riscv64
+      artifact-pattern: firecrawl_anydoc-${{ matrix.version }}-*-manylinux_riscv64

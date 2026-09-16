@@ -10,40 +10,54 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'gevent version to build (git tag, e.g. 26.8.0)'
-        required: true
-        default: '26.8.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/gevent.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-gevent.yml'
+      - 'docs/packages/gevent.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-gevent.yml'
+      - 'docs/packages/gevent.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '26.8.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  GEVENT_VERSION: ${{ inputs.version || '26.8.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: gevent
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build gevent ${{ inputs.version || '26.8.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build gevent ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python:
           # make-manylinux skips free-threaded builds: "The GIL is required".
           - "cp312"
           - "cp313"
           - "cp314"
+
+    env:
+      GEVENT_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout gevent ${{ env.GEVENT_VERSION }}
@@ -128,11 +142,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish gevent ${{ inputs.version || '26.8.0' }}
+    name: Publish gevent ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: gevent-${{ inputs.version || '26.8.0' }}-*-manylinux_riscv64
+      artifact-pattern: gevent-${{ matrix.version }}-*-manylinux_riscv64

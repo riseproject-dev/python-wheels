@@ -8,22 +8,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'onnx version to build (git tag without leading v, e.g. 1.22.0)'
-        required: true
-        default: '1.22.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/onnx.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-onnx.yml'
+      - 'docs/packages/onnx.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-onnx.yml'
+      - 'docs/packages/onnx.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.22.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  ONNX_VERSION: ${{ inputs.version || '1.22.0' }}
   UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
   UV_INDEX_STRATEGY: unsafe-best-match
   UV_ONLY_BINARY: ':all:'
@@ -32,18 +38,26 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: onnx
+      version: ${{ inputs.version }}
 
   build:
     needs: [setup]
-    name: Build onnx ${{ inputs.version || '1.22.0' }} ${{ matrix.build }}
+    if: needs.setup.outputs.versions != '[]'
+    name: Build onnx ${{ matrix.version }} ${{ matrix.build }}
     runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # cp312 wheel is abi3, so only cp314t needs a separate build
         build:
           - "cp312-manylinux_riscv64"
           - "cp314t-manylinux_riscv64"
+
+    env:
+      ONNX_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout onnx v${{ env.ONNX_VERSION }}
@@ -133,11 +147,16 @@ jobs:
           done
 
   publish:
-    name: Publish onnx ${{ inputs.version || '1.22.0' }}
+    name: Publish onnx ${{ matrix.version }}
     needs: [setup, build]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: onnx-${{ inputs.version || '1.22.0' }}-*-manylinux_riscv64
+      artifact-pattern: onnx-${{ matrix.version }}-*-manylinux_riscv64

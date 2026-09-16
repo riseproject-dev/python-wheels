@@ -9,39 +9,53 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pygame version to build (git tag, e.g. 2.6.1)'
-        required: true
-        default: '2.6.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pygame.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pygame.yml'
+      - 'docs/packages/pygame.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pygame.yml'
+      - 'docs/packages/pygame.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.6.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  PYGAME_VERSION: ${{ inputs.version || '2.6.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pygame
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build pygame ${{ inputs.version || '2.6.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pygame ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 600
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Upstream builds no cp314/cp314t wheels for 2.6.1 (predates 3.14; no
         # free-threading support), so the matrix stops at cp313 to match.
         python: ["cp312", "cp313"]
+
+    env:
+      PYGAME_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pygame ${{ env.PYGAME_VERSION }}
@@ -193,8 +207,16 @@ jobs:
 
   gpl_sources:
     needs: [setup]
-    name: Collect GPL sources for pygame ${{ inputs.version || '2.6.1' }}
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources for pygame ${{ matrix.version }}
     runs-on: ubuntu-24.04-riscv
+
+    env:
+      PYGAME_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout python-wheels
@@ -218,13 +240,18 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pygame ${{ inputs.version || '2.6.1' }}
+    name: Publish pygame ${{ matrix.version }}
     needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pygame-${{ inputs.version || '2.6.1' }}-*-manylinux_riscv64
-      gpl-sources-artifact: pygame-${{ inputs.version || '2.6.1' }}-gpl-sources
+      artifact-pattern: pygame-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: pygame-${{ matrix.version }}-gpl-sources
       gpl-sources-description: the copyleft libraries bundled in the wheel

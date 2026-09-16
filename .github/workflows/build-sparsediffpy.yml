@@ -9,41 +9,55 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'sparsediffpy version to build (git tag without the leading v, e.g. 0.3.0)'
-        required: true
-        default: '0.3.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/sparsediffpy.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-sparsediffpy.yml'
+      - 'docs/packages/sparsediffpy.yaml'
+      - 'patches/sparsediffpy/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sparsediffpy.yml'
+      - 'docs/packages/sparsediffpy.yaml'
       - 'patches/sparsediffpy/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.3.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.3.0 there.
-  SPARSEDIFFPY_VERSION: ${{ inputs.version || '0.3.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: sparsediffpy
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build sparsediffpy ${{ inputs.version || '0.3.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build sparsediffpy ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Matches upstream's own build-and-publish.yml matrix (minus cp311, below
         # this repo's numpy>=2.5.0 floor); upstream builds no free-threaded wheel.
         python: ["cp312", "cp313", "cp314"]
+
+    env:
+      SPARSEDIFFPY_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout sparsediffpy v${{ env.SPARSEDIFFPY_VERSION }}
@@ -104,10 +118,18 @@ jobs:
 
   gpl_sources:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     # OpenBLAS is compiled with gfortran, so auditwheel vendors the image's
     # libgfortran into sparsediffpy.libs/.
-    name: Collect GPL sources (gcc) for sparsediffpy ${{ inputs.version || '0.3.0' }}
+    name: Collect GPL sources (gcc) for sparsediffpy ${{ matrix.version }}
     runs-on: ubuntu-24.04-riscv
+
+    env:
+      SPARSEDIFFPY_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Collect gcc source RPM from manylinux_riscv64
@@ -124,13 +146,18 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish sparsediffpy ${{ inputs.version || '0.3.0' }}
+    name: Publish sparsediffpy ${{ matrix.version }}
     needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: sparsediffpy-${{ inputs.version || '0.3.0' }}-*-manylinux_riscv64
-      gpl-sources-artifact: sparsediffpy-${{ inputs.version || '0.3.0' }}-gpl-sources
+      artifact-pattern: sparsediffpy-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: sparsediffpy-${{ matrix.version }}-gpl-sources
       gpl-sources-description: gcc

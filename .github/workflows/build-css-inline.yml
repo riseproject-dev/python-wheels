@@ -9,37 +9,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'css-inline version to build (git tag without the python-v prefix, e.g. 0.21.2)'
-        required: true
-        default: '0.21.2'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/css-inline.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-css-inline.yml'
+      - 'docs/packages/css-inline.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-css-inline.yml'
+      - 'docs/packages/css-inline.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.21.2' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.21.2 there.
-  CSS_INLINE_VERSION: ${{ inputs.version || '0.21.2' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: css-inline
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build css-inline ${{ inputs.version || '0.21.2' }} ${{ matrix.tag }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build css-inline ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           # pyo3's abi3-py310 feature is on unconditionally (bindings/python/Cargo.toml),
           # so one abi3 wheel serves every interpreter it claims. Upstream publishes no
@@ -51,6 +61,9 @@ jobs:
               cp310-manylinux_riscv64 cp311-manylinux_riscv64
               cp312-manylinux_riscv64 cp313-manylinux_riscv64
               cp314-manylinux_riscv64
+
+    env:
+      CSS_INLINE_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout css-inline python-v${{ env.CSS_INLINE_VERSION }}
@@ -104,11 +117,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish css-inline ${{ inputs.version || '0.21.2' }}
+    name: Publish css-inline ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: css-inline-${{ inputs.version || '0.21.2' }}-*-manylinux_riscv64
+      artifact-pattern: css-inline-${{ matrix.version }}-*-manylinux_riscv64

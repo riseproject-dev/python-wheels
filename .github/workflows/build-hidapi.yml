@@ -9,36 +9,50 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'hidapi version to build (git tag, e.g. 0.15.0)'
-        required: true
-        default: '0.15.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/hidapi.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-hidapi.yml'
+      - 'docs/packages/hidapi.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-hidapi.yml'
+      - 'docs/packages/hidapi.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.15.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  HIDAPI_VERSION: ${{ inputs.version || '0.15.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: hidapi
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build hidapi ${{ inputs.version || '0.15.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build hidapi ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      HIDAPI_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout cython-hidapi ${{ env.HIDAPI_VERSION }}
@@ -154,8 +168,16 @@ jobs:
 
   gpl_sources:
     needs: [setup]
-    name: Collect GPL sources for hidapi ${{ inputs.version || '0.15.0' }}
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources for hidapi ${{ matrix.version }}
     runs-on: ubuntu-24.04-riscv
+
+    env:
+      HIDAPI_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout python-wheels
@@ -178,13 +200,18 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish hidapi ${{ inputs.version || '0.15.0' }}
+    name: Publish hidapi ${{ matrix.version }}
     needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: hidapi-${{ inputs.version || '0.15.0' }}-*-manylinux_riscv64
-      gpl-sources-artifact: hidapi-${{ inputs.version || '0.15.0' }}-gpl-sources
+      artifact-pattern: hidapi-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: hidapi-${{ matrix.version }}-gpl-sources
       gpl-sources-description: gcc and the copyleft libraries bundled in the wheel

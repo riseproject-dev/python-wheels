@@ -12,22 +12,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'sdbus version to build (git tag, e.g. 0.14.3)'
-        required: true
-        default: '0.14.3'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/sdbus.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-sdbus.yml'
+      - 'docs/packages/sdbus.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sdbus.yml'
+      - 'docs/packages/sdbus.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.14.3' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  SDBUS_VERSION: ${{ inputs.version || '0.14.3' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   # setup.py only sets Extension(py_limited_api=...); the bdist_wheel floor
   # tag comes from us via --py-limited-api, so we pick our own (RISE's min).
@@ -36,12 +42,23 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: sdbus
+      version: ${{ inputs.version }}
 
   build_abi3:
     needs: [setup]
-    name: Build sdbus ${{ inputs.version || '0.14.3' }} cp312-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build sdbus ${{ matrix.version }} cp312-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
+    env:
+      SDBUS_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout sdbus ${{ env.SDBUS_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -152,9 +169,17 @@ jobs:
 
   build_freethreaded:
     needs: [setup]
-    name: Build sdbus ${{ inputs.version || '0.14.3' }} cp314t-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build sdbus ${{ matrix.version }} cp314t-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
+    env:
+      SDBUS_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout sdbus ${{ env.SDBUS_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -252,8 +277,16 @@ jobs:
 
   gpl_sources:
     needs: [setup]
-    name: Collect GPL sources for sdbus ${{ inputs.version || '0.14.3' }}
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources for sdbus ${{ matrix.version }}
     runs-on: ubuntu-24.04-riscv
+
+    env:
+      SDBUS_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout python-wheels
@@ -276,13 +309,18 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish sdbus ${{ inputs.version || '0.14.3' }}
+    name: Publish sdbus ${{ matrix.version }}
     needs: [setup, build_abi3, build_freethreaded, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: sdbus-${{ inputs.version || '0.14.3' }}-*-manylinux_riscv64
-      gpl-sources-artifact: sdbus-${{ inputs.version || '0.14.3' }}-gpl-sources
+      artifact-pattern: sdbus-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: sdbus-${{ matrix.version }}-gpl-sources
       gpl-sources-description: gcc and the copyleft libraries bundled in the wheel

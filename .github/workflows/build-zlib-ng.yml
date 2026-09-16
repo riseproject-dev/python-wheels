@@ -9,40 +9,53 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'zlib-ng version to build (git tag without the leading v, e.g. 1.0.0)'
-        required: true
-        default: '1.0.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/zlib-ng.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-zlib-ng.yml'
+      - 'docs/packages/zlib-ng.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-zlib-ng.yml'
+      - 'docs/packages/zlib-ng.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.0.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.0.0 there.
-  ZLIB_NG_VERSION: ${{ inputs.version || '1.0.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: zlib-ng
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build zlib-ng ${{ inputs.version || '1.0.0' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build zlib-ng ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
         libc: [manylinux, musllinux]
+
+    env:
+      ZLIB_NG_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout zlib-ng v${{ env.ZLIB_NG_VERSION }}
@@ -88,11 +101,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish zlib-ng ${{ inputs.version || '1.0.0' }}
+    name: Publish zlib-ng ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: zlib-ng-${{ inputs.version || '1.0.0' }}-*riscv64
+      artifact-pattern: zlib-ng-${{ matrix.version }}-*riscv64

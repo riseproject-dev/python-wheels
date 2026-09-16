@@ -17,38 +17,52 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'mujoco version to build (git tag, e.g. 3.12.0)'
-        required: true
-        default: '3.12.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/mujoco.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-mujoco.yml'
+      - 'docs/packages/mujoco.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mujoco.yml'
+      - 'docs/packages/mujoco.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '3.12.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 env:
-  MUJOCO_VERSION: ${{ inputs.version || '3.12.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: mujoco
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build mujoco ${{ inputs.version || '3.12.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build mujoco ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: [cp312-cp312, cp313-cp313, cp314-cp314, cp314-cp314t]
+
+    env:
+      MUJOCO_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout google-deepmind/mujoco ${{ env.MUJOCO_VERSION }}
@@ -197,11 +211,16 @@ jobs:
           MUJOCO_TEST_EOF
 
   publish:
-    name: Publish mujoco ${{ inputs.version || '3.12.0' }}
+    name: Publish mujoco ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: mujoco-${{ inputs.version || '3.12.0' }}-*-manylinux_riscv64
+      artifact-pattern: mujoco-${{ matrix.version }}-*-manylinux_riscv64

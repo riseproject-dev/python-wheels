@@ -9,42 +9,56 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'gensim version to build (git tag, e.g. 4.4.0)'
-        required: true
-        default: '4.4.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/gensim.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-gensim.yml'
+      - 'docs/packages/gensim.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-gensim.yml'
+      - 'docs/packages/gensim.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '4.4.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  GENSIM_VERSION: ${{ inputs.version || '4.4.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: gensim
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build gensim ${{ inputs.version || '4.4.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build gensim ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Per-interpreter (not abi3): the Cython extensions link the version-specific ABI.
         python:
           - "cp312"
           - "cp313"
           - "cp314"
           - "cp314t"
+
+    env:
+      GENSIM_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout gensim ${{ env.GENSIM_VERSION }}
@@ -128,11 +142,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish gensim ${{ inputs.version || '4.4.0' }}
+    name: Publish gensim ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: gensim-${{ inputs.version || '4.4.0' }}-*-manylinux_riscv64
+      artifact-pattern: gensim-${{ matrix.version }}-*-manylinux_riscv64

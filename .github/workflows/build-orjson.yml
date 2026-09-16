@@ -8,43 +8,56 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'orjson version to build (git tag without leading v, e.g. 3.12.0)'
-        required: true
-        default: '3.12.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/orjson.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-orjson.yml'
+      - 'docs/packages/orjson.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-orjson.yml'
+      - 'docs/packages/orjson.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '3.12.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 3.12.0 there.
-  ORJSON_VERSION: ${{ inputs.version || '3.12.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   RUST_TOOLCHAIN: "nightly-2026-08-01"
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: orjson
+      version: ${{ inputs.version }}
 
   manylinux:
     needs: [setup]
-    name: Build orjson ${{ inputs.version || '3.12.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build orjson ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # No freethreaded (3.14t) entry: upstream only builds freethreaded
         # wheels in manylinux_fedora, which forwards the
         # ORJSON_BUILD_FREETHREADED/UNSAFE_PYO3_BUILD_FREE_THREADED env vars
         # into its container automatically. This job's `podman run` only
         # forwards the -e vars listed below, matching manylinux_pypa upstream.
         python: ['python3.12', 'python3.13', 'python3.14']
+
+    env:
+      ORJSON_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout orjson v${{ env.ORJSON_VERSION }}
@@ -86,11 +99,16 @@ jobs:
           compression-level: 0
 
   publish:
-    name: Publish orjson ${{ inputs.version || '3.12.0' }}
+    name: Publish orjson ${{ matrix.version }}
     needs: [setup, manylinux]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: orjson-${{ inputs.version || '3.12.0' }}-*
+      artifact-pattern: orjson-${{ matrix.version }}-*

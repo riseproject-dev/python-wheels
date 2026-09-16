@@ -9,42 +9,55 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'adbc-driver-manager version to build (PyPI version, e.g. 1.12.0)'
-        required: true
-        default: '1.12.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/adbc-driver-manager.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-adbc-driver-manager.yml'
+      - 'docs/packages/adbc-driver-manager.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-adbc-driver-manager.yml'
+      - 'docs/packages/adbc-driver-manager.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.12.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.12.0 there.
-  ADBC_VERSION: ${{ inputs.version || '1.12.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: adbc-driver-manager
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build adbc-driver-manager ${{ inputs.version || '1.12.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build adbc-driver-manager ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python:
           - "cp312"
           - "cp313"
           - "cp314"
           - "cp314t"
+
+    env:
+      ADBC_VERSION: ${{ matrix.version }}
 
     steps:
       # The monorepo has no tag that literally embeds the PyPI version (releases are
@@ -86,11 +99,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish adbc-driver-manager ${{ inputs.version || '1.12.0' }}
+    name: Publish adbc-driver-manager ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: adbc-driver-manager-${{ inputs.version || '1.12.0' }}-*-manylinux_riscv64
+      artifact-pattern: adbc-driver-manager-${{ matrix.version }}-*-manylinux_riscv64

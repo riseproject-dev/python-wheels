@@ -9,40 +9,53 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'vodozemac version to build (git tag, e.g. 0.10.0)'
-        required: true
-        default: '0.10.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/vodozemac.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-vodozemac.yml'
+      - 'docs/packages/vodozemac.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-vodozemac.yml'
+      - 'docs/packages/vodozemac.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.10.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.10.0 there.
-  VODOZEMAC_VERSION: ${{ inputs.version || '0.10.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: vodozemac
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build vodozemac ${{ inputs.version || '0.10.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build vodozemac ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # No abi3 feature on pyo3 in Cargo.toml, so upstream ships one wheel
         # per interpreter (matches PyPI's cp3xx-cp3xx tags).
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      VODOZEMAC_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout vodozemac-python ${{ env.VODOZEMAC_VERSION }}
@@ -79,11 +92,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish vodozemac ${{ inputs.version || '0.10.0' }}
+    name: Publish vodozemac ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: vodozemac-${{ inputs.version || '0.10.0' }}-*-manylinux_riscv64
+      artifact-pattern: vodozemac-${{ matrix.version }}-*-manylinux_riscv64

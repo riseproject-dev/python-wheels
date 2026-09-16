@@ -8,37 +8,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'murmurhash2 version to build (git tag without the leading v, e.g. 0.2.10)'
-        required: true
-        default: '0.2.10'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/murmurhash2.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-murmurhash2.yml'
+      - 'docs/packages/murmurhash2.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-murmurhash2.yml'
+      - 'docs/packages/murmurhash2.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.2.10' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.2.10 there.
-  MURMURHASH2_VERSION: ${{ inputs.version || '0.2.10' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: murmurhash2
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build murmurhash2 ${{ inputs.version || '0.2.10' }} ${{ matrix.tag }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build murmurhash2 ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           # pyo3's abi3-py36 feature is on unconditionally (Cargo.toml), so one
           # abi3 wheel serves every interpreter in our matrix; upstream ships
@@ -50,6 +60,9 @@ jobs:
             build: >-
               cp312-manylinux_riscv64 cp313-manylinux_riscv64
               cp314-manylinux_riscv64
+
+    env:
+      MURMURHASH2_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout murmurhash2-py v${{ env.MURMURHASH2_VERSION }}
@@ -90,11 +103,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish murmurhash2 ${{ inputs.version || '0.2.10' }}
+    name: Publish murmurhash2 ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: murmurhash2-${{ inputs.version || '0.2.10' }}-*-manylinux_riscv64
+      artifact-pattern: murmurhash2-${{ matrix.version }}-*-manylinux_riscv64

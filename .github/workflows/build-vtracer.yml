@@ -9,43 +9,56 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'vtracer version to build (git tag, e.g. 0.6.15)'
-        required: true
-        default: '0.6.15'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/vtracer.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-vtracer.yml'
+      - 'docs/packages/vtracer.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-vtracer.yml'
+      - 'docs/packages/vtracer.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.6.15' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.6.15 there.
-  VTRACER_VERSION: ${{ inputs.version || '0.6.15' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: vtracer
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build vtracer ${{ inputs.version || '0.6.15' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build vtracer ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # pyo3 0.19.2, no abi3 feature, so every interpreter needs its own
         # build. cp314 segfaults on the first string crossing the FFI
         # boundary - this pyo3 predates CPython 3.14's changed Unicode
         # object layout (gotcha 322) - and cp314t is dropped too, since the
         # same pyo3 predates Py_GIL_DISABLED entirely (gotcha 306).
         python: ["cp312", "cp313"]
+
+    env:
+      VTRACER_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout vtracer ${{ env.VTRACER_VERSION }}
@@ -89,11 +102,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish vtracer ${{ inputs.version || '0.6.15' }}
+    name: Publish vtracer ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: vtracer-${{ inputs.version || '0.6.15' }}-*-manylinux_riscv64
+      artifact-pattern: vtracer-${{ matrix.version }}-*-manylinux_riscv64

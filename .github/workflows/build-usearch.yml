@@ -9,37 +9,51 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'usearch version to build (git tag without the leading v, e.g. 2.26.1)'
-        required: true
-        default: '2.26.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/usearch.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-usearch.yml'
+      - 'docs/packages/usearch.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-usearch.yml'
+      - 'docs/packages/usearch.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.26.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  USEARCH_VERSION: ${{ inputs.version || '2.26.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: usearch
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build usearch ${{ inputs.version || '2.26.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build usearch ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      USEARCH_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout usearch v${{ env.USEARCH_VERSION }}
@@ -83,8 +97,16 @@ jobs:
 
   gpl_sources:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     name: Collect GPL sources
     runs-on: ubuntu-24.04-riscv
+    env:
+      USEARCH_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout python-wheels
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -106,13 +128,18 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish usearch ${{ inputs.version || '2.26.1' }}
+    name: Publish usearch ${{ matrix.version }}
     needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: usearch-${{ inputs.version || '2.26.1' }}-*-manylinux_riscv64
-      gpl-sources-artifact: usearch-${{ inputs.version || '2.26.1' }}-gpl-sources
+      artifact-pattern: usearch-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: usearch-${{ matrix.version }}-gpl-sources
       gpl-sources-description: gcc

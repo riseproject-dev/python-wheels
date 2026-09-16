@@ -13,24 +13,30 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'onigurumacffi version to build (git tag without leading v, e.g. 1.5.0)'
-        required: true
-        default: '1.5.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/onigurumacffi.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-onigurumacffi.yml'
+      - 'docs/packages/onigurumacffi.yaml'
+      - 'patches/onigurumacffi/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-onigurumacffi.yml'
+      - 'docs/packages/onigurumacffi.yaml'
       - 'patches/onigurumacffi/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.5.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 1.5.0 there.
-  ONIGURUMACFFI_VERSION: ${{ inputs.version || '1.5.0' }}
   ONIGURUMA_VERSION: 6.9.10
   ONIGURUMA_SHA256: 2a5cfc5ae259e4e97f86b68dfffc152cdaffe94e2060b770cb827238d769fc05
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
@@ -38,15 +44,20 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: onigurumacffi
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build onigurumacffi ${{ inputs.version || '1.5.0' }} ${{ matrix.tag }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build onigurumacffi ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           # setup.py tags the wheel abi3 at the building interpreter's version, so
           # cp312 (our floor) is what reproduces a cp312-abi3 wheel; cibuildwheel
@@ -56,6 +67,9 @@ jobs:
           # setup.py skips the bdist_wheel abi3 override under Py_GIL_DISABLED.
           - tag: cp314t
             build: cp314t-manylinux_riscv64
+
+    env:
+      ONIGURUMACFFI_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout onigurumacffi v${{ env.ONIGURUMACFFI_VERSION }}
@@ -116,11 +130,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish onigurumacffi ${{ inputs.version || '1.5.0' }}
+    name: Publish onigurumacffi ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: onigurumacffi-${{ inputs.version || '1.5.0' }}-*-manylinux_riscv64
+      artifact-pattern: onigurumacffi-${{ matrix.version }}-*-manylinux_riscv64

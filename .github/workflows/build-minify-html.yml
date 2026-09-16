@@ -9,41 +9,54 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'minify-html version to build (git tag, e.g. 0.18.1)'
-        required: true
-        default: '0.18.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/minify-html.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-minify-html.yml'
+      - 'docs/packages/minify-html.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-minify-html.yml'
+      - 'docs/packages/minify-html.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.18.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.18.1 there.
-  MINIFY_HTML_VERSION: ${{ inputs.version || '0.18.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: minify-html
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build minify-html ${{ inputs.version || '0.18.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build minify-html ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # minify-html-python's Cargo.toml carries no abi3 feature, so upstream
         # publishes one wheel per interpreter (cp38-cp314) and no free-threaded
         # build; cp312+ follows the repo's default floor.
         python: ["cp312", "cp313", "cp314"]
+
+    env:
+      MINIFY_HTML_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout minify-html v${{ env.MINIFY_HTML_VERSION }}
@@ -105,11 +118,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish minify-html ${{ inputs.version || '0.18.1' }}
+    name: Publish minify-html ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: minify-html-${{ inputs.version || '0.18.1' }}-*-manylinux_riscv64
+      artifact-pattern: minify-html-${{ matrix.version }}-*-manylinux_riscv64

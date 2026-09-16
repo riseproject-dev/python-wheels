@@ -9,37 +9,51 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'connectorx version to build (git tag without leading v, e.g. 0.4.5)'
-        required: true
-        default: '0.4.5'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/connectorx.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-connectorx.yml'
+      - 'docs/packages/connectorx.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-connectorx.yml'
+      - 'docs/packages/connectorx.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.4.5' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  CONNECTORX_VERSION: ${{ inputs.version || '0.4.5' }}
   CARGO_BUILD_JOBS: '2'
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: connectorx
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build connectorx ${{ inputs.version || '0.4.5' }} ${{ matrix.python-version }}-riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build connectorx ${{ matrix.version }} ${{ matrix.python-version }}-riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 1440
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python-version: ['3.12', '3.13', '3.14']
+
+    env:
+      CONNECTORX_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout connector-x v${{ env.CONNECTORX_VERSION }}
@@ -90,11 +104,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish connectorx ${{ inputs.version || '0.4.5' }}
+    name: Publish connectorx ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: connectorx-${{ inputs.version || '0.4.5' }}-*-riscv64
+      artifact-pattern: connectorx-${{ matrix.version }}-*-riscv64

@@ -10,36 +10,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'crcmod-plus version/tag to build (e.g. 2.3.1)'
-        required: true
-        default: '2.3.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/crcmod-plus.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-crcmod-plus.yml'
+      - 'docs/packages/crcmod-plus.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-crcmod-plus.yml'
+      - 'docs/packages/crcmod-plus.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.3.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  CRCMOD_PLUS_VERSION: ${{ inputs.version || '2.3.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: crcmod-plus
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build crcmod-plus ${{ inputs.version || '2.3.1' }} ${{ matrix.tag }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build crcmod-plus ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           # setup.py tags every non-free-threaded CPython wheel cp311-abi3, so
           # one build serves them all; the free-threaded build cannot use the
@@ -55,6 +66,9 @@ jobs:
               cp313-manylinux_riscv64 cp314-manylinux_riscv64
           - tag: cp314t
             build: cp314t-manylinux_riscv64
+
+    env:
+      CRCMOD_PLUS_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout crcmod-plus ${{ env.CRCMOD_PLUS_VERSION }}
@@ -90,11 +104,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish crcmod-plus ${{ inputs.version || '2.3.1' }}
+    name: Publish crcmod-plus ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: crcmod-plus-${{ inputs.version || '2.3.1' }}-*-manylinux_riscv64
+      artifact-pattern: crcmod-plus-${{ matrix.version }}-*-manylinux_riscv64

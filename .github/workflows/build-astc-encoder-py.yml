@@ -10,23 +10,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'astc-encoder-py version to build (e.g. 0.1.12)'
-        required: true
-        default: '0.1.12'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/astc-encoder-py.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-astc-encoder-py.yml'
+      - 'docs/packages/astc-encoder-py.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-astc-encoder-py.yml'
+      - 'docs/packages/astc-encoder-py.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.1.12' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.1.12 there.
-  ASTC_ENCODER_PY_VERSION: ${{ inputs.version || '0.1.12' }}
   # Upstream cuts releases without git tags, so pin the release commit: this is
   # "chore(release): bump 0.1.12", whose tree is byte-identical to the 0.1.12
   # PyPI sdist (checked against src/, setup.py, pyproject.toml, and the pinned
@@ -38,15 +43,20 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: astc-encoder-py
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build astc-encoder-py ${{ inputs.version || '0.1.12' }} cp312-abi3-${{ matrix.libc }}_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build astc-encoder-py ${{ matrix.version }} cp312-abi3-${{ matrix.libc }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # setup.py's bdist_wheel_abi3 hardcodes the cp37-abi3 tag on every
         # CPython build (no Py_GIL_DISABLED guard), so one build per libc
         # covers cp312/cp313/cp314 via find_compatible_wheel; cp314t is
@@ -82,6 +92,9 @@ jobs:
               assert len(decomp.data) == w * h * 4, len(decomp.data);
               print('astc_encoder OK: compressed', len(comp), 'decompressed', len(decomp.data))"
 
+    env:
+      ASTC_ENCODER_PY_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout astc-encoder-py ${{ env.ASTC_ENCODER_PY_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -114,11 +127,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish astc-encoder-py ${{ inputs.version || '0.1.12' }}
+    name: Publish astc-encoder-py ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: astc-encoder-py-${{ inputs.version || '0.1.12' }}-*riscv64
+      artifact-pattern: astc-encoder-py-${{ matrix.version }}-*riscv64

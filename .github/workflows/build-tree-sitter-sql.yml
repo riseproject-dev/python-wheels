@@ -9,39 +9,56 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'tree-sitter-sql version to build (git tag without leading v, e.g. 0.3.11)'
-        required: true
-        default: '0.3.11'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/tree-sitter-sql.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-tree-sitter-sql.yml'
+      - 'docs/packages/tree-sitter-sql.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tree-sitter-sql.yml'
+      - 'docs/packages/tree-sitter-sql.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.3.11' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  TREE_SITTER_SQL_VERSION: ${{ inputs.version || '0.3.11' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: tree-sitter-sql
+      version: ${{ inputs.version }}
 
   generate_parser:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     # derekstride/tree-sitter-sql does not commit the generated src/parser.c at its
     # release tags (only src/scanner.c). Upstream's own publish.yml regenerates it via
     # `tree-sitter generate` before building, so we do the same here, once on x86
     # (generation is architecture-independent and the CLI has no riscv64 build),
     # then hand the completed checkout to the riscv64 job as a tarball.
-    name: Generate tree-sitter-sql ${{ inputs.version || '0.3.11' }} parser
+    name: Generate tree-sitter-sql ${{ matrix.version }} parser
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      TREE_SITTER_SQL_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout tree-sitter-sql v${{ env.TREE_SITTER_SQL_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -69,9 +86,17 @@ jobs:
 
   build_wheels:
     needs: [setup, generate_parser]
-    name: Build tree-sitter-sql ${{ inputs.version || '0.3.11' }} cp310-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build tree-sitter-sql ${{ matrix.version }} cp310-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
+
+    env:
+      TREE_SITTER_SQL_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Download checkout artifact
@@ -98,11 +123,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish tree-sitter-sql ${{ inputs.version || '0.3.11' }}
+    name: Publish tree-sitter-sql ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: tree-sitter-sql-${{ inputs.version || '0.3.11' }}-*-manylinux_riscv64
+      artifact-pattern: tree-sitter-sql-${{ matrix.version }}-*-manylinux_riscv64

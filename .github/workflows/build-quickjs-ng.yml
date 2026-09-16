@@ -9,43 +9,56 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'quickjs-ng version to build (git tag without leading v, e.g. 0.16.2.1)'
-        required: true
-        default: '0.16.2.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/quickjs-ng.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-quickjs-ng.yml'
+      - 'docs/packages/quickjs-ng.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-quickjs-ng.yml'
+      - 'docs/packages/quickjs-ng.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.16.2.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.16.2.1 there.
-  QUICKJS_NG_VERSION: ${{ inputs.version || '0.16.2.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: quickjs-ng
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build quickjs-ng ${{ inputs.version || '0.16.2.1' }} cp310-abi3-${{ matrix.libc }}_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build quickjs-ng ${{ matrix.version }} cp310-abi3-${{ matrix.libc }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # abi3 (pyproject.toml: [tool.distutils.bdist_wheel] py_limited_api =
         # "cp310"), so the single cp310 build (the abi3 floor, gotcha 96) is
         # loadable on every newer CPython; pyproject.toml's [tool.cibuildwheel]
         # skips cp*t-* so there is no free-threaded build.
         libc: [manylinux, musllinux]
+
+    env:
+      QUICKJS_NG_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout quickjs-ng v${{ env.QUICKJS_NG_VERSION }}
@@ -104,11 +117,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish quickjs-ng ${{ inputs.version || '0.16.2.1' }}
+    name: Publish quickjs-ng ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: quickjs-ng-${{ inputs.version || '0.16.2.1' }}-*riscv64
+      artifact-pattern: quickjs-ng-${{ matrix.version }}-*riscv64

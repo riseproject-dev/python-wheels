@@ -9,34 +9,50 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'fast-histogram version to build (git tag without the leading v, e.g. 0.14)'
-        required: true
-        default: '0.14'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/fast-histogram.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-fast-histogram.yml'
+      - 'docs/packages/fast-histogram.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fast-histogram.yml'
+      - 'docs/packages/fast-histogram.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.14' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.14 there.
-  FAST_HISTOGRAM_VERSION: ${{ inputs.version || '0.14' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: fast-histogram
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build fast-histogram ${{ inputs.version || '0.14' }} cp39-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build fast-histogram ${{ matrix.version }} cp39-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
+
+    env:
+      FAST_HISTOGRAM_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout fast-histogram v${{ env.FAST_HISTOGRAM_VERSION }}
@@ -92,11 +108,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish fast-histogram ${{ inputs.version || '0.14' }}
+    name: Publish fast-histogram ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: fast-histogram-${{ inputs.version || '0.14' }}-*-manylinux_riscv64
+      artifact-pattern: fast-histogram-${{ matrix.version }}-*-manylinux_riscv64

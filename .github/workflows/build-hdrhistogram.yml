@@ -9,43 +9,57 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'hdrhistogram version to build (git tag, e.g. 0.10.7)'
-        required: true
-        default: '0.10.7'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/hdrhistogram.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-hdrhistogram.yml'
+      - 'docs/packages/hdrhistogram.yaml'
+      - 'patches/hdrhistogram/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-hdrhistogram.yml'
+      - 'docs/packages/hdrhistogram.yaml'
       - 'patches/hdrhistogram/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.10.7' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.10.7 there.
-  HDRHISTOGRAM_VERSION: ${{ inputs.version || '0.10.7' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: hdrhistogram
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build hdrhistogram ${{ inputs.version || '0.10.7' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build hdrhistogram ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Matches upstream's own CIBW_BUILD/CIBW_SKIP: cp310-cp314, free-threaded
         # skipped because the C extension is not validated for that ABI.
         python: ["cp310", "cp311", "cp312", "cp313", "cp314"]
         libc: [manylinux, musllinux]
+
+    env:
+      HDRHISTOGRAM_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout HdrHistogram_py ${{ env.HDRHISTOGRAM_VERSION }}
@@ -100,11 +114,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish hdrhistogram ${{ inputs.version || '0.10.7' }}
+    name: Publish hdrhistogram ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: hdrhistogram-${{ inputs.version || '0.10.7' }}-*riscv64
+      artifact-pattern: hdrhistogram-${{ matrix.version }}-*riscv64

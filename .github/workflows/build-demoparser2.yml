@@ -9,37 +9,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'demoparser2 version to build (git tag without leading v, e.g. 0.42.0)'
-        required: true
-        default: '0.42.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/demoparser2.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-demoparser2.yml'
+      - 'docs/packages/demoparser2.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-demoparser2.yml'
+      - 'docs/packages/demoparser2.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.42.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.42.0 there.
-  DEMOPARSER2_VERSION: ${{ inputs.version || '0.42.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: demoparser2
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build demoparser2 ${{ inputs.version || '0.42.0' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build demoparser2 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # demoparser2's pyo3 dependency has a plain `features = ["extension-module",
         # "generate-import-lib"]` (no abi3-pyNN), so every interpreter needs its own build.
         python: ["cp312", "cp313", "cp314", "cp314t"]
@@ -50,6 +60,9 @@ jobs:
           # so the wheel builds fine but the test phase must be skipped here.
           - python: "cp314t"
             test_skip: "*"
+
+    env:
+      DEMOPARSER2_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout demoparser2 v${{ env.DEMOPARSER2_VERSION }}
@@ -121,11 +134,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish demoparser2 ${{ inputs.version || '0.42.0' }}
+    name: Publish demoparser2 ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: demoparser2-${{ inputs.version || '0.42.0' }}-*-manylinux_riscv64
+      artifact-pattern: demoparser2-${{ matrix.version }}-*-manylinux_riscv64

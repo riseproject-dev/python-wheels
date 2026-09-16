@@ -9,37 +9,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'hdbscan version to build (e.g. 0.8.44)'
-        required: true
-        default: '0.8.44'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/hdbscan.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-hdbscan.yml'
+      - 'docs/packages/hdbscan.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-hdbscan.yml'
+      - 'docs/packages/hdbscan.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.8.44' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.8.44 there.
-  HDBSCAN_VERSION: ${{ inputs.version || '0.8.44' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: hdbscan
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build hdbscan ${{ inputs.version || '0.8.44' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build hdbscan ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Per-interpreter (not abi3): the Cython extensions link the version-specific ABI.
         # cp310/cp311 dropped from upstream's cp310-cp314 (gotcha 67/84): hdbscan's hard
         # runtime dependency scikit-learn>=1.6 only has riscv64 wheels on
@@ -50,6 +60,9 @@ jobs:
           - "cp313"
           - "cp314"
           - "cp314t"
+
+    env:
+      HDBSCAN_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout hdbscan ${{ env.HDBSCAN_VERSION }}
@@ -84,11 +97,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish hdbscan ${{ inputs.version || '0.8.44' }}
+    name: Publish hdbscan ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: hdbscan-${{ inputs.version || '0.8.44' }}-*-manylinux_riscv64
+      artifact-pattern: hdbscan-${{ matrix.version }}-*-manylinux_riscv64

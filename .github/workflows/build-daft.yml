@@ -9,23 +9,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'daft version to build (git tag without the leading v, e.g. 0.7.24)'
-        required: true
-        default: '0.7.24'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/daft.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-daft.yml'
+      - 'docs/packages/daft.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-daft.yml'
+      - 'docs/packages/daft.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.7.24' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.7.24 there.
-  DAFT_VERSION: ${{ inputs.version || '0.7.24' }}
   CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
   RUSTUP_MAX_RETRIES: 10
@@ -36,12 +41,23 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: daft
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build daft ${{ inputs.version || '0.7.24' }} cp310-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build daft ${{ matrix.version }} cp310-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 1440
+
+    env:
+      DAFT_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout Daft v${{ env.DAFT_VERSION }}
@@ -150,11 +166,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish daft ${{ inputs.version || '0.7.24' }}
+    name: Publish daft ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: daft-${{ inputs.version || '0.7.24' }}-*-manylinux_riscv64
+      artifact-pattern: daft-${{ matrix.version }}-*-manylinux_riscv64

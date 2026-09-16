@@ -15,41 +15,55 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'mpi4py version to build (git tag, e.g. 4.1.2)'
-        required: true
-        default: '4.1.2'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/mpi4py.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-mpi4py.yml'
+      - 'docs/packages/mpi4py.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mpi4py.yml'
+      - 'docs/packages/mpi4py.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '4.1.2' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  MPI4PY_VERSION: ${{ inputs.version || '4.1.2' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: mpi4py
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build mpi4py ${{ inputs.version || '4.1.2' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build mpi4py ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python:
           - "cp312"
           - "cp313"
           - "cp314"
           - "cp314t"
+
+    env:
+      MPI4PY_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout mpi4py ${{ env.MPI4PY_VERSION }}
@@ -134,11 +148,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish mpi4py ${{ inputs.version || '4.1.2' }}
+    name: Publish mpi4py ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: mpi4py-${{ inputs.version || '4.1.2' }}-*-manylinux_riscv64
+      artifact-pattern: mpi4py-${{ matrix.version }}-*-manylinux_riscv64

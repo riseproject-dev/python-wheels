@@ -9,22 +9,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'lru-dict version to build (e.g. 1.4.1)'
-        required: true
-        default: '1.4.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/lru-dict.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-lru-dict.yml'
+      - 'docs/packages/lru-dict.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-lru-dict.yml'
+      - 'docs/packages/lru-dict.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.4.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  LRU_DICT_VERSION: ${{ inputs.version || '1.4.1' }}
   # 1.4.1 was released to PyPI without a git tag; pin the commit that bumped
   # pyproject.toml's version to 1.4.1, byte-identical to the PyPI sdist
   # (gotcha 103). Update alongside LRU_DICT_VERSION.
@@ -34,16 +40,24 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: lru-dict
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build lru-dict ${{ inputs.version || '1.4.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build lru-dict ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      LRU_DICT_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout lru-dict ${{ env.LRU_DICT_VERSION }}
@@ -77,11 +91,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish lru-dict ${{ inputs.version || '1.4.1' }}
+    name: Publish lru-dict ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: lru-dict-${{ inputs.version || '1.4.1' }}-*-manylinux_riscv64
+      artifact-pattern: lru-dict-${{ matrix.version }}-*-manylinux_riscv64

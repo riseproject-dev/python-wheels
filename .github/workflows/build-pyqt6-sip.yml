@@ -10,39 +10,53 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'PyQt6-sip version to build (e.g. 13.12.0)'
-        required: true
-        default: '13.12.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyqt6-sip.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pyqt6-sip.yml'
+      - 'docs/packages/pyqt6-sip.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyqt6-sip.yml'
+      - 'docs/packages/pyqt6-sip.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '13.12.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  PYQT6_SIP_VERSION: ${{ inputs.version || '13.12.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyqt6-sip
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build pyqt6-sip ${{ inputs.version || '13.12.0' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyqt6-sip ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp310", "cp311", "cp312", "cp313", "cp314"]
         libc: [manylinux, musllinux]
+
+    env:
+      PYQT6_SIP_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Fetch PyQt6-sip ${{ env.PYQT6_SIP_VERSION }} sdist
@@ -107,11 +121,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pyqt6-sip ${{ inputs.version || '13.12.0' }}
+    name: Publish pyqt6-sip ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pyqt6-sip-${{ inputs.version || '13.12.0' }}-*riscv64
+      artifact-pattern: pyqt6-sip-${{ matrix.version }}-*riscv64

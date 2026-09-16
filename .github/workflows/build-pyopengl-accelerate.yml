@@ -8,38 +8,51 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pyopengl-accelerate version to build (git tag, e.g. 3.1.10)'
-        required: true
-        default: '3.1.10'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyopengl-accelerate.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pyopengl-accelerate.yml'
+      - 'docs/packages/pyopengl-accelerate.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyopengl-accelerate.yml'
+      - 'docs/packages/pyopengl-accelerate.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '3.1.10' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 3.1.10 there.
-  PYOPENGL_ACCELERATE_VERSION: ${{ inputs.version || '3.1.10' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyopengl-accelerate
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build pyopengl-accelerate ${{ inputs.version || '3.1.10' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyopengl-accelerate ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      PYOPENGL_ACCELERATE_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pyopengl ${{ env.PYOPENGL_ACCELERATE_VERSION }}
@@ -106,11 +119,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pyopengl-accelerate ${{ inputs.version || '3.1.10' }}
+    name: Publish pyopengl-accelerate ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pyopengl-accelerate-${{ inputs.version || '3.1.10' }}-*riscv64
+      artifact-pattern: pyopengl-accelerate-${{ matrix.version }}-*riscv64

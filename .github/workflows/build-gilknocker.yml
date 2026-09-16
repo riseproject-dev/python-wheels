@@ -9,42 +9,55 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'gilknocker version to build (git tag without leading v, e.g. 0.4.2)'
-        required: true
-        default: '0.4.2'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/gilknocker.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-gilknocker.yml'
+      - 'docs/packages/gilknocker.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-gilknocker.yml'
+      - 'docs/packages/gilknocker.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.4.2' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.4.2 there.
-  GILKNOCKER_VERSION: ${{ inputs.version || '0.4.2' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: gilknocker
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build gilknocker ${{ inputs.version || '0.4.2' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build gilknocker ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # gilknocker pins pyo3 to a pre-PEP-703 git rev (0.19.2, no abi3
         # feature) with no Py_GIL_DISABLED handling at all, and upstream itself
         # ships no cp313t/cp314t wheels for 0.4.2 - cp314t is dropped outright,
         # same reasoning as the murmurhash2 case (gotcha 306), not just untested.
         python: ["cp312", "cp313", "cp314"]
+
+    env:
+      GILKNOCKER_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout gilknocker v${{ env.GILKNOCKER_VERSION }}
@@ -99,11 +112,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish gilknocker ${{ inputs.version || '0.4.2' }}
+    name: Publish gilknocker ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: gilknocker-${{ inputs.version || '0.4.2' }}-*-manylinux_riscv64
+      artifact-pattern: gilknocker-${{ matrix.version }}-*-manylinux_riscv64

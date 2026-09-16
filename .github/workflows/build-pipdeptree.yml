@@ -11,42 +11,55 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pipdeptree version/tag to build (e.g. 4.2.2)'
-        required: true
-        default: '4.2.2'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pipdeptree.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pipdeptree.yml'
+      - 'docs/packages/pipdeptree.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pipdeptree.yml'
+      - 'docs/packages/pipdeptree.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '4.2.2' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 4.2.2 there.
-  PIPDEPTREE_VERSION: ${{ inputs.version || '4.2.2' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pipdeptree
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build pipdeptree ${{ inputs.version || '4.2.2' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pipdeptree ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # cp310 picks up pyproject.toml's own cp310-* cibuildwheel override, which turns on
         # the limited API, so this one wheel is reused+tested on every GIL cp3.10+ interpreter.
         # cp314t/cp315t can't use the limited API, so each takes a wheel of its own; the image
         # has no cp313t (gotcha 11), but upstream doesn't publish a cp313t wheel either.
         python: ["cp310", "cp314t", "cp315t"]
+
+    env:
+      PIPDEPTREE_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pipdeptree ${{ env.PIPDEPTREE_VERSION }}
@@ -90,11 +103,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pipdeptree ${{ inputs.version || '4.2.2' }}
+    name: Publish pipdeptree ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pipdeptree-${{ inputs.version || '4.2.2' }}-*-manylinux_riscv64
+      artifact-pattern: pipdeptree-${{ matrix.version }}-*-manylinux_riscv64

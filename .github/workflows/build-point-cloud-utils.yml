@@ -9,48 +9,65 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'point-cloud-utils git tag to build (e.g. v0.34)'
-        required: true
-        default: 'v0.34'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/point-cloud-utils.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-point-cloud-utils.yml'
+      - 'docs/packages/point-cloud-utils.yaml'
+      - 'patches/point-cloud-utils/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-point-cloud-utils.yml'
+      - 'docs/packages/point-cloud-utils.yaml'
       - 'patches/point-cloud-utils/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || 'v0.34' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  POINT_CLOUD_UTILS_TAG: ${{ inputs.version || 'v0.34' }}
-  # v0.34's setup.py hardcodes version="0.34.0"; the git tag itself doesn't
-  # carry the patch component.
-  POINT_CLOUD_UTILS_VERSION: '0.34.0'
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: point-cloud-utils
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build point-cloud-utils ${{ inputs.version || 'v0.34' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build point-cloud-utils ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: [cp312, cp313, cp314, cp314t]
 
+    env:
+      POINT_CLOUD_UTILS_VERSION: ${{ matrix.version }}
+
     steps:
-      - name: Checkout point-cloud-utils ${{ env.POINT_CLOUD_UTILS_TAG }}
+      # setup.py hardcodes version="0.34.0" while the git tag is v0.34: the
+      # tag carries no patch component.
+      - id: tag
+        run: echo "ref=v${POINT_CLOUD_UTILS_VERSION%.0}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout point-cloud-utils ${{ steps.tag.outputs.ref }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: fwilliams/point-cloud-utils
-          ref: ${{ env.POINT_CLOUD_UTILS_TAG }}
+          ref: ${{ steps.tag.outputs.ref }}
           persist-credentials: false
 
       - name: Checkout python-wheels
@@ -140,8 +157,16 @@ jobs:
 
   gpl_sources:
     needs: [setup]
-    name: Collect GPL sources (gcc) for point-cloud-utils ${{ inputs.version || 'v0.34' }}
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources (gcc) for point-cloud-utils ${{ matrix.version }}
     runs-on: ubuntu-24.04-riscv
+    env:
+      POINT_CLOUD_UTILS_VERSION: ${{ matrix.version }}
+
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -163,6 +188,11 @@ jobs:
   publish:
     name: Publish point-cloud-utils 0.34.0
     needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write

@@ -9,22 +9,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'cityhash version to build (e.g. 0.4.10)'
-        required: true
-        default: '0.4.10'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cityhash.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-cityhash.yml'
+      - 'docs/packages/cityhash.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cityhash.yml'
+      - 'docs/packages/cityhash.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.4.10' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  CITYHASH_VERSION: ${{ inputs.version || '0.4.10' }}
   # Upstream cuts the 0.4.10 release without pushing a git tag; this commit's
   # setup.py already reads VERSION = "0.4.10" and its tree is byte-identical
   # to the released sdist. Update alongside CITYHASH_VERSION once a later
@@ -35,16 +41,24 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: cityhash
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build cityhash ${{ inputs.version || '0.4.10' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cityhash ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      CITYHASH_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout cityhash ${{ env.CITYHASH_REF }}
@@ -69,11 +83,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish cityhash ${{ inputs.version || '0.4.10' }}
+    name: Publish cityhash ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: cityhash-${{ inputs.version || '0.4.10' }}-*-manylinux_riscv64
+      artifact-pattern: cityhash-${{ matrix.version }}-*-manylinux_riscv64

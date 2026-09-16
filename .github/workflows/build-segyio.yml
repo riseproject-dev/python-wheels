@@ -8,37 +8,51 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'segyio version to build (git tag without leading v, e.g. 1.9.14)'
-        required: true
-        default: '1.9.14'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/segyio.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-segyio.yml'
+      - 'docs/packages/segyio.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-segyio.yml'
+      - 'docs/packages/segyio.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.9.14' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  SEGYIO_VERSION: ${{ inputs.version || '1.9.14' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: segyio
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build segyio ${{ inputs.version || '1.9.14' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build segyio ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      SEGYIO_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout segyio v${{ env.SEGYIO_VERSION }}
@@ -84,11 +98,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish segyio ${{ inputs.version || '1.9.14' }}
+    name: Publish segyio ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: segyio-${{ inputs.version || '1.9.14' }}-*-manylinux_riscv64
+      artifact-pattern: segyio-${{ matrix.version }}-*-manylinux_riscv64

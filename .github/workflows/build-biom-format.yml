@@ -8,37 +8,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'biom-format version to build (git tag, e.g. 2.1.17)'
-        required: true
-        default: '2.1.17'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/biom-format.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-biom-format.yml'
+      - 'docs/packages/biom-format.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-biom-format.yml'
+      - 'docs/packages/biom-format.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.1.17' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 2.1.17 there.
-  BIOM_FORMAT_VERSION: ${{ inputs.version || '2.1.17' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: biom-format
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build biom-format ${{ inputs.version || '2.1.17' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build biom-format ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
         include:
           # pandas (a hard runtime requirement) publishes no cp314t wheel on
@@ -46,6 +56,9 @@ jobs:
           # be installed for testing under cp314t; skip only the test phase.
           - python: "cp314t"
             test_skip: "*"
+
+    env:
+      BIOM_FORMAT_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout biom-format ${{ env.BIOM_FORMAT_VERSION }}
@@ -88,11 +101,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish biom-format ${{ inputs.version || '2.1.17' }}
+    name: Publish biom-format ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: biom-format-${{ inputs.version || '2.1.17' }}-*-manylinux_riscv64
+      artifact-pattern: biom-format-${{ matrix.version }}-*-manylinux_riscv64

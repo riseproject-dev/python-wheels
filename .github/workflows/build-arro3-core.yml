@@ -9,37 +9,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'arro3-core version to build (git tag without the leading py-v, e.g. 0.8.1)'
-        required: true
-        default: '0.8.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/arro3-core.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-arro3-core.yml'
+      - 'docs/packages/arro3-core.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-arro3-core.yml'
+      - 'docs/packages/arro3-core.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.8.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.8.1 there.
-  ARRO3_CORE_VERSION: ${{ inputs.version || '0.8.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: arro3-core
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build arro3-core ${{ inputs.version || '0.8.1' }} ${{ matrix.tag }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build arro3-core ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           # Upstream builds one abi3 wheel with `-i 3.11 --features abi3-py311`
           # plus per-interpreter wheels for the free-threaded builds. cp313t is
@@ -54,6 +64,9 @@ jobs:
           - tag: cp314t
             build: cp314t-manylinux_riscv64
             features: --features extension-module
+
+    env:
+      ARRO3_CORE_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout arro3 py-v${{ env.ARRO3_CORE_VERSION }}
@@ -302,11 +315,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish arro3-core ${{ inputs.version || '0.8.1' }}
+    name: Publish arro3-core ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: arro3-core-${{ inputs.version || '0.8.1' }}-*-manylinux_riscv64
+      artifact-pattern: arro3-core-${{ matrix.version }}-*-manylinux_riscv64

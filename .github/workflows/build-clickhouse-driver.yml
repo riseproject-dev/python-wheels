@@ -9,36 +9,50 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'clickhouse-driver version to build (git tag, e.g. 0.2.11)'
-        required: true
-        default: '0.2.11'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/clickhouse-driver.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-clickhouse-driver.yml'
+      - 'docs/packages/clickhouse-driver.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-clickhouse-driver.yml'
+      - 'docs/packages/clickhouse-driver.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.2.11' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  CLICKHOUSE_DRIVER_VERSION: ${{ inputs.version || '0.2.11' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: clickhouse-driver
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build clickhouse-driver ${{ inputs.version || '0.2.11' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build clickhouse-driver ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      CLICKHOUSE_DRIVER_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout clickhouse-driver ${{ env.CLICKHOUSE_DRIVER_VERSION }}
@@ -95,11 +109,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish clickhouse-driver ${{ inputs.version || '0.2.11' }}
+    name: Publish clickhouse-driver ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: clickhouse-driver-${{ inputs.version || '0.2.11' }}-*-manylinux_riscv64
+      artifact-pattern: clickhouse-driver-${{ matrix.version }}-*-manylinux_riscv64

@@ -8,38 +8,49 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'gmpy2 version to build (git tag without leading v, e.g. 2.3.1)'
-        required: true
-        default: '2.3.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/gmpy2.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-gmpy2.yml'
+      - 'docs/packages/gmpy2.yaml'
+      - 'patches/gmpy2/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-gmpy2.yml'
+      - 'docs/packages/gmpy2.yaml'
       - 'patches/gmpy2/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.3.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 2.3.1 there.
-  GMPY2_VERSION: ${{ inputs.version || '2.3.1' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: gmpy2
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build gmpy2 ${{ inputs.version || '2.3.1' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build gmpy2 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
         include:
           # Cython, a hard test-only requirement (test-extras builds and imports
@@ -52,6 +63,9 @@ jobs:
         # musllinux riscv64 wheel on PyPI or our registry, so CIBW_TEST_EXTRAS
         # cannot resolve in a musl venv (same reasoning as the tree-sitter-*
         # family dropping musllinux for its own test dependency).
+
+    env:
+      GMPY2_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout gmpy2 v${{ env.GMPY2_VERSION }}
@@ -110,11 +124,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish gmpy2 ${{ inputs.version || '2.3.1' }}
+    name: Publish gmpy2 ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: gmpy2-${{ inputs.version || '2.3.1' }}-*-manylinux_riscv64
+      artifact-pattern: gmpy2-${{ matrix.version }}-*-manylinux_riscv64

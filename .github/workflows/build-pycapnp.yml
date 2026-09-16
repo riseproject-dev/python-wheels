@@ -9,40 +9,53 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pycapnp version to build (git tag, e.g. 2.2.4)'
-        required: true
-        default: '2.2.4'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pycapnp.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pycapnp.yml'
+      - 'docs/packages/pycapnp.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pycapnp.yml'
+      - 'docs/packages/pycapnp.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '2.2.4' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 2.2.4 there.
-  PYCAPNP_VERSION: ${{ inputs.version || '2.2.4' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pycapnp
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build pycapnp ${{ inputs.version || '2.2.4' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pycapnp ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
         libc: [manylinux, musllinux]
+
+    env:
+      PYCAPNP_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pycapnp v${{ env.PYCAPNP_VERSION }}
@@ -102,11 +115,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pycapnp ${{ inputs.version || '2.2.4' }}
+    name: Publish pycapnp ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pycapnp-${{ inputs.version || '2.2.4' }}-*riscv64
+      artifact-pattern: pycapnp-${{ matrix.version }}-*riscv64

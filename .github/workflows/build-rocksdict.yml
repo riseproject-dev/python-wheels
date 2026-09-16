@@ -8,23 +8,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'rocksdict version to build (git tag without leading v, e.g. 0.3.29)'
-        required: true
-        default: '0.3.29'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/rocksdict.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-rocksdict.yml'
+      - 'docs/packages/rocksdict.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-rocksdict.yml'
+      - 'docs/packages/rocksdict.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.3.29' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 0.3.29 there.
-  ROCKSDICT_VERSION: ${{ inputs.version || '0.3.29' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
@@ -33,19 +38,27 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: rocksdict
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build rocksdict ${{ inputs.version || '0.3.29' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build rocksdict ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 1440
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # pyo3 carries no abi3 feature here, so upstream ships one cp3x-cp3x
         # wheel per interpreter (like build-fastuuid.yml) - repo-standard set.
         # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      ROCKSDICT_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout rocksdict v${{ env.ROCKSDICT_VERSION }}
@@ -101,11 +114,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish rocksdict ${{ inputs.version || '0.3.29' }}
+    name: Publish rocksdict ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: rocksdict-${{ inputs.version || '0.3.29' }}-*-manylinux_riscv64
+      artifact-pattern: rocksdict-${{ matrix.version }}-*-manylinux_riscv64

@@ -12,22 +12,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'xgboost version to build (git tag, e.g. v3.4.1)'
-        required: true
-        default: 'v3.4.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/xgboost-cpu.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-xgboost-cpu.yml'
+      - 'docs/packages/xgboost-cpu.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-xgboost-cpu.yml'
+      - 'docs/packages/xgboost-cpu.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || 'v3.4.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  XGBOOST_VERSION: ${{ inputs.version || 'v3.4.1' }}
   # Pinned explicitly so the gpl_sources job pulls the same image the wheel's
   # vendored libgomp came from.
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
@@ -35,19 +41,30 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: xgboost-cpu
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build xgboost-cpu ${{ inputs.version || 'v3.4.1' }} py3-none-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build xgboost-cpu ${{ matrix.version }} py3-none-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
+
+    env:
+      XGBOOST_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout xgboost ${{ env.XGBOOST_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: dmlc/xgboost
-          ref: ${{ env.XGBOOST_VERSION }}
+          ref: v${{ env.XGBOOST_VERSION }}
           submodules: 'true'
           persist-credentials: false
 
@@ -107,8 +124,16 @@ jobs:
 
   gpl_sources:
     needs: [setup]
-    name: Collect GPL sources (gcc) for xgboost-cpu ${{ inputs.version || 'v3.4.1' }}
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources (gcc) for xgboost-cpu ${{ matrix.version }}
     runs-on: ubuntu-24.04-riscv
+    env:
+      XGBOOST_VERSION: ${{ matrix.version }}
+
     steps:
       # auditwheel vendors the image's libgomp.so.1 into the wheel.
       - name: Collect gcc source RPM from manylinux_riscv64
@@ -125,13 +150,18 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish xgboost-cpu ${{ inputs.version || 'v3.4.1' }}
+    name: Publish xgboost-cpu ${{ matrix.version }}
     needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: xgboost-cpu-${{ inputs.version || 'v3.4.1' }}-*-manylinux_riscv64
-      gpl-sources-artifact: xgboost-cpu-${{ inputs.version || 'v3.4.1' }}-gpl-sources
+      artifact-pattern: xgboost-cpu-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: xgboost-cpu-${{ matrix.version }}-gpl-sources
       gpl-sources-description: gcc

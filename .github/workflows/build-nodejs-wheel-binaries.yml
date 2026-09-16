@@ -8,35 +8,52 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'nodejs-wheel-binaries version to build (git tag without leading v, e.g. 24.19.0)'
-        required: true
-        default: '24.19.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/nodejs-wheel-binaries.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-nodejs-wheel-binaries.yml'
+      - 'docs/packages/nodejs-wheel-binaries.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-nodejs-wheel-binaries.yml'
+      - 'docs/packages/nodejs-wheel-binaries.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '24.19.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  NODEJS_WHEEL_BINARIES_VERSION: ${{ inputs.version || '24.19.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: nodejs-wheel-binaries
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build nodejs-wheel-binaries ${{ inputs.version || '24.19.0' }} manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build nodejs-wheel-binaries ${{ matrix.version }} manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 2880  # 48h — full Node.js (V8 + ICU) compile from source; runner speed
                             # varies enough that a prior run needed ~23h16m and the next one
                             # was still compiling V8 objects when killed at the 24h mark
+    env:
+      NODEJS_WHEEL_BINARIES_VERSION: ${{ matrix.version }}
+
     steps:
       - name: Checkout nodejs-wheel v${{ env.NODEJS_WHEEL_BINARIES_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -69,11 +86,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish nodejs-wheel-binaries ${{ inputs.version || '24.19.0' }}
+    name: Publish nodejs-wheel-binaries ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: nodejs-wheel-binaries-${{ inputs.version || '24.19.0' }}-*-manylinux_riscv64
+      artifact-pattern: nodejs-wheel-binaries-${{ matrix.version }}-*-manylinux_riscv64

@@ -5,15 +5,17 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'matplotlib version to test (git tag without leading v, e.g. 3.11.1)'
-        required: true
-        default: '3.11.1'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/matplotlib.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/test-matplotlib.yml'
+      - 'docs/packages/matplotlib.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '3.11.1' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
@@ -23,7 +25,6 @@ env:
   NO_AT_BRIDGE: 1  # Necessary for GTK3 interactive test.
   OPENBLAS_NUM_THREADS: 1
   PYTHONFAULTHANDLER: 1
-  MPL_VERSION: ${{ inputs.version || '3.11.1' }}
   # Query PyPI + gitlab riscv64 mirror; pick best compatible wheel
   # (`unsafe-best-match` = pip-like). Refuse sdist for dependencies so uv
   # selects the gitlab riscv64 wheel when PyPI lacks one instead of falling
@@ -33,18 +34,30 @@ env:
   UV_ONLY_BINARY: ':all:'
 
 jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: matplotlib
+      version: ${{ inputs.version }}
+
   test:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
     permissions:
       contents: read
-    name: "Test matplotlib ${{ inputs.version || '3.11.1' }} — Python ${{ matrix.python-version }} on ${{ matrix.os }}"
+    name: "Test matplotlib ${{ matrix.version }} — Python ${{ matrix.python-version }} on ${{ matrix.os }}"
     runs-on: ${{ matrix.os }}
 
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           - os: ubuntu-24.04-riscv
             python-version: '3.12'
+
+    env:
+      MPL_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout matplotlib v${{ env.MPL_VERSION }}

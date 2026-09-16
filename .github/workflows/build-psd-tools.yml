@@ -10,36 +10,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'psd-tools version to build (git tag without leading v, e.g. 1.19.0)'
-        required: true
-        default: '1.19.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/psd-tools.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-psd-tools.yml'
+      - 'docs/packages/psd-tools.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-psd-tools.yml'
+      - 'docs/packages/psd-tools.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '1.19.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  PSD_TOOLS_VERSION: ${{ inputs.version || '1.19.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: psd-tools
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build psd-tools ${{ inputs.version || '1.19.0' }} ${{ matrix.tag }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build psd-tools ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         include:
           # setup.py's Py_LIMITED_API macro + tools/configure_abi_tag.sh (a
           # [tool.cibuildwheel] override for cp3{13,14}) tag cp313+ non-free-
@@ -51,6 +62,9 @@ jobs:
             build: cp313-manylinux_riscv64 cp314-manylinux_riscv64
           - tag: cp314t
             build: cp314t-manylinux_riscv64
+
+    env:
+      PSD_TOOLS_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout psd-tools ${{ env.PSD_TOOLS_VERSION }}
@@ -94,11 +108,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish psd-tools ${{ inputs.version || '1.19.0' }}
+    name: Publish psd-tools ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: psd-tools-${{ inputs.version || '1.19.0' }}-*-manylinux_riscv64
+      artifact-pattern: psd-tools-${{ matrix.version }}-*-manylinux_riscv64

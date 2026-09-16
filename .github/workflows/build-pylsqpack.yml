@@ -8,34 +8,52 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'pylsqpack version to build (git tag, e.g. 0.3.24)'
-        required: true
-        default: '0.3.24'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pylsqpack.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pylsqpack.yml'
+      - 'docs/packages/pylsqpack.yaml'
+      - 'patches/pylsqpack/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pylsqpack.yml'
+      - 'docs/packages/pylsqpack.yaml'
       - 'patches/pylsqpack/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.3.24' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  PYLSQPACK_VERSION: ${{ inputs.version || '0.3.24' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pylsqpack
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build pylsqpack ${{ inputs.version || '0.3.24' }} cp310-abi3-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pylsqpack ${{ matrix.version }} cp310-abi3-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
+
+    env:
+      PYLSQPACK_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout pylsqpack ${{ env.PYLSQPACK_VERSION }}
@@ -80,11 +98,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish pylsqpack ${{ inputs.version || '0.3.24' }}
+    name: Publish pylsqpack ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pylsqpack-${{ inputs.version || '0.3.24' }}-*-manylinux_riscv64
+      artifact-pattern: pylsqpack-${{ matrix.version }}-*-manylinux_riscv64

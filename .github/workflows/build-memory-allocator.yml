@@ -9,23 +9,30 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'memory-allocator version to build (e.g. 0.2.0)'
-        required: true
-        default: '0.2.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/memory-allocator.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-memory-allocator.yml'
+      - 'docs/packages/memory-allocator.yaml'
+      - 'patches/memory-allocator/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-memory-allocator.yml'
+      - 'docs/packages/memory-allocator.yaml'
       - 'patches/memory-allocator/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.2.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  MEMORY_ALLOCATOR_VERSION: ${{ inputs.version || '0.2.0' }}
   # The v0.2.0 tag was left behind by a history rewrite around the meson
   # migration and predates the version bump (pyproject.toml there still
   # reads 0.1.4); this commit's tree is byte-identical to the released
@@ -37,17 +44,25 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: memory-allocator
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build memory-allocator ${{ inputs.version || '0.2.0' }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build memory-allocator ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
         libc: [manylinux, musllinux]
+
+    env:
+      MEMORY_ALLOCATOR_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout memory_allocator ${{ env.MEMORY_ALLOCATOR_REF }}
@@ -96,11 +111,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish memory-allocator ${{ inputs.version || '0.2.0' }}
+    name: Publish memory-allocator ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: memory-allocator-${{ inputs.version || '0.2.0' }}-*riscv64
+      artifact-pattern: memory-allocator-${{ matrix.version }}-*riscv64

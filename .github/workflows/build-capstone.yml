@@ -9,38 +9,52 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'capstone version/tag to build (e.g. 5.0.9)'
-        required: true
-        default: '5.0.9'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/capstone.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-capstone.yml'
+      - 'docs/packages/capstone.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-capstone.yml'
+      - 'docs/packages/capstone.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '5.0.9' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  CAPSTONE_VERSION: ${{ inputs.version || '5.0.9' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: capstone
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build capstone ${{ inputs.version || '5.0.9' }} py3-none-${{ matrix.libc }}_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build capstone ${{ matrix.version }} py3-none-${{ matrix.libc }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         libc: [manylinux, musllinux]
+
+    env:
+      CAPSTONE_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout capstone ${{ env.CAPSTONE_VERSION }}
@@ -81,11 +95,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish capstone ${{ inputs.version || '5.0.9' }}
+    name: Publish capstone ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: capstone-${{ inputs.version || '5.0.9' }}-*riscv64
+      artifact-pattern: capstone-${{ matrix.version }}-*riscv64

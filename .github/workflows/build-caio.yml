@@ -9,38 +9,53 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'caio version to build (git tag, e.g. 0.12.2)'
-        required: true
-        default: '0.12.2'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/caio.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-caio.yml'
+      - 'docs/packages/caio.yaml'
+      - 'patches/caio/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-caio.yml'
+      - 'docs/packages/caio.yaml'
       - 'patches/caio/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '0.12.2' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  CAIO_VERSION: ${{ inputs.version || '0.12.2' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: caio
+      version: ${{ inputs.version }}
 
   build_wheels:
     needs: [setup]
-    name: Build caio ${{ inputs.version || '0.12.2' }} ${{ matrix.python }}-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    name: Build caio ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      CAIO_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout caio ${{ env.CAIO_VERSION }}
@@ -98,11 +113,16 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish caio ${{ inputs.version || '0.12.2' }}
+    name: Publish caio ${{ matrix.version }}
     needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: caio-${{ inputs.version || '0.12.2' }}-*-manylinux_riscv64
+      artifact-pattern: caio-${{ matrix.version }}-*-manylinux_riscv64

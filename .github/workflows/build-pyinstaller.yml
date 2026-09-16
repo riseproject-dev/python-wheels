@@ -10,22 +10,28 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'PyInstaller version to build (git tag without leading v, e.g. 6.22.2)'
-        required: true
-        default: '6.22.2'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyinstaller.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-pyinstaller.yml'
+      - 'docs/packages/pyinstaller.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyinstaller.yml'
+      - 'docs/packages/pyinstaller.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '6.22.2' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 env:
-  PYINSTALLER_VERSION: ${{ inputs.version || '6.22.2' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
   # PyInstaller's own name for the bootloader directory on 64-bit RISC-V glibc
   # (PyInstaller/_shared_with_waf.py maps machine "riscv*" to "riscv").
@@ -37,11 +43,22 @@ env:
 jobs:
   setup:
     uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyinstaller
+      version: ${{ inputs.version }}
 
   build_wheel:
     needs: [setup]
-    name: Build PyInstaller ${{ inputs.version || '6.22.2' }} py3-none-manylinux_riscv64
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build PyInstaller ${{ matrix.version }} py3-none-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
+
+    env:
+      PYINSTALLER_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout PyInstaller v${{ env.PYINSTALLER_VERSION }}
@@ -114,12 +131,14 @@ jobs:
           compression-level: 0
 
   test_wheel:
-    name: Test PyInstaller ${{ inputs.version || '6.22.2' }} on ${{ matrix.python-version }}
+    name: Test PyInstaller ${{ matrix.version }} on ${{ matrix.python-version }}
     needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     strategy:
       fail-fast: false
       matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Upstream's CI matrix has no free-threaded entry, and neither does the
         # set of interpreters it publishes wheels for, so cp314t is left out.
         python-version: ['3.12', '3.13', '3.14']
@@ -146,6 +165,9 @@ jobs:
               --deselect tests/functional/test_multipackage.py::test_spec_with_multipackage
               --deselect tests/functional/test_libraries.py::test_idlelib
               --deselect tests/functional/test_libraries.py::test_tkinter_tcl_library_dir
+
+    env:
+      PYINSTALLER_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout PyInstaller v${{ env.PYINSTALLER_VERSION }}
@@ -201,11 +223,16 @@ jobs:
           python -m pytest -n 4 --durations 10 ${{ matrix.deselect }} tests/unit tests/functional
 
   publish:
-    name: Publish PyInstaller ${{ inputs.version || '6.22.2' }}
+    name: Publish PyInstaller ${{ matrix.version }}
     needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
     with:
-      artifact-pattern: pyinstaller-${{ inputs.version || '6.22.2' }}-*-manylinux_riscv64
+      artifact-pattern: pyinstaller-${{ matrix.version }}-*-manylinux_riscv64
