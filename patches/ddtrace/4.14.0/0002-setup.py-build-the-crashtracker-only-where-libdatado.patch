@@ -1,0 +1,57 @@
+From f9b171d23f881c9bf35e4c42221579f948c38d7c Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Wed, 26 Aug 2026 15:37:18 +0200
+Subject: [PATCH] setup.py: build the crashtracker only where libdatadog
+ supports it
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The `crashtracker` feature of src/native pulls in libdd-crashtracker,
+which cannot compile outside x86_64/aarch64 on Linux:
+
+  * it depends unconditionally (for `cfg(target_os = "linux")`) on
+    libdd-libunwind-sys, whose build script picks the libunwind
+    per-architecture static library from `#[cfg(target_arch)]` arms that
+    exist for x86_64 and aarch64 only, leaving `arch` undefined
+    elsewhere;
+  * collector/emitters.rs reads the crash-time register state out of
+    `ucontext_t` through the same two-arm `#[cfg(target_arch)]` pattern,
+    with no fallback.
+
+Gate the feature on the architectures libdatadog actually implements.
+ddtrace already treats the native crashtracker bindings as optional —
+`ddtrace/internal/core/crashtracking.py` sets `is_available = False` when
+the import fails, and `_check_for_crashtracking_available()` does the
+same — so nothing else needs changing: the wheel simply reports
+crashtracking as unavailable.
+
+Upstream-Status: To upstream [blocked on riscv64 unwinding/ucontext support in libdatadog's libdd-crashtracker]
+---
+ setup.py | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/setup.py b/setup.py
+index 13c8bd9..69c301e 100644
+--- a/setup.py
++++ b/setup.py
+@@ -287,10 +287,15 @@ def is_64_bit_python():
+     return sys.maxsize > (1 << 32)
+ 
+ 
++# libdatadog's crashtracker unwinds through libdd-libunwind-sys and reads the
++# signal ucontext register by register, both of which it implements for x86_64
++# and aarch64 only.
++CRASHTRACKER_ARCHS = ("AMD64", "aarch64", "arm64", "x86_64")
++
+ rust_features = ["stats"]
+ if CURRENT_OS in ("Linux", "Darwin") and is_64_bit_python() and sys.version_info < (3, 15):
+     rust_features.append("profiling")
+-    if not SERVERLESS_BUILD:
++    if not SERVERLESS_BUILD and platform.machine() in CRASHTRACKER_ARCHS:
+         rust_features.append("crashtracker")
+ if not SERVERLESS_BUILD:
+     rust_features.append("ffe")
+-- 
+2.50.1 (Apple Git-155)
+

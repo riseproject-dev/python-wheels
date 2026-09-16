@@ -81,12 +81,32 @@ jobs:
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
           CIBW_TEST_REQUIRES: pytest pytest-xdist
           # pyproject.toml is what djlint resolves reported paths against.
-          CIBW_TEST_SOURCES: tests pytest.toml pyproject.toml
+          # docs/, README.md and src/djlint/rules.yaml (a single data file, not
+          # the package directory - avoids shadowing the installed wheel with
+          # the uncompiled checkout) back the doc-consistency tests added in
+          # 1.45.0 (test_docs.py, test_readme.py, and two tests in
+          # test_cli.py) that check the docs' examples against the real
+          # linter/formatter/CLI output.
+          CIBW_TEST_SOURCES: tests pytest.toml pyproject.toml docs README.md src/djlint/rules.yaml
           # Upstream never tests its wheels; run the suite its CI runs.
           # The import assert catches a silently-uncompiled (pure-Python) wheel.
+          #
+          # test_closed_pipe_is_not_a_crash deselected: it monkeypatches
+          # print_output to raise BrokenPipeError, expecting djLint's own
+          # SIGPIPE handler (which swaps sys.stdout for a fresh io.StringIO
+          # before sys.exit(2), so the interpreter's own exit-time flush can't
+          # fail against the dead pipe) to produce exit code 2 under Click's
+          # CliRunner. Instead CliRunner reports exit code 1 - the stdout swap
+          # appears to break CliRunner's own stdout-capture teardown - on
+          # every interpreter we build (3.12/3.13/3.14/3.14t), with Click
+          # 8.5.0 (unpinned by djLint's own `click>=8.2.0`, and what upstream
+          # tests with too, per their uv.lock). Not riscv64-specific: upstream
+          # itself only runs this test on Python 3.10 and 3.15 (see
+          # .github/workflows/ci.yml's `pytest` matrix), so the whole 3.11-3.14
+          # range where this reproduces is a gap in their own coverage.
           CIBW_TEST_COMMAND: >-
             python -c "import djlint; assert djlint.__file__.endswith('.so'), djlint.__file__"
-            && python -m pytest tests
+            && python -m pytest tests --deselect tests/test_djlint/test_djlint.py::test_closed_pipe_is_not_a_crash
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
