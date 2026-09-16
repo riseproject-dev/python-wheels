@@ -1,0 +1,48 @@
+From 6e6a15e8126dc83222c41ce189a681c535363310 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Wed, 16 Sep 2026 14:20:56 +0200
+Subject: [PATCH] BUG: use eigh for the symmetric matrix in
+ _design_knockoff_equi
+
+`xcov` is `exog.T @ exog`, so it is symmetric positive semi-definite and its
+eigenvalues are real. `np.linalg.eig` calls LAPACK's general `dgeev`, which
+returns a complex array whenever rounding leaves any imaginary part non-zero
+- what happens depends on the BLAS kernels, and OpenBLAS's riscv64_generic
+ones do it for these matrices where the x86_64 and aarch64 ones do not.
+
+0.15.0 added a guard that catches this (raises "Expected real eigenvalues,
+got imaginary." instead of the casting error 0.14.6 hit), but still calls
+the general `eig`, so the underlying issue - and the 13 riscv64 failures in
+stats/tests/test_knockoff.py - are unchanged; the guard just replaces one
+error with another.
+
+`eigh` uses `dsyevd`, is real by construction on every platform, and agrees
+with `eig` to 3e-15 on the same inputs, so the guard's imaginary branch
+becomes unreachable dead code, harmlessly.
+
+Backported from 0.14.6's local patch (the scipy.compat.apply_where fix from
+that patch set is dropped here: 0.15.0 already carries it upstream).
+
+Upstream-Status: To upstream [not yet submitted; pending review of the riscv64 port that found it]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ statsmodels/stats/_knockoff.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/statsmodels/stats/_knockoff.py b/statsmodels/stats/_knockoff.py
+index cbbbe9f..a2de99a 100644
+--- a/statsmodels/stats/_knockoff.py
++++ b/statsmodels/stats/_knockoff.py
+@@ -238,7 +238,7 @@ def _design_knockoff_equi(exog, rng):
+     exog = exog / xnm
+ 
+     xcov = np.dot(exog.T, exog)
+-    ev, _ = np.linalg.eig(xcov)
++    ev, _ = np.linalg.eigh(xcov)
+ 
+     if np.iscomplexobj(ev):
+         if np.all(ev.imag == 0):
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,40 @@
+From b6c799e480c62504349d5661ee20cb3ef452e738 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 28 Aug 2026 05:11:21 +0200
+Subject: [PATCH] tests: give the completion wait a budget slower machines can
+ meet
+
+test_payload_access_is_safe_while_worker_publishes_completion allows 30
+seconds for the worker to drain every queued operation. The heaviest
+parametrisation makes that a tight budget on its own: 2000 write callbacks
+each sleep 1ms before taking the counter lock, so two of those seconds are
+spent sleeping in a single worker thread, while 16 observer threads scan the
+same 2000-element list without yielding. With the GIL disabled on a
+four-core machine the observers starve the worker badly enough that the
+drain does not finish in time.
+
+Only [caio.thread_aio-observers=16-completions=2000] is affected; every
+lighter combination of the same test passes, as do the other 740 tests. The
+suite takes 700s on the riscv64 runner against 117s in the same container
+image on aarch64, so the ceiling is raised by roughly that factor.
+Event.wait returns as soon as the event is set, so faster hardware pays
+nothing for the larger budget.
+
+Upstream-Status: To upstream [not yet submitted; found porting caio to riscv64]
+---
+ tests/test_free_threading.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/tests/test_free_threading.py b/tests/test_free_threading.py
+index f50518f..115f508 100644
+--- a/tests/test_free_threading.py
++++ b/tests/test_free_threading.py
+@@ -618,7 +618,7 @@ def test_payload_access_is_safe_while_worker_publishes_completion(
+         workers.start_many(observe, (() for _ in range(observer_count)))
+         observer_start.wait()
+         blocker_release.set()
+-        assert all_completed.wait(30), "worker did not finish queued operations"
++        assert all_completed.wait(180), "worker did not finish queued operations"
+         workers.join(timeout=10)
+ 
+         assert completed_count[0] == operation_count

@@ -1,0 +1,59 @@
+From f12ffc38c16c3a9e94985cd7b048dd5cff3b8ad2 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Wed, 26 Aug 2026 12:54:40 +0200
+Subject: [PATCH] tests: make the raising callbacks in
+ test_callback_exception_no_system_error raise once
+
+test_callback_exception_no_system_error installs an error_cb and a
+stats_cb that raise unconditionally, asserts the exception surfaces out
+of consume(), and then calls close() with the callback still armed.
+librdkafka keeps delivering both events for the lifetime of the consumer
+-- stats every statistics.interval.ms (100ms here), the broker-resolve
+failure on its retry backoff -- and close() dispatches whatever is queued,
+so if more than one interval elapses between the assertions and close()
+the callback fires again and the RuntimeError escapes close(), failing the
+test.
+
+It is a race, not an architecture problem: on a slower CI runner the few
+statements between the assertion and close() are enough.  Reproduced on
+macOS/arm64 by inserting time.sleep(1.2) before each close() -- the test
+fails there unmodified and passes with this change.
+
+Raise only on the first invocation.  The assertions are unchanged
+(each callback still runs, still appends, still raises out of consume());
+only the redundant later raises during close() go away.
+
+Upstream-Status: To upstream [not submitted yet: confluentinc requires a signed CLA before a pull request can be accepted]
+---
+ tests/test_Consumer.py | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/tests/test_Consumer.py b/tests/test_Consumer.py
+index 74b3120..ad42828 100644
+--- a/tests/test_Consumer.py
++++ b/tests/test_Consumer.py
+@@ -440,7 +440,9 @@ def test_callback_exception_no_system_error():
+     error_called = []
+ 
+     def error_cb_that_raises(error):
+-        """Error callback that raises an exception"""
++        """Error callback that raises an exception, once"""
++        if error_called:
++            return
+         error_called.append(error)
+         raise RuntimeError("Test exception from error_cb")
+ 
+@@ -469,7 +471,9 @@ def test_callback_exception_no_system_error():
+     stats_called = []
+ 
+     def stats_cb_that_raises(stats_json):
+-        """Stats callback that raises an exception"""
++        """Stats callback that raises an exception, once"""
++        if stats_called:
++            return
+         stats_called.append(stats_json)
+         raise RuntimeError("Test exception from stats_cb")
+ 
+-- 
+2.50.1 (Apple Git-155)
+
