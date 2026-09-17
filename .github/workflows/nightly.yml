@@ -33,39 +33,88 @@ jobs:
         with:
           enable-cache: false
 
-      - name: Check versions and declare upgrades
+      # Detection only: the working tree stays clean, and every change is
+      # declared again per package, on that package's own branch, below.
+      - name: Check versions
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SINCE: "2026-09-01"
-        run: uv run --with-requirements ci_scripts/requirements.txt python3 ci_scripts/check_versions.py --summary --report "$RUNNER_TEMP/report.md" ${{ github.event_name != 'pull_request' && '--declare' || '' }}
+        run: |
+          uv run --with-requirements ci_scripts/requirements.txt python3 ci_scripts/check_versions.py \
+            --summary --report "$RUNNER_TEMP/report.md" --report-dir "$RUNNER_TEMP/reports"
+          cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Open or update the upgrade PR
+      # One PR per package, so each build-<pkg>.yml runs on its own PR and a
+      # single failing build no longer holds back every other upgrade.
+      - name: Open or update one PR per package
         if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BRANCH: github-actions/nightly-upgrades
+          REPORTS: ${{ runner.temp }}/reports
         run: |
-          if git diff --quiet -- docs/packages ci_scripts/packages.txt ci_scripts/deprecated.txt; then
+          set -euo pipefail
+
+          base=$(git rev-parse HEAD)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Branch off main and re-declare this package alone, so the PR only
+          # ever touches its own docs/packages/<pkg>.yaml (plus packages.txt and
+          # deprecated.txt for a deprecation).
+          open_pr() {
+            local package="$1" slug="$2" title="$3"
+            local branch="github-actions/nightly-upgrade/$slug" pr
+
+            git switch --force-create "$branch" "$base" || return 1
+            git reset --hard --quiet "$base" || return 1
+
+            uv run --with-requirements ci_scripts/requirements.txt python3 \
+              ci_scripts/check_versions.py --declare "$package" || return 1
+
+            if git diff --quiet -- docs/packages ci_scripts/packages.txt ci_scripts/deprecated.txt; then
+              echo "$package: nothing to declare"
+              return 0
+            fi
+
+            git add docs/packages ci_scripts/packages.txt ci_scripts/deprecated.txt || return 1
+            git commit -s -m "$title" || return 1
+
+            # Leave an open PR alone when it already declares the same thing:
+            # a nightly force-push would restart its build for nothing.
+            if git fetch --quiet origin "$branch" 2>/dev/null &&
+               git diff --quiet FETCH_HEAD HEAD -- "docs/packages/$slug.yaml"; then
+              echo "$package: $branch is already up to date"
+              return 0
+            fi
+
+            git push --force origin "$branch" || return 1
+
+            pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json url --jq '.[0].url') || return 1
+            if [ -n "$pr" ]; then
+              gh pr edit "$pr" --title "$title" --body-file "$REPORTS/$slug.md" || return 1
+              echo "Updated $pr"
+            else
+              gh pr create --draft --repo "$GITHUB_REPOSITORY" --base main --head "$branch" \
+                --reviewer threexc,justeph,luhenry \
+                --title "$title" --body-file "$REPORTS/$slug.md" || return 1
+            fi
+          }
+
+          if [ "$(jq length "$REPORTS/packages.json")" -eq 0 ]; then
             echo "Nothing to declare"
             exit 0
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch --create "$BRANCH"
-          git add docs/packages ci_scripts/packages.txt ci_scripts/deprecated.txt
-          git commit -s -m "packages: Update versions and status"
-          git push --force origin "$BRANCH"
 
-          pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json url --jq '.[0].url')
-          if [ -n "$pr" ]; then
-            gh pr edit "$pr" --body-file "$RUNNER_TEMP/report.md"
-            echo "Updated $pr"
-          else
-            gh pr create --draft --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" \
-              --reviewer threexc,justeph,luhenry \
-              --title "packages: Update versions and status" \
-              --body-file "$RUNNER_TEMP/report.md"
-          fi
+          ret=0
+          while IFS=$'\t' read -r package slug title; do
+            if ! open_pr "$package" "$slug" "$title"; then
+              echo "::warning::$package: could not open or update its PR"
+              ret=1
+            fi
+          done < <(jq -r '.[] | [.package, .slug, .title] | @tsv' "$REPORTS/packages.json")
+
+          git switch --force --detach "$base"
+          exit $ret
 
   check_deprecated_packages:
     runs-on: ubuntu-latest
