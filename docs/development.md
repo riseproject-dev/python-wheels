@@ -82,8 +82,8 @@ declared is a bug in the build, not something to document.
 To **upgrade** an existing package, append a `- version: <new version>` line to
 its YAML and open a PR; no workflow change is needed unless the new version
 needs one. The nightly `check_versions.py --declare` run opens one draft PR
-per package (`github-actions/nightly-upgrade/<package>`), so each upgrade is
-built, reviewed and merged on its own.
+per package (`nightly-upgrade/<package>`), so each upgrade is built, reviewed
+and merged on its own.
 
 ## Workflow Customizations for riscv64
 
