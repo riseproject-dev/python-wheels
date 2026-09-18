@@ -18,6 +18,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
 - **173** — `gh pr list --state open --head <pkg>` does not see a *merged* PR, so a finished
 - **208** — A fresh `main` publish run finishing green does not mean
 - **357** — A single combined-interpreter build job's artifact name needs to match the
+- **381** — The nightly-upgrade automation force-pushes a `nightly-upgrade/<pkg>` branch
 - **380** — A project that splits every release into two independently-named PyPI
 - **370** — `.queue.yml` lives on `main` in a checkout shared by every concurrently
 
@@ -350,3 +351,30 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
       backend-only or frontend-only smoke test cannot catch a packaging mismatch (an
       `RPATH`/install-location assumption, a version skew between the two) between the
       halves that only surfaces when they are installed side by side.
+
+381. **The nightly-upgrade automation force-pushes a `nightly-upgrade/<pkg>` branch
+    on *every* run whose fresh regeneration of `docs/packages/<pkg>.yaml` differs at
+    all from what's already on the branch — silently discarding any commits added on
+    top, workflow and patch fixes included.** `.github/workflows/nightly.yml`'s
+    `open_pr()` always does `git switch --force-create "$branch" "$base"` +
+    `git reset --hard --quiet "$base"`, re-declares the package fresh, commits, and
+    only skips `git push --force` when `git diff --quiet FETCH_HEAD HEAD -- "docs/packages/$slug.yaml"`
+    — i.e. when that one file is byte-identical between the fresh regeneration and
+    the existing branch. A pending entry (no `tag:`/`files:` yet) is *always*
+    regenerated as a bare `- version: X` line; the script never emits `patched:` or
+    `comment:` for a pending entry, only for already-published ones. Adding either
+    field to a pending entry while fixing that package's CI (e.g. "mark it patched so
+    reviewers know") makes the branch diverge from the bot's own regeneration, so the
+    *next* nightly run (once/day by cron, but also `workflow_dispatch`-able any time)
+    force-pushes over the branch and wipes every commit added since the bot originally
+    opened it — not just the yaml edit, the whole branch tip, workflow fixes and all
+    (observed live: two sibling fixes on the same nightly run lost their patches this
+    way, while a third fix on a branch that never touched the yaml survived untouched).
+    **Never add `patched:`/`comment:`/anything else to a pending version entry** —
+    confine every CI fix strictly to `.github/workflows/build-<pkg>.yml` and
+    `patches/<pkg>/<version>/`, leaving `docs/packages/<pkg>.yaml`'s pending lines
+    exactly as declared. If a branch does get wiped, `git log --oneline <branch>`
+    shows a single bot commit with no ancestry to your prior fix commits (a genuine
+    reset, not a merge) — the fix must be re-authored from scratch (or reapplied from
+    memory of the diagnosis) on top of the new tip; there is nothing to `git cherry-pick`
+    since the old tip is no longer an ancestor and may not even still exist as a ref.

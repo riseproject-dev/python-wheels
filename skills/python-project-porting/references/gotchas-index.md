@@ -541,6 +541,12 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
   running agent — edit it from an ephemeral detached worktree off fresh `origin/main`
   per state transition, and re-read the entry back after every push to catch a
   concurrent stale-based commit reverting it.
+- **381** — The nightly-upgrade automation (`.github/workflows/nightly.yml`) force-pushes
+  a `github-actions/nightly-upgrade/<pkg>` branch on *every* run whose fresh regeneration
+  of `docs/packages/<pkg>.yaml` differs at all from what's already there — including a
+  `patched: true`/`comment:` you added to a still-*pending* entry, which it never emits —
+  silently wiping any workflow/patch fixes pushed on top. Never touch that file's pending
+  entries when fixing CI; confine fixes to `.github/workflows/` and `patches/`.
 - **380** — A project that splits every release into two independently-named PyPI
   packages from one build needs two `_publish-wheel.yml` calls with disjoint artifact
   patterns, not two patterns on one call — the reusable workflow asserts a single
