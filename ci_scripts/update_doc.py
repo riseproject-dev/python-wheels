@@ -37,6 +37,7 @@ ARTIFACTS_PATH = os.environ.get("ARTIFACTS_PATH", "dist")
 RELEASE_TAG = os.environ.get("RELEASE_TAG")
 GPL_SOURCES_DESCRIPTION = os.environ.get("GPL_SOURCES_DESCRIPTION", "").strip()
 DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() == "true"
+GH_TOKEN = os.environ.get("GH_TOKEN", "")
 
 
 def find_wheel_files(path):
@@ -262,6 +263,21 @@ def git_run(*args, check=True):
     return subprocess.run(["git", *args], check=check)
 
 
+def push_remote():
+    """
+    Where to push the docs branch.
+
+    The checkout's own credentials are whatever the workflow gave it, and a
+    push made with GITHUB_TOKEN raises no events, so the documentation PR would
+    get no checks. Push over GH_TOKEN instead -- the App installation token
+    when the publish workflow minted one -- and fall back to the checkout's
+    remote when there is none. Actions masks the token in the logs.
+    """
+    if not GH_TOKEN:
+        return "origin"
+    return f"https://x-access-token:{GH_TOKEN}@github.com/{REPO}"
+
+
 def checkout_shared_branch(branch):
     """
     Check out the shared docs branch as a local worktree HEAD, based on
@@ -430,7 +446,7 @@ def main():
 
     # The rebase rewrote whatever was on the branch, so the push is no longer a
     # fast-forward; the lease keeps it from clobbering a concurrent update.
-    push = ["push", "origin", f"HEAD:{branch}"]
+    push = ["push", push_remote(), f"HEAD:{branch}"]
     if remote_sha:
         push.insert(1, f"--force-with-lease={branch}:{remote_sha}")
     git_run(*push)
