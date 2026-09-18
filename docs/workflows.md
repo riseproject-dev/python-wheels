@@ -111,6 +111,19 @@ following workflows beyond those used for specific package builds:
    pending ones, or those matching the `version` glob of a
    `workflow_dispatch`).
 
+### The riseproject-dev App
+
+Branches pushed and pull requests opened with the default `GITHUB_TOKEN` raise
+no events, so nothing ever runs on them: the nightly upgrade PRs would sit
+there with no checks. `nightly.yml` therefore mints an installation token for
+the `riseproject-dev` GitHub App and commits as `riseproject-dev[bot]`. It
+needs the repository variable `RISEPROJECT_APP_CLIENT_ID` (the App's Client ID)
+and the repository secret `RISEPROJECT_APP_PRIVATE_KEY` (the App's private key,
+PEM included), and the App must be installed on this repository with read and
+write access to contents and pull requests, plus read access to issues. With
+the variable unset the workflow falls back to `GITHUB_TOKEN` and the
+`github-actions[bot]` identity, checkless as before.
+
 ## The RISC-V Wheels Dashboard
 
 RISE makes use of the [RISC-V

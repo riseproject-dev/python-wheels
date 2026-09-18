@@ -321,10 +321,7 @@ def pr_exists(branch):
 
 
 def configure_git_identity():
-    git_run("config", "user.name", "github-actions[bot]")
-    git_run(
-        "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"
-    )
+    subprocess.run([CI_SCRIPTS_DIR / "git-identity.sh"], check=True)
 
 
 def extract_pr_url(stdout):
