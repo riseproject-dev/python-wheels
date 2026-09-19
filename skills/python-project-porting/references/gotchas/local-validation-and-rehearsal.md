@@ -17,6 +17,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
 - **223** — For a `bindings = "bin"` CLI's test assertions, `cargo build --release` the tool
 - **298** — A local rehearsal's `pip`-resolved cibuildwheel can be too old for
 - **369** — Without docker, fetch Rocky 10's own dnf repodata over plain HTTPS to
+- **384** — `dnf` failing in the image with `Curl error (60) ... self-signed certificate` is
+- **394** — A libtorch-linking project cannot be rehearsed on x86_64 with PyPI's `torch`
+  your egress proxy, not the image — install the proxy CA into the container trust store
 
 ---
 
@@ -247,3 +250,58 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
       by package `name=` attribute to jump straight to its block rather than loading
       the whole file, and delete it when done; it is Rocky's own public mirror data,
       not anything project-specific worth keeping.
+
+384. **`dnf` failing inside the image with `Curl error (60) ... self-signed certificate in
+    certificate chain` is a fact about *your session's egress proxy*, not about the image —
+    install the proxy CA into the container's trust store instead of recording "in-image dnf
+    is impossible".** A sandbox whose outbound HTTPS goes through a TLS-intercepting proxy
+    gives the host a CA bundle, but a container gets neither that bundle nor the host's
+    loopback proxy, so every `dnf makecache`/`repoquery` dies on `mirrors.rockylinux.org`
+    and it looks like the image cannot reach its own repos. Three things fix it together,
+    and all three are needed:
+    ```
+    docker run --rm --network host \
+      -e HTTPS_PROXY -e HTTP_PROXY -e https_proxy -e http_proxy \
+      -v "$PWD/.git/pw-scratch/<pkg>:/s" "$MANYLINUX_RISCV64_IMAGE" bash -c '
+      cp /s/ca-bundle.crt /etc/pki/ca-trust/source/anchors/proxy.crt
+      update-ca-trust extract
+      dnf repoquery --qf "%{name}|%{version}|%{reponame}\n" "qt6*"'
+    ```
+    `--network host` is what lets the container reach a proxy listening on the host's
+    loopback; the env vars are not inherited unless named; and `update-ca-trust extract`
+    (Rocky's anchors directory, *not* `/etc/ssl/certs`) is what makes curl inside `dnf`
+    accept the intercepted chain. This matters because two queue entries had already
+    recorded the proxy failure as an image limitation and fallen back to gotcha 369's
+    raw-repodata parse — which is still the right tool for "is it packaged, in which repo",
+    but cannot answer what `dnf` actually *resolves*, and cannot show you the installed
+    on-disk layout (`/usr/lib64/cmake/Qt6*`, `ClangConfig.cmake`, real `.so` names) that a
+    CMake `find_package` will or will not hit.
+    - **Use `repoquery` for inventory and reserve `install` for layout questions.** A
+      `repoquery` is metadata-only and answers in seconds even under QEMU — and it returns
+      the SDK's *version*, which is the field most likely to be assumed rather than checked
+      (gotcha 383). Actually installing a large `-devel` set is emulated `rpm` scriptlet
+      work and can take tens of minutes on a loaded host, so do not put it on the critical
+      path of a triage decision; note how far it got and move on.
+    - This is the container half of the rule already stated for the host: never disable TLS
+      verification or unset the proxy variables to make a fetch succeed.
+
+394. **A project that links libtorch cannot be rehearsed on an x86_64 host with the
+    `torch` wheel PyPI serves, because that one is a CUDA build: `find_package(Torch)`
+    pulls in `Caffe2Config.cmake`, which hard-fails with "Your installed Caffe2 version
+    uses CUDA but I cannot find the CUDA libraries" before CMake reaches a single line
+    of the project's own configuration (the torchcodec case).** The failure has nothing
+    to do with the project or with riscv64 — the riscv64 `torch` on our registry is a
+    `+cpu` build whose `Caffe2Config.cmake` has the CUDA branch compiled out, so the same
+    configure succeeds there. Two consequences worth knowing before spending a rehearsal
+    cycle on it:
+    - **A CPU-only torch is the prerequisite for any local rehearsal of a libtorch
+      extension**, and PyPI has none for linux x86_64 (the CPU variants live on
+      `download.pytorch.org/whl/cpu`, a separate index); linux aarch64's PyPI `torch`
+      *is* CPU-only, which is one more reason gotcha 101's aarch64 rehearsal is the right
+      host for this family of packages.
+    - **Everything before `find_package(Torch)` still validates cheaply on x86**, and for
+      a scikit-build-core/CMake project that is most of the interesting surface: the
+      build frontend and `--no-build-isolation` wiring, `pkg-config` discovery of a
+      source-built native dependency, the backend finding `pybind11`, and any
+      licence-guard/env-var gate the project puts in front of a wheel build. Run it and
+      read how far the configure got rather than treating the CUDA error as a dead end.
