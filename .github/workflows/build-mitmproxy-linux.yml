@@ -1,0 +1,190 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-linux-wheel` job of
+# https://github.com/mitmproxy/mitmproxy_rs/blob/v0.12.11/.github/workflows/ci.yml
+name: Build mitmproxy-linux wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/mitmproxy-linux.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mitmproxy-linux.yml'
+      - 'docs/packages/mitmproxy-linux.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mitmproxy-linux.yml'
+      - 'docs/packages/mitmproxy-linux.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: mitmproxy-linux
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build mitmproxy-linux ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+
+    env:
+      MITMPROXY_LINUX_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout mitmproxy_rs v${{ env.MITMPROXY_LINUX_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: mitmproxy/mitmproxy_rs
+          ref: v${{ env.MITMPROXY_LINUX_VERSION }}
+          persist-credentials: false
+
+      - name: Stage the licence beside mitmproxy-linux's pyproject.toml
+        # maturin globs LICEN[CS]E* relative to the pyproject directory, which
+        # in this monorepo is mitmproxy-linux/ -- so upstream's own aarch64
+        # wheel ships no licence text at all.
+        run: cp LICENSE mitmproxy-linux/
+
+      # `[tool.maturin] bindings = "bin"`: the wheel is one compiled executable
+      # with no ABI tag, so a single native build covers every interpreter.
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --locked --out dist --manifest-path mitmproxy-linux/Cargo.toml
+          manylinux: '2_39'
+          # The redirector's build.rs compiles mitmproxy-linux-ebpf to
+          # bpfel-unknown-none, which needs the nightly toolchain and
+          # bpf-linker upstream's own .github/actions/setup installs.
+          before-script-linux: |
+            git config --global --add safe.directory "*"
+            rustup toolchain install nightly --profile minimal --component rust-src
+            cargo install --locked bpf-linker@0.9.15
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mitmproxy-linux-${{ env.MITMPROXY_LINUX_VERSION }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test mitmproxy-linux ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    env:
+      MITMPROXY_LINUX_VERSION: ${{ matrix.version }}
+      # Without this uv would reuse the runner image's system CPython for 3.12
+      # and download a standalone build for the others.
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # The wheel is interpreter-agnostic (bindings = "bin"), so every
+        # interpreter exercises the same binary.
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: mitmproxy-linux-${{ env.MITMPROXY_LINUX_VERSION }}-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . mitmproxy_linux
+
+      # The redirector needs root, a tun device and cgroup eBPF attach, so it
+      # cannot be driven end to end here (upstream gates that behind its own
+      # `root-tests` feature). Assert instead that the eBPF object its build.rs
+      # cross-compiles to bpfel-unknown-none really is embedded in the riscv64
+      # executable -- loading it is all the binary does.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          cat > verify.py <<'EOF'
+          import struct
+          import subprocess
+          import sys
+
+          from mitmproxy_linux import executable_path
+
+          exe = executable_path()
+          assert exe.is_file(), exe
+          buf = exe.read_bytes()
+          assert buf[:6] == b"\x7fELF\x02\x01", buf[:6]
+          (machine,) = struct.unpack_from("<H", buf, 18)
+          assert machine == 243, f"redirector is not riscv64: e_machine={machine}"
+
+          pos = 0
+          while True:
+              pos = buf.find(b"\x7fELF\x02\x01\x01", pos + 1)
+              assert pos > 0, "no embedded eBPF object in the redirector"
+              if struct.unpack_from("<H", buf, pos + 18)[0] == 247:
+                  break
+
+          (shoff,) = struct.unpack_from("<Q", buf, pos + 0x28)
+          shentsize, shnum, shstrndx = struct.unpack_from("<HHH", buf, pos + 0x3A)
+          base = pos + shoff
+          (strtab,) = struct.unpack_from("<Q", buf, base + shstrndx * shentsize + 0x18)
+          names = []
+          for i in range(shnum):
+              (name,) = struct.unpack_from("<I", buf, base + i * shentsize)
+              start = pos + strtab + name
+              names.append(buf[start:buf.index(b"\0", start)].decode())
+          print("eBPF sections:", [n for n in names if n])
+          assert "cgroup/sock_create" in names, names
+          assert b"INTERCEPT_CONF" in buf[pos:], "INTERCEPT_CONF map missing"
+
+          run = subprocess.run([exe], capture_output=True, text=True, timeout=60)
+          print(run.stderr, file=sys.stderr)
+          assert run.returncode != 0, run
+          assert "usage:" in run.stderr, run.stderr
+          EOF
+          python verify.py
+
+  publish:
+    name: Publish mitmproxy-linux ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: mitmproxy-linux-${{ matrix.version }}-manylinux_riscv64
