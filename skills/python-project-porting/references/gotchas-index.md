@@ -205,6 +205,9 @@ The porting gotchas (374 of them) live in [`references/gotchas/`](gotchas/), spl
   musllinux unbuildable no matter how the CMake/C++ side is patched.
 - **391** — A project's real cibuildwheel recipe can live in a *separate packaging repo* that the
   source tree never references — the source repo can carry no GitHub Actions at all.
+- **396** — A `cpXY-none-<platform>` wheel is the third plat-name shape: `setup.py` declares
+  no `ext_modules` at all, and a sibling CMake build both compiles the extension modules and
+  hands `bdist_wheel` the tag (the coremltools case).
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
@@ -300,6 +303,9 @@ The porting gotchas (374 of them) live in [`references/gotchas/`](gotchas/), spl
 - **202** — A monorepo's "regenerate deps from Bazel" helper may already tolerate a missing
 - **219** — GDAL's cmake build produces no `gdal-config` script — a second consumer of the
 - **233** — A package can have no Python build backend at all — the wheel comes from an
+- **397** — A CMake build that shells out to a bare `python3` for one vendored sub-extension
+  silently builds it for the container's default interpreter, not the one the wheel is for
+  (the coremltools/kmeans1d case).
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
