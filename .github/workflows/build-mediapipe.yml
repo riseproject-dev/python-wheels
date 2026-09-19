@@ -1,0 +1,285 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# mediapipe tags no release and publishes no sdist; PyPI's 1.0.1 wheels were
+# built from commit 02d83cb8, where mediapipe/version.bzl reads 1.0.1 and which
+# is the last commit before the upload. The build follows upstream's own
+# manylinux recipe:
+# https://github.com/google/mediapipe/blob/master/Dockerfile.manylinux_2_28_x86_64
+# https://github.com/google/mediapipe/blob/master/build_manylinux_wheel.sh
+name: Build mediapipe wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/mediapipe.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mediapipe.yml'
+      - 'docs/packages/mediapipe.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mediapipe.yml'
+      - 'docs/packages/mediapipe.yaml'
+
+run-name: build-mediapipe ${{ inputs.version && format('- {0}', inputs.version) || '' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # No upstream tag exists for this version; move together with the version in
+  # docs/packages/mediapipe.yaml.
+  MEDIAPIPE_REF: 02d83cb8eb451099dfb24c02a8784ed996a1710c
+  OPENCV_VERSION: '4.10.0'
+  # Upstream downloads a bazel release binary, which exists for no riscv64;
+  # 7.5.0 is the version this repo bootstraps from source.
+  BAZEL_VERSION: '7.5.0'
+  RULES_PYTHON_VERSION: '0.33.2'
+  RULES_JAVA_VERSION: '7.6.5'
+  PROJECT_RULES_PYTHON_VERSION: '0.34.0'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: mediapipe
+      version: ${{ inputs.version }}
+
+  bazel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Bootstrap bazel (riscv64)
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+
+    steps:
+      - name: Restore bazel binary
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: bazel-bin
+          key: bazel-${{ env.BAZEL_VERSION }}-manylinux_riscv64
+
+      - name: Bootstrap bazel ${{ env.BAZEL_VERSION }}
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p bazel-bin
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e BAZEL_VERSION \
+            -e RULES_PYTHON_VERSION \
+            -e RULES_JAVA_VERSION \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          dnf install -y --disablerepo=extras --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+
+          # rules_python 0.33.2's PLATFORMS has no riscv64 entry, aborting the bootstrap
+          # (bazelbuild/bazel#23018). Any linux entry is a safe stand-in: the toolchain it names
+          # is never selected on a riscv64 host. Fixed in bazel 8.2.0; the 7.x backport is open.
+          mkdir -p /tmp/rules_python
+          curl -fsSLo /tmp/rules_python.tar.gz "https://github.com/bazel-contrib/rules_python/releases/download/${RULES_PYTHON_VERSION}/rules_python-${RULES_PYTHON_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_python.tar.gz -C /tmp/rules_python --strip-components=1
+          sed -i 's|fail("No platform declared for host OS {} on arch {}".format(os_name, arch))|return "x86_64-unknown-linux-gnu"|' \
+            /tmp/rules_python/python/private/toolchains_repo.bzl
+
+          # rules_java 7.x maps riscv64 to a stray-colon include path, so a JNI library
+          # can't find jni_md.h. Fixed in rules_java 8.x, never backported.
+          mkdir -p /tmp/rules_java
+          curl -fsSLo /tmp/rules_java.tar.gz "https://github.com/bazelbuild/rules_java/releases/download/${RULES_JAVA_VERSION}/rules_java-${RULES_JAVA_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_java.tar.gz -C /tmp/rules_java
+          sed -i 's|\[":include/linux"\]|["include/linux"]|g' /tmp/rules_java/toolchains/BUILD
+
+          mkdir -p /tmp/bazel-src
+          cd /tmp/bazel-src
+          curl -fsSLo dist.zip "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-dist.zip"
+          unzip -q dist.zip
+
+          EXTRA_BAZEL_ARGS="--tool_java_runtime_version=local_jdk \
+            --override_module=rules_python=/tmp/rules_python \
+            --override_module=rules_java=/tmp/rules_java" \
+            bash ./compile.sh
+          install -m 0755 output/bazel /work/bazel-bin/bazel
+          SCRIPT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin/bazel
+          if-no-files-found: error
+
+  build_wheels:
+    name: Build mediapipe ${{ matrix.version }} py3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    needs: [setup, bazel]
+    if: needs.setup.outputs.versions != '[]'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      MEDIAPIPE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout google/mediapipe @ ${{ env.MEDIAPIPE_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: google/mediapipe
+          ref: ${{ env.MEDIAPIPE_REF }}
+          path: mediapipe
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download bazel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin
+
+      - name: Build wheel
+        run: |
+          mkdir -p wheelhouse
+          set -o pipefail
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e MEDIAPIPE_VERSION \
+            -e OPENCV_VERSION \
+            -e PROJECT_RULES_PYTHON_VERSION \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT' 2>&1 | tee build.log
+          set -eux
+
+          dnf install -y --disablerepo=extras --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+          install -m 0755 /work/bazel-bin/bazel /usr/local/bin/bazel
+
+          export PYTHON_BIN="/opt/python/cp312-cp312/bin/python"
+          export PATH="/opt/python/cp312-cp312/bin:${PATH}"
+          "${PYTHON_BIN}" -m pip install -q -U pip setuptools wheel auditwheel
+          ln -sf "${PYTHON_BIN}" /usr/local/bin/python
+          ln -sf "${PYTHON_BIN}" /usr/local/bin/python3
+
+          git clone -q --depth 1 --branch "${OPENCV_VERSION}" https://github.com/opencv/opencv /tmp/opencv
+          cmake -S /tmp/opencv -B /tmp/opencv/release \
+            -DCMAKE_BUILD_TYPE=RELEASE -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DBUILD_SHARED_LIBS=OFF -DBUILD_LIST=imgproc,core \
+            -DWITH_ITT=OFF -DWITH_IPP=OFF -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF \
+            -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_opencv_ts=OFF \
+            -DCV_ENABLE_INTRINSICS=ON -DWITH_EIGEN=ON -DWITH_PTHREADS=ON -DWITH_PTHREADS_PF=ON
+          cmake --build /tmp/opencv/release -j "$(nproc)"
+          cmake --install /tmp/opencv/release
+
+          # MODULE.bazel's rules_python registers a hermetic interpreter, and its
+          # PLATFORMS still has no riscv64 entry at this version; any linux entry
+          # is a safe stand-in because it is never the one selected here.
+          mkdir -p /tmp/rules_python
+          curl -fsSLo /tmp/rules_python.tar.gz "https://github.com/bazel-contrib/rules_python/releases/download/${PROJECT_RULES_PYTHON_VERSION}/rules_python-${PROJECT_RULES_PYTHON_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_python.tar.gz -C /tmp/rules_python --strip-components=1
+          sed -i 's|fail("No platform declared for host OS {} on arch {}".format(os_name, arch))|return "x86_64-unknown-linux-gnu"|' \
+            /tmp/rules_python/python/private/toolchains_repo.bzl
+
+          cd /work/mediapipe
+
+          MP_VERSION="$(awk '/MEDIAPIPE_FULL_VERSION/ {split($0, a, "="); print a[2]}' mediapipe/version.bzl | tr -d '" ')"
+          test "${MP_VERSION}" = "${MEDIAPIPE_VERSION}"
+          sed -i "s/__version__ = 'dev'/__version__ = '${MP_VERSION}'/g" setup.py
+
+          echo 'cc_library(name = "opencv", srcs = ["local/lib64/libopencv_imgproc.a", "local/lib64/libopencv_core.a"], hdrs = glob(["local/include/opencv4/opencv2/**/*.h*"]), includes = ["local/include/opencv4/"], linkstatic = 1, visibility = ["//visibility:public"])' > third_party/opencv_linux.BUILD
+          sed -i "s|bazel_command.append('--define=OPENCV=source')|pass|g" setup.py
+
+          {
+            # No remote JDK is published for riscv64, and .bazelrc's 128 jobs
+            # overcommits these runners for a build this size.
+            echo "build --java_runtime_version=local_jdk"
+            echo "build --tool_java_runtime_version=local_jdk"
+            echo "build --jobs=HOST_CPUS"
+            echo "common --override_module=rules_python=/tmp/rules_python"
+            echo "common --curses=no --show_progress_rate_limit=60"
+          } >> .bazelrc
+
+          "${PYTHON_BIN}" setup.py bdist_wheel
+          auditwheel repair --plat manylinux_2_39_riscv64 -w /work/wheelhouse dist/*.whl
+
+          # The payload is a ctypes-loaded libmediapipe.so with no extension
+          # module, which is why every wheel upstream publishes is py3-none.
+          "${PYTHON_BIN}" -m wheel tags --python-tag py3 --abi-tag none --remove /work/wheelhouse/*.whl
+          SCRIPT
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mediapipe-${{ env.MEDIAPIPE_VERSION }}-build-log
+          path: build.log
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mediapipe-${{ env.MEDIAPIPE_VERSION }}-py3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+      - name: Test wheel
+        run: |
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          PYTHON_BIN="/opt/python/cp312-cp312/bin/python"
+          "${PYTHON_BIN}" -m pip install --only-binary=:all: /work/wheelhouse/*.whl
+
+          cd /tmp
+          "${PYTHON_BIN}" - <<'PY'
+          import numpy as np
+
+          import mediapipe as mp
+          from mediapipe.tasks.python.core import mediapipe_c_bindings
+
+          lib = mediapipe_c_bindings.load_raw_library()
+          assert lib._name.endswith("libmediapipe.so"), lib._name
+
+          data = np.zeros((6, 4, 3), dtype=np.uint8)
+          image = mp.Image(image_format=mp.ImageFormat.SRGB, data=data)
+          assert (image.width, image.height) == (4, 6), (image.width, image.height)
+          assert np.array_equal(image.numpy_view(), data)
+          PY
+          SCRIPT
+
+  publish:
+    name: Publish mediapipe ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: mediapipe-${{ matrix.version }}-py3-manylinux_riscv64
