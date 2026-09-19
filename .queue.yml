@@ -773,9 +773,73 @@ packages:
   version: 6.11.2
   home: https://pyside.org
   repo: https://code.qt.io/cgit/pyside/pyside-setup.git/
-  status: queued
+  status: blocked-on-dependency
   pr: null
-  notes: '2 Linux wheels upstream (abi: cp310); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: '2 Linux wheels upstream (abi: cp310-abi3, manylinux_2_34_x86_64 + manylinux_2_39_aarch64,
+    175 MB each); no riscv64 on PyPI or pypi.riseproject.dev (checked directly: /simple/pyside6-addons/,
+    /simple/pyside6-essentials/ and /simple/pyside6/ all 404; only shiboken6 6.11.2 riscv64
+    is live). 6.11.2 re-confirmed latest on PyPI for all five pyside-setup distributions
+    (2026-09-19). Blocked on pyside6-essentials, NOT on pyside6 - the meta-package direction
+    is the opposite of what the names suggest. requires_dist, read off PyPI: pyside6-addons
+    -> shiboken6==6.11.2 + PySide6_Essentials==6.11.2; pyside6-essentials -> shiboken6 only;
+    pyside6 -> shiboken6 + PySide6_Essentials + PySide6_Addons. pyside6 is a 0.57 MB meta-wheel
+    (vs essentials 80 MB, addons 175 MB) that depends on THIS package, so the critical path
+    is shiboken6 (published, PR #1696) -> pyside6-essentials -> pyside6-addons -> pyside6,
+    and pyside6-essentials is the only one of the three that is actually actionable today.
+    Its own queue entry says "Do not attempt until shiboken6 is merged and published" - that
+    condition is now met (shiboken6 published), and it is currently unclaimed. Publishing
+    pyside6-addons alone would in any case ship a wheel whose exact-pinned PySide6_Essentials==6.11.2
+    runtime dependency is unsatisfiable from PyPI or pypi.riseproject.dev on riscv64, so
+    `pip install pyside6-addons` would still fail - the same consumer-side dead end the pyqt5/pyqt5-qt5
+    pair is parked for. Second, harder reason this cannot be its own port: pyside6-addons
+    is not a build target at all. build_scripts/config.py:get_allowed_top_level_build_values()
+    in pyside-setup 6.11.2 returns exactly four values - all, shiboken6, shiboken6-generator,
+    pyside6 - and `--internal-build-type` the same three minus `all`; there is no pyside6-essentials
+    or pyside6-addons target. `setup.py bdist_wheel --build-type=pyside6` builds every PySide6
+    module (essentials AND addons) into one tree, and the five/six published distributions
+    are carved out AFTER the build by the root-level create_wheels.py, which walks build/<env>a/package_for_wheels
+    once and emits {shiboken6, shiboken6_generator, PySide6_Essentials, PySide6_Addons, PySide6,
+    PySide6_Examples} from build_scripts/wheel_files.py''s per-wheel ModuleData lists. So
+    a standalone build-pyside6-addons.yml would run the entire multi-hour Qt6 bindings build
+    and throw away four of the five wheels it produced, and a sibling build-pyside6-essentials.yml
+    would run the same build a second time to keep a different one. (This is exactly why
+    shiboken6 WAS portable standalone: it has its own --build-type. `--module-subset` does
+    not rescue the split - it only narrows which Qt modules get bindings, it does not change
+    which wheels create_wheels.py writes, and the addon modules still need the essentials
+    typesystems and libpyside6 to generate and link against.) Recommended shape when this
+    unblocks: ONE port, owned by whoever takes pyside6-essentials, running the single `--build-type=pyside6
+    --standalone` build plus create_wheels.py, and publishing the resulting distributions
+    through one _publish-wheel.yml call each with disjoint artifact-patterns per gotcha 380.
+    Third finding, to be settled by that combined port rather than here: 9 of the 41 modules
+    in wheel_files_pyside_addons() have no Qt6 provider in the build image at all. QtWebEngineCore/QtWebEngineQuick/QtWebEngineWidgets,
+    QtPdf and QtPdfWidgets need qt6-qtwebengine; QtGraphs/QtGraphsWidgets need qt6-qtgraphs;
+    QtHttpServer needs qt6-qthttpserver; QtWebView(+QtWebViewQuick) needs qt6-qtwebview.
+    None of those four packages exists in ANY of the manylinux_2_39_riscv64 image''s four
+    enabled repos (Rocky Linux 10.2: baseos, appstream, crb, extras) on ANY arch - not riscv64,
+    not x86_64, not aarch64(RHEL 10 ships no Qt6 WebEngine at all) - and there is no chromium
+    and no gn package either, while EPEL does not exist for riscv64 (gotcha 51). QtWebEngine
+    IS Chromium, so those 9 modules are not a dnf line away; they are a Chromium-for-riscv64
+    bring-up on the scale of the pyqt5-qt5 Qt5-SDK stop (gotcha 186). The other 32 addon modules
+    ARE covered by prebuilt Rocky 10 riscv64 AppStream -devel packages (qt6-qt3d, qt6-qtcharts,
+    qt6-qtdatavis3d, qt6-qtmultimedia, qt6-qtnetworkauth, qt6-qtconnectivity, qt6-qtpositioning,
+    qt6-qtquick3d, qt6-qtremoteobjects, qt6-qtscxml, qt6-qtsensors, qt6-qtserialport, qt6-qtserialbus,
+    qt6-qtspeech, qt6-qtvirtualkeyboard, qt6-qtwebchannel, qt6-qtwebsockets, qt6-qtlocation
+    - all verified present), so a reduced 32/41-module addons wheel is technically producible:
+    create_wheels.py only prints "Warning: <file> does not exist" (and only when verbose
+    > 0) for missing payload, it does not fail. Whether to ship a wheel carrying upstream''s
+    name and version while missing a quarter of its advertised modules is a deliberate decision
+    for that port, not something to let a suppressed warning make. Unlike pyqt5-qt5 this is
+    NOT a park: source is fully open (LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only), most
+    of the Qt6 module set is already packaged for riscv64, and the blocker is an unported
+    sibling rather than absent source. Evidence gathered read-only: PyPI JSON for the five
+    distributions, pypi.riseproject.dev /simple/ endpoints, upstream build_scripts/config.py
+    + build_scripts/wheel_files.py + create_wheels.py at tag 6.11.2, and Rocky 10 repodata
+    (repomd.xml -> primary.xml.gz) enumerated directly from dl.rockylinux.org for riscv64,
+    x86_64 and aarch64; the equivalent in-image `dnf install` probe was blocked by this session''s
+    egress proxy MITM-ing TLS to mirrors.rockylinux.org (same limitation recorded on the
+    pyqt5-qt5 entry), though the image itself pulled fine and confirmed Rocky 10.2 with those
+    four repos enabled. No local build was attempted: there is no addons-only build to attempt.
+    No worktree, branch, PR or workflow created. Pattern recorded as gotcha 382 (feasibility-and-triage).'
 - pkg: pylance
   version: 11.0.0
   home: https://lancedb.github.io/lance/
