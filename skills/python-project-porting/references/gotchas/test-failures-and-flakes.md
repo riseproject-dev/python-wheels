@@ -34,6 +34,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **362** — A `multiprocessing.Process().join()` regression test for a native threadpool's
   fork safety can hang the full length of its `pytest.mark.timeout` deterministically,
   not flakily, on the riscv64 runner.
+- **414** — A native RNG seeded from `time(NULL)` makes a stochastic test a wall-clock
+  lottery: replay consecutive epoch seconds through the library's own seed setter to
+  measure the real failure rate instead of re-running the suite.
 
 ---
 
@@ -916,3 +919,39 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       choreography in the comment so a future upstream fix (or disproof) is easy to
       recognize, and note that it was reproduced deterministically rather than assumed
       flaky.
+
+414. **A stochastic test whose native RNG is seeded from `time(NULL)` is a wall-clock
+    lottery, not an arch or libc difference — find the seed line in the C/C++ dependency,
+    then replay consecutive epoch seconds through the library's own seed setter to measure
+    the real failure rate (the leidenalg case).** `leidenalg`'s musllinux leg failed one
+    test out of 688 (`test_Bipartite`, `AssertionError: 2 != 1`) while the manylinux leg of
+    the same run was green and a full local QEMU rehearsal of *both* legs had passed — the
+    shape that invites "musl-specific edge" or "Alpine drift". It was neither:
+    `libleidenalg`'s `Optimiser::Optimiser()` does `igraph_rng_seed(&rng, time(NULL))`, so
+    every optimisation run is seeded by the *second* at which the object was constructed,
+    and the test seeds nothing.
+    - **A loop that re-runs the operation back-to-back proves nothing** and is the trap
+      here: 400 iterations inside the same second all get the same seed and return the
+      identical answer, which reads as "deterministic, so the failure must be
+      environmental". Likewise a passing suite rerun — 20 green full-suite runs only buy
+      20 samples, one per run, because the test runs once per suite.
+    - **Drive the seed directly.** Most such libraries expose the setter the constructor
+      bypasses (`Optimiser.set_rng_seed(value)` here). Construct the object, set the seed
+      to `int(time.time()) + i` for a few thousand `i`, and count the bad outcomes: that
+      replays the exact space the constructor samples from, thousands of samples in the
+      time one suite run takes. leidenalg: **7/1000 consecutive seconds fail (0.7%)**.
+    - **Run the same replay on a glibc/x86_64 install of the *upstream released wheel*.**
+      If it reports the identical failing seeds — it did here, the same 7 epoch seconds on
+      `manylinux_2_28_x86_64` as on the CI-built `musllinux_1_2_riscv64` wheel — the flake
+      is upstream's and platform-independent, and the port has nothing to answer for. This
+      is a cheap control that needs no riscv64 emulation.
+    - **Then re-run the job and change nothing.** Deselecting a test upstream itself ships
+      green 99.3% of the time would diverge from upstream's CI for no defect (SKILL.md's
+      goal 2); at ~0.7% per suite run and four interpreters retesting one abi3 wheel per
+      leg, expect a hit on roughly 3% of jobs and roughly 6% of two-libc runs, which is
+      quite enough to explain "one leg red, its twin green".
+    - **The distinguishing question is "what varies between the two legs?", not "what is
+      different about musl?"** Contrast gotcha 286, where a musllinux-only eigensolver
+      failure really did track a vendored dependency, and gotcha 379/362, where the
+      failure reproduced *deterministically*. Wall-clock seeding fails that test: nothing
+      about the wheel, the libc or the arch enters the seed.
