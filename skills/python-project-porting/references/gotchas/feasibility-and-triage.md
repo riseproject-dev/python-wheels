@@ -51,6 +51,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **376** — A permissive `License:` field on the wrapper package says nothing about whether
   the payload it ships has any source at all — check the binary's own content, not the
   metadata's license family (the tableauhyperapi case).
+- **381** — A third-party *vendor release* of a project this repo has already ruled out
+  inherits that verdict — resolve the redistribution to its upstream before triaging anything
+  else (the tokenspeed-triton case).
 
 ---
 
@@ -1623,3 +1626,55 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     - Parked (`.queue.yml`); no worktree/branch/PR created — diagnosed read-only against
       the real 0.0.26359 wheel contents (`unzip -l`, `file`/`strings` on both native
       binaries) and Tableau's own installation/hardware-requirements documentation.
+
+381. **A third-party *vendor release* of a project this repo has already ruled out inherits
+     that verdict — resolve the redistribution to its upstream before triaging anything else
+     (the tokenspeed-triton case).** Nothing in a queue entry says a distribution is somebody
+     else's rebuild of another project: `tokenspeed-triton`'s PyPI `Author`,
+     `Author-email` and `Home-page` are copied verbatim from upstream triton (Philippe
+     Tillet, `phil@openai.com`, `github.com/triton-lang/triton/`), and `.queue.yml`'s
+     `home`/`repo` inherit them, so it reads as an ordinary triton port. Two metadata tells
+     give it away, both free: the summary suffix — "A language and compiler for custom Deep
+     Learning operations **(vendor release for TokenSpeed)**" — and a version that upstream
+     never released (`3.8.10.post<YYYYMMDD>`, five dated builds, while PyPI `triton`'s newest
+     is `3.8.0` and there is no `3.8.10` tag). Dated `.postN` builds off a release *line*
+     are a vendor-nightly smell in general.
+     - **The renamed namespace *is* the redistribution, and its transform is private.**
+       `top_level.txt` is `tokenspeed_triton`, every path in the wheel is
+       `tokenspeed_triton/…`, and the backend entry points are `[tokenspeed_triton.backends]`;
+       the consumer (`lightseekorg/tokenspeed`, a GPU LLM inference engine) even bans the real
+       name in `python/pyproject.toml` (`"triton" = { msg = "Use tokenspeed_triton instead." }`).
+       This is gotcha 185's rename shape without gotcha 185's escape hatch: pi-heif's
+       `transform_to-pi_heif.py` is checked in upstream and can simply be run, whereas the
+       downstream triton fork here is not public — TokenSpeed's own
+       `.skills/bisect-triton-release.md` instructs its developers to "ask where the downstream
+       triton repo is to inspect downstream changes" — and **zero sdists exist across every
+       version ever published**, so there is no source for the thing PyPI actually ships.
+     - **Check only what the rebuild changed; don't re-derive the upstream verdict.** For
+       triton that verdict is gotcha 41, and the wheel confirms it in one range-request read
+       — `uv run ci_scripts/wheel_contents.py <pkg> --match <wheel-tag>` lists a remote
+       wheel largest-first without downloading it, and `--member <path>` pulls one file
+       (`dist-info/entry_points.txt`, a backend `driver.py`) out of the same wheel:
+       a 179 MB `tokenspeed_triton/_C/libtriton.so` beside
+       `backends/nvidia/bin/{ptxas,ptxas-blackwell,nvdisasm,cuobjdump}` and
+       `backends/nvidia/lib/libdevice.10.bc`, plus an AMD backend of HIP/HSA headers and
+       `*.bc`. The two questions specific to a fork are whether it *added* a backend or a CPU
+       path upstream lacks (it did not — `entry_points.txt` lists exactly `amd` and `nvidia`,
+       matching upstream `setup.py`'s `BackendInstaller.copy(["nvidia", "amd"])`, and each
+       `driver.py` `ctypes.CDLL`s `libcuda.so.1` / `libamdhip64.so`), and whether the vendor
+       toolchain now reaches our arch (it does not — NVIDIA's
+       `redist/redistrib_13.{0,2}.0.json` still lists only `linux-x86_64`, `linux-sbsa`,
+       `windows-x86_64`).
+     - **Re-check a moved build mechanism rather than trusting the older gotcha's file
+       names.** triton's pinned prebuilt LLVM is no longer `cmake/llvm-hash.txt` (404 today)
+       but `cmake/llvm-info.json` read by `python/build_helpers.py`; its `sha256sum` keys are
+       `almalinux`/`ubuntu`/`macos`-`{x64,arm64}` + `windows-x64`, and
+       `llvm-b010a18d-<suffix>-1.tar.gz` on `oaitriton.blob.core.windows.net` answers 200 for
+       `ubuntu-x64`/`almalinux-arm64` and 404 for every riscv64 spelling. Use a *real* hash
+       from that JSON when probing — a made-up one 404s for every arch and proves nothing.
+       `get_llvm_system_suffix()` returns `None` on an unrecognised machine and falls back to
+       a user-supplied LLVM, so a port would first owe a from-source build of that exact
+       revision (libclang-scale, gotcha 338) before hitting the blockers that end it anyway.
+     - Report `parked`, cite the upstream gotcha, and note the family: sibling distributions
+       from the same vendor (`tokenspeed-mla`, `tokenspeed-kernel*`) are the same shape, as
+       are the already-parked `sglang`/`onnxruntime-gpu` entries.

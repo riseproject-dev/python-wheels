@@ -93,6 +93,9 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
 - **376** — A permissive `License:` field on the wrapper package says nothing about whether
   the payload it ships has any source at all — check the binary's own content, not the
   metadata's license family (the tableauhyperapi case).
+- **381** — A third-party *vendor release* of a project this repo has already ruled out
+  inherits that verdict — resolve the redistribution to its upstream before triaging anything
+  else (the tokenspeed-triton case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
