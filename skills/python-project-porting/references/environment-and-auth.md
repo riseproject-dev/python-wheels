@@ -23,6 +23,16 @@
   do not use the user's address from your own session context, which is a *different*
   address. A `pre-commit` hook rejects any other identity (and any workflow adding
   `BUILD_VERBOSITY`); if it fires, fix the command, don't bypass the hook.
+  - **`ci_scripts/git-identity.sh` is for CI, not for you — never run it.** It sets
+    `user.name`/`user.email` to `github-actions[bot]` (or the App bot when `APP_SLUG` is set)
+    so *workflow* commits are attributed to the bot. Run locally it silently rewrites
+    `.git/config`, and because `git config` in a worktree writes the **common** config, it
+    clobbers the identity for the shared checkout and every other worktree/agent too — the
+    next commit anywhere lands as `github-actions[bot]`. Read it if you need to know what CI
+    does; restore with `git config user.name "Ludovic Henry"` and
+    `git config user.email "git@ludovic.dev"`, and check `git log -1 --format='%an <%ae>'`
+    before pushing. The `pre-commit` hook is not always installed locally, so nothing else
+    catches it.
 
 - **Pushing workflow files needs `workflow` scope** on the gh token, else the push is
   rejected ("refusing to allow an OAuth App to create or update workflow … without
