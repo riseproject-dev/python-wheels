@@ -44,6 +44,17 @@
   once). If it reports a real rebase conflict, resolve it by hand before re-running it.
   Before writing a new gotcha number, run `ci_scripts/next_gotcha.sh` (and again right before
   the final push) — concurrent agents have repeatedly collided on the same next number.
+- **A port PR/branch must touch only `.github/workflows/`, `docs/packages/<pkg>.yaml` and
+  `patches/<pkg>/<version>/`** — never `skills/`, `ci_scripts/`, or `.queue.yml` (those are
+  main-only, per the bullet above). This has been violated repeatedly: an agent researching
+  a port legitimately finds a new gotcha or writes a helper script, and it rides along in the
+  same commit as the port itself instead of going to `main` separately. Run
+  `ci_scripts/check_port_pr_scope.sh --branch` before your final push on any non-`main`
+  branch to catch it. Better: install it as a local pre-commit hook once per clone/worktree so
+  it catches the mistake immediately instead of at push time —
+  `git config core.hooksPath ci_scripts/git-hooks` (this setting lives in `.git/config`, not
+  in the tracked tree, so run it again in any worktree that doesn't have it yet;
+  `git config --get core.hooksPath` shows whether it's already set).
 
 - **Pushing workflow files needs `workflow` scope** on the gh token, else the push is
   rejected ("refusing to allow an OAuth App to create or update workflow … without
