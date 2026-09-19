@@ -87,8 +87,8 @@ jobs:
         run: |
           git apply ../python-wheels/patches/paddlepaddle/${{ matrix.version }}/*.patch
 
-      # Same OOM guard build-vtk.yml needs on these 4-core runners: linking
-      # libpaddle.so and libphi_core.so peaks well above the runner's RAM.
+      # Parity with build-vtk.yml's own guard, though swapon fails on these
+      # runners (/ is overlayfs), so 15GB of RAM is the real link budget.
       - name: Set swap space
         uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
         with:
@@ -164,6 +164,10 @@ jobs:
           esac
           EOF
 
+      # numpy and Pillow of python/requirements.txt have riscv64 wheels only on
+      # our registry; only-binary keeps a newer PyPI release from winning the
+      # resolution and then compiling from sdist (Pillow's needs libjpeg headers
+      # the image does not carry).
       - name: Build wheel
         run: |
           podman run -t \
@@ -173,6 +177,8 @@ jobs:
             --workdir /paddle \
             -e PYTHON_TAG="${{ matrix.python }}" \
             -e PADDLE_VERSION="${PADDLE_VERSION}" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            -e PIP_ONLY_BINARY=numpy,pillow \
             --pull=newer \
             "${MANYLINUX_RISCV64_IMAGE}" \
             bash /paddle/riscv64-build-and-test.sh build
@@ -192,6 +198,7 @@ jobs:
             --workdir /paddle \
             -e PYTHON_TAG="${{ matrix.python }}" \
             -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            -e PIP_ONLY_BINARY=numpy,pillow \
             "${MANYLINUX_RISCV64_IMAGE}" \
             bash /paddle/riscv64-build-and-test.sh test
 
