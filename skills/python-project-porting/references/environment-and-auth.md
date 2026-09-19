@@ -33,6 +33,17 @@
     `git config user.email "git@ludovic.dev"`, and check `git log -1 --format='%an <%ae>'`
     before pushing. The `pre-commit` hook is not always installed locally, so nothing else
     catches it.
+- **Bookkeeping commits (`.queue.yml`, a new gotcha, a `ci_scripts/` fix) go straight to
+  `origin/main`, never a feature branch** — but many agents do this concurrently, so use
+  `ci_scripts/safe_push_main.sh` instead of a bare `git push`. It always pushes `HEAD` (a bare
+  `git push origin main` pushes your local `main` branch, which may be stale, if you aren't
+  literally on a branch named `main`), fetches and rebases onto the latest `origin/main` first,
+  retries on a race with another agent's concurrent push, and refuses to push if `.queue.yml`'s
+  package count would shrink (a signal you rebased onto a stale snapshot and are about to
+  silently revert someone else's already-landed commit — this has nearly happened more than
+  once). If it reports a real rebase conflict, resolve it by hand before re-running it.
+  Before writing a new gotcha number, run `ci_scripts/next_gotcha.sh` (and again right before
+  the final push) — concurrent agents have repeatedly collided on the same next number.
 
 - **Pushing workflow files needs `workflow` scope** on the gh token, else the push is
   rejected ("refusing to allow an OAuth App to create or update workflow … without
