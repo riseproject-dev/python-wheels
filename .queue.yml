@@ -872,9 +872,71 @@ packages:
   version: 6.11.2
   home: https://pyside.org
   repo: https://code.qt.io/cgit/pyside/pyside-setup.git/
-  status: queued
+  status: blocked-on-dependency
   pr: null
-  notes: '2 Linux wheels upstream (abi: cp310); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: '2 Linux wheels upstream of 5 total (abi: cp310-abi3; manylinux_2_34_x86_64 + manylinux_2_39_aarch64,
+    0.57 MB each); no riscv64 on PyPI or pypi.riseproject.dev (checked directly: /simple/pyside6/,
+    /simple/pyside6-essentials/ and /simple/pyside6-addons/ all 404; only shiboken6 6.11.2
+    riscv64 is live). 6.11.2 re-confirmed latest 2026-09-19, both as PyPI info.version and
+    as the newest tag on code.qt.io/pyside/pyside-setup (v6.11.2; v6.11.1, v6.10.3 behind it).
+    Blocked on BOTH pyside6-essentials and pyside6-addons - pyside6 is the tip of the chain,
+    not its base. requires_dist off PyPI: shiboken6==6.11.2 (published, PR #1696) +
+    PySide6_Essentials==6.11.2 + PySide6_Addons==6.11.2, so the critical path is shiboken6 ->
+    pyside6-essentials -> pyside6-addons -> pyside6, and a green pyside6 build today would ship
+    a wheel whose two exact pins are unsatisfiable on riscv64 from either index - the same
+    consumer-side dead end pyqt5/pyqt5-qt5 is parked for. See the pyside6-addons entry
+    (blocked-on-dependency) and gotcha 382 for the shared structural finding: there is no
+    per-distribution build target (build_scripts/config.py:get_allowed_top_level_build_values()
+    at 6.11.2 allows only all, shiboken6, shiboken6-generator, pyside6), the distributions are
+    carved out after one full build by the root-level create_wheels.py, and the right shape is
+    ONE port owned by whoever takes pyside6-essentials that runs `--build-type=pyside6
+    --standalone` once and publishes essentials + addons + this meta-wheel from that single
+    build (gotcha 380 for the disjoint artifact-pattern publish). Deliberately NOT folded into
+    that port here: two product decisions are still open (the reduced 32/41 addons module set,
+    and the Qt minor skew below), and neither is mine to settle unilaterally. What this entry
+    adds beyond the addons one, recorded as gotcha 383: (1) the pyside6 wheel carries ZERO
+    compiled content - the real manylinux_2_39_aarch64 wheel is 67 entries / 4.9 MB uncompressed
+    and holds no .so at all, just 59 generated Qt*.pyi stubs plus PySide6/__init__.py, _config.py,
+    _git_pyside_version.py, py.typed and dist-info. Its cp310-abi3-manylinux tag comes from a
+    deliberately fake extension: wheel_artifacts/setup.py.base declares
+    ext_modules=[Extension("PySide6/QtCore", [], py_limited_api=True)] with no sources beside a
+    no-op build_ext Command, and says in a comment that it exists only to make setuptools think
+    there are extension modules (with py_limited_api/plat_name set in
+    wheel_artifacts/pyproject.toml.base). (2) That does NOT make it a gotcha-27 "no port needed"
+    case like watchdog: pyside6 publishes no sdist on any version, so riscv64 pip has nothing to
+    fall back to and the wheel genuinely is required - just last. (3) It must be cut from the
+    SAME build tree as its siblings, not merely a later one: create_wheels.py:get_simple_manifest
+    gives it the one-line manifest `prune PySide6`, which with include_package_data=True keeps
+    only the top-level files of build/<env>a/package_for_wheels/PySide6 (dropping Qt/, scripts/,
+    support/), and the 59 stubs it keeps span essentials modules, addons modules AND the nine
+    WebEngine-family modules whose .so lives elsewhere - so an umbrella built from a different
+    run than the published siblings can advertise stubs for modules those wheels do not contain.
+    (4) New and unweighed by any entry so far: the build image ships Qt 6.10.1, NOT 6.11.x.
+    `dnf repoquery qt6*` inside quay.io/pypa/manylinux_2_39_riscv64 (Rocky Linux 10.2) reports
+    6.10.1 for all ~100 qt6-* packages across appstream/crb, and this repo''s own published
+    shiboken6-6.11.2-6.10.1-cp37-abi3-manylinux_2_39_riscv64.whl already encodes it (that 6.10.1
+    is a wheel build tag carrying the Qt version). Not a hard stop -
+    sources/pyside6/cmake/PySideSetup.cmake marks only Core/Gui/Widgets/PrintSupport/Sql/Network/
+    Test/Concurrent REQUIRED (all in qt6-qtbase*, present), leaves the rest OPTIONAL_COMPONENTS,
+    and derives PYSIDE_QT_VERSION from the discovered Qt6Core_VERSION instead of asserting a
+    minimum, so a 6.11.2-against-6.10.1 configure succeeds and shiboken''s typesystem `since=`
+    gating drops the newer API - but the published wheels would then expose a Qt 6.10 API surface
+    under a 6.11.2 version number, and QtCanvasPainter (new in 6.11, present in upstream''s stub
+    set) has no provider in the image at all. That is a second divergence from upstream stacked on
+    top of the missing-WebEngine one and should be decided explicitly by the combined port; the
+    pyside6-essentials entry does not mention it yet. Also corrected, as gotcha 384: in-image dnf
+    is NOT blocked by a TLS-intercepting egress proxy (as the pyqt5-qt5 and pyside6-addons entries
+    record) - `docker run --network host`, passing the proxy env vars through, plus copying the
+    proxy CA into /etc/pki/ca-trust/source/anchors and running update-ca-trust extract, makes
+    dnf/repoquery work normally inside the riscv64 image; that is how the Qt 6.10.1 version fact
+    above was obtained. Local validation reached: manylinux_2_39_riscv64 image pulled and the
+    full qt6-*/clang-devel/llvm-devel inventory enumerated by repoquery in-image; NO build was
+    attempted, because there is no pyside6-only thing to build (see above) and a full PySide6
+    bindings build needs shiboken6-generator compiled first, which is many hours under QEMU - the
+    confirmatory `dnf install` of the 30-package Qt6 -devel set was still running after ~15 min on
+    a contended host when this was recorded. No worktree, branch, PR or workflow created; no
+    docs/packages/pyside6.yaml added. Re-queue only once pyside6-essentials and pyside6-addons
+    riscv64 wheels are published, or fold this entry into that combined port.'
 - pkg: vtk
   version: 9.7.0
   home: https://vtk.org
