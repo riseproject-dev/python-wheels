@@ -1446,9 +1446,39 @@ packages:
   version: 0.2.5
   home: https://github.com/lightseekorg/tokenspeed
   repo: https://github.com/lightseekorg/tokenspeed
-  status: queued
+  status: parked
   pr: null
-  notes: '2 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Not feasible, and there is no longer a gap to close: the queue note''s "2 Linux wheels upstream
+    (abi: py3)" describes 0.2.5, but upstream has since removed the arch-specific payload -- new gotcha
+    388. 0.2.0-0.2.8 each publish py3-none-manylinux_2_28_{x86_64,aarch64} (~0.75 MB) and no sdist, while
+    the current latest 0.2.9 publishes a single py3-none-any wheel (0.15 MB) that already installs on
+    riscv64 unmodified, so riscv64 gets exactly what x86_64 gets and there is nothing arch-specific left
+    to build (gotcha 24''s "already installs" reasoning, reached via gotcha 388''s latest-vs-queued check
+    rather than from the queued version''s files). Verified, not assumed: (1) uv run ci_scripts/queue_triage.py
+    tokenspeed-mla --deps (new helper) flags the entry stale and tables the per-version tag/size collapse.
+    (2) The 0.75 MB of platform-only content in 0.2.5 was two prebuilt NVIDIA Blackwell cubins, tokenspeed_mla/objs/cute_dsl_fmha_fp8_e4m3_to_bf16_hd192_sm_{100a,103a}_x86_64.so
+    (1.45 MB + 1.37 MB uncompressed), loaded by tokenspeed_mla/fmha_binary.py via cutlass.cute.runtime.load_module(...,
+    enable_tvm_ffi=True) after torch.cuda.get_device_properties() picks the sm_<major><minor>a_<machine>
+    filename -- an AOT CuTe DSL build for compute capability 10.0/10.3, i.e. Blackwell SM100/SM103 only.
+    Both that module and the whole objs/ directory are gone from 0.2.9. NVIDIA ships no riscv64 CUDA:
+    redist/redistrib_13.0.0.json lists only linux-x86_64, linux-sbsa, windows-x86_64, linux-all (gotcha
+    41''s check). (3) Runtime deps are a hard wall regardless of the wheel shape. Inside quay.io/pypa/manylinux_2_39_riscv64
+    under qemu, a full binary-only resolve of tokenspeed-mla==0.2.9 with --extra-index-url pypi.riseproject.dev
+    fails on "tokenspeed-triton>=3.8.10.post20260906 (from versions: none)" -- that sibling is the vendor
+    triton rebuild parked in this same queue (gotcha 381/41), no riscv64 wheel and no sdist at any version.
+    nvidia-cutlass-dsl is a py3-none-any *facade* that downloads fine with --no-deps and still blocks:
+    resolving it fully is ResolutionImpossible because it pins nvidia-cutlass-dsl-libs-{base,cu12}==4.7.1,
+    published cp310-cp314(t)-manylinux_2_28_{x86_64,aarch64} only, no sdist, ~88 MB of CUDA payload each
+    (gotcha 40''s dependency-blocked shape, gotcha 388''s facade note). Only apache-tvm-ffi and torch are
+    actually served for riscv64 (both on pypi.riseproject.dev; torch 2.14.0+cpu cp312 resolved). (4) Installed
+    the 0.2.9 wheel in the riscv64 container: import tokenspeed_mla succeeds, but __init__.py wraps every
+    import in one try/except ImportError and swaps in _unavailable stubs, so tokenspeed_mla_decode() raises
+    "ImportError: tokenspeed_mla requires PyTorch, CUDA bindings, and NVIDIA CuTe DSL runtime dependencies"
+    -- gotcha 183''s importable-but-unusable shape, and a property of the wheel upstream ships for every
+    arch, not a riscv64 defect. Same vendor family and same disposition as the parked tokenspeed-triton
+    entry, which predicted this one. Version left at 0.2.5 to match the queue snapshot (latest is 0.2.9);
+    no workflow, docs/packages entry, patches or PR created. Revisit only if NVIDIA ships a riscv64 CUDA
+    toolkit and TokenSpeed publishes riscv64 builds of tokenspeed-triton and the CuTe DSL payload wheels.'
 - pkg: tokenspeed-triton
   version: 3.8.10.post20260721
   home: https://github.com/triton-lang/triton/
