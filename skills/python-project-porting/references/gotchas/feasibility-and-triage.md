@@ -70,6 +70,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   unportable: in a JIT kernel library the compiled part is a few-hundred-KB shim, so gotcha
   41's vendor-payload tell is absent and the wall is what that shim links — `libtorch_cuda.so`,
   which our CPU-only riscv64 torch can never provide (the humming-kernels case).
+- **387** — A GPU-toolkit-suffixed distribution name (`-cuda12x`, `-rocm-7-0`) is a toolkit
+  selector whose name can come from a *separate* release-tools repo, and a documented
+  stub/no-CUDA build mode is a docs build, not a port (the cupy-cuda12x case).
 
 ---
 
@@ -1950,3 +1953,64 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
      maturin binary, but a per-arch C++ shim retagged by hand (0.1.14+ adds a
      `_device_info.abi3.so` and becomes honestly `cp310-abi3`, so an `abi: py3` note in the
      queue goes stale on a package like this).
+
+387. **A GPU-toolkit-suffixed distribution name (`-cuda12x`, `-cuda13x`, `-rocm-7-0`) is a
+    toolkit *selector*, and the name can be injected from a **separate** release-tools
+    repository the source repo never mentions (the cupy-cuda12x case).** Gotcha 79's
+    `-gpu`/`-headless` sibling branches inside one `setup.py`, and gotcha 185's transform
+    script at least lives in the source tree. cupy is a step further out: `cupy/cupy`'s
+    `pyproject.toml` says `name = "cupy"` and nothing in that repo builds a suffixed
+    wheel. The suffixed distributions come from `cupy/cupy-release-tools`, whose
+    `dist_config.py` holds the whole sibling axis as a table —
+    `'12.x' → {'name': 'cupy-cuda12x', 'kind': 'cuda', 'image':
+    'cupy/cupy-release-tools:cuda-runfile-12.9.0-el8-amd64'}`, plus `12.x-aarch64`,
+    `13.x`, `13.x-aarch64`, `rocm-7.0` — and whose `dist.py` calls
+    `rename_project(f'{workdir}/cupy/pyproject.toml', package_name)` to rewrite
+    `project.name` before building. So the playbook's "read upstream's own build/release
+    docs first" has to mean *that* repo: it is where the arch list, the base images and
+    the name mapping actually are. Read the table before anything else — if every `kind`
+    is a proprietary GPU toolkit and there is no CPU entry, the suffix is not a feature
+    flag and there is no CPU-shaped sibling of that distribution (same conclusion as the
+    parked `onnxruntime-gpu`, reached from a different direction).
+    - **Ask the vendor's own redist index for our arch, as gotcha 41 does.** All 24 CUDA
+      12.x manifests (`developer.download.nvidia.com/compute/cuda/redist/redistrib_12.*.json`)
+      list only `linux-x86_64`, `linux-sbsa`, `linux-aarch64`, `linux-ppc64le`,
+      `linux-all` and `windows-x86_64`; 13.x is the same minus ppc64le. The PyPI
+      republications agree (`nvidia-cuda-runtime-cu12`, `nvidia-cublas-cu12`,
+      `nvidia-cuda-nvrtc-cu12`: manylinux x86_64/aarch64 and Windows only). CUDA on
+      RISC-V is an announced future capability for RVA23 server-class platforms with no
+      released nvcc, cuDNN or `libcuda.so.1`.
+    - **Check whether the toolkit is a build requirement or a runtime `dlopen` (gotcha
+      284) — here it is the former.** `install/cupy_builder/_features.py`'s `CUDA_cuda`
+      feature sets `required = True` and configures by *compiling* a probe that reads
+      `CUDA_VERSION` from `cuda.h` (rejecting anything below 12000); its `includes` are
+      `cuda_runtime.h`/`cublas_v2.h`/`cufft.h`/`curand.h`/`cusparse.h`, its link list is
+      `cudart_static`+`cublas`+`cufft`+`curand`+`cusparse`+`cuda`+`nvrtc`, and four `.cu`
+      sources (`cupy_cub.cu`, `cupy_thrust.cu`, `cupy_distributions.cu`,
+      `cupy_cufftXt.cu`) need nvcc. `setup.py` `sys.exit(1)`s when a required feature
+      fails to configure, so there is no partial build.
+    - **The un-suffixed base name is not the escape hatch.** PyPI's `cupy` project ships
+      an sdist and *no wheel on any arch or interpreter* — gotcha 50/126, no riscv64 gap
+      to close — and that sdist builds through the same `required` CUDA feature. Retarget
+      a `-cuda*` queue entry to the base name only if the base actually publishes wheels
+      somewhere.
+    - **Nor is the project's own "no-GPU" build mode.** `CUPY_INSTALL_USE_STUB=1` (auto-set
+      when `READTHEDOCS=True`) defines `CUPY_NO_CUDA`, pins the compile-time
+      `CUPY_CUDA_VERSION` to 0, and compiles against `cupy_backends/stub/*.h`, whose
+      banner reads "This file is a stub header file of cuda for Read the Docs" and whose
+      entry points all `return cudaSuccess` (`cudaDriverGetVersion` writes 0). It builds
+      clean with no toolkit installed and yields a wheel that computes nothing — gotcha
+      41's rejected offline-build escape hatch behind a friendlier switch. A documented
+      stub/no-CUDA flag is evidence about the *docs build*, never about portability.
+    - **A metadata file inside the wheel can state the coupling outright, for one range
+      request.** `ci_scripts/wheel_contents.py <pkg> --member cupy/.data/_wheel.json`
+      returns `{"cuda": "12.x", "packaging": "pip", "nccl": {...}}`, and the same listing
+      shows the wheel bundles *no* CUDA `.so` at all (only cupy's own extensions plus
+      vendored CCCL/jitify/xsf headers) — i.e. the toolkit is a hard external dependency
+      resolved at runtime (`cuda-pathfinder`, the `ctk` extra's
+      `cuda-toolkit[...]==12.*`), not a vendored payload that could be swapped.
+    - **One tree spread over several queue entries is one verdict, not several
+      triages.** `cupy-cuda12x` and `cupy-cuda13x` are separate `.queue.yml` rows for the
+      same source tree differing only in the toolkit major; park each with the same
+      evidence rather than re-deriving it (gotcha 150's sibling check used to save work
+      rather than to sequence it).

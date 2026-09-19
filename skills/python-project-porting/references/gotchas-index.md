@@ -115,6 +115,10 @@ The porting gotchas (371 of them) live in [`references/gotchas/`](gotchas/), spl
   41's vendor-payload tell is absent and the wall is what that shim links — `libtorch_cuda.so`,
   which our CPU-only riscv64 torch can never provide; refines gotchas 249 and 284 (the
   humming-kernels case).
+- **387** — A GPU-toolkit-suffixed distribution name (`-cuda12x`, `-rocm-7-0`) is a toolkit
+  selector whose name can be injected from a *separate* release-tools repo; check the vendor's
+  redist index for our arch, and treat a documented stub/no-CUDA build mode as a docs build,
+  not a port (the cupy-cuda12x case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
