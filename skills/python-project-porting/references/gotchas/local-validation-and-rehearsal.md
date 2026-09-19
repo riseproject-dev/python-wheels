@@ -19,6 +19,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
 - **369** — Without docker, fetch Rocky 10's own dnf repodata over plain HTTPS to
 - **384** — `dnf` failing in the image with `Curl error (60) ... self-signed certificate` is
 - **394** — A libtorch-linking project cannot be rehearsed on x86_64 with PyPI's `torch`
+- **412** — When no riscv64 image or cross-toolchain is reachable, exercise a C/C++ source's
   your egress proxy, not the image — install the proxy CA into the container trust store
 - **403** — Prove which build *variant* you are about to produce by stubbing the build
   backend's `setup()` on the host
@@ -373,3 +374,40 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
     - **Prefer `-O1`/`-O2` over `-O0`** when trading fidelity for QEMU time, and re-run the
       import assertions against a wheel built with upstream's real `CFLAGS` before
       believing a green rehearsal.
+
+412. **When no riscv64 image or cross-toolchain is reachable, exercise a C/C++ source's
+    *generic* architecture path natively by renaming the arch macros in a scratch copy —
+    `-U__x86_64__` cannot do it, because glibc's own headers key off the same macro.**
+    Gotchas 9/101/180 all assume a container: `quay.io` for the manylinux images,
+    `deb.debian.org`/`dl-cdn.alpinelinux.org` for a compiler inside a `--platform
+    linux/riscv64` base. A restricted-egress host can have working QEMU/binfmt and still
+    reach none of them, leaving no way to compile a single line for riscv64. The
+    substitute question is nearly as good: *does the source's non-x86, non-aarch64 branch
+    compile at all?* — which is the branch riscv64 takes, and it compiles on any host.
+    The obvious spelling fails: `g++ -U__x86_64__` dies in `/usr/include/gnu/stubs.h`
+    with `fatal error: gnu/stubs-32.h: No such file or directory`, because undefining the
+    macro flips glibc's own multilib selection, not just the project's `#if`s. Rename the
+    macros in the project's sources instead, in a copy under `.git/pw-scratch/<pkg>/`:
+    ```bash
+    cp -a <checkout>/csrc .git/pw-scratch/<pkg>/csrc && cd .git/pw-scratch/<pkg>/csrc
+    sed -i 's/__x86_64__/__FAKE_X86__/g; s/_M_X64/FAKE_M_X64/g;
+            s/__aarch64__/__FAKE_A64__/g; s/_M_ARM64/FAKE_M_ARM64/g;
+            s/__i386__/__FAKE_I386__/g' *.cpp *.h
+    g++ -std=c++17 -O2 -fopenmp -I. -c <each source> -o /dev/null
+    ```
+    The system headers keep their real macros, the project's guards all evaluate false, and
+    what compiles is the scalar fallback path. For bitsandbytes this settled in seconds that
+    every `immintrin.h`/`arm_neon.h` block in `csrc/cpu_ops.{cpp,h}` has a working generic
+    `#else` — the one real riscv64 unknown — without a single emulated instruction.
+    - **It proves compilability, not codegen or correctness**, so it substitutes for the
+      *pre-flight*, never for the CI build: an arch-specific miscompile, an alignment
+      assumption or a numeric divergence (gotcha 172's territory) still only shows up on the
+      real runner. Pair it with the `pip download --platform manylinux_2_39_riscv64` check
+      (gotcha 101) so the dependency side is settled on the host too.
+    - **Check what the egress policy actually allows before giving up on the container**:
+      `mirror.gcr.io` proxies Docker Hub and often survives a policy that blocks `quay.io`
+      and Docker Hub's own CDN, which is enough to install binfmt
+      (`docker run --privileged --rm mirror.gcr.io/tonistiigi/binfmt --install riscv64`,
+      after `mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc` if the host has not
+      mounted it) and to pull `mirror.gcr.io/riscv64/debian`. A riscv64 shell with no
+      reachable package mirror still cannot compile anything, which is what sends you here.

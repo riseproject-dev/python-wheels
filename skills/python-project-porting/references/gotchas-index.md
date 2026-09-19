@@ -93,6 +93,9 @@ The porting gotchas (377 of them) live in [`references/gotchas/`](gotchas/), spl
 - **376** — A permissive `License:` field on the wrapper package says nothing about whether
   the payload it ships has any source at all — check the binary's own content, not the
   metadata's license family (the tableauhyperapi case).
+- **411** — A GPU-first package is not CUDA-blocked when its own build system makes the CPU
+  backend the *default* — read the backend selector and diff the per-platform wheel sizes
+  before parking it (the bitsandbytes case).
 - **381** — A third-party *vendor release* of a project this repo has already ruled out
   inherits that verdict — resolve the redistribution to its upstream before triaging anything
   else (the tokenspeed-triton case).
@@ -622,6 +625,10 @@ The porting gotchas (377 of them) live in [`references/gotchas/`](gotchas/), spl
 - **410** — Gotcha 188's "lower the optimisation level for the local rehearsal only" can
   silently produce a broken wheel when the project has a C99 `inline` helper with no
   `static` — and the suite still passes, because the pure-Python fallback catches it.
+- **412** — When no riscv64 image or cross-toolchain is reachable, rename a C/C++ source's
+  arch macros in a scratch copy to exercise its generic architecture path natively — a
+  restricted-egress host can still prove compilability without a container (the
+  bitsandbytes case).
 
 ### PR, CI, triggers, publishing & maintainer signals — [`gotchas/pr-ci-and-maintainer.md`](gotchas/pr-ci-and-maintainer.md)
 
