@@ -58,6 +58,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   one port each — check the allowed `--build-type` values before writing any YAML, and let
   `requires_dist` (not the most "core-sounding" name) fix the order (the
   pyside6/-essentials/-addons case).
+- **383** — The *umbrella* distribution of a split family carries no compiled code at all,
+  gets its platform+`abi3` tag from a deliberately fake `Extension`, and its payload is
+  generated stubs for the union of its siblings' modules — so it cannot be cut from a
+  different build than they were (the pyside6 meta-wheel case).
 
 ---
 
@@ -1748,3 +1752,67 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       exists, gotcha 380 covers publishing the several wheels it emits: one
       `_publish-wheel.yml` call per distribution with disjoint `artifact-pattern`s, since
       the reusable workflow asserts a single normalized name and version per invocation.
+
+383. **The *umbrella* distribution of a split family carries no compiled code at all, gets
+    its platform+`abi3` tag from a deliberately fake `Extension`, and its payload is
+    generated stubs for the union of its siblings' modules — so it cannot be cut from a
+    different build than they were (the pyside6 meta-wheel case).** Gotcha 382 establishes
+    that a split family is one unit of work and fixes the order from `requires_dist`; this
+    is the umbrella end of that chain, and it is stronger than "do it last". Read the
+    umbrella's file list before assuming it is a thin metadata shim: `pyside6`
+    6.11.2's `manylinux_2_39_aarch64` wheel is 0.57 MB compressed but 67 entries and
+    4.9 MB uncompressed, and holds **zero** `.so` — 59 generated `Qt*.pyi` stubs plus
+    `__init__.py`, `_config.py`, `_git_pyside_version.py`, `py.typed` and `dist-info`.
+    - **A platform tag with no compiled content has a third origin beyond gotcha 27's
+      hand-set `--plat-name` and gotcha 81/145's real payload: a fake extension declared
+      on purpose.** `wheel_artifacts/setup.py.base` passes
+      `ext_modules=[Extension("PySide6/QtCore", [], py_limited_api=True)]` — no sources —
+      next to a `build_ext` `Command` subclass whose `run()` is `pass` and whose
+      `get_source_files()` returns `[]`, and says so in a comment: it exists only "to force
+      setuptools to understand we are using extension modules". With
+      `wheel_artifacts/pyproject.toml.base`'s `[tool.distutils.bdist_wheel] py_limited_api
+      = "cp310"` and `plat_name = PROJECT_TAG`, that is the entire reason the wheel is
+      tagged `cp310-abi3-manylinux_…` instead of `py3-none-any`. Grepping the sdist for
+      `Extension(` would have "confirmed" a compiled package; reading its arguments is what
+      settles it. (The tag needs no `--plat-name` CLI flag either — `create_wheels.py`'s
+      `get_platform_tag()` computes `manylinux_{platform.libc_ver()[1]}_{platform.machine()}`
+      itself, which is what you want, since passing `--plat-name` to `setup.py bdist_wheel`
+      crashes on a native non-macOS Linux build.)
+    - **Do not conclude "arch-independent content, therefore no port needed" (gotcha 27)
+      without checking for an sdist.** watchdog was dismissible because upstream ships no
+      `py3-none-any` wheel *and* publishes an sdist, so riscv64 `pip install` already falls
+      back and builds in seconds. `pyside6` publishes **no sdist on any version** — 6.11.2
+      has exactly five wheels and nothing else — so `pip install pyside6` on riscv64 has
+      nothing to fall back to and genuinely does need this wheel. Stub-only content changes
+      *when* it gets built, not *whether*.
+    - **The umbrella's stub set spans every sibling, which is why it must come out of the
+      same build tree, not merely a later one.** `create_wheels.py`'s
+      `get_simple_manifest("PySide6")` is the single line `prune PySide6`, which with
+      `include_package_data=True` keeps exactly the *top-level* files of
+      `build/<env>a/package_for_wheels/PySide6/` and drops every subdirectory (`Qt/`,
+      `scripts/`, `support/`, …) — hence stubs only. But those 59 stubs cover essentials
+      modules, addons modules *and* the nine WebEngine-family modules from gotcha 382,
+      whose `.so`s live in the other wheels. So if the combined port ships a reduced
+      module set, the umbrella built from that same tree correctly advertises the reduced
+      stub set, while an umbrella built from any *other* run can advertise stubs for
+      modules the published sibling wheels do not contain. Publish the umbrella as an
+      artifact of the one build that produced its siblings.
+    - **Check the in-image SDK's *minor version* against the binding release, not just
+      whether the packages exist.** A family like this pins `==` across its own
+      distributions but is generated against whatever system SDK the image has, and those
+      can be different minors. `dnf repoquery 'qt6*'` inside
+      `quay.io/pypa/manylinux_2_39_riscv64` (Rocky Linux 10.2) reports **6.10.1** for every
+      one of the ~100 `qt6-*` packages in appstream/crb — not 6.11.x — and this repo's own
+      published `shiboken6-6.11.2-6.10.1-cp37-abi3-manylinux_2_39_riscv64.whl` already
+      records it: that `6.10.1` is a wheel *build tag* carrying the Qt version. It is not a
+      hard stop — `sources/pyside6/cmake/PySideSetup.cmake` marks only
+      Core/Gui/Widgets/PrintSupport/Sql/Network/Test/Concurrent `REQUIRED` (all in
+      `qt6-qtbase*`, present), leaves the rest `OPTIONAL_COMPONENTS`, and derives
+      `PYSIDE_QT_VERSION` from the discovered `Qt6Core_VERSION` rather than asserting a
+      minimum, so the configure succeeds and shiboken's typesystem `since=` gating drops
+      the newer API. But it means the wheels would expose a Qt 6.10 API surface under a
+      6.11.2 version number, and that a module introduced in the binding's own minor
+      (`QtCanvasPainter`, new in 6.11 and present in upstream's stub set) has no provider
+      in the image at all. That is a second, independent divergence from upstream stacked
+      on top of the missing-modules one, and it belongs on the queue entry as an explicit
+      decision, not as an unremarked build outcome.

@@ -101,6 +101,11 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
   `requires_dist` (not the most "core-sounding" name) fix the order; complements gotcha 380
   (how to publish them once the combined port exists) (the
   pyside6/pyside6-essentials/pyside6-addons case).
+- **383** — The *umbrella* distribution of a split family carries no compiled code at all,
+  gets its platform+`abi3` tag from a deliberately fake `Extension`, and its payload is
+  generated stubs for the union of its siblings' modules — so it cannot be cut from a
+  different build than they were; also, check the in-image SDK's *minor version* against the
+  binding release (the pyside6 meta-wheel case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -531,6 +536,8 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
 - **223** — For a `bindings = "bin"` CLI's test assertions, `cargo build --release` the tool
 - **298** — A local rehearsal's `pip`-resolved cibuildwheel can be too old for
 - **369** — Without docker, fetch Rocky 10's own dnf repodata over plain HTTPS to
+- **384** — `dnf` failing in the image with `Curl error (60) ... self-signed certificate` is
+  your egress proxy, not the image — install the proxy CA into the container trust store
 
 ### PR, CI, triggers, publishing & maintainer signals — [`gotchas/pr-ci-and-maintainer.md`](gotchas/pr-ci-and-maintainer.md)
 
