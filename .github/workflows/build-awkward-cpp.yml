@@ -32,11 +32,13 @@ permissions:
 
 env:
   # awkward-cpp is released from the scikit-hep/awkward monorepo by a
-  # workflow_dispatch-only job (deploy-cpp.yml) that never pushes a git tag
-  # (gotcha 103). This is the version-bump commit ("awkward 2.13.0 and
-  # awkward-cpp 56"), verified byte-identical to the PyPI sdist. Update
-  # alongside AWKWARD_CPP_VERSION.
-  AWKWARD_CPP_REF: cef1a524fb52896b86ef505526f2fe4689f5e217
+  # workflow_dispatch-only job (deploy-cpp.yml) that never pushes an
+  # awkward-cpp tag (gotcha 103), so every version names its own version-bump
+  # commit. One shared pin would build whatever version that commit happens to
+  # declare and publish it under the name of the version being built.
+  AWKWARD_CPP_REFS: >-
+    {"56": "cef1a524fb52896b86ef505526f2fe4689f5e217",
+     "57": "f1d81ac30a44a21dee36d37ff5c6f96dd2ad8327"}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
@@ -63,11 +65,26 @@ jobs:
       AWKWARD_CPP_VERSION: ${{ matrix.version }}
 
     steps:
-      - name: Checkout scikit-hep/awkward ${{ env.AWKWARD_CPP_REF }}
+      # A version with no entry fails here rather than silently building the
+      # commit some other version pinned.
+      - name: Resolve the upstream commit for ${{ matrix.version }}
+        id: upstream
+        env:
+          REFS: ${{ env.AWKWARD_CPP_REFS }}
+          VERSION: ${{ matrix.version }}
+        run: |
+          set -euo pipefail
+          if ! ref=$(jq -er --arg v "$VERSION" '.[$v] // empty' <<<"$REFS"); then
+            echo "::error::awkward-cpp $VERSION has no entry in AWKWARD_CPP_REFS"
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout scikit-hep/awkward ${{ steps.upstream.outputs.ref }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: scikit-hep/awkward
-          ref: ${{ env.AWKWARD_CPP_REF }}
+          ref: ${{ steps.upstream.outputs.ref }}
           # rapidjson is a submodule of awkward-cpp/, and its LICENSE is one of
           # the project's declared license-files.
           submodules: true
@@ -76,11 +93,24 @@ jobs:
       - name: Prepare build files
         run: pipx run nox -s prepare
 
+      # The version comes from the checked-out pyproject.toml, not from the
+      # matrix, so a wrong entry yields an sdist - and then wheels - named
+      # after a different version, which the publish step would record against
+      # this one.
       - name: Build awkward-cpp sdist
         id: sdist
+        env:
+          VERSION: ${{ matrix.version }}
         run: |
+          set -euo pipefail
           pipx run build --sdist awkward-cpp
           pipx run twine check awkward-cpp/dist/*
+          for sdist in awkward-cpp/dist/*.tar.gz; do
+            case "${sdist##*/}" in
+              "awkward_cpp-$VERSION.tar.gz") ;;
+              *) echo "::error::$sdist is not awkward-cpp $VERSION"; exit 1 ;;
+            esac
+          done
 
       - name: Upload sdist artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1

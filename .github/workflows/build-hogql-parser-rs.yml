@@ -30,10 +30,19 @@ permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # PostHog/posthog never tags this crate; pin the commit that bumped
-  # Cargo.toml/pyproject.toml to 1.3.109 (matches the PyPI sdist, and current
-  # master). Update alongside HOGQL_PARSER_RS_VERSION.
-  HOGQL_PARSER_RS_REF: c30d2736928729ea424b08003c9cea2006b7606b
+  # PostHog/posthog never tags this crate, and master's
+  # rust/hogql/parser/Cargo.toml stops at 1.3.109 - 1.3.110 and later went to
+  # PyPI from commits that never landed there. So a version names either the
+  # commit whose Cargo.toml/pyproject.toml declares it, or, where no such
+  # commit exists, the PyPI sdist that does, pinned by hash. One shared pin
+  # instead built 1.3.109 for every version and republished it as each of
+  # them, which left 1.3.110+ permanently unreleased and rebuilt on every docs
+  # push.
+  HOGQL_PARSER_RS_SOURCES: >-
+    {"1.3.109": {"ref": "c30d2736928729ea424b08003c9cea2006b7606b"},
+     "1.3.110": {"sdist-sha256": "a4ee05635c36ae39fcae00af44c9c1034ac94969c0a37db3f6db2446d555e9e6"},
+     "1.3.111": {"sdist-sha256": "4e6d76002b47cc870246e31b9df02d5b081473f0dc2288e41d5b18b70de25e02"},
+     "1.3.112": {"sdist-sha256": "d48185660a3b9c68cd937b3b667ec733a9ec9f9633567f5c8dc3a952ec286d30"}}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
@@ -58,21 +67,67 @@ jobs:
       HOGQL_PARSER_RS_VERSION: ${{ matrix.version }}
 
     steps:
+      # A version with no entry fails here rather than silently building
+      # whatever version some other entry's sources declare. package-dir
+      # differs between the two: maturin's sdist is its own trimmed workspace
+      # root, with the crate under hogql/parser.
+      - name: Resolve the sources for ${{ matrix.version }}
+        id: upstream
+        env:
+          SOURCES: ${{ env.HOGQL_PARSER_RS_SOURCES }}
+          VERSION: ${{ matrix.version }}
+        run: |
+          set -euo pipefail
+          if ! entry=$(jq -ce --arg v "$VERSION" '.[$v] // empty' <<<"$SOURCES"); then
+            echo "::error::hogql-parser-rs $VERSION has no entry in HOGQL_PARSER_RS_SOURCES"
+            exit 1
+          fi
+          ref=$(jq -r '.ref // ""' <<<"$entry")
+          {
+            echo "ref=$ref"
+            echo "sdist-sha256=$(jq -r '."sdist-sha256" // ""' <<<"$entry")"
+            if [ -n "$ref" ]; then
+              echo "package-dir=rust/hogql/parser"
+            else
+              echo "package-dir=sdist"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
       # The crate lives at rust/hogql/parser inside an ~80-member Cargo
       # workspace (rust/Cargo.toml); sparse-checkout skips the rest of the
       # multi-GB posthog monorepo (Django app, frontend, ...).
       - name: Checkout posthog rust/ workspace
+        if: steps.upstream.outputs.ref != ''
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: PostHog/posthog
-          ref: ${{ env.HOGQL_PARSER_RS_REF }}
+          ref: ${{ steps.upstream.outputs.ref }}
           sparse-checkout: rust
           persist-credentials: false
+
+      # maturin's sdist is self-contained: a workspace root whose only member
+      # is the crate, its Cargo.lock, and the pyproject.toml declaring this
+      # version - what the bump commit that never landed would have provided.
+      - name: Unpack the hogql-parser-rs ${{ matrix.version }} sdist
+        if: steps.upstream.outputs.sdist-sha256 != ''
+        env:
+          VERSION: ${{ matrix.version }}
+          SDIST_SHA256: ${{ steps.upstream.outputs.sdist-sha256 }}
+        run: |
+          set -euo pipefail
+          url=$(curl --fail --silent --show-error \
+            "https://pypi.org/pypi/hogql-parser-rs/$VERSION/json" |
+            jq -er '.urls[] | select(.packagetype == "sdist") | .url')
+          curl --fail --silent --show-error --location --output sdist.tar.gz "$url"
+          echo "$SDIST_SHA256  sdist.tar.gz" | sha256sum --check --strict
+          mkdir -p sdist
+          tar --extract --gzip --file sdist.tar.gz \
+            --strip-components=1 --directory sdist
 
       - name: Build wheel
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
-          package-dir: rust/hogql/parser
+          package-dir: ${{ steps.upstream.outputs.package-dir }}
           output-dir: wheelhouse/
           # pyo3 carries abi3-py312 unconditionally, so one cp312-abi3 wheel
           # covers every interpreter, matching upstream's own PyPI wheels.
@@ -89,6 +144,21 @@ jobs:
             import json;
             r = json.loads(m.parse_expr_json('1 + 2'));
             assert r.get('error') is not True, r"
+
+      # The version is baked into the sources, not passed in, so a wrong pin
+      # yields a wheel named after a different version - which the publish step
+      # would then record against this one. Refuse it here instead.
+      - name: Check the wheel carries ${{ matrix.version }}
+        env:
+          VERSION: ${{ matrix.version }}
+        run: |
+          set -euo pipefail
+          for wheel in wheelhouse/*.whl; do
+            case "${wheel##*/}" in
+              "hogql_parser_rs-$VERSION-"*) ;;
+              *) echo "::error::$wheel is not hogql-parser-rs $VERSION"; exit 1 ;;
+            esac
+          done
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:

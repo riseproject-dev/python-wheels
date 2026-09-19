@@ -33,9 +33,14 @@ permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # rhino3dm.py 8.32.1 was never tagged in git (8.32.0 and 8.32.2 were); this is
-  # the commit whose setup.py/src tree is byte-identical to the released sdist.
-  RHINO3DM_REF: 56daf09ab774cc02b69a1de2e17a1c8746550778
+  # Every version builds from its own commit: 8.32.1 was never tagged in git
+  # (8.32.0 and 8.32.2 were), so it names the commit whose setup.py/src tree is
+  # byte-identical to the released sdist; 8.35.0 names its tag's commit. One
+  # shared pin would build whatever version that commit declares and publish it
+  # under the name of the version being built.
+  RHINO3DM_REFS: >-
+    {"8.32.1": "56daf09ab774cc02b69a1de2e17a1c8746550778",
+     "8.35.0": "f44a7887955d471ad3e52327a5a410a96aad7957"}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
@@ -61,11 +66,26 @@ jobs:
       RHINO3DM_VERSION: ${{ matrix.version }}
 
     steps:
+      # A version with no entry fails here rather than silently building the
+      # commit some other version pinned.
+      - name: Resolve the upstream commit for ${{ matrix.version }}
+        id: upstream
+        env:
+          REFS: ${{ env.RHINO3DM_REFS }}
+          VERSION: ${{ matrix.version }}
+        run: |
+          set -euo pipefail
+          if ! ref=$(jq -er --arg v "$VERSION" '.[$v] // empty' <<<"$REFS"); then
+            echo "::error::rhino3dm $VERSION has no entry in RHINO3DM_REFS"
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
       - name: Checkout rhino3dm ${{ env.RHINO3DM_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: mcneel/rhino3dm
-          ref: ${{ env.RHINO3DM_REF }}
+          ref: ${{ steps.upstream.outputs.ref }}
           # opennurbs, draco and pybind11 are submodules, statically linked
           # into the _rhino3dm extension.
           submodules: recursive
@@ -122,6 +142,21 @@ jobs:
               assert licences == expected, (path, licences)
               print(path, "ok")
           EOF
+
+      # The version comes from the checked-out setup.py, not from the matrix,
+      # so a wrong entry yields wheels named after a different version - which
+      # the publish step would then record against this one.
+      - name: Check the wheels carry ${{ matrix.version }}
+        env:
+          VERSION: ${{ matrix.version }}
+        run: |
+          set -euo pipefail
+          for wheel in wheelhouse/*.whl; do
+            case "${wheel##*/}" in
+              "rhino3dm-$VERSION-"*) ;;
+              *) echo "::error::$wheel is not rhino3dm $VERSION"; exit 1 ;;
+            esac
+          done
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
