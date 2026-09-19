@@ -371,6 +371,7 @@ The porting gotchas (374 of them) live in [`references/gotchas/`](gotchas/), spl
 - **278** — A vendored, direct-copy (not submodule) header can be missing riscv64 from its
 - **363** — A `libraries=[...]` entry can go missing from the link line with *no* error —
 - **368** — Linking several codecs against Rocky 10's system libraries instead of
+- **395** — When a project dlopen()s a differently-named shared library per major
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 
@@ -574,6 +575,7 @@ The porting gotchas (374 of them) live in [`references/gotchas/`](gotchas/), spl
 - **369** — Without docker, fetch Rocky 10's own dnf repodata over plain HTTPS to
 - **384** — `dnf` failing in the image with `Curl error (60) ... self-signed certificate` is
   your egress proxy, not the image — install the proxy CA into the container trust store
+- **394** — A libtorch-linking project cannot be rehearsed on x86_64 with PyPI's `torch`
 
 ### PR, CI, triggers, publishing & maintainer signals — [`gotchas/pr-ci-and-maintainer.md`](gotchas/pr-ci-and-maintainer.md)
 
