@@ -119,6 +119,10 @@ The porting gotchas (371 of them) live in [`references/gotchas/`](gotchas/), spl
   selector whose name can be injected from a *separate* release-tools repo; check the vendor's
   redist index for our arch, and treat a documented stub/no-CUDA build mode as a docs build,
   not a port (the cupy-cuda12x case).
+- **388** — The queue entry's wheel shape is a snapshot — re-read the *latest* release's tag
+  set before triaging the queued version, because upstream can delete the arch-specific
+  payload and erase the gap outright; also, a `py3-none-any` dependency can be a facade for
+  platform-only payload wheels (the tokenspeed-mla case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

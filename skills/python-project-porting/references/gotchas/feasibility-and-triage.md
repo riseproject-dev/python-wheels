@@ -73,6 +73,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **387** — A GPU-toolkit-suffixed distribution name (`-cuda12x`, `-rocm-7-0`) is a toolkit
   selector whose name can come from a *separate* release-tools repo, and a documented
   stub/no-CUDA build mode is a docs build, not a port (the cupy-cuda12x case).
+- **388** — The queue entry's wheel shape is a snapshot — re-read the *latest* release's tag
+  set first, because upstream can delete the arch-specific payload and erase the gap outright
+  (the tokenspeed-mla case).
 
 ---
 
@@ -2014,3 +2017,48 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       same source tree differing only in the toolkit major; park each with the same
       evidence rather than re-deriving it (gotcha 150's sibling check used to save work
       rather than to sequence it).
+
+388. **The queue entry's wheel shape is a *snapshot* — re-read the latest release's tag set
+     before triaging the queued version, because upstream can delete the arch-specific payload
+     and erase the gap outright (the tokenspeed-mla case).** Gotcha 386 closes with one way a
+     queue note's `abi:` goes stale (upstream stopped mislabelling a compiled wheel); this is
+     the sharper version of the same hazard, where the *platform* half goes away too and the
+     gap disappears with it. Gotchas 27/35/81/145/157 all reason about one *fixed* set of
+     `py3-none-<platform>` wheels and ask what the platform half contains; they tacitly assume
+     the set you were handed is the set upstream still ships. It need not be: `.queue.yml`
+     records the wheel shape at the moment the queue was generated (here `2 Linux wheels
+     upstream (abi: py3)`, true of 0.2.5), and a later release can drop the payload and
+     collapse to a single universal wheel — at which point riscv64 already installs exactly
+     what x86_64 installs and there is nothing left to port, whatever the older version's
+     wheels held. tokenspeed-mla 0.2.0–0.2.8 each publish
+     `py3-none-manylinux_2_28_{x86_64,aarch64}` (~0.75 MB) and **0.2.9 publishes one
+     `py3-none-any` (0.15 MB)**, having deleted `tokenspeed_mla/fmha_binary.py` and the
+     `tokenspeed_mla/objs/*.so` those wheels existed to carry.
+     - **Make the per-version tag table the first read of any triage**, before `pip download`,
+       before `wheel_contents.py`, before the repo checkout:
+       `uv run ci_scripts/queue_triage.py <pkg> --deps` prints latest-vs-queued (flagging a
+       stale entry), each recent release's ABI/platform tags with sizes, whether an sdist
+       exists, and which releases already have a riscv64-installable file. A `riscv64-OK` row
+       on the **latest** version closes the case on its own. Reading only the queued version's
+       files would have sent this port straight into the far more expensive question of whether
+       two NVIDIA Blackwell cubins can be rebuilt.
+     - **Size direction is the tell that a payload was removed, not added.** Gotcha 81 diffs
+       sizes *across platforms at one version* to separate a cosmetic tag from real content;
+       diff them *across versions at one platform* too. A platform wheel that is 5x the new
+       universal wheel means the arch-specific bytes were dropped, so read the newest release's
+       file list rather than inferring from the version the queue names.
+     - **A vanished gap still is not automatically "already works".** Confirm what the
+       universal wheel actually does on riscv64 before reporting: 0.2.9 installs and imports
+       fine in `quay.io/pypa/manylinux_2_39_riscv64`, but `__init__.py` wraps every import in
+       one `try:`/`except ImportError` and substitutes `_unavailable` stubs, so
+       `tokenspeed_mla.tokenspeed_mla_decode()` raises `ImportError: tokenspeed_mla requires
+       PyTorch, CUDA bindings, and NVIDIA CuTe DSL runtime dependencies`. That is gotcha
+       183's importable-but-unusable shape — and it is a property of the package upstream
+       publishes for *every* architecture, so it is not a riscv64 gap and not ours to close.
+     - **Watch for a `py3-none-any` *facade* in the dependency check.** `nvidia-cutlass-dsl`
+       resolves on riscv64 (its own wheel is `py3-none-any`, ~15 KB) and is nonetheless a hard
+       blocker: it is a metapackage whose `requires_dist` pins
+       `nvidia-cutlass-dsl-libs-{base,cu12}==<ver>`, which publish
+       `cp310–cp314(t)-manylinux_2_28_{x86_64,aarch64}` only, no sdist, ~88 MB of CUDA payload.
+       Follow any `py3-none-any` dependency one level down before calling it available —
+       `pip download <dep> --no-deps` says yes where a full resolve says `ResolutionImpossible`.
