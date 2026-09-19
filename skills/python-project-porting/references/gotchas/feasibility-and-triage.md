@@ -54,6 +54,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **381** — A third-party *vendor release* of a project this repo has already ruled out
   inherits that verdict — resolve the redistribution to its upstream before triaging anything
   else (the tokenspeed-triton case).
+- **382** — Several PyPI distributions carved out of *one* build are one unit of work, not
+  one port each — check the allowed `--build-type` values before writing any YAML, and let
+  `requires_dist` (not the most "core-sounding" name) fix the order (the
+  pyside6/-essentials/-addons case).
 
 ---
 
@@ -1678,3 +1682,69 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
      - Report `parked`, cite the upstream gotcha, and note the family: sibling distributions
        from the same vendor (`tokenspeed-mla`, `tokenspeed-kernel*`) are the same shape, as
        are the already-parked `sglang`/`onnxruntime-gpu` entries.
+
+382. **Several PyPI distributions carved out of one build are one unit of work, not one
+    port each — read the allowed `--build-type` values before writing any YAML, and let
+    `requires_dist` fix the order (the pyside6/pyside6-essentials/pyside6-addons case).**
+    The queue holds each split distribution as its own entry, so each arrives looking like
+    an independent port with its own workflow. Settle first whether the distribution you
+    were handed is a *build target* at all. pyside-setup 6.11.2's
+    `build_scripts/config.py:get_allowed_top_level_build_values()` returns exactly four:
+    `all`, `shiboken6`, `shiboken6-generator`, `pyside6`. `pyside6-essentials`,
+    `pyside6-addons` and the `pyside6` meta-wheel are **not** among them — they are carved
+    out *after* the build by the root-level `create_wheels.py`, which walks
+    `build/<env>a/package_for_wheels` once and emits all of
+    `{shiboken6, shiboken6_generator, PySide6_Essentials, PySide6_Addons, PySide6,
+    PySide6_Examples}` from `build_scripts/wheel_files.py`'s per-wheel `ModuleData` lists.
+    So a standalone `build-pyside6-addons.yml` would run the entire multi-hour Qt6
+    bindings build and throw away four of the five wheels it just produced, and a sibling
+    `build-pyside6-essentials.yml` would run the same build again to keep a different one.
+    That is also why `shiboken6` *was* portable on its own (`build-shiboken6.yml`): it has
+    its own `--build-type`. `--module-subset` does not rescue the split either — it only
+    narrows which Qt modules get bindings, it does not change which wheels
+    `create_wheels.py` writes, and the dependent wheel's modules still need the base
+    wheel's typesystems and `libpyside6` to generate and link against.
+    - **Let `requires_dist` fix the dependency order; the "core-sounding" name is often
+      the *last* link, not the first.** `pyside6` looks like the core package and is the
+      one a porter reaches for, but its Linux wheel is 0.57 MB against essentials' 80 MB
+      and addons' 175 MB: it is a meta-wheel requiring `shiboken6` + `PySide6_Essentials`
+      + `PySide6_Addons`. Addons requires `PySide6_Essentials==<ver>`; essentials requires
+      only `shiboken6`. So the real critical path is
+      shiboken6 → essentials → addons → pyside6, and porting "pyside6" first is porting
+      the tip. One check of each `requires_dist` (gotcha 40/187's dependency-tree check,
+      reused for ordering rather than for feasibility) settles the order in a minute and
+      prevents two agents duplicating one build in parallel PRs.
+    - **Diff the dependent wheel's module list against the base's — that is where the new
+      native dependencies hide.** `wheel_files_pyside_essentials()` lists 26 modules, all
+      covered by Rocky 10 riscv64's AppStream (`qt6-qtbase-devel`, `qt6-qtdeclarative-devel`,
+      `qt6-qtsvg-devel`, `qt6-qttools-*`, …). `wheel_files_pyside_addons()` lists 41, and
+      nine of them — `QtWebEngineCore`/`QtWebEngineQuick`/`QtWebEngineWidgets`, `QtPdf`,
+      `QtPdfWidgets`, `QtGraphs`, `QtGraphsWidgets`, `QtHttpServer`,
+      `QtWebView`(+`QtWebViewQuick`) — need `qt6-qtwebengine`, `qt6-qtgraphs`,
+      `qt6-qthttpserver` and `qt6-qtwebview`, none of which Rocky 10 ships in *any* of the
+      image's four enabled repos (baseos/appstream/crb/extras) on *any* arch — not riscv64,
+      not x86_64, not aarch64 (RHEL 10 ships no Qt6 WebEngine at all), and there is no
+      `chromium` and no `gn` package either. QtWebEngine *is* Chromium, so those nine are
+      not a `dnf install` line away; they are a Chromium-for-riscv64 bring-up, gotcha 186's
+      "producing the missing artifact shape yourself is authoring a new build system"
+      scale. Enumerate the repodata directly (`repomd.xml` → `primary.xml.gz` under
+      `dl.rockylinux.org/pub/rocky/10/<repo>/<arch>/os/`) rather than `dnf`-ing inside the
+      image: it is faster than QEMU and, per gotcha 51's EPEL note, an egress proxy that
+      MITMs TLS breaks in-container `dnf` against `mirrors.rockylinux.org` anyway.
+    - **A missing payload file is only a warning, so a reduced wheel is silently
+      producible — make that call deliberately.** `create_wheels.py`'s copy loop prints
+      `Warning: {file} does not exist` (and only when `verbose > 0`) and carries on; it
+      does not fail. Shipping a `pyside6-addons` wheel that keeps the same name and
+      version as upstream's while missing nine of its 41 advertised modules is a product
+      decision about what `pypi.riseproject.dev` promises, not something to let a
+      suppressed warning decide. Record the choice on the queue entry either way.
+    - **Record it as `blocked-on-dependency`, not `parked`, when the blocker is a sibling
+      port rather than absent source.** Contrast `pyqt5-qt5`, parked because no sdist or
+      build recipe exists anywhere across its whole release history. Here the source is
+      fully open (LGPL-3.0/GPL-2.0/GPL-3.0), 32 of the 41 addon modules are already
+      covered by prebuilt Rocky 10 riscv64 `-devel` packages, and the base sibling is
+      simply unported — a real dependency, not a dead end. Point the note at the base
+      entry and leave the WebEngine sub-decision to the combined port. Once that port
+      exists, gotcha 380 covers publishing the several wheels it emits: one
+      `_publish-wheel.yml` call per distribution with disjoint `artifact-pattern`s, since
+      the reusable workflow asserts a single normalized name and version per invocation.

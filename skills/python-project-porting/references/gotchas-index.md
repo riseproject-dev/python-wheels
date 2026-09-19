@@ -96,6 +96,11 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
 - **381** — A third-party *vendor release* of a project this repo has already ruled out
   inherits that verdict — resolve the redistribution to its upstream before triaging anything
   else (the tokenspeed-triton case).
+- **382** — Several PyPI distributions carved out of *one* build are one unit of work, not
+  one port each — check the allowed `--build-type` values before writing any YAML, and let
+  `requires_dist` (not the most "core-sounding" name) fix the order; complements gotcha 380
+  (how to publish them once the combined port exists) (the
+  pyside6/pyside6-essentials/pyside6-addons case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
