@@ -1,0 +1,117 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/amaye15/JSON-Tools-rs/blob/v0.9.30/.github/workflows/maturin-ci.yml
+name: Build json-tools-rs wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/json-tools-rs.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-json-tools-rs.yml'
+      - 'docs/packages/json-tools-rs.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-json-tools-rs.yml'
+      - 'docs/packages/json-tools-rs.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: json-tools-rs
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build json-tools-rs ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # No abi3 feature on pyo3 in Cargo.toml, so upstream ships one wheel per
+        # interpreter. cp314t is dropped: orjson - a hard runtime dependency -
+        # publishes no free-threaded wheel on PyPI or pypi.riseproject.dev
+        # (gotcha 84).
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      JSON_TOOLS_RS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout json-tools-rs v${{ env.JSON_TOOLS_RS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: amaye15/JSON-Tools-rs
+          ref: v${{ env.JSON_TOOLS_RS_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # json-tools-rs ships no [tool.cibuildwheel], so the Rust toolchain
+          # its maturin backend needs is installed in-container.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Without it pip prefers PyPI's orjson, which has no riscv64 wheel,
+          # and source-builds it in the container.
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=orjson
+          CIBW_TEST_REQUIRES: pytest orjson
+          # pyproject.toml carries the [tool.pytest.ini_options] that adds
+          # tests.py to python_files; without it pytest collects nothing.
+          CIBW_TEST_SOURCES: pyproject.toml python/tests
+          CIBW_TEST_COMMAND: >-
+            python -c "import json_tools_rs; assert json_tools_rs.json_tools_rs.__file__.endswith('.so'), json_tools_rs.json_tools_rs.__file__" &&
+            python -m pytest -v
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: json-tools-rs-${{ env.JSON_TOOLS_RS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish json-tools-rs ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: json-tools-rs-${{ matrix.version }}-*-manylinux_riscv64
