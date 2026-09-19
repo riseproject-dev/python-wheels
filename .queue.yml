@@ -1695,9 +1695,54 @@ packages:
   version: 6.11.0
   home: https://www.riverbankcomputing.com/software/pyqt/
   repo: https://www.riverbankcomputing.com/software/pyqt/
-  status: queued
+  status: blocked-on-dependency
   pr: null
-  notes: '2 Linux wheels upstream (abi: cp310); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: '2 Linux wheels upstream (abi: cp310); no riscv64 on PyPI or pypi.riseproject.dev.
+    6.11.0 re-confirmed latest on PyPI (2026-09-19; 6 files - macosx/win_amd64/win_arm64/manylinux_2_34_x86_64/manylinux_2_39_aarch64
+    wheels plus an sdist). Blocked on pyqt6-qt6 (parked, see that entry + gotcha 385:
+    PyQt6-Qt6 is Riverbank repackaging the Qt Company''s own prebuilt installer tree,
+    whose matrix has no riscv64, so shipping it means a from-source Qt6 SDK bring-up).
+    Read-only triage; no worktree, branch, PR or workflow created. Not the same stop as
+    pyqt5: PyQt6 is genuinely open and buildable - GPL-3.0 sdist on every release, real
+    C++/.sip sources for 35 binding sets, builds with two public pure-Python tools (sip
+    >=6.15,<7 and PyQt-builder >=1.19,<2), and pyqt6-sip is already live on our registry
+    (13.12.0, cp310-cp314, satisfies the >=13.8,<14 pin). The blocker is the runtime pair,
+    and it is sharper than metadata: the published wheel''s METADATA requires PyQt6-Qt6
+    (>=6.11.0, <6.12.0), and ci_scripts/check_riscv64_deps.py --python 312 -- ''PyQt6-Qt6>=6.11.0,<6.12.0''
+    answers UNRESOLVABLE (from versions: none) against PyPI + our registry. Worth recording
+    because the sdist disagrees with the wheel: the sdist''s PKG-INFO declares only
+    ''Requires-Dist: PyQt6-sip (>=13.11, <14)'' and nothing in project.py or in PyQt-builder
+    ever emits the PyQt6-Qt6 line (pyqtbuild''s only Requires-Dist writes are bundle/qt_wheel.py,
+    which puts it *in* the Qt wheel, and bundle/bundle.py, which *removes* it when pyqt-bundle
+    bundles Qt inside the bindings wheel) - it comes from Riverbank''s release step, so
+    judging feasibility from the sdist alone would have said "unblocked". The physical
+    coupling is the decisive evidence: pulled PyQt6/QtCore.abi3.so out of the 6.11.0
+    manylinux_2_39_aarch64 wheel with ci_scripts/wheel_contents.py --member (nothing
+    downloaded beyond that member) and readelf -d shows NEEDED libQt6Core.so.6 with
+    RUNPATH $ORIGIN/Qt6/lib, while the wheel itself ships no Qt6/lib (893 entries, 40.6 MB
+    uncompressed: .abi3.so modules, .pyi stubs, one Qt6/qsci/api file) - the directory is
+    populated by the sibling pyqt6-qt6 wheel at install time. Building against a distro Qt6
+    instead was checked and does not rescue it, though it is technically possible: project.py
+    only rejects qt_version >> 16 != 6 (no minimum minor), PyQt-builder takes the sip tag
+    from the discovered qt_version_tag, sipbuild''s update_buildable_bindings() silently
+    drops bindings whose config test fails, and Rocky 10.2 riscv64 does have what such a
+    build needs (qmake6 in qt6-qtbase-devel, 76 qt6-* in AppStream + 28 in CRB, 28 module
+    -devel packages - enumerated from the repodata, not dnf). But that build yields a
+    Qt-6.10.1 API surface under a 6.11.0 version number (gotcha 383''s divergence; same
+    shape as this repo''s published shiboken6-6.11.2-6.10.1 build tag), silently drops
+    QtPdf/QtPdfWidgets (no qt6-qtpdf on any Rocky 10 arch), and - decisive - auditwheel can
+    only bundle the Qt libraries the extensions link, not what Qt dlopens: the platform
+    plugins (platforms/libqxcb.so, libqoffscreen.so), imageformat/sqldriver plugins and the
+    QML tree all live in pyqt6-qt6''s payload, and the bundled distro libQt6Core keeps its
+    compiled-in /usr/lib64/qt6/plugins prefix, so such a wheel would import fine and then
+    fail at the first QApplication with "no Qt platform plugin could be initialized".
+    Shipping that under the pyqt6 name is a broken product, not a reduced one. Re-triage
+    trigger: the moment a riscv64 Qt6 SDK exists (in-repo or upstream) and pyqt6-qt6 lands,
+    this becomes a straightforward sdist build - pip install "sip>=6.15,<7" "PyQt-builder>=1.19,<2",
+    build from the PyPI sdist in the manylinux_2_39_riscv64 image against that SDK, keep the
+    upstream shape (no bundled Qt, RUNPATH $ORIGIN/Qt6/lib), cp310-abi3 single wheel. Consumer
+    pattern recorded as gotcha 393 (feasibility-and-triage); no need to redo the pyqt6-qt6
+    investigation, which is captured on that entry and in gotcha 385.'
 - pkg: ibmmq
   version: 2.1.0
   home: https://ibm.com/software/products/en/ibm-mq
