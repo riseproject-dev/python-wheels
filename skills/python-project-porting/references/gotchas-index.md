@@ -596,6 +596,10 @@ The porting gotchas (374 of them) live in [`references/gotchas/`](gotchas/), spl
 - **384** — `dnf` failing in the image with `Curl error (60) ... self-signed certificate` is
   your egress proxy, not the image — install the proxy CA into the container trust store
 - **394** — A libtorch-linking project cannot be rehearsed on x86_64 with PyPI's `torch`
+- **403** — Prove which build *variant* you are about to produce by stubbing the build
+  backend's `setup()` on the host
+- **404** — For a from-source C++ world, a *full CMake configure* inside the real riscv64
+  image is the honest local ceiling
 
 ### PR, CI, triggers, publishing & maintainer signals — [`gotchas/pr-ci-and-maintainer.md`](gotchas/pr-ci-and-maintainer.md)
 

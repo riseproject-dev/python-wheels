@@ -20,6 +20,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
 - **384** — `dnf` failing in the image with `Curl error (60) ... self-signed certificate` is
 - **394** — A libtorch-linking project cannot be rehearsed on x86_64 with PyPI's `torch`
   your egress proxy, not the image — install the proxy CA into the container trust store
+- **403** — Prove which build *variant* you are about to produce by stubbing the build
+  backend's `setup()` on the host
+- **404** — For a from-source C++ world, a *full CMake configure* inside the real riscv64
+  image is the honest local ceiling
 
 ---
 
@@ -305,3 +309,41 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
       source-built native dependency, the backend finding `pybind11`, and any
       licence-guard/env-var gate the project puts in front of a wheel build. Run it and
       read how far the configure got rather than treating the CUDA error as a dead end.
+
+403. **Prove which build *variant* you are about to produce by stubbing the build
+    backend's `setup()` on the host — it costs seconds and is the only cheap guard on
+    gotcha 79's trap, where the wrong sibling compiles for hours under your artifact
+    name.** For a sibling port selected by env vars plus a pre-stamped generated file
+    (`ENABLE_CONTRIB`/`ENABLE_HEADLESS` + `cv2/version.py`), put a fake module in
+    `sys.modules` exposing whatever `setup.py` imports, have its `setup(**kw)` record
+    `kw["name"]`/`kw["version"]`/`kw["license"]`/`cmake_args` and raise `SystemExit`, then
+    `runpy.run_path("setup.py", run_name="__main__")`. It is arch-independent, needs no
+    toolchain, and works with `.git` already deleted — exactly the tree the container sees.
+    Two habits make it worth the five lines:
+    - **Assert the negative too.** Re-run with the generated file stamped `False` and the
+      env vars still set: if the name does not change, the env vars are decorative and the
+      stamp is the real selector — the fact the workflow's `grep -Fqx` guards. Getting plain
+      `opencv_python` back from a contrib+headless environment turns gotcha 79's warning
+      into something measured rather than quoted.
+    - **Read the `cmake_args` list it captured** instead of re-deriving the flags from the
+      `setup.py` source; a variant's flags are assembled across several conditionals and the
+      captured list is the authoritative answer.
+
+404. **For a from-source C++ world (OpenCV+contrib and friends), a *full CMake configure*
+    inside the real riscv64 image is the honest local ceiling — budget ~40 minutes for it
+    and report what it proved rather than that "a build" was attempted.** Under
+    `qemu-riscv64` binfmt on a loaded 4-core x86_64 host, `cmake` over opencv +
+    opencv_contrib reported `Configuring done (2365.7s)` / `Generating done`; the compile of
+    the ~50 modules that follows is days of emulation and is not a local task. The configure
+    summary carries most of what a reviewer would otherwise take on trust — the
+    extra-modules path and its submodule SHA, the module list, `GUI: NONE` for a headless
+    variant, the baseline `-march=rv64gc` and which SIMD kernels were dropped, and which
+    third-party libraries are vendored (`build (…)`) rather than external. Two setup notes
+    that each cost a restart:
+    - **Mount the source tree read-write.** OpenCV's `OpenCVDownload.cmake` writes a
+      `.cache/` directory *into the source dir*, so a `:ro` mount fails the configure at
+      once with "Read-only file system" — which reads like a real port problem.
+    - **Give the container the egress proxy.** Those same third-party fetches go to
+      `raw.githubusercontent.com`: run with `--network host`, pass the host's `HTTPS_PROXY`,
+      and mount the proxy CA (gotcha 384). Without it the downloads fail and the modules
+      needing them quietly drop out of the summary you are reading.
