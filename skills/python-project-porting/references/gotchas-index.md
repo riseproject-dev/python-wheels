@@ -93,6 +93,9 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
 - **376** — A permissive `License:` field on the wrapper package says nothing about whether
   the payload it ships has any source at all — check the binary's own content, not the
   metadata's license family (the tableauhyperapi case).
+- **381** — A GPU-first package is not CUDA-blocked when its own build system makes the CPU
+  backend the *default* — read the backend selector and diff the per-platform wheel sizes
+  before parking it (the bitsandbytes case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -523,6 +526,7 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
 - **223** — For a `bindings = "bin"` CLI's test assertions, `cargo build --release` the tool
 - **298** — A local rehearsal's `pip`-resolved cibuildwheel can be too old for
 - **369** — Without docker, fetch Rocky 10's own dnf repodata over plain HTTPS to
+- **382** — When no riscv64 image or cross-toolchain is reachable, exercise a C/C++ source's
 
 ### PR, CI, triggers, publishing & maintainer signals — [`gotchas/pr-ci-and-maintainer.md`](gotchas/pr-ci-and-maintainer.md)
 

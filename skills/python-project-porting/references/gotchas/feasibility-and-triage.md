@@ -51,6 +51,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **376** — A permissive `License:` field on the wrapper package says nothing about whether
   the payload it ships has any source at all — check the binary's own content, not the
   metadata's license family (the tableauhyperapi case).
+- **381** — A GPU-first package is not CUDA-blocked when its own build system makes the CPU
+  backend the *default* — read the backend selector and diff the per-platform wheel sizes
+  before parking it (the bitsandbytes case).
 
 ---
 
@@ -1623,3 +1626,31 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     - Parked (`.queue.yml`); no worktree/branch/PR created — diagnosed read-only against
       the real 0.0.26359 wheel contents (`unzip -l`, `file`/`strings` on both native
       binaries) and Tableau's own installation/hardware-requirements documentation.
+
+381. **A GPU-first package is not CUDA-blocked when its own build system makes the CPU
+     backend the *default* — read the backend selector and diff the per-platform wheel
+     sizes before parking it (the bitsandbytes case; see `build-bitsandbytes.yml`).**
+     bitsandbytes reads as the archetypal GPU port: the repo is `.cu` kernels, the
+     classifiers say `Environment :: GPU :: NVIDIA CUDA`, and the Linux wheels are
+     23-43 MB of `libbitsandbytes_cuda1NN.so`. Its `CMakeLists.txt` nevertheless opens
+     with `set(COMPUTE_BACKEND "cpu" CACHE STRING ...)`, and every `BUILD_CUDA`/`BUILD_HIP`/
+     `BUILD_XPU` branch — including `enable_language(CUDA)` and `find_package(CUDAToolkit
+     REQUIRED)` — sits behind an `if` that a plain `cmake .` never enters. So the default
+     build compiles two ordinary C++17 files (`csrc/cpu_ops.cpp`, `csrc/pythonInterface.cpp`)
+     against nothing but OpenMP, and needs no GPU toolkit at build *or* test time.
+     - **The per-platform wheel sizes say which backend is optional, not just that the
+       platforms differ.** Gotcha 81 reads divergent sizes in `pypi.org/pypi/<pkg>/<ver>/json`
+       as "real per-platform content"; the sharper reading is the *small* end. bitsandbytes
+       0.50.2 ships 43 MB (x86_64), 23 MB (aarch64) — and **123 KB** (macOS arm64) and 1 MB
+       (win_arm64). A platform upstream itself builds at three orders of magnitude smaller is
+       upstream shipping the CPU-only backend, which is exactly the wheel riscv64 wants. No
+       `--enable-cpu` flag to discover, no divergence to justify: the port is upstream's own
+       macOS/Windows-ARM recipe pointed at a third platform.
+     - **Check the GPU dependency is not also a *runtime* wall** before committing. Here it
+       is not: `bitsandbytes/cextension.py` `ctypes.CDLL`s whichever `libbitsandbytes_*.so`
+       matches the detected runtime, falling back to a `BNBNativeLibrary` whose `__getattr__`
+       raises only when a CUDA-only entry point is actually *called*, and the test suite's
+       GPU half is gated behind a `requires_cuda` fixture plus `@pytest.mark.slow`, both
+       deselected by upstream's own default `addopts`. Contrast gotcha 40/187's conda wall
+       and the sglang case, where the blocker is a *dependency* (`cuda-python`) with no
+       riscv64 build at all — an optional backend inside one CMake tree is not that.
