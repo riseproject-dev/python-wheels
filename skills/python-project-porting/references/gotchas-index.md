@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (371 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -106,6 +106,10 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
   generated stubs for the union of its siblings' modules — so it cannot be cut from a
   different build than they were; also, check the in-image SDK's *minor version* against the
   binding release (the pyside6 meta-wheel case).
+- **385** — A no-sdist vendor wheel can still have a fully public build recipe — read
+  `dist-info/WHEEL`'s `Generator:` before parking it for "no source anywhere"; a
+  vendor-named generator is usually a *repackager*, which moves the stop to whether the
+  vendor publishes the payload for our arch (the pyqt6-qt6 case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

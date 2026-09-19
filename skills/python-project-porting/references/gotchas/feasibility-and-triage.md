@@ -62,6 +62,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   gets its platform+`abi3` tag from a deliberately fake `Extension`, and its payload is
   generated stubs for the union of its siblings' modules — so it cannot be cut from a
   different build than they were (the pyside6 meta-wheel case).
+- **385** — A no-sdist vendor wheel can still have a fully public build recipe — read
+  `dist-info/WHEEL`'s `Generator:` before parking it for "no source anywhere"; a
+  vendor-named generator is usually a *repackager*, which moves the stop to whether the
+  vendor publishes the payload for our arch (the pyqt6-qt6 case).
 
 ---
 
@@ -1816,3 +1820,68 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       in the image at all. That is a second, independent divergence from upstream stacked
       on top of the missing-modules one, and it belongs on the queue entry as an explicit
       decision, not as an unremarked build outcome.
+
+385. **A no-sdist vendor wheel can still have a fully public build recipe — read
+    `dist-info/WHEEL`'s `Generator:` before parking it for "no source anywhere" (the
+    pyqt6-qt6 case).** pyqt5-qt5 was parked on the gotcha-372 signal: generic vendor
+    homepage, zero sdists across the whole release history. pyqt6-qt6 matches that signal
+    exactly — 41 releases, 184 files, **0** sdists, `repo` pointing at a marketing page —
+    and the verdict is still different, because one small file names the tool that built
+    it. `WHEEL` says `Generator: pyqt-qt-wheel`, and `pyqt-qt-wheel` is a console script of
+    the **sibling** distribution `PyQt-builder` (BSD-2-Clause, sdist on PyPI):
+    `pyqtbuild/bundle/qt_wheel.py` plus a per-package payload manifest in
+    `pyqtbuild/bundle/packages/pyqt6.py`. The recipe was public the whole time. Read the
+    `Generator:` line first — it costs one range request
+    (`wheel_contents.py <whl> --member <dist-info>/WHEEL`, gotcha 41) and it decides which
+    question you are actually answering. A stock generator (`bdist_wheel`, `setuptools`,
+    `maturin`, `hatchling`, `skbuild`) tells you nothing; a **vendor-named** one is a lead
+    to chase into that vendor's other PyPI distributions.
+    - **A named generator is often a *repackager*, not a build — which moves the stop from
+      "is there source?" to "does the vendor publish the payload for our arch?"**
+      `qt_wheel()` compiles nothing: it copies files out of `--qt-dir` and writes a
+      `dist-info` from prototypes, which is why every wheel is `py3-none-<platform>` with a
+      load-bearing platform tag (gotcha 35). So the port's real input is not a source tree,
+      it is *the vendor's own prebuilt tree*, and the feasibility check is gotcha 35/41's
+      vendor-artifact-index check aimed **one level up** — at the installer, not at the
+      wheel. `download.qt.io/online/qtsdkrepository/` offers exactly `linux_x64`,
+      `linux_arm64`, `mac_x64`, `windows_x86`, `windows_arm64`, a 1:1 match with the six
+      wheels Riverbank publishes. The wheel matrix is not a packaging choice to be widened;
+      it is the Qt Company's prebuilt-binary matrix, and riscv64 is absent from both.
+    - **Two path-parsing habits pin such a tool to the vendor's own layout — grep for them
+      before assuming you can point it at anything else.** `abstract_package.py` derives the
+      Qt version from `os.path.basename(os.path.dirname(qt_dir))`, and `qt_wheel.py` maps
+      `os.path.basename(qt_dir)` through a closed table (`gcc_64`, `gcc_arm64`, `macos`/
+      `clang_64`/`x86_64`/`arm64`, `msvc*`) to the platform tag, raising
+      `UserException("Qt architecture '<x>' is unsupported")` on anything else. `--qt-dir`
+      must therefore be `<prefix>/6.11.2/gcc_64`, i.e. an official online-installer tree.
+      The encouraging half: `bundle_qt()` branches only on `manylinux*`/`macosx*`/`win*`
+      prefixes, so that arch table is the *only* riscv64 blocker inside the tool — a
+      few-line patch, not a rewrite. The tool is a third-party build dependency, so such a
+      patch belongs wherever the workflow installs it, not in `patches/<pkg>/<version>/`.
+    - **Hardcoded sonames in the manifest rule out substituting a distro build, and
+      `ignore_missing` hides it.** `packages/pyqt6.py` names its non-Qt payload literally —
+      `libicui18n.so.73`/`libicuuc.so.73`/`libicudata.so.73` and
+      `libavcodec.so.61`/`libavformat.so.61`/`libavutil.so.59`/`libswresample.so.5`/
+      `libswscale.so.8` — because they are *the vendor's own* ICU and FFmpeg builds. Point
+      the tool at a distro Qt whose ICU major differs and
+      `bundle_qt(..., ignore_missing=True)` merely warns: you ship a wheel silently missing
+      ICU and FFmpeg that resolves them from the host. Same trap as gotcha 382's suppressed
+      `create_wheels.py` warning — a missing-payload warning must never be allowed to make
+      the product decision.
+    - **Check the in-image distro version too, not just the package names.** Rocky 10.2
+      riscv64 (the `manylinux_2_39_riscv64` base) does ship a broad Qt6 — 76 `qt6-*`
+      packages in AppStream and 28 in CRB, enumerated straight from the repodata per
+      gotchas 369/384 — but at **6.10.1**, not 6.11.2, so it cannot back a wheel carrying
+      upstream's 6.11.2 version (the same minor-version divergence gotcha 383 flags for the
+      pyside6 family), and it has no `qt6-qtpdf`, `qt6-qtwebengine`, `qt6-qtquick3dphysics`
+      or `qt6-qtwebview`, and no `ffmpeg`, `chromium` or `gn`. Of the 96 `libQt6*.so.6` in
+      the aarch64 wheel, `QtPdf`/`QtPdfQuick`/`QtPdfWidgets` come from the qtwebengine repo
+      (PDFium, a Chromium subset), so they are gotcha 382's Chromium-for-riscv64 wall again.
+    - **Park it as *scope*, and say which kind of stop it is.** Qt's sources are public and
+      LGPL-3.0, and distros build Qt 6.10 for riscv64 natively, so nothing here is
+      unportable in principle; producing the input artifact is a from-source Qt 6 SDK
+      bring-up — ~96 shared libraries across ~22 Qt repos plus ICU, FFmpeg and PDFium —
+      i.e. gotcha 186 scale, the same scope stop as pyqt5-qt5 reached by a different route.
+      Recording *which* park this is matters for re-triage later: "no recipe exists" never
+      becomes actionable, while "the recipe exists, its input artifact does not" becomes
+      actionable the moment anyone stands up a Qt-for-riscv64 SDK build.
