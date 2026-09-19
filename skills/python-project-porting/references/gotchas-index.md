@@ -394,6 +394,10 @@ The porting gotchas (380 of them) live in [`references/gotchas/`](gotchas/), spl
 - **401** — Rocky 10 riscv64 ships OpenBLAS, LAPACK and FFTW but no SuiteSparse, GSL or
   GLPK, and a numeric package's optional-extension set has to be cut along that line
   (Alpine riscv64 has all of them, but ships no licence texts).
+- **420** — Gotcha 139's binutils-too-old trap recurs inside a Bazel dependency's microkernel
+  library (XNNPACK's `zvfh` kernels), where the fix is that dependency's own feature
+  `--define` rather than an `-march` probe — and `--keep_going` hides a single-cause failure
+  behind five hours of unrelated progress, making it look like a timeout.
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
