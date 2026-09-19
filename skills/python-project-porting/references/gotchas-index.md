@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (371 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (374 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -192,6 +192,8 @@ The porting gotchas (371 of them) live in [`references/gotchas/`](gotchas/), spl
 - **360** — A `setup.py`'s own `bdist_wheel --plat-name` insertion can hardcode
   `manylinux1_` + `platform.machine()` regardless of the actual container libc, making
   musllinux unbuildable no matter how the CMake/C++ side is patched.
+- **388** — A project's real cibuildwheel recipe can live in a *separate packaging repo* that the
+  source tree never references — the source repo can carry no GitHub Actions at all.
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
@@ -335,6 +337,9 @@ The porting gotchas (371 of them) live in [`references/gotchas/`](gotchas/), spl
 - **378** — A newer libstdc++ on the manylinux image can deprecate calls a project's own
   `-DCMAKE_COMPILE_WARNING_AS_ERROR=ON` CI flag then turns into hard errors, purely from
   a toolchain-version gap upstream's own (older) runners never see.
+- **390** — libev is one of the `-devel` packages that *is* in Rocky 10's riscv64 repos, so an
+  upstream `yum install -y libev libev-devel` needs no replacement — but its header is
+  `/usr/include/ev.h`.
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
@@ -449,6 +454,9 @@ The porting gotchas (371 of them) live in [`references/gotchas/`](gotchas/), spl
 - **329** — A test suite that shells out to the package's own installed CLI binaries at a
 - **347** — A test that asserts "you're running against an editable/in-place install" can
 - **348** — A `glcontext`-based package's `create_context(standalone=True)` defaults to the
+- **389** — A test `.pyx` that Cython-`include`s a checkout-root-relative path can be satisfied by
+  staging just those files; a staged package dir with no `__init__.py` is a namespace
+  portion and does not shadow the wheel.
 
 ### Testing: pytest config, servers & test selection — [`gotchas/pytest-config-servers-and-selection.md`](gotchas/pytest-config-servers-and-selection.md)
 

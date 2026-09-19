@@ -56,6 +56,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **374** — `find_package(Python3 REQUIRED COMPONENTS Interpreter Development)` fails on
   manylinux's static-libpython CPython, on any architecture — only `Development.Module`
   is ever needed to build an extension module, not the `Development.Embed` half.
+- **390** — libev is one of the `-devel` packages that *is* in Rocky 10's riscv64 repos, so an
+  upstream `yum install -y libev libev-devel` needs no replacement — but its header is
+  `/usr/include/ev.h`.
 
 ---
 
@@ -1028,3 +1031,26 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
     - **Reproduce locally first**: a plain `python -m build -w` with the flag on vs. off
       on `manylinux_2_39_aarch64` (gotcha 101) settles which of the two is responsible
       in minutes, and shows the exact deprecated symbols by name.
+
+390. **libev is one of the `-devel` packages that *is* in Rocky 10's riscv64 repos, so an
+    upstream `yum install -y libev libev-devel` needs no replacement — but its header is
+    `/usr/include/ev.h`, not `/usr/include/libev/ev.h` (completes gotchas 51/337).**
+    Gotcha 51's EPEL-is-absent rule makes every inherited `yum install` line suspect, and
+    libev is EPEL-only on older RHEL derivatives, so the reflex is to build it from source
+    in `CIBW_BEFORE_ALL_LINUX` (as upstream's own `multibuild` `config.sh` does, from a
+    2016 tarball whose `config.guess` predates riscv64 and would not configure). Checked
+    instead of guessed, `libev` 4.33 is in **baseos** and `libev-devel`/`libev-source` in
+    **crb**, which the manylinux image already has enabled — a plain `yum install -y libev
+    libev-devel` installs both on riscv64, so the upstream line ships unchanged.
+    - **Fedora/RHEL put libev's header at the include root**, while Debian/Ubuntu use
+      `/usr/include/libev/ev.h`; a project carrying a hardcoded include-path list (the
+      driver's `[tool.cassandra-driver] libev-includes`) only builds because the list also
+      contains a bare `/usr/include`. `rpm -ql libev-devel` settles it in one command and
+      `dnf -q list <pkg>` settles availability — for the whole question offline, gotcha
+      369's repodata fetch.
+    - **The image's licence texts are dropped by `tsflags=nodocs`**, so
+      `/usr/share/licenses/libev/LICENSE` is absent until `dnf -y reinstall
+      --setopt=tsflags= libev` restores it (gotcha 137); it is byte-identical to the 4.33
+      tarball's `LICENSE`, which is the text a vendored-licence patch should carry. libev
+      is dual `BSD-2-Clause OR GPL-2.0-or-later`, so taking the BSD option means shipping
+      the notice and *no* `gpl_sources` job.
