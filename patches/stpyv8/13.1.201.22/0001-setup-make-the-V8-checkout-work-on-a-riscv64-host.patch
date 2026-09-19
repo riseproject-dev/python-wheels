@@ -1,0 +1,151 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sat, 19 Sep 2026 21:10:00 +0200
+Subject: [PATCH] setup: make the V8 checkout work on a riscv64 host
+
+checkout_v8() cannot complete on riscv64 for three independent reasons,
+all of them in the gclient half of the recipe rather than in V8 itself:
+
+* Two of V8's CIPD packages have no linux-riscv64 build: buildtools/
+  reclient (infra/rbe/client) and third_party/siso (infra/build/siso).
+  Their DEPS conditions exclude s390/ppc/zos and arm64-on-Linux but not
+  riscv64, so gclient sync dies on "no such package" -- first inside
+  `fetch`, then again in the explicit sync. Both are optional build
+  accelerators that plain gn + ninja never asks for, and gn
+  (gn/gn/linux-${arch}) and ninja (infra/3pp/tools/ninja/${platform})
+  share the very same guard clause while *having* linux-riscv64
+  packages, so this cannot be fixed by overriding gclient's host_cpu:
+  that would stop the two tools we do need from being fetched. Patch
+  the two conditions out of the checked-out DEPS instead, after the
+  release tag is checked out and before the sync that reads it.
+
+* That DEPS edit, and the V8_GIT_TAG checkout it follows, only survive
+  the sync if the v8 solution is unmanaged: depot_tools' fetch config
+  for V8 declares no "managed" key, so gclient defaults it to true and
+  re-resolves the solution to its remote default branch on every sync,
+  which either moves the checkout off the release tag or refuses to run
+  at all over a locally modified DEPS ("You have uncommitted changes").
+
+* Parallel syncs lose a gsutil bootstrap lockfile race on riscv64
+  ([Errno 11] Resource temporarily unavailable), the same class of
+  flakiness depot_tools already serializes 32-bit arm boards for.
+
+Upstream-Status: To upstream [not yet submitted to cloudflare/stpyv8]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ setup.py | 69 +++++++++++++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 67 insertions(+), 2 deletions(-)
+
+diff --git a/setup.py b/setup.py
+index fb80c38..0162b2c 100644
+--- a/setup.py
++++ b/setup.py
+@@ -1,6 +1,7 @@
+ #!/usr/bin/env python
+ 
+ import logging
++import re
+ import shutil
+ import subprocess
+ 
+@@ -16,6 +17,8 @@ log = logging.getLogger()
+ ICU_DATA_PACKAGE_FOLDER = os.path.join(os.pardir, os.pardir, "stpyv8-icu")
+ ICU_DATA_V8_FILE_PATH = os.path.join("v8", "out.gn", "x64.release.sample", "icudtl.dat")
+ 
++RISCV64 = platform.machine() in ("riscv64",)
++
+ 
+ def exec_cmd(cmdline, *args, **kwargs):
+     msg = kwargs.get("msg")
+@@ -75,6 +78,58 @@ def install_depot():
+             exit(1)
+ 
+ 
++def unmanage_v8_solution():
++    # gclient only honors a solution's checked-out state (and any local edit to
++    # its DEPS, see skip_unavailable_cipd_packages below) when the solution is
++    # unmanaged; a managed one is re-resolved to its remote default branch on
++    # every sync, which either discards the V8_GIT_TAG checkout done above or
++    # refuses to run over the DEPS edit ("You have uncommitted changes").
++    gclient_file = os.path.join(os.path.dirname(V8_HOME), ".gclient")
++
++    with open(gclient_file, encoding="utf-8", mode="r") as fd:
++        text = fd.read()
++
++    if "managed" in text:
++        return
++
++    text = re.sub(
++        r"""["']custom_deps["']\s*:\s*\{\s*\}\s*,""",
++        '"custom_deps": {}, "managed": False,',
++        text,
++        count=1,
++    )
++
++    with open(gclient_file, encoding="utf-8", mode="w") as fd:
++        fd.write(text)
++
++
++def skip_unavailable_cipd_packages():
++    # Two of V8's CIPD packages, buildtools/reclient (infra/rbe/client, the
++    # remote execution client) and third_party/siso (the siso build tool), are
++    # unconditioned on riscv64 -- their conditions exclude s390/ppc/zos and
++    # arm64-on-Linux -- but neither is published for linux-riscv64, so gclient
++    # sync fails on them. Both are optional build accelerators plain gn + ninja
++    # never asks for, and gn and ninja themselves share the same guard clause
++    # and *do* have linux-riscv64 packages, so the host_cpu they resolve to
++    # cannot simply be overridden.
++    deps_file = os.path.join(V8_HOME, "DEPS")
++
++    with open(deps_file, encoding="utf-8", mode="r") as fd:
++        text = fd.read()
++
++    for condition in (
++        '(host_os == "linux" or host_os == "mac" or host_os == "win") and '
++        'host_cpu != "s390" and host_os != "zos" and host_cpu != "ppc" and '
++        '(host_cpu != "arm64" or host_os == "mac")',
++        'not build_with_chromium and host_cpu != "s390" and '
++        'host_os != "zos" and host_cpu != "ppc"',
++    ):
++        text = text.replace(condition, f'{condition} and host_cpu != "riscv64"', 1)
++
++    with open(deps_file, encoding="utf-8", mode="w") as fd:
++        fd.write(text)
++
++
+ def checkout_v8():
+     install_depot()
+ 
+@@ -87,7 +142,10 @@ def checkout_v8():
+             msg="Fetching Google V8 code",
+         )
+ 
+-        if not success:
++        # fetch's own gclient sync fails on riscv64 over the CIPD packages
++        # skip_unavailable_cipd_packages() disables below; V8 itself is cloned
++        # by then, and the sync below completes what this one left undone.
++        if not success and not RISCV64:
+             exit(1)
+ 
+     success, _, __ = exec_cmd(
+@@ -106,11 +164,18 @@ def checkout_v8():
+     if not success:
+         exit(1)
+ 
++    if RISCV64:
++        unmanage_v8_solution()
++        skip_unavailable_cipd_packages()
++
+     success, _, __ = exec_cmd(
+         os.path.join(DEPOT_HOME, "gclient"),
+         "sync",
+         "-D",
+-        "-j8",
++        # depot_tools serializes the sync on 32-bit arm boards because parallel
++        # syncs are flaky there; riscv64 boards lose the same gsutil bootstrap
++        # lockfile race ([Errno 11] Resource temporarily unavailable).
++        "-j1" if RISCV64 else "-j8",
+         cwd=os.path.dirname(V8_HOME),
+         msg="Syncing Google V8 code",
+     )

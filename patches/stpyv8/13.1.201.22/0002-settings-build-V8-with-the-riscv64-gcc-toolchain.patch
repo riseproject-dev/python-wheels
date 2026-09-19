@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sat, 19 Sep 2026 21:12:00 +0200
+Subject: [PATCH] settings: build V8 with the riscv64 gcc toolchain
+
+gn defaults is_clang to true, which points the build at Chromium's
+prebuilt clang in third_party/llvm-build. That toolchain is published
+for amd64/arm64/mac hosts only, and V8's DEPS conditions its Linux
+object on host_os alone, so a riscv64 host happily downloads an x86_64
+clang it can never execute.
+
+V8 already carries the alternative: build/toolchain/linux/BUILD.gn
+defines gcc_toolchain("riscv64") with toolprefix "riscv64-linux-gnu-"
+(the arrangement the RISC-V V8 port documents at
+https://github.com/riscv-collab/v8/wiki/Cross-compiled-Build), and
+is_clang=false is what routes gn at it. The build host must provide
+riscv64-linux-gnu-prefixed tools; on a native riscv64 builder those are
+the system gcc/binutils.
+
+The other riscv64-relevant gn arguments are already set unconditionally
+by this file: treat_warnings_as_errors=false (V8 gates -Werror on clang
+everywhere but config("chromium_code"), and GCC emits diagnostics clang
+does not) and use_custom_libcxx=false (V8's bundled libc++ needs GCC 15+
+to build with GCC).
+
+Upstream-Status: To upstream [not yet submitted to cloudflare/stpyv8]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ settings.py | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/settings.py b/settings.py
+index 76059a8..c0e908a 100644
+--- a/settings.py
++++ b/settings.py
+@@ -34,6 +34,17 @@ gn_args = {
+     "v8_use_external_startup_data": "false",
+ }
+ 
++if platform.machine() in ("riscv64",):
++    # Chromium's prebuilt clang (third_party/llvm-build, fetched by gclient from
++    # the chromium-browser-clang bucket) is only published for amd64/arm64/mac
++    # hosts, and its Linux object is unconditioned on host_cpu, so a riscv64
++    # host downloads an x86_64 binary it can never run. V8's own
++    # build/toolchain/linux/BUILD.gn already defines a gcc_toolchain("riscv64")
++    # (toolprefix riscv64-linux-gnu-, see
++    # https://github.com/riscv-collab/v8/wiki/Cross-compiled-Build); is_clang=false
++    # routes gn at it.
++    gn_args["is_clang"] = "false"
++
+ source_files = [
+     "Exception.cpp",
+     "Platform.cpp",
