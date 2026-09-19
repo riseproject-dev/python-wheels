@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (374 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (376 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -225,6 +225,9 @@ The porting gotchas (374 of them) live in [`references/gotchas/`](gotchas/), spl
   into a single job, so the abi3 wheel is never built and nothing fails — make the leg a real
   matrix dimension (the primp/arro3-core case: two already-published packages are quietly
   shipping only their free-threaded wheel).
+- **408** — A `setup.py` that reaches for `wheel.bdist_wheel` behind a `try/except ImportError`
+  still gets its abi3 tag under modern setuptools — setuptools ships a `wheel.bdist_wheel`
+  shim, so do not add `wheel` to `build-system.requires` to "fix" it.
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
@@ -592,6 +595,9 @@ The porting gotchas (374 of them) live in [`references/gotchas/`](gotchas/), spl
 - **349** — The legacy `[project.license]` table form (`{file = "..."}`) not only suppresses
   setuptools' PEP 639 default glob — combining it with an explicit `license-files` key
   is a hard error on recent setuptools.
+- **409** — The `gpl_sources` trigger can come from the *musllinux* leg alone: auditwheel's
+  musllinux policy does not allowlist the GCC runtime, so a C++ extension's musl wheel
+  vendors `libstdc++`/`libgcc_s` where its manylinux sibling vendors nothing.
 
 ### Local validation & the aarch64/QEMU rehearsal — [`gotchas/local-validation-and-rehearsal.md`](gotchas/local-validation-and-rehearsal.md)
 

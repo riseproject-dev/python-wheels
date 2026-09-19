@@ -46,6 +46,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
   source tree never references — the source repo can carry no GitHub Actions at all.
 - **402** — A two-leg abi3 + free-threaded matrix expressed only through `include:` collapses
   into a single job, so the abi3 wheel is never built and nothing fails.
+- **408** — A `setup.py` that reaches for `wheel.bdist_wheel` behind a `try/except ImportError`
+  still gets its abi3 tag under modern setuptools.
 
 ---
 
@@ -856,3 +858,28 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
       <tag>-manylinux_riscv64` jobs against the legs declared before believing a green
       run. `docs/packages/<pkg>.yaml` is the after-the-fact tell — a published version
       carrying only the free-threaded wheel where an earlier version carried both.
+
+408. **A `setup.py` that reaches for `wheel.bdist_wheel` behind a `try/except ImportError`
+     still gets its abi3 tag under modern setuptools — do not "fix" it by adding `wheel`
+     to `build-system.requires` (the leidenalg case).** Gotcha 34's third abi3 route is a
+     `bdist_wheel` subclass defined in `setup.py`; a common variant guards the import
+     (`try: from wheel.bdist_wheel import bdist_wheel / except ImportError: bdist_wheel =
+     None`) and then *silently* drops to a per-interpreter wheel when the import fails.
+     Since setuptools 70.1 `wheel` is no longer returned by
+     `setuptools.build_meta.get_requires_for_build_wheel()`, so the PEP 517 isolated env
+     built from `requires = ["setuptools>=45", "setuptools_scm[toml]>=6.2"]` installs no
+     `wheel` distribution at all — which reads like a guaranteed silent abi3 loss and
+     invites a pyproject patch (plus gotcha 31's `SETUPTOOLS_SCM_PRETEND_VERSION` fallout
+     for the dirtied tree). It is not: setuptools still ships a `wheel.bdist_wheel` shim
+     re-exporting `setuptools.command.bdist_wheel`, so the guarded import resolves and the
+     subclass is installed.
+     - **Settle it in one minute on any host, no target arch involved**: a throwaway
+       project with the same `build-system.requires` and a `setup.py` that prints the
+       import result, built with `python -m build --wheel`, prints
+       `<class 'setuptools.command.bdist_wheel.bdist_wheel'>` (setuptools 84). Do this
+       *before* writing a patch — the wheel filename from the real build is the other
+       proof, and a `cpNN-abi3` tag means the path is live.
+     - **Re-check it when the shim goes away.** It is a compatibility shim, so the negative
+       outcome (a `cpNN-cpNN` wheel from a project whose PyPI files are `cpNN-abi3`) is the
+       signal to revisit; the fix then is upstream's pyproject, not a cibuildwheel knob,
+       because `CIBW_CONFIG_SETTINGS` cannot reach a `cmdclass` that was never registered.
