@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (377 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -93,9 +93,57 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
 - **376** — A permissive `License:` field on the wrapper package says nothing about whether
   the payload it ships has any source at all — check the binary's own content, not the
   metadata's license family (the tableauhyperapi case).
-- **381** — A GPU-first package is not CUDA-blocked when its own build system makes the CPU
-  backend the *default* — read the backend selector and diff the per-platform wheel sizes
-  before parking it (the bitsandbytes case).
+- **381** — A third-party *vendor release* of a project this repo has already ruled out
+  inherits that verdict — resolve the redistribution to its upstream before triaging anything
+  else (the tokenspeed-triton case).
+- **382** — Several PyPI distributions carved out of *one* build are one unit of work, not
+  one port each — check the allowed `--build-type` values before writing any YAML, and let
+  `requires_dist` (not the most "core-sounding" name) fix the order; complements gotcha 380
+  (how to publish them once the combined port exists) (the
+  pyside6/pyside6-essentials/pyside6-addons case).
+- **383** — The *umbrella* distribution of a split family carries no compiled code at all,
+  gets its platform+`abi3` tag from a deliberately fake `Extension`, and its payload is
+  generated stubs for the union of its siblings' modules — so it cannot be cut from a
+  different build than they were; also, check the in-image SDK's *minor version* against the
+  binding release (the pyside6 meta-wheel case).
+- **385** — A no-sdist vendor wheel can still have a fully public build recipe — read
+  `dist-info/WHEEL`'s `Generator:` before parking it for "no source anywhere"; a
+  vendor-named generator is usually a *repackager*, which moves the stop to whether the
+  vendor publishes the payload for our arch (the pyqt6-qt6 case).
+- **386** — A GPU-only package can be small, source-open and blob-free and still be
+  unportable: in a JIT kernel library the compiled part is a few-hundred-KB shim, so gotcha
+  41's vendor-payload tell is absent and the wall is what that shim links — `libtorch_cuda.so`,
+  which our CPU-only riscv64 torch can never provide; refines gotchas 249 and 284 (the
+  humming-kernels case).
+- **387** — A GPU-toolkit-suffixed distribution name (`-cuda12x`, `-rocm-7-0`) is a toolkit
+  selector whose name can be injected from a *separate* release-tools repo; check the vendor's
+  redist index for our arch, and treat a documented stub/no-CUDA build mode as a docs build,
+  not a port (the cupy-cuda12x case).
+- **388** — The queue entry's wheel shape is a snapshot — re-read the *latest* release's tag
+  set before triaging the queued version, because upstream can delete the arch-specific
+  payload and erase the gap outright; also, a `py3-none-any` dependency can be a facade for
+  platform-only payload wheels (the tokenspeed-mla case).
+- **392** — With no project URL and a stock `Generator:`, the *conda-forge feedstock* is the
+  cheapest source-availability oracle (a feedstock whose `source:` is the PyPI wheels is a
+  repackager, so there is nothing to build); `readelf -S` splits a real compiled extension
+  into engine vs embedded model weights (`.text` ~280 KB, `.rodata` ~34.8 MB); a compound
+  `License: <permissive> AND LicenseRef-*` is gotcha 372's second lock; and an open-source
+  org's monorepo hits can all be the closed-source package's *consumer*
+  (the livekit-local-inference case).
+- **393** — The bindings half of a "bindings wheel + vendored-SDK wheel" pair looks unblocked
+  from its sdist and is not: the blocking pin is added by the vendor's release step, not by the
+  sources, and the coupling is a `RUNPATH` into the sibling wheel's directory; a distro-SDK
+  build is defeated by the sibling's dlopened plugin/QML payload (the pyqt6 case).
+- **405** — An NVIDIA-owned, profiler-adjacent package can have no CUDA dependency whatsoever:
+  no CUDA header, no `libraries=`, the GPU only ever the *consumer* of the annotations — and
+  parking it fakes a blocker for every portable consumer that depends on it (the nvtx case).
+- **407** — An upstream recipe can stop being conda-based between releases: the tag the queue
+  entry names built its C++ SDK inside micromamba (conda-forge has no `linux-riscv64`
+  freeimage) while the newest tag uses `dnf` plus uv, so read the recipe — and the component
+  versions in its workflow `env:` block — at the newest tag before pricing the port or
+  recording a conda blocker; `api.anaconda.org/package/conda-forge/<name>` answers subdir
+  coverage per package, and micromamba itself does ship a riscv64 binary
+  (the cadquery-ocp-novtk case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -129,6 +177,9 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
   wrong commit — check `git merge-base --is-ancestor <tag> origin/main` before trusting it.
 - **352** — A gitlink with no `.gitmodules` entry breaks `actions/checkout`'s own
   persist-credentials cleanup, not the checkout itself.
+- **406** — Gotcha 103's byte-for-byte sdist proof cannot come out clean when upstream cuts
+  releases from a non-public tree: a `[tool.cibuildwheel]`-only difference is not a wrong pin,
+  and the released sdist's `test-command` can name a script that never existed (the nvtx case).
 
 ### cibuildwheel mechanics, the matrix & abi3 — [`gotchas/cibuildwheel-matrix-and-abi3.md`](gotchas/cibuildwheel-matrix-and-abi3.md)
 
@@ -165,6 +216,18 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
 - **360** — A `setup.py`'s own `bdist_wheel --plat-name` insertion can hardcode
   `manylinux1_` + `platform.machine()` regardless of the actual container libc, making
   musllinux unbuildable no matter how the CMake/C++ side is patched.
+- **391** — A project's real cibuildwheel recipe can live in a *separate packaging repo* that the
+  source tree never references — the source repo can carry no GitHub Actions at all.
+- **396** — A `cpXY-none-<platform>` wheel is the third plat-name shape: `setup.py` declares
+  no `ext_modules` at all, and a sibling CMake build both compiles the extension modules and
+  hands `bdist_wheel` the tag (the coremltools case).
+- **402** — A two-leg abi3 + free-threaded matrix expressed only through `include:` collapses
+  into a single job, so the abi3 wheel is never built and nothing fails — make the leg a real
+  matrix dimension (the primp/arro3-core case: two already-published packages are quietly
+  shipping only their free-threaded wheel).
+- **408** — A `setup.py` that reaches for `wheel.bdist_wheel` behind a `try/except ImportError`
+  still gets its abi3 tag under modern setuptools — setuptools ships a `wheel.bdist_wheel`
+  shim, so do not add `wheel` to `build-system.requires` to "fix" it.
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
@@ -260,6 +323,9 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
 - **202** — A monorepo's "regenerate deps from Bazel" helper may already tolerate a missing
 - **219** — GDAL's cmake build produces no `gdal-config` script — a second consumer of the
 - **233** — A package can have no Python build backend at all — the wheel comes from an
+- **397** — A CMake build that shells out to a bare `python3` for one vendored sub-extension
+  silently builds it for the container's default interpreter, not the one the wheel is for
+  (the coremltools/kmeans1d case).
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
@@ -308,6 +374,12 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
 - **378** — A newer libstdc++ on the manylinux image can deprecate calls a project's own
   `-DCMAKE_COMPILE_WARNING_AS_ERROR=ON` CI flag then turns into hard errors, purely from
   a toolchain-version gap upstream's own (older) runners never see.
+- **390** — libev is one of the `-devel` packages that *is* in Rocky 10's riscv64 repos, so an
+  upstream `yum install -y libev libev-devel` needs no replacement — but its header is
+  `/usr/include/ev.h`.
+- **401** — Rocky 10 riscv64 ships OpenBLAS, LAPACK and FFTW but no SuiteSparse, GSL or
+  GLPK, and a numeric package's optional-extension set has to be cut along that line
+  (Alpine riscv64 has all of them, but ships no licence texts).
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
@@ -328,6 +400,10 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
 - **278** — A vendored, direct-copy (not submodule) header can be missing riscv64 from its
 - **363** — A `libraries=[...]` entry can go missing from the link line with *no* error —
 - **368** — Linking several codecs against Rocky 10's system libraries instead of
+- **395** — When a project dlopen()s a differently-named shared library per major
+- **400** — A `setup.py` knob that feeds a downloaded dependency's *sources* into
+  `Extension(sources=...)` needs a path relative to the project root, so the tarball has
+  to be extracted inside the checkout, not into `/tmp`.
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 
@@ -345,6 +421,7 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
 - **292** — Gotcha 81's "diff the wheel `size` field" test can pass on a real per-arch binary
 - **295** — A require-extension knob that reaches the container correctly (gotcha 129's
 - **308** — A maturin shim whose star-import name collides with the compiled submodule's
+- **398** — Reproducing a `py3-none-<platform>` wheel takes an explicit retag — setuptools'
 
 ### Dependencies & the registry — [`gotchas/dependencies-and-registry.md`](gotchas/dependencies-and-registry.md)
 
@@ -376,6 +453,9 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
   keeps resolving to a newer, wheel-less release.
 - **375** — `uv` can reject a real `abi3` wheel resolved by name from an index as "has no
   usable wheels" even though the identical wheel installs fine as a local file.
+- **399** — A dependency we already publish can satisfy a dependent's *runtime* link and still
+  be unusable as its *build* input: a wheel ships `.so` files, not headers or a CMake package,
+  and the upstream recipe's header source can be conda-forge (the cadquery-ocp/VTK case).
 
 ### Build-tool drift & pins — [`gotchas/build-tool-drift-and-pins.md`](gotchas/build-tool-drift-and-pins.md)
 
@@ -422,6 +502,9 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
 - **329** — A test suite that shells out to the package's own installed CLI binaries at a
 - **347** — A test that asserts "you're running against an editable/in-place install" can
 - **348** — A `glcontext`-based package's `create_context(standalone=True)` defaults to the
+- **389** — A test `.pyx` that Cython-`include`s a checkout-root-relative path can be satisfied by
+  staging just those files; a staged package dir with no `__init__.py` is a namespace
+  portion and does not shadow the wheel.
 
 ### Testing: pytest config, servers & test selection — [`gotchas/pytest-config-servers-and-selection.md`](gotchas/pytest-config-servers-and-selection.md)
 
@@ -512,6 +595,9 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
 - **349** — The legacy `[project.license]` table form (`{file = "..."}`) not only suppresses
   setuptools' PEP 639 default glob — combining it with an explicit `license-files` key
   is a hard error on recent setuptools.
+- **409** — The `gpl_sources` trigger can come from the *musllinux* leg alone: auditwheel's
+  musllinux policy does not allowlist the GCC runtime, so a C++ extension's musl wheel
+  vendors `libstdc++`/`libgcc_s` where its manylinux sibling vendors nothing.
 
 ### Local validation & the aarch64/QEMU rehearsal — [`gotchas/local-validation-and-rehearsal.md`](gotchas/local-validation-and-rehearsal.md)
 
@@ -526,7 +612,16 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
 - **223** — For a `bindings = "bin"` CLI's test assertions, `cargo build --release` the tool
 - **298** — A local rehearsal's `pip`-resolved cibuildwheel can be too old for
 - **369** — Without docker, fetch Rocky 10's own dnf repodata over plain HTTPS to
-- **382** — When no riscv64 image or cross-toolchain is reachable, exercise a C/C++ source's
+- **384** — `dnf` failing in the image with `Curl error (60) ... self-signed certificate` is
+  your egress proxy, not the image — install the proxy CA into the container trust store
+- **394** — A libtorch-linking project cannot be rehearsed on x86_64 with PyPI's `torch`
+- **403** — Prove which build *variant* you are about to produce by stubbing the build
+  backend's `setup()` on the host
+- **404** — For a from-source C++ world, a *full CMake configure* inside the real riscv64
+  image is the honest local ceiling
+- **410** — Gotcha 188's "lower the optimisation level for the local rehearsal only" can
+  silently produce a broken wheel when the project has a C99 `inline` helper with no
+  `static` — and the suite still passes, because the pure-Python fallback catches it.
 
 ### PR, CI, triggers, publishing & maintainer signals — [`gotchas/pr-ci-and-maintainer.md`](gotchas/pr-ci-and-maintainer.md)
 
