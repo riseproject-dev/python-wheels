@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (376 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (377 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -619,6 +619,9 @@ The porting gotchas (376 of them) live in [`references/gotchas/`](gotchas/), spl
   backend's `setup()` on the host
 - **404** — For a from-source C++ world, a *full CMake configure* inside the real riscv64
   image is the honest local ceiling
+- **410** — Gotcha 188's "lower the optimisation level for the local rehearsal only" can
+  silently produce a broken wheel when the project has a C99 `inline` helper with no
+  `static` — and the suite still passes, because the pure-Python fallback catches it.
 
 ### PR, CI, triggers, publishing & maintainer signals — [`gotchas/pr-ci-and-maintainer.md`](gotchas/pr-ci-and-maintainer.md)
 

@@ -24,6 +24,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
   backend's `setup()` on the host
 - **404** — For a from-source C++ world, a *full CMake configure* inside the real riscv64
   image is the honest local ceiling
+- **410** — Gotcha 188's "lower the optimisation level for the local rehearsal only" can
+  silently produce a broken wheel when the project has a C99 `inline` helper with no
+  `static` — and the suite still passes, because the pure-Python fallback catches it.
 
 ---
 
@@ -347,3 +350,26 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
       `raw.githubusercontent.com`: run with `--network host`, pass the host's `HTTPS_PROXY`,
       and mount the proxy CA (gotcha 384). Without it the downloads fail and the modules
       needing them quietly drop out of the summary you are reading.
+
+410. **Gotcha 188's "lower the optimisation level for the local rehearsal only" can
+    silently produce a *broken* wheel when the project has a C99 `inline` helper with no
+    `static`: the extension links, ships, and passes the suite, because the package's own
+    pure-Python fallback catches the ImportError (the cassandra-driver case).**
+    `cassandra/cmurmur3.c` defines `inline int64_t rotl64(...)` — under C99/gnu11 that
+    emits no out-of-line definition, so at `-O3` the call is inlined and at `-O0` the
+    `.so` keeps an undefined `rotl64`. The rehearsal's wheel therefore contained all
+    twenty `.so` files, passed gotcha 20's presence check, passed auditwheel repair, and
+    ran the whole unit suite green — 618 passed — while `cassandra.murmur3`'s
+    `try: from cassandra.cmurmur3 import murmur3 / except ImportError` had quietly fallen
+    back to Python. The identical `-O3` wheel differed by only two tests (the two that
+    skip when the C murmur3 is missing), which is far too small a delta to notice.
+    - **Fix the *check*, not just the rehearsal**: presence in the zip is not proof, so
+      have `CIBW_TEST_COMMAND` **import** every extension and assert `__file__` ends in
+      `.so`, plus one real call per hand-written extension
+      (`murmur3("key") == -6847573755651342660`, `libevwrapper.Loop()`). Then a degraded
+      or unimportable build fails the job instead of passing it. `readelf --dyn-syms -W
+      <ext>.so | grep UND` on the built wheel is the direct confirmation, and it works on
+      a riscv64 `.so` from an x86 host.
+    - **Prefer `-O1`/`-O2` over `-O0`** when trading fidelity for QEMU time, and re-run the
+      import assertions against a wheel built with upstream's real `CFLAGS` before
+      believing a green rehearsal.
