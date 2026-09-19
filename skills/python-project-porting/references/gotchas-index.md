@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (379 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (380 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -147,6 +147,17 @@ The porting gotchas (379 of them) live in [`references/gotchas/`](gotchas/), spl
   recording a conda blocker; `api.anaconda.org/package/conda-forge/<name>` answers subdir
   coverage per package, and micromamba itself does ship a riscv64 binary
   (the cadquery-ocp-novtk case).
+- **418** — An upstream wheel for another non-x86 architecture is only a precedent for the parts
+  of it that are actually that architecture: the released paddlepaddle `linux_aarch64` wheel
+  ships x86-64 `liblapack.so.3`/`libblas.so.3`/`libgfortran.so.3` beside a real aarch64
+  `libopenblas.so.0`, because one prebuilt tarball covers all of Linux — `file`/`readelf -h`
+  every `.so` in the sibling wheel before mirroring its build (the paddlepaddle case).
+- **419** — Gotcha 411's "is the CPU backend the default?" test can pass and still not yield
+  a port: a torch extension's non-CUDA branch can compile operator *schemas* with no
+  implementations, so the build succeeds in seconds against a CPU-only torch and the wheel
+  is a dead stub — count the sources that branch globs, diff the built `.so` against the
+  published CUDA one, and call an op instead of trusting a "did the extension load" flag
+  (the xformers case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -383,6 +394,10 @@ The porting gotchas (379 of them) live in [`references/gotchas/`](gotchas/), spl
 - **401** — Rocky 10 riscv64 ships OpenBLAS, LAPACK and FFTW but no SuiteSparse, GSL or
   GLPK, and a numeric package's optional-extension set has to be cut along that line
   (Alpine riscv64 has all of them, but ships no licence texts).
+- **420** — Gotcha 139's binutils-too-old trap recurs inside a Bazel dependency's microkernel
+  library (XNNPACK's `zvfh` kernels), where the fix is that dependency's own feature
+  `--define` rather than an `-march` probe — and `--keep_going` hides a single-cause failure
+  behind five hours of unrelated progress, making it look like a timeout.
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
@@ -407,6 +422,9 @@ The porting gotchas (379 of them) live in [`references/gotchas/`](gotchas/), spl
 - **400** — A `setup.py` knob that feeds a downloaded dependency's *sources* into
   `Extension(sources=...)` needs a path relative to the project root, so the tarball has
   to be extracted inside the checkout, not into `/tmp`.
+- **415** — Turning an optional native codec OFF can select a stub whose signature has
+  drifted from its declaration; the ELF links anyway and the first `dlopen` is where it
+  dies.
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 
@@ -571,6 +589,8 @@ The porting gotchas (379 of them) live in [`references/gotchas/`](gotchas/), spl
   only on `cp314t`, with no riscv64 or correctness bug behind it — free-threaded
   CPython's deferred reference counting doesn't guarantee the ordering GIL-serialized
   builds do.
+- **416** — A conftest-time `ImportError` is reported by pytest *without* the exception
+  chain, so a `dlopen` failure reaches the log stripped of its cause.
 - **414** — A stochastic test whose native RNG is seeded from `time(NULL)` is a wall-clock
   lottery, not an arch or libc difference — replay consecutive epoch seconds through the
   library's own seed setter to measure the real failure rate.
@@ -628,6 +648,8 @@ The porting gotchas (379 of them) live in [`references/gotchas/`](gotchas/), spl
 - **410** — Gotcha 188's "lower the optimisation level for the local rehearsal only" can
   silently produce a broken wheel when the project has a C99 `inline` helper with no
   `static` — and the suite still passes, because the pure-Python fallback catches it.
+- **417** — A QEMU riscv64 rehearsal of a cibuildwheel job needs `CI=1` for
+  scikit-build-core's CMake probe, and needs `CIBW_BEFORE_ALL`'s staging replayed.
 - **412** — When no riscv64 image or cross-toolchain is reachable, rename a C/C++ source's
   arch macros in a scratch copy to exercise its generic architecture path natively — a
   restricted-egress host can still prove compilability without a container (the

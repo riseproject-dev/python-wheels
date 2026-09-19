@@ -88,6 +88,12 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **407** — An upstream recipe can stop being conda-based between releases, so read it at the
   *newest* tag before pricing a port or recording a conda blocker (the cadquery-ocp-novtk
   case).
+- **418** — An upstream wheel for *another* non-x86 architecture is only a precedent for the
+  parts of it that are actually that architecture — `readelf -h` every `.so` in it (the
+  paddlepaddle case).
+- **419** — Gotcha 411's "is the CPU backend the default?" test can pass and still not yield a
+  port: the non-CUDA branch of a torch extension can compile operator *schemas* with no
+  implementations, so the build succeeds and the wheel is a dead stub (the xformers case).
 
 ---
 
@@ -2280,3 +2286,89 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       read them out of the tag the job checks out instead of hardcoding them, and assert
       that `WHEEL` equals the version in `docs/packages/<pkg>.yaml` so a bump that moves
       them fails loudly.
+
+418. **An upstream wheel for *another* non-x86 architecture is only a precedent for the
+    parts of it that are actually that architecture — `readelf -h` every `.so` in it (the
+    paddlepaddle case).** Gotcha 186 warns that a vendor publishing one *artifact shape*
+    says nothing about another; this is the sharper version, where the vendor publishes
+    the right shape for the wrong ISA and ships it anyway. Paddle's CMake knows four
+    non-x86 architectures (`WITH_ARM`/`WITH_SW`/`WITH_MIPS`/`WITH_LOONGARCH`), each
+    turning off Xbyak, MKL and AVX, and upstream publishes `linux_aarch64` wheels off the
+    first — which reads as "the non-x86 CPU path is maintained, mirror it". It mostly is.
+    But `cmake/external/lapack.cmake` takes **one prebuilt tarball for the whole of
+    Linux** (`lapack_lnx_v3.10.0.20210628.tar.gz`, x86-64 only — the comment beside it
+    says "lapack need fortran compiler which many machines don't have"), and `setup.py`
+    copies `LAPACK_LIB`/`BLAS_LIB`/`GFORTRAN_LIB`/`GNU_RT_LIB_1` into `paddle/libs/`
+    unconditionally. So the released
+    `paddlepaddle-3.3.1-cp312-cp312-linux_aarch64.whl` carries x86-64
+    `liblapack.so.3`, `libblas.so.3`, `libgfortran.so.3` and `libquadmath.so.0` beside a
+    genuinely aarch64 `libopenblas.so.0`.
+    - **The check is two commands and needs no build.** Download the sibling-arch wheel,
+      then `unzip -q -j <whl> '<pkg>/libs/*' -d x && file x/*` (or `readelf -h`) — a
+      mismatched `Machine:` line names every payload whose build step is
+      architecture-blind. Do it before writing the workflow: it is the difference between
+      "mirror upstream" and "mirror upstream and fix what it got wrong", and it is the
+      only way to find these, because nothing links against them (Paddle `dlopen`s
+      LAPACK through `phi/backends/dynload/lapack.cc`, so the build is green and the
+      failure is a runtime `paddle.linalg` error).
+    - **A prebuilt-for-one-arch dependency is not automatically gotcha 35's wall.** Ask
+      what it would take to *produce* the missing artifact. Here it is Reference-LAPACK
+      v3.10.0 — the same release the tarball packages — built by its own CMake against
+      the manylinux image's `gfortran`, i.e. a 30-line `ExternalProject_Add`, not gotcha
+      186's "authoring a new build system". Gate the source build on the new arch flag so
+      x86-64 and macOS keep the tarball, and say in the patch that the fix would repair
+      the sibling arch too.
+
+419. **Gotcha 411's "is the CPU backend the default?" test can pass and still not yield a
+    port: a torch extension's non-CUDA branch can compile *operator schemas with no
+    implementations*, so the build succeeds in seconds against a CPU-only torch and the
+    wheel it produces is a dead stub (the xformers case).** bitsandbytes (gotcha 411) was
+    rescued by reading its backend selector; xformers' selector reads the same way and ends
+    somewhere else. `setup.py:get_extensions()` sets `extension = CppExtension` and only
+    promotes it to `CUDAExtension` (adding `source_cuda`) inside
+    `if (torch.cuda.is_available() and CUDA_HOME is not None and torch.version.cuda is not
+    None) or FORCE_CUDA=1 or TORCH_CUDA_ARCH_LIST != ""`, with the HIP branch behind
+    `torch.version.hip` — so with our `torch-2.14.0+cpu` and no toolkit the CPU path is
+    what runs, needs no GPU host, and `pip wheel . --no-deps --no-build-isolation` finishes
+    in seconds. Everything after that is the trap.
+    - **Count and read the sources the non-CUDA branch globs — don't stop at "it built".**
+      The CPU branch's `sources` is `xformers/csrc/**/*.cpp` minus the HIP directory: at
+      0.0.35 that is exactly two files, 44 lines total, and every line is an `m.def("op(...)
+      -> ...")` inside `STABLE_TORCH_LIBRARY_FRAGMENT` — `attention.cpp`'s entire body is
+      additionally wrapped in `#if defined(USE_ROCM)`, so it contributes nothing at all.
+      Every `m.impl` lives in a `.cu` (or HIP `.cpp`) that only the GPU branches compile. A
+      schema with no implementation registers fine and then raises `NotImplementedError:
+      Could not run '<ns>::<op>' with arguments from the 'CPU' backend` on the first call.
+    - **When upstream publishes no CPU wheel to size-diff against, build one and diff the
+      `.so`.** Gotcha 411's cheapest signal was upstream's own 123 KB macOS wheel next to a
+      43 MB Linux one. Here upstream ships no CPU artifact anywhere, so produce it:
+      the CPU-built `xformers/_C.so` is 233 KB with **five** dynamic symbols, none of them
+      an operator (`nm -D --defined-only`), against the published CUDA wheel's 11.6 MB
+      `_C.so`. Two orders of magnitude *and* an empty symbol table is not "a smaller
+      backend", it is "no backend".
+    - **`_has_cpp_library is True` proves only that the `.so` loaded.** xformers'
+      `_cpp_lib.py` catches a failed `torch.ops.load_library` and degrades with a warning,
+      so a package-level "did the extension load" flag reads healthy on a wheel whose every
+      op is missing. Install the wheel and *call* something: `memory_efficient_attention`
+      answers `No operator found ... device=cpu (supported: {'cuda'})`, and one grep
+      (`grep -rn SUPPORTED_DEVICES <pkg>/ops/`) shows every op class in the dispatch list
+      declaring `{"cuda"}` — i.e. no patch to the build reaches the Python layer either.
+    - **Check upstream's wheel matrix for a CPU job before calling the CPU path
+      "upstream's own recipe".** `.github/workflows/wheels.yml`'s target determinator emits
+      only `toolkit_type` `cuda` (cu126/cu128/cu130) and `rocm` (7.1); there is no CPU
+      entry, and `upload_pip` filters `*torch2.10.0+cu128*`. bitsandbytes' CPU wheel exists
+      upstream and merely lacked a third platform; a CPU-only xformers wheel is an artifact
+      upstream ships nowhere — gotcha 24's divergence test, reached from the opposite
+      direction.
+    - **Verdict: `parked` under gotcha 183's rule** (installable and importable, primary
+      function unreachable rather than degraded), not `not-feasible` — the build genuinely
+      works, which is exactly why the note has to say what the built wheel *contains*.
+    - **Free bonus for triage notes: a `py39-none-<platform>` tag on a torch extension is
+      real compiled content.** It is neither gotcha 27's cosmetic `--plat-name` nor gotcha
+      145's maturin binary: `bdist_wheel.get_tag()` hand-returns `("py39", "none",
+      plat_tag)` because the `.so` talks only to torch's stable ABI
+      (`STABLE_TORCH_LIBRARY_FRAGMENT`, `get_export_symbols()` returning `[]`, no
+      `PyInit_*`), so one wheel covers every CPython 3.9+ including free-threaded. A queue
+      note reading "1 Linux wheel (abi: py39)" on a torch-extension package is that
+      convention, not a pure-Python tell — and it means the port, had it been feasible,
+      would have been one wheel rather than a per-interpreter matrix.
