@@ -23,6 +23,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
   silently builds it for the container's default interpreter, not the one the wheel is for.
 - **421** — `pierotofy/set-swap-space` is a no-op on the riscv64 runners — a heavy link gets
   the runner's 15GB of RAM and nothing behind it.
+- **423** — A depot_tools/gclient checkout downloads no GCS dependency on riscv64 until
+  `VPYTHON_BYPASS` is set (gsutil's vpython venv pins a crcmod wheel that has no riscv64 build).
+- **424** — Audit a chromium-style DEPS for riscv64-less CIPD packages with `cipd describe`
+  before spending a build cycle finding them one at a time.
 
 ---
 
@@ -433,3 +437,69 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       `##[end-action ... outcome=success` sitting next to a `WARNING:` in the same step
       is the shape; `swapon --show` in the action's own "after" report printing `0B` is
       the proof.
+
+423. **A depot_tools/gclient checkout (V8, Chromium, Skia, ANGLE) cannot download a
+    single GCS dependency on riscv64 until `VPYTHON_BYPASS` is set.** `gclient sync`
+    dies minutes in, on whichever `dep_type: 'gcs'` entry it reaches first (for V8 that
+    is `third_party/llvm-build/Release+Asserts`), with the resolver error nested inside
+    a gclient traceback:
+    ```
+    Exception: 1: [E...] Creating virtual environment at: .../vpython-root.0/store/uv_venv-...
+      × No solution found when resolving dependencies:
+      ╰─▶ Because crcmod==1.7+chromium.4 has no wheels with a matching
+          platform tag (e.g., `manylinux_2_39_riscv64`) ...
+    ```
+    Every gcs dep *and* every `download_from_google_storage.py` hook (V8's
+    `wasm_spec_tests`, `wasm_js`, `bazel`, `gcmole`, ...) is run as
+    `vpython3 gsutil.py`, and `depot_tools/gsutil.vpython.toml` pins
+    `crcmod==1.7+chromium.4`, which chromium's wheel mirror builds for
+    x86_64/aarch64/arm/mac/windows only. It is the *venv* that is unbuildable, not the
+    tool.
+    - **The fix is depot_tools' own escape hatch**, as a job-level env var:
+      `VPYTHON_BYPASS: manually managed python not supported by chrome operations`
+      (the literal string `vpython3` compares against — anything else is ignored).
+      `vpython3` then execs `python3` from `PATH`, and gsutil uses crcmod only as an
+      optional hash accelerator, so the download just works. It also makes the DEPS
+      `vpython3_common` hook (`vpython3 -vpython-tool install`), which would resolve the
+      same riscv64-less wheel set, exit 0 — the bypass short-circuits any
+      `-vpython-tool*` argument.
+    - **Nothing else in depot_tools is missing for riscv64**, so do not conclude the
+      approach is dead: `cipd_client_version.digests` carries a `linux-riscv64` line, and
+      `infra/3pp/tools/cpython3/linux-riscv64` (the hermetic python) and
+      `infra/tools/luci/vpython3/linux-riscv64` both exist. A
+      `Platform linux-riscv64 is not supported by the CIPD client bootstrap` line in the
+      same log is a **red herring from a relative invocation**: `cipd` derives
+      `DEPOT_TOOLS_DIR` from `$0`, so `depot_tools/gclient --version` leaves it looking
+      for `depot_tools/cipd_client_version.digests` after it has cd'd into depot_tools.
+      Invoke these entry points through an absolute path (`"${PWD}/depot_tools/gclient"`).
+    - **Rehearse it for the price of a clone**, no source checkout and no build: in
+      `quay.io/pypa/manylinux_2_39_riscv64` under qemu-riscv64, clone depot_tools and run
+      gclient's own gcs code path against the one object that failed —
+      `python3 -c "import download_from_google_storage as d;
+      print(d.Gsutil(d.GSUTIL_DEFAULT_PATH).check_call('cp', '<gs://url>', '/tmp/o'))"`
+      is literally what `gclient.py`'s `DownloadGoogleStorage` calls. It reproduces the
+      resolver error bare and returns 0 under the bypass.
+
+424. **Audit a chromium-style DEPS for riscv64-less CIPD packages with `cipd describe`
+    before you spend a build cycle discovering them one at a time.** gclient aborts on
+    the first unavailable package, so a checkout with three missing ones costs three
+    cycles — and for a project like V8 each cycle is the whole fetch+sync. Two commands
+    settle it from an x86 host, because the CIPD *registry* is arch-independent:
+    `depot_tools/cipd describe <pkg>/linux-riscv64 -version <the pin from DEPS>` and
+    `depot_tools/cipd ls <pkg-prefix>` for the list of platforms that do exist. For V8
+    13.1.201.22: `gn/gn/linux-riscv64` and `infra/3pp/tools/ninja/linux-riscv64` are
+    published, while `infra/rbe/client` (reclient), `infra/build/siso` and
+    `infra/tools/luci/{isolate,swarming}` are not.
+    - **Enumerate the candidates mechanically rather than by eye**, with depot_tools'
+      own evaluator: for every `cipd`/`gcs` block in DEPS,
+      `gclient_eval.EvaluateCondition(cond, {"host_os": "linux", "host_cpu": "riscv64",
+      "build_with_chromium": False, ...})` says whether riscv64 will try to fetch it.
+      That is also the check that proves a DEPS patch does what it claims: the same
+      evaluation after the edit must leave gn and ninja `True` and the unpublished ones
+      `False`.
+    - **You cannot fix this by lying about `host_cpu`**, because the conditions gating
+      the packages that *are* published have the same shape
+      (`host_cpu != "s390" and host_os != "zos" and ...`) as the ones that are not —
+      excluding riscv64 wholesale would drop gn and ninja too. Append
+      `and host_cpu != "riscv64"` to the conditions of the missing packages only, and
+      keep them in one list so the next version bump has one place to re-verify.

@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (382 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (384 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -343,6 +343,13 @@ The porting gotchas (382 of them) live in [`references/gotchas/`](gotchas/), spl
 - **421** — `pierotofy/set-swap-space` is a no-op on the riscv64 runners (`/` is overlayfs, so
   `swapon` fails and the action soft-passes): a heavy link gets 15GB of RAM and nothing behind
   it.
+- **423** — A depot_tools/gclient checkout (V8/Chromium/Skia) downloads no `dep_type: 'gcs'`
+  dependency and runs no `download_from_google_storage` hook on riscv64 until
+  `VPYTHON_BYPASS` is set — gsutil's vpython venv pins `crcmod==1.7+chromium.4`, which has no
+  riscv64 wheel; the cipd-bootstrap error in the same log is a relative-path red herring.
+- **424** — Audit a chromium-style DEPS for riscv64-less CIPD packages with
+  `cipd describe <pkg>/linux-riscv64` (and `gclient_eval.EvaluateCondition`) before spending a
+  build cycle discovering them one abort at a time.
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
