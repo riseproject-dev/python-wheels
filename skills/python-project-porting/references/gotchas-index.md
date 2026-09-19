@@ -395,6 +395,7 @@ The porting gotchas (374 of them) live in [`references/gotchas/`](gotchas/), spl
 - **292** — Gotcha 81's "diff the wheel `size` field" test can pass on a real per-arch binary
 - **295** — A require-extension knob that reaches the container correctly (gotcha 129's
 - **308** — A maturin shim whose star-import name collides with the compiled submodule's
+- **398** — Reproducing a `py3-none-<platform>` wheel takes an explicit retag — setuptools'
 
 ### Dependencies & the registry — [`gotchas/dependencies-and-registry.md`](gotchas/dependencies-and-registry.md)
 
