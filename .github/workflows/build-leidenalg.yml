@@ -1,0 +1,174 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the manylinux/musllinux jobs of
+# https://github.com/vtraag/leidenalg/blob/0.12.0/.github/workflows/build.yml
+name: Build leidenalg wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/leidenalg.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-leidenalg.yml'
+      - 'docs/packages/leidenalg.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-leidenalg.yml'
+      - 'docs/packages/leidenalg.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: leidenalg
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build leidenalg ${{ matrix.version }} cp38-abi3-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        libc: [manylinux, musllinux]
+
+    env:
+      LEIDENALG_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout leidenalg ${{ env.LEIDENALG_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: vtraag/leidenalg
+          ref: ${{ env.LEIDENALG_VERSION }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # setup.py's bdist_wheel_abi3 always tags the wheel cp38-abi3 (gotcha 34), so
+          # build on upstream's cp39 floor (their CIBW_PROJECT_REQUIRES_PYTHON, gotcha 96)
+          # and let cibuildwheel reuse+retest the same wheel on cp312-cp314 (gotcha 11).
+          # No free-threaded wheel exists upstream either (their own CIBW_SKIP: cp3??t-*,
+          # since Py_LIMITED_API can't target it).
+          CIBW_BUILD: >-
+            cp39-${{ matrix.libc }}_riscv64 cp312-${{ matrix.libc }}_riscv64
+            cp313-${{ matrix.libc }}_riscv64 cp314-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # The igraph C core and libleidenalg are cloned and compiled here, so their GPL
+          # notices only exist inside the container -- stage them where setuptools' default
+          # licence glob picks them up (gotcha 53).
+          CIBW_BEFORE_BUILD_LINUX: |
+            if command -v apk > /dev/null; then
+              apk add flex bison zlib-dev
+            elif command -v yum > /dev/null; then
+              yum install -y flex bison zlib-devel
+            fi
+            pip install -U cmake wheel
+            scripts/build_igraph.sh
+            scripts/build_libleidenalg.sh
+            cp build-deps/src/igraph/COPYING LICENSE.igraph
+            cp build-deps/src/libleidenalg/LICENSE LICENSE.libleidenalg
+          CIBW_ENVIRONMENT: >-
+            CFLAGS='-I/project/build-deps/install/include/ -L/project/build-deps/install/lib64/ -L/project/build-deps/install/lib/'
+            LD_LIBRARY_PATH='/project/build-deps/install/lib64/:/project/build-deps/install/lib/'
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: ddt
+          CIBW_TEST_COMMAND: cd {project} && python -m unittest -v
+
+      - name: Check the wheel is abi3 and carries the compiled extension + licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              assert "-cp38-abi3-" in whl, whl
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith("_c_leiden.abi3.so") for n in names), names
+              assert any("leidenalg.libs/libigraph" in n for n in names), names
+              assert any("leidenalg.libs/liblibleidenalg" in n for n in names), names
+              licenses = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+              assert licenses == {"LICENSE", "LICENSE.igraph", "LICENSE.libleidenalg"}, (whl, licenses)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: leidenalg-${{ env.LEIDENALG_VERSION }}-cp38-abi3-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      LEIDENALG_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # auditwheel's musllinux policy does not allowlist the GCC runtime, so the
+      # musllinux wheel vendors the image's libstdc++ and libgcc_s (gotcha 66).
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: leidenalg-${{ env.LEIDENALG_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish leidenalg ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: leidenalg-${{ matrix.version }}-*riscv64
+      gpl-sources-artifact: leidenalg-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
