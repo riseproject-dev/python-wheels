@@ -19,6 +19,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
 - **369** — Without docker, fetch Rocky 10's own dnf repodata over plain HTTPS to
 - **384** — `dnf` failing in the image with `Curl error (60) ... self-signed certificate` is
 - **394** — A libtorch-linking project cannot be rehearsed on x86_64 with PyPI's `torch`
+- **417** — A QEMU riscv64 rehearsal of a cibuildwheel job needs `CI=1` for
+  scikit-build-core's CMake probe, and needs `CIBW_BEFORE_ALL`'s staging replayed.
 - **412** — When no riscv64 image or cross-toolchain is reachable, exercise a C/C++ source's
   your egress proxy, not the image — install the proxy CA into the container trust store
 - **403** — Prove which build *variant* you are about to produce by stubbing the build
@@ -411,3 +413,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
       after `mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc` if the host has not
       mounted it) and to pull `mirror.gcr.io/riscv64/debian`. A riscv64 shell with no
       reachable package mirror still cannot compile anything, which is what sends you here.
+
+417. **Rehearsing a cibuildwheel job by hand under docker+QEMU: the two things that fail
+    for reasons that have nothing to do with the port (the torchcodec rehearsal).**
+    Running the workflow's steps yourself inside `quay.io/pypa/manylinux_2_39_riscv64`
+    (rather than through cibuildwheel) is the honest way to reproduce a riscv64 failure on
+    an x86 host — it is how the `decode_avif` undefined symbol of gotcha 415 was found and
+    fixed without spending a CI cycle. Two traps sit in front of it:
+    - **Export `CI=1`, or scikit-build-core cannot find CMake.** Its `cmake --version`
+      probe runs under a short timeout (`scikit_build_core/program_search.py`'s
+      `compute_timeout`, whose base value is *quadrupled* when `CI` is set). Emulated
+      riscv64 blows through the base value, and the build dies with
+      `scikit_build_core.errors.CMakeNotFoundError: Could not find CMake with version
+      >=3.18` — preceded by the real tell, `WARNING - Accessing CMake timed out,
+      ignoring` — even though `cmake` is in the image and works fine when you run it.
+      GitHub Actions sets `CI=true` for every step, so real CI never sees this and it is
+      purely a rehearsal artifact. Same reasoning applies to any other tool that scales a
+      timeout by `CI`.
+    - **Replay `CIBW_BEFORE_ALL` in full, including anything it stages into `{project}`.**
+      Skipping the licence-staging half of torchcodec's before-all made the *metadata*
+      step fail with `Every pattern in "project.license-files" must match at least one
+      file: 'LICENSE.*' did not match any`, because PEP 639 requires every declared
+      pattern to match — a build error that exists only because the rehearsal was
+      incomplete (see gotcha 105 for the patch that adds that pattern). A before-all that
+      writes files into the project directory is part of the build, not setup.
+    - **You can cut the rehearsal's own dependencies down as long as you keep the
+      interfaces.** FFmpeg was built `--disable-everything` here: torchcodec's image
+      library links no FFmpeg at all and the core libraries only need the full `libav*`
+      API surface, which is exported whatever codecs are enabled. That turned a 36-minute
+      FFmpeg build into a few minutes and changed nothing about the bug under
+      investigation — but say so in the PR, because it does mean the *decode* tests were
+      left to CI.
