@@ -1,0 +1,244 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Paddle publishes no wheel workflow on GitHub; ci/run_setup.sh is the script
+# its own CI drives, so this mirrors that script's Linux CPU environment and
+# its `python setup.py bdist_wheel` invocation, narrowed to riscv64.
+name: Build paddlepaddle wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/paddlepaddle.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-paddlepaddle.yml'
+      - 'docs/packages/paddlepaddle.yaml'
+      - 'patches/paddlepaddle/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-paddlepaddle.yml'
+      - 'docs/packages/paddlepaddle.yaml'
+      - 'patches/paddlepaddle/**'
+
+run-name: build-paddlepaddle ${{ inputs.version && format('- {0}', inputs.version) || '' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: paddlepaddle
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build paddlepaddle ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 2880  # 48h: 1.3M lines of heavily templated C++ plus the
+                            # third_party world, on the same 4-core runners that
+                            # need this budget for build-vtk.yml.
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # libpaddle.so links CPython directly, so every interpreter rebuilds the
+        # whole tree. cp313 is the newest upstream publishes for this release.
+        python: ["cp312", "cp313"]
+
+    env:
+      PADDLE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout Paddle v${{ matrix.version }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: PaddlePaddle/Paddle
+          ref: v${{ matrix.version }}
+          path: Paddle
+          # `git submodule update --init`, as ci/run_setup.sh runs it: cmake
+          # skips its own submodule step under WITH_SETUP_INSTALL.
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch Paddle source
+        working-directory: Paddle
+        run: |
+          git apply ../python-wheels/patches/paddlepaddle/${{ matrix.version }}/*.patch
+
+      # Same OOM guard build-vtk.yml needs on these 4-core runners: linking
+      # libpaddle.so and libphi_core.so peaks well above the runner's RAM.
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 10
+
+      - name: Write container script
+        run: |
+          cat > Paddle/riscv64-build-and-test.sh <<'EOF'
+          #!/bin/bash
+          set -e -x
+
+          python_exe="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin/python"
+          py_version="${PYTHON_TAG#cp}"
+          py_version="${py_version:0:1}.${py_version:1}"
+
+          case "$1" in
+          build)
+            "${python_exe}" -m pip install -U pip setuptools wheel
+            "${python_exe}" -m pip install -r /paddle/python/requirements.txt
+            "${python_exe}" -m pip install -r /paddle/paddle/scripts/compile_requirements.txt
+            # The operator generators under paddle/fluid/operators/generator/
+            # import yaml, which upstream's own build image preinstalls rather
+            # than declaring in either requirements file.
+            "${python_exe}" -m pip install pyyaml
+
+            export PYTHON_EXECUTABLE="${python_exe}"
+            export PY_VERSION="${py_version}"
+            export CMAKE_BUILD_TYPE=Release
+            export WITH_RISCV=ON
+            export WITH_GPU=OFF
+            export WITH_ROCM=OFF
+            export WITH_XPU=OFF
+            export WITH_IPU=OFF
+            export WITH_TENSORRT=OFF
+            export WITH_OPENVINO=OFF
+            export WITH_ONNXRUNTIME=OFF
+            export WITH_CUDNN_FRONTEND=OFF
+            export WITH_CINN=OFF
+            export WITH_DISTRIBUTE=OFF
+            export WITH_PYTHON=ON
+            export WITH_TESTING=OFF
+            export WITH_CPP_TEST=OFF
+            export WITH_INFERENCE_API_TEST=OFF
+            export ON_INFER=OFF
+            export WITH_STRIP=ON
+            # The released Linux wheels split phi and pir out of libpaddle.so;
+            # a single object would not link in this runner's memory.
+            export WITH_SHARED_PHI=ON
+            export WITH_SHARED_IR=ON
+            export MAX_JOBS="$(nproc)"
+
+            cd /paddle
+            "${python_exe}" setup.py bdist_wheel
+
+            auditwheel show dist/*.whl
+            auditwheel repair -w /paddle/wheelhouse dist/*.whl
+            ;;
+          test)
+            "${python_exe}" -m venv /tmp/venv
+            . /tmp/venv/bin/activate
+            pip install -U pip
+            pip install /paddle/wheelhouse/*.whl
+            cd /tmp
+            # Upstream's documented post-install verification.
+            python -c "import paddle; paddle.utils.run_check()"
+            # Exercises the LAPACK backend patch 0003 builds from source.
+            python -c "import paddle; x = paddle.rand([8, 8]); q, r = paddle.linalg.qr(x); assert paddle.allclose(q @ r, x, atol=1e-5)"
+            ;;
+          *)
+            echo "usage: $0 <build|test>" >&2
+            exit 1
+            ;;
+          esac
+          EOF
+
+      - name: Build wheel
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "${PWD}/Paddle":/paddle \
+            --workdir /paddle \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            -e PADDLE_VERSION="${PADDLE_VERSION}" \
+            --pull=newer \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /paddle/riscv64-build-and-test.sh build
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: paddlepaddle-${{ env.PADDLE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: Paddle/wheelhouse/*.whl
+          if-no-files-found: error
+
+      - name: Test wheel
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "${PWD}/Paddle":/paddle \
+            --workdir /paddle \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /paddle/riscv64-build-and-test.sh test
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources (gcc) for paddlepaddle ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+    env:
+      PADDLE_VERSION: ${{ matrix.version }}
+
+    steps:
+      # setup.py copies GFORTRAN_LIB and GNU_RT_LIB_1 into paddle/libs/, which
+      # patch 0003 resolves to the image's own libgfortran.so.5 and
+      # libquadmath.so.0.
+      - name: Collect gcc source RPM from manylinux_riscv64
+        uses: riseproject-dev/python-wheels/actions/collect-gpl-sources@main
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: paddlepaddle-${{ env.PADDLE_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish paddlepaddle ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: paddlepaddle-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: paddlepaddle-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
