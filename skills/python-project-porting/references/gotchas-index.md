@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (374 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -325,6 +325,10 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
 - **278** — A vendored, direct-copy (not submodule) header can be missing riscv64 from its
 - **363** — A `libraries=[...]` entry can go missing from the link line with *no* error —
 - **368** — Linking several codecs against Rocky 10's system libraries instead of
+- **384** — When a project dlopen()s a differently-named shared library per major
+  version of a native dependency, the version you build against is a user-visible ABI
+  contract — pick the major that the target platform ships, build it LGPL, exclude it
+  from the wheel, and assert the resulting `.so` name.
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 
@@ -523,6 +527,9 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
 - **223** — For a `bindings = "bin"` CLI's test assertions, `cargo build --release` the tool
 - **298** — A local rehearsal's `pip`-resolved cibuildwheel can be too old for
 - **369** — Without docker, fetch Rocky 10's own dnf repodata over plain HTTPS to
+- **383** — A libtorch-linking project cannot be rehearsed on x86_64 with PyPI's `torch`
+  wheel: it is a CUDA build, so `find_package(Torch)` dies in `Caffe2Config.cmake` before
+  reaching the project's own CMake. Everything up to that point still validates.
 
 ### PR, CI, triggers, publishing & maintainer signals — [`gotchas/pr-ci-and-maintainer.md`](gotchas/pr-ci-and-maintainer.md)
 

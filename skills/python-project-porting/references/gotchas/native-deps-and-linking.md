@@ -22,6 +22,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
 - **231** — A vendored C library's own CMake can carry a genuine, tested riscv64 branch —
 - **363** — A `libraries=[...]` entry can go missing from the link line with *no* error —
 - **368** — Linking several codecs against Rocky 10's system libraries instead of
+- **384** — When a project dlopen()s a differently-named shared library per major version
 
 ---
 
@@ -495,3 +496,30 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
       compiler flag; libpng's own `CHANGES` file (`grep -n cICP CHANGES` against the
       tagged release) gives the exact version the symbol was added in, and confirms
       Rocky 10's 1.6.40 predates it — a real wall, not a flag away.
+
+384. **When a project dlopen()s a differently-named shared library per major version of
+    a native dependency, the version you build against is not an implementation detail —
+    it is an ABI contract with whatever the *user's* machine has installed (the torchcodec
+    case).** torchcodec compiles `libtorchcodec_core<N>.so` where `N` is the FFmpeg major
+    version, and at import time tries `N` = 9, 8, 7, 6, 5, 4 in turn, using the first that
+    loads; upstream ships all six in one wheel by linking against prebuilt non-GPL FFmpeg
+    tarballs it hosts on S3. Those tarballs have no riscv64 build, so the riscv64 wheel
+    goes down the project's other path — `pkg-config` against one installed FFmpeg — and
+    therefore carries exactly one `N`. That makes the FFmpeg version a **user-visible**
+    choice: build against 7.x and the wheel imports on nothing that ships FFmpeg 6.
+    - **Pick the major version of the platform the wheels are consumed on**, not the
+      newest release: `ubuntu-24.04-riscv` (the runner these wheels target) ships FFmpeg
+      6.1, so a 6.1.x source build is what makes `apt install ffmpeg` enough for a user.
+      The mapping is from the *library* soname, not the FFmpeg release number — FFmpeg 6
+      is `libavcodec.so.60`/`libavutil.so.58`, and it is the `libavcodec` major that the
+      project's CMake switches on.
+    - **Build it LGPL and do not ship it.** No `--enable-gpl`/`--enable-nonfree` and no
+      third-party codec integrations keeps the FFmpeg build itself LGPL, and excluding
+      `libav*`/`libsw*`/`libpostproc*` from `auditwheel repair` keeps it out of the wheel
+      entirely — which is also what upstream's own `packaging/repair_wheel.py` enforces,
+      since FFmpeg is a runtime dependency the user supplies.
+    - **Assert the resulting `.so` name in a post-build step.** `libtorchcodec_core6.so`
+      present in the wheel is the one-line proof that the FFmpeg the container built is
+      the FFmpeg that got linked; a silent fallback to a different major would otherwise
+      only surface as an ImportError on a user's machine.
+

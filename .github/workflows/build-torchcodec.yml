@@ -1,0 +1,199 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/pytorch/torchcodec/blob/main/.github/workflows/linux_wheel.yaml
+name: Build torchcodec wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/torchcodec.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-torchcodec.yml'
+      - 'docs/packages/torchcodec.yaml'
+      - 'patches/torchcodec/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-torchcodec.yml'
+      - 'docs/packages/torchcodec.yaml'
+      - 'patches/torchcodec/**'
+
+run-name: build-torchcodec ${{ inputs.version && format('- {0}', inputs.version) || '' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # Upstream links against prebuilt non-GPL FFmpeg tarballs it hosts on S3, which have no
+  # riscv64 build, so FFmpeg is built from source here (LGPL: no --enable-gpl/--enable-nonfree)
+  # and never shipped. 6.1 because that is the libavutil ABI of the system FFmpeg on
+  # ubuntu-24.04-riscv, where these wheels are consumed: the FFmpeg major version is baked
+  # into the libtorchcodec_core<N>.so name that torchcodec dlopen()s at runtime.
+  FFMPEG_VERSION: 6.1.6
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: torchcodec
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build torchcodec ${{ matrix.version }} cp${{ matrix.python-version }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Match torch's own riscv64 matrix on the registry: torchcodec's pybind11 module is
+        # per-ABI, so there is no single abi3 wheel even though it targets torch's stable ABI.
+        # See https://pypi.riseproject.dev/python-wheels/development.html#target-python-versions
+        python-version: [312, 313, 314, 314t]
+
+    env:
+      TORCHCODEC_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout torchcodec v${{ env.TORCHCODEC_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pytorch/torchcodec
+          ref: v${{ env.TORCHCODEC_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch torchcodec source
+        run: git apply python-wheels/patches/torchcodec/${{ env.TORCHCODEC_VERSION }}/00*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_BUILD: "cp${{ matrix.python-version }}-manylinux_riscv64"
+          # setup is scikit-build-core driving CMake, which resolves Torch_DIR by running
+          # `import torch` in the build interpreter; torch only exists on our registry, so it
+          # cannot be declared in build-system.requires and isolation has to be off.
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          # auditwheel grafts libjpeg-turbo/libpng/libwebp/zlib into the wheel, so their
+          # licence texts have to travel with it (the rpm that owns each bundled .so is
+          # resolved rather than hardcoded; %license files are dropped by the image's
+          # tsflags=nodocs and come back with an explicit reinstall). LICENSE.* is what the
+          # patched pyproject.toml globs into .dist-info/licenses/.
+          CIBW_BEFORE_ALL: |
+            set -ex
+            dnf install -y --setopt=tsflags= pkgconfig libjpeg-turbo-devel libpng-devel libwebp-devel zlib-devel
+            devel=$(rpm -q --whatprovides --qf '%{NAME}\n' libjpeg-turbo-devel libpng-devel libwebp-devel zlib-devel | sort -u)
+            libs=$(rpm -ql $devel | grep -E '\.so$' | xargs -r readlink -f)
+            pkgs=$(rpm -qf --qf '%{NAME}\n' $libs | grep -E '^[A-Za-z0-9._+-]+$' | sort -u)
+            dnf reinstall -y --setopt=tsflags= $pkgs
+            for p in $pkgs; do
+              for f in /usr/share/licenses/$p/*; do
+                [ -f "$f" ] || continue
+                cp "$f" "{project}/LICENSE.$p.${f##*/}"
+              done
+            done
+            ls {project}/LICENSE.*
+            mkdir -p /tmp/ffmpeg
+            curl -fsSL "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n${FFMPEG_VERSION}.tar.gz" | tar xz --strip-components=1 -C /tmp/ffmpeg
+            cd /tmp/ffmpeg
+            ./configure --prefix=/usr/local --disable-static --enable-shared --enable-pic --disable-doc
+            make -j"$(nproc)" install
+            ldconfig
+          CIBW_BEFORE_BUILD: >-
+            pip install --only-binary=:all:
+            torch>=2.11 "scikit-build-core>=0.10" pybind11 ninja setuptools wheel
+          # I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION is upstream's own escape hatch for
+          # wheels built against an FFmpeg that is not their S3 one; the guard exists to stop
+          # a GPL FFmpeg being linked, and the build above is LGPL.
+          # AVIF and HEIC are off because neither can be had on riscv64: libavif comes from
+          # the same S3 bucket and libheif is packaged in neither Rocky 10 nor a riscv64 EPEL.
+          # decode_avif/decode_heic then raise an actionable error instead of failing the build.
+          CIBW_ENVIRONMENT: >-
+            FFMPEG_VERSION=${{ env.FFMPEG_VERSION }}
+            BUILD_VERSION=${{ env.TORCHCODEC_VERSION }}
+            I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1
+            TORCHCODEC_BUILD_AVIF=0
+            TORCHCODEC_BUILD_HEIC=0
+            TORCHCODEC_DISABLE_COMPILE_WARNING_AS_ERROR=1
+            PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Same exclude list as upstream's packaging/repair_wheel.py: FFmpeg is a runtime
+          # dependency the user supplies, and libtorch/libc10/libgomp come from the torch
+          # wheel, which is imported (RTLD_GLOBAL) before torchcodec loads its own libraries.
+          CIBW_REPAIR_WHEEL_COMMAND: >-
+            auditwheel repair -w {dest_dir} {wheel}
+            --exclude 'libavcodec*'
+            --exclude 'libavdevice*'
+            --exclude 'libavfilter*'
+            --exclude 'libavformat*'
+            --exclude 'libavutil*'
+            --exclude 'libswresample*'
+            --exclude 'libswscale*'
+            --exclude 'libpostproc*'
+            --exclude 'libtorch*'
+            --exclude 'libc10*'
+            --exclude libgomp.so.1
+          CIBW_TEST_REQUIRES: torch>=2.11 numpy pytest pillow
+          # pyproject.toml is staged alongside test/ purely for its [tool.pytest.ini_options]
+          # (the needs_* markers and the 'not slow' default); src/ deliberately is not, which
+          # is what upstream's packaging/remove_src.sh achieves before its own test jobs.
+          CIBW_TEST_SOURCES: test pyproject.toml
+          # FAIL_WITHOUT_<CODEC> turns a missing image codec from a silent skip into a
+          # failure, for the three we do build. test_transform_ops.py imports torchvision at
+          # module scope and pypi.riseproject.dev has no riscv64 torchvision yet.
+          CIBW_TEST_COMMAND: FAIL_WITHOUT_JPEG=1 FAIL_WITHOUT_PNG=1 FAIL_WITHOUT_WEBP=1 pytest --ignore=test/test_transform_ops.py test
+
+      - name: Check the wheel bundles the image codecs and no FFmpeg
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          for want in ("torchcodec/libtorchcodec_core6.so", "torchcodec/libtorchcodec_image.so",
+                       "libjpeg", "libpng", "libwebp", "licenses/LICENSE"):
+              if not any(want in n for n in names):
+                  raise SystemExit(f"error: {want} missing from {sys.argv[1]}")
+          for unwanted in ("libavcodec", "libavutil", "libtorch.so", "libc10.so"):
+              if any(unwanted in n for n in names):
+                  raise SystemExit(f"error: {unwanted} must not be bundled in {sys.argv[1]}")
+          print("\n".join(n for n in names if ".so" in n or "licenses/" in n))
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: torchcodec-${{ env.TORCHCODEC_VERSION }}-cp${{ matrix.python-version }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish torchcodec ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: torchcodec-${{ matrix.version }}-*-manylinux_riscv64

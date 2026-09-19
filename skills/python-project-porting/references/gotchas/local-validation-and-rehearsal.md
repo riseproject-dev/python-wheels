@@ -17,6 +17,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
 - **223** — For a `bindings = "bin"` CLI's test assertions, `cargo build --release` the tool
 - **298** — A local rehearsal's `pip`-resolved cibuildwheel can be too old for
 - **369** — Without docker, fetch Rocky 10's own dnf repodata over plain HTTPS to
+- **383** — A libtorch-linking project cannot be rehearsed on x86_64 with PyPI's `torch`
 
 ---
 
@@ -247,3 +248,25 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
       by package `name=` attribute to jump straight to its block rather than loading
       the whole file, and delete it when done; it is Rocky's own public mirror data,
       not anything project-specific worth keeping.
+
+383. **A project that links libtorch cannot be rehearsed on an x86_64 host with the
+    `torch` wheel PyPI serves, because that one is a CUDA build: `find_package(Torch)`
+    pulls in `Caffe2Config.cmake`, which hard-fails with "Your installed Caffe2 version
+    uses CUDA but I cannot find the CUDA libraries" before CMake reaches a single line
+    of the project's own configuration (the torchcodec case).** The failure has nothing
+    to do with the project or with riscv64 — the riscv64 `torch` on our registry is a
+    `+cpu` build whose `Caffe2Config.cmake` has the CUDA branch compiled out, so the same
+    configure succeeds there. Two consequences worth knowing before spending a rehearsal
+    cycle on it:
+    - **A CPU-only torch is the prerequisite for any local rehearsal of a libtorch
+      extension**, and PyPI has none for linux x86_64 (the CPU variants live on
+      `download.pytorch.org/whl/cpu`, a separate index); linux aarch64's PyPI `torch`
+      *is* CPU-only, which is one more reason gotcha 101's aarch64 rehearsal is the right
+      host for this family of packages.
+    - **Everything before `find_package(Torch)` still validates cheaply on x86**, and for
+      a scikit-build-core/CMake project that is most of the interesting surface: the
+      build frontend and `--no-build-isolation` wiring, `pkg-config` discovery of a
+      source-built native dependency, the backend finding `pybind11`, and any
+      licence-guard/env-var gate the project puts in front of a wheel build. Run it and
+      read how far the configure got rather than treating the CUDA error as a dead end.
+
