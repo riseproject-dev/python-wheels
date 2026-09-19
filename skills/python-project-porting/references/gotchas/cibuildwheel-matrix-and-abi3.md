@@ -39,8 +39,11 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **360** — A `setup.py`'s own `bdist_wheel --plat-name` insertion can hardcode
   `manylinux1_` + `platform.machine()` regardless of the actual container libc, making
   musllinux unbuildable no matter how the CMake/C++ side is patched.
-- **383** — A two-leg abi3 + free-threaded matrix expressed only through `include:`
-  collapses into a single job, so the abi3 wheel is never built and nothing fails.
+- **396** — A `cpXY-none-<platform>` wheel is the third plat-name shape: `setup.py` declares
+  no `ext_modules` at all, and a sibling CMake build both compiles the extension modules and
+  hands `bdist_wheel` the tag.
+- **391** — A project's real cibuildwheel recipe can live in a *separate packaging repo* that the
+  source tree never references — the source repo can carry no GitHub Actions at all.
 
 ---
 
@@ -762,38 +765,56 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
       logic) is the lower-risk, upstream-faithful choice when this is caught on the first
       port rather than treated as a regression to fix.
 
-383. **A two-leg abi3 + free-threaded matrix expressed only through `include:` collapses
-    into a *single* job, and the abi3 wheel is never built (the primp/arro3-core case).**
-    The idiom several workflows here use is a base matrix of just
-    `version: ${{ fromJSON(needs.setup.outputs.versions) }}` plus two `include:` objects
-    that each introduce the same brand-new keys (`tag`, `build`, `features`). GitHub only
-    *adds* an include object's keys to the existing combinations when none of them
-    overwrites an **original** matrix value — `tag` is not an original key, so the first
-    include adds `tag: cpNN-abi3` to the one combination and the second overwrites it with
-    `tag: cp314t`. One job runs, the free-threaded wheel publishes, and nothing fails: the
-    abi3 leg simply does not exist. `build-primp.yml` shipped only
-    `primp-2.0.0-cp314-cp314t` and `primp-2.0.1-cp314-cp314t` that way (run 35310255186
-    has exactly two build jobs, both `cp314t-manylinux_riscv64`), and
-    `build-arro3-core.yml` did the same for 0.8.2 after publishing both wheels for 0.8.1.
-    - **Fix: make the leg a real matrix dimension**, so each include *updates* the
-      matching combination instead of adding a key:
-      ```yaml
-      matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        tag: [cp310-abi3, cp314t]
-        include:
-          - tag: cp310-abi3
-            build: cp312-manylinux_riscv64 cp313-manylinux_riscv64
-            features: --features abi3-py310
-          - tag: cp314t
-            build: cp314t-manylinux_riscv64
-            features: ''
-      ```
-    - **A single `include:` object is safe** (`build-css-inline.yml`): the collapse needs
-      two entries competing for the same new key. It is also why this only became latent
-      when the `version` vector replaced the older per-interpreter base vector — with
-      `python:` or `tag:` in the base matrix the includes only ever *updated* legs.
-    - **Diagnose it from the job list, not the log**: count the `Build <pkg> <ver>
-      <tag>-manylinux_riscv64` jobs against the legs declared before believing a green
-      run. `docs/packages/<pkg>.yaml` is the after-the-fact tell — a published version
-      carrying only the free-threaded wheel where an earlier version carried both.
+391. **A project's real cibuildwheel recipe can live in a *separate packaging repo* that
+    the source tree never references — the source repo can carry no GitHub Actions at all
+    (the cassandra-driver case).** `pyproject.toml` has no `[tool.cibuildwheel]` table, the
+    release tag has no `.github/` directory, and the only CI file is a `Jenkinsfile` that
+    builds no wheel (it is the CCM/DSE integration matrix, installing the driver
+    `--editable`). Read only the source repo and the port looks like it has no upstream
+    recipe to mirror, which is how a workflow ends up invented from scratch — exactly the
+    divergence goal 2 forbids. Here it was `datastax/python-driver-wheels`, a `multibuild`
+    repo carrying the driver as a git submodule, named once in `README-dev.rst`'s release
+    checklist ("Update the `python-driver` submodule of `python-driver-wheels` … Trigger
+    the Github Actions necessary to build wheels"); its `build_wheels_linux.yml` holds the
+    whole recipe — `CIBW_BUILD`, `CIBW_SKIP`, `CIBW_BEFORE_ALL`, `CIBW_ENVIRONMENT` and the
+    `CIBW_TEST_*` set.
+    - **Where to look, in order**: the developer/release doc (`README-dev`,
+      `CONTRIBUTING`, `RELEASING`) for the name of a wheels/packaging repo; then that
+      repo's `.github/workflows/`; then its `config.sh`/`build_wheel.sh` if it is a
+      `multibuild` project — the pre-cibuildwheel hooks (`pre_build`, `run_tests`) often
+      still hold the *real* wheel-verification script that the cibuildwheel workflow later
+      replaced with a stub, which is the gotcha 94 answer for that package handed over
+      ready-made.
+    - Distinct from gotcha 338: there the packaging fork *is* where the released wheels
+      come from and it drags in a sibling dependency of its own; here the packaging repo is
+      upstream's and only holds the recipe, so the port still builds the source tag.
+
+396. **A `cpXY-none-<platform>` wheel is the third plat-name shape: `setup.py` declares no
+    `ext_modules` at all, and a sibling CMake build both compiles the extension modules and
+    hands `bdist_wheel` the tag (the coremltools case; see `build-coremltools.yml`).**
+    Gotcha 27 reads `py3-none-<platform>` as "the platform half was forced by hand, nothing
+    is compiled"; gotcha 81 adds the ctypes-payload exception. Neither covers a wheel tagged
+    `cpXY-**none**-<platform>` — an interpreter tag with no ABI tag — which is what you get
+    when the compiled modules are real, per-interpreter pybind11 `.so`s, but setuptools never
+    sees them: coremltools' `setup.py` has zero `ext_modules` and ships
+    `libmilstoragepython.so`/`libmodelpackage.so` through `package_data` globs, while
+    `CMakeLists.txt` builds them and then invokes `setup.py bdist_wheel
+    --plat-name=<plat> --python-tag=cp${MAJOR}${MINOR}` itself. Read the interpreter half
+    before concluding anything from the missing ABI tag: `cpXY-none` means per-interpreter
+    content that setuptools was not told about, whereas gotcha 27's `py3-none` means no
+    per-interpreter content at all.
+    - **The architecture of the whole wheel is then one string in the build system, not a
+      `platform.machine()` call.** Gotcha 360's keystone-engine case at least interpolated
+      the real machine; coremltools' CMakeLists is `elseif(... MATCHES "Linux")
+      set(PLAT_NAME "manylinux1_x86_64")` — a literal, so a riscv64 build silently produces
+      an x86_64-tagged wheel that installs on the wrong machine. Grep the build system for
+      `plat-name`/`plat_name`, not just `setup.py`, whenever `setup.py` has no `ext_modules`
+      but the released wheels carry a platform tag.
+    - **Patch it to a libc-neutral `linux_<arch>` and let `auditwheel repair` retag**, the
+      same resolution gotcha 360 points at, and keep the existing x86_64 branch byte for
+      byte so the diff is upstreamable: `if(${CMAKE_SYSTEM_PROCESSOR} MATCHES "x86_64")` →
+      the old literal, `else()` → `linux_${CMAKE_SYSTEM_PROCESSOR}`.
+    - **cibuildwheel is the wrong tool for this shape.** It drives a PEP 517 build, which
+      here would run `setup.py` on its own and emit a `py3-none-any` wheel containing
+      riscv64 `.so`s — worse than a wrong platform tag. Drive the container yourself
+      (gotcha 15) and run the project's own `dist` target.

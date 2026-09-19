@@ -334,14 +334,6 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       `MATURIN_PEP517_ARGS="…" python -c "import maturin; maturin.prepare_metadata_for_build_wheel('out')"`
       prints the exact `maturin pep517 build-wheel …` command line and fails fast on a bad
       flag — seconds instead of an eight-hour cycle.
-    - **Copying upstream's `--release` verbatim is the commonest way to get this wrong:
-      `maturin pep517 build-wheel` has no `--release` flag at all** (`maturin pep517
-      build-wheel --help` lists `--profile <PROFILE-NAME>` and no `--release`), so an
-      upstream release job that runs `maturin build --release --strip …` translates to
-      `--profile release --strip …`, never `--release`. The build dies in seconds with
-      clap's `unexpected argument '--release'`, but only after the container, rustup
-      install and `before-all` have run. Same for `-i/--interpreter`: accepted, but
-      redundant since the backend already targets cibuildwheel's interpreter.
 
 147. **A Rust crate that downloads a prebuilt native library almost always has an
     env-var escape to a locally built one — read its build script's variable table before
