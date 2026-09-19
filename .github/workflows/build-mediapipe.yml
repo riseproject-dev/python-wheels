@@ -47,6 +47,7 @@ env:
   BAZEL_VERSION: '7.5.0'
   RULES_PYTHON_VERSION: '0.33.2'
   RULES_JAVA_VERSION: '7.6.5'
+  PROJECT_RULES_PYTHON_VERSION: '0.34.0'
 
 jobs:
   setup:
@@ -162,6 +163,7 @@ jobs:
             -w /work \
             -e MEDIAPIPE_VERSION \
             -e OPENCV_VERSION \
+            -e PROJECT_RULES_PYTHON_VERSION \
             "${MANYLINUX_RISCV64_IMAGE}" \
             bash <<'SCRIPT' 2>&1 | tee build.log
           set -eux
@@ -187,6 +189,15 @@ jobs:
           cmake --build /tmp/opencv/release -j "$(nproc)"
           cmake --install /tmp/opencv/release
 
+          # MODULE.bazel's rules_python registers a hermetic interpreter, and its
+          # PLATFORMS still has no riscv64 entry at this version; any linux entry
+          # is a safe stand-in because it is never the one selected here.
+          mkdir -p /tmp/rules_python
+          curl -fsSLo /tmp/rules_python.tar.gz "https://github.com/bazel-contrib/rules_python/releases/download/${PROJECT_RULES_PYTHON_VERSION}/rules_python-${PROJECT_RULES_PYTHON_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_python.tar.gz -C /tmp/rules_python --strip-components=1
+          sed -i 's|fail("No platform declared for host OS {} on arch {}".format(os_name, arch))|return "x86_64-unknown-linux-gnu"|' \
+            /tmp/rules_python/python/private/toolchains_repo.bzl
+
           cd /work/mediapipe
 
           MP_VERSION="$(awk '/MEDIAPIPE_FULL_VERSION/ {split($0, a, "="); print a[2]}' mediapipe/version.bzl | tr -d '" ')"
@@ -197,11 +208,12 @@ jobs:
           sed -i "s|bazel_command.append('--define=OPENCV=source')|pass|g" setup.py
 
           {
-            # The image has no remote JDK for riscv64, and .bazelrc's 128 jobs
-            # would run one C++ compile per 120 MB of RAM on these runners.
+            # No remote JDK is published for riscv64, and .bazelrc's 128 jobs
+            # overcommits these runners for a build this size.
             echo "build --java_runtime_version=local_jdk"
             echo "build --tool_java_runtime_version=local_jdk"
             echo "build --jobs=HOST_CPUS"
+            echo "common --override_module=rules_python=/tmp/rules_python"
             echo "common --curses=no --show_progress_rate_limit=60"
           } >> .bazelrc
 
