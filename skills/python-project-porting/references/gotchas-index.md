@@ -123,6 +123,13 @@ The porting gotchas (374 of them) live in [`references/gotchas/`](gotchas/), spl
   set before triaging the queued version, because upstream can delete the arch-specific
   payload and erase the gap outright; also, a `py3-none-any` dependency can be a facade for
   platform-only payload wheels (the tokenspeed-mla case).
+- **392** — With no project URL and a stock `Generator:`, the *conda-forge feedstock* is the
+  cheapest source-availability oracle (a feedstock whose `source:` is the PyPI wheels is a
+  repackager, so there is nothing to build); `readelf -S` splits a real compiled extension
+  into engine vs embedded model weights (`.text` ~280 KB, `.rodata` ~34.8 MB); a compound
+  `License: <permissive> AND LicenseRef-*` is gotcha 372's second lock; and an open-source
+  org's monorepo hits can all be the closed-source package's *consumer*
+  (the livekit-local-inference case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

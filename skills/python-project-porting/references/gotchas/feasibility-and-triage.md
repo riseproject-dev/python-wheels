@@ -76,6 +76,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **388** — The queue entry's wheel shape is a snapshot — re-read the *latest* release's tag
   set first, because upstream can delete the arch-specific payload and erase the gap outright
   (the tokenspeed-mla case).
+- **392** — With no project URL and a stock `Generator:`, the *conda-forge feedstock* is the
+  cheapest source-availability oracle; and `readelf -S` splits a real compiled extension into
+  engine vs embedded-model-weights in one command (the livekit-local-inference case).
 
 ---
 
@@ -2062,3 +2065,76 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
        `cp310–cp314(t)-manylinux_2_28_{x86_64,aarch64}` only, no sdist, ~88 MB of CUDA payload.
        Follow any `py3-none-any` dependency one level down before calling it available —
        `pip download <dep> --no-deps` says yes where a full resolve says `ResolutionImpossible`.
+
+392. **When PyPI records no project URL and `Generator:` is stock, the *conda-forge feedstock*
+    is the cheapest source-availability oracle — and `readelf -S` tells you in one command
+    whether a real compiled extension is code or embedded model weights (the
+    livekit-local-inference case).** Gotcha 385 says to read `dist-info/WHEEL`'s `Generator:`
+    before parking anything for "no source anywhere", because a vendor-named generator is a
+    lead. `livekit-local-inference` 0.2.7 says `Generator: setuptools (84.0.0)` — a stock
+    one, which by 385's own rule tells you nothing — and PyPI's JSON has
+    `project_urls: null`, `home_page: null`, no author and no description, so there is no
+    link to follow either. The next cheap read is conda-forge:
+    - **A GitHub code search for the *distribution name* finds the feedstock**, and its
+      recipe is written by someone who already answered "where does this build from?".
+      `conda-forge/livekit-local-inference-feedstock`'s `recipe/recipe.yaml` opens with the
+      verdict in as many words — *"This package is closed-source and ships only binary wheels
+      on PyPI (no sdist)"* — and proves it structurally: its `source:` is not a tarball but a
+      nest of `if: target_platform == ...` / `if: match(python, "3.X.*")` blocks each naming a
+      `files.pythonhosted.org` **wheel** URL, one per (platform, interpreter). A feedstock
+      whose source is the PyPI wheels is a *repackager* (gotcha 385's second bullet, arrived
+      at from the other side), so it adds no platform upstream doesn't already ship and
+      riscv64 has nothing to repackage. `recipe.yaml`'s `about:` also fills the blanks PyPI
+      left — `repository:`, `documentation:`, `homepage:` — which is how the queue entry's
+      empty `home`/`repo` get answered at all. Two `curl`s of
+      `raw.githubusercontent.com/conda-forge/<pkg>-feedstock/main/recipe/recipe.yaml`
+      (or `meta.yaml`) settle it; `conda-forge/feedstock-outputs`'s
+      `outputs/<a>/<b>/<c>/<pkg>.json` confirms a feedstock exists before you guess its name.
+      Distinct from gotchas 40/42, which ask whether a *dependency*'s conda channel serves our
+      subdir — this uses the recipe as evidence about **source**, not about availability.
+    - **`readelf -S -W` separates "compiled code" from "a blob with a `.so` extension"
+      faster than `strings`.** The wheel is a genuine `cp312-cp312-manylinux_2_27_x86_64`
+      extension — gotcha 27/35/81's `py3-none-<platform>` tells are all absent, and gotcha
+      41's vendored `bin/`/`lib*.so` neighbours are absent too: 14 entries, one of which is
+      `livekit/local_inference/_native.cpython-312-x86_64-linux-gnu.so` at 35.0 MB of a
+      35.1 MB wheel. The section table is the tell: `.text` is `0x444ad` (**~280 KB**) while
+      `.rodata` is `0x21168f8` (**~34.8 MB**), i.e. 99.2% of the file is constant data baked
+      into the binary — the proprietary model weights, not an inference runtime. Corroborated
+      without downloading more: `DT_NEEDED` lists only `libstdc++/libm/libgcc_s/libpthread/
+      libc`, so nothing like ONNX Runtime is linked; the `.comment` is
+      `GCC: (GNU) 14.2.1 20250110 (Red Hat 14.2.1-11)` and `strings` shows pybind11 v12
+      internals, so ~280 KB of hand-written C++ is the whole engine; and the shipped
+      `_native.pyi` says so outright (*"Eagerly init the EOT model singleton (~108 MB)"*).
+      Per-platform wheel sizes within ~45 KB of each other across five platforms say the same
+      thing from the outside (gotcha 81's cross-platform size diff, inverted: near-identical
+      sizes mean the *weights* dominate and the code is noise).
+    - **A compound `License:` with a `LicenseRef-` term is the metadata echo of that split,
+      and it is gotcha 372's second lock.** `License: Apache-2.0 AND LicenseRef-LiveKit-Model`
+      plus *two* files under `dist-info/licenses/` (`LICENSE`, `MODEL_LICENSE`) and both
+      `License :: OSI Approved :: Apache Software License` **and** `License :: Other/
+      Proprietary License` classifiers: the permissive half covers the thin wrapper, the
+      bespoke half covers the 34.8 MB that matters. The LIVEKIT MODEL LICENSE AGREEMENT bars
+      using the models "on a standalone basis or with any frameworks other than LiveKit
+      Agents" and bars making them available to third parties except under that agreement, so
+      even lifting the weights out of an existing `.so` into a self-built riscv64 wheel is
+      foreclosed. Same double lock as hdbcli (gotcha 372), reached from a *permissive-looking*
+      top-level license rather than a uniformly proprietary one — the inverse of gotcha 376,
+      where the permissive field was real and the source was still absent.
+    - **An open-source org's flagship repo can be the closed-source package's *consumer*,
+      never its source.** LiveKit has 79 public repos and the obvious search hits are all in
+      `livekit/agents` — but every one is an `import`: `livekit-agents/livekit/agents/
+      inference/vad.py`, `inference/eot/transports.py` and `ipc/_preload.py` do
+      `from livekit.local_inference import VAD/EOT`, and `livekit-agents/pyproject.toml`
+      lists `livekit-local-inference>=0.2.7` in `dependencies`. No repo in the org contains
+      the extension's sources, and none is named for it. "The org is open source", a sibling
+      port from the same org (livekit-blingfire, built from `livekit/agents`), and even a
+      dependency edge from an open-source package are all *not* evidence that a given
+      distribution has source — check `requires_dist` direction before assuming a monorepo
+      hit is the upstream. Note the consequence for the queue: a closed-source leaf can
+      block an otherwise-pure-Python parent, since `livekit-agents` core cannot be installed
+      on riscv64 at all while this dependency has no wheel.
+    - **Confirm zero sdist across the *whole* release history, not the queued version**
+      (gotcha 372): 120 files across 0.2.2–0.2.7, every one a `bdist_wheel`, tags limited to
+      `macosx_10_9/10_13/10_15_x86_64`, `macosx_11_0_arm64`,
+      `manylinux_2_27/2_28_{x86_64,aarch64}` and `win_amd64` for cp310–cp314. Parked; no
+      worktree/branch/PR — there is no build input to stage a workflow around.
