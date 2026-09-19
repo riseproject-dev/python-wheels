@@ -44,6 +44,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
   hands `bdist_wheel` the tag.
 - **391** — A project's real cibuildwheel recipe can live in a *separate packaging repo* that the
   source tree never references — the source repo can carry no GitHub Actions at all.
+- **402** — A two-leg abi3 + free-threaded matrix expressed only through `include:` collapses
+  into a single job, so the abi3 wheel is never built and nothing fails.
+- **408** — A `setup.py` that reaches for `wheel.bdist_wheel` behind a `try/except ImportError`
+  still gets its abi3 tag under modern setuptools.
 
 ---
 
@@ -818,3 +822,64 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
       here would run `setup.py` on its own and emit a `py3-none-any` wheel containing
       riscv64 `.so`s — worse than a wrong platform tag. Drive the container yourself
       (gotcha 15) and run the project's own `dist` target.
+
+402. **A two-leg abi3 + free-threaded matrix expressed only through `include:` collapses
+    into a *single* job, and the abi3 wheel is never built (the primp/arro3-core case).**
+    The idiom several workflows here use is a base matrix of just
+    `version: ${{ fromJSON(needs.setup.outputs.versions) }}` plus two `include:` objects
+    that each introduce the same brand-new keys (`tag`, `build`, `features`). GitHub only
+    *adds* an include object's keys to the existing combinations when none of them
+    overwrites an **original** matrix value — `tag` is not an original key, so the first
+    include adds `tag: cpNN-abi3` to the one combination and the second overwrites it with
+    `tag: cp314t`. One job runs, the free-threaded wheel publishes, and nothing fails: the
+    abi3 leg simply does not exist. `build-primp.yml` shipped only
+    `primp-2.0.0-cp314-cp314t` and `primp-2.0.1-cp314-cp314t` that way (run 35310255186
+    has exactly two build jobs, both `cp314t-manylinux_riscv64`), and
+    `build-arro3-core.yml` did the same for 0.8.2 after publishing both wheels for 0.8.1.
+    - **Fix: make the leg a real matrix dimension**, so each include *updates* the
+      matching combination instead of adding a key:
+      ```yaml
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        tag: [cp310-abi3, cp314t]
+        include:
+          - tag: cp310-abi3
+            build: cp312-manylinux_riscv64 cp313-manylinux_riscv64
+            features: --features abi3-py310
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+            features: ''
+      ```
+    - **A single `include:` object is safe** (`build-css-inline.yml`): the collapse needs
+      two entries competing for the same new key. It is also why this only became latent
+      when the `version` vector replaced the older per-interpreter base vector — with
+      `python:` or `tag:` in the base matrix the includes only ever *updated* legs.
+    - **Diagnose it from the job list, not the log**: count the `Build <pkg> <ver>
+      <tag>-manylinux_riscv64` jobs against the legs declared before believing a green
+      run. `docs/packages/<pkg>.yaml` is the after-the-fact tell — a published version
+      carrying only the free-threaded wheel where an earlier version carried both.
+
+408. **A `setup.py` that reaches for `wheel.bdist_wheel` behind a `try/except ImportError`
+     still gets its abi3 tag under modern setuptools — do not "fix" it by adding `wheel`
+     to `build-system.requires` (the leidenalg case).** Gotcha 34's third abi3 route is a
+     `bdist_wheel` subclass defined in `setup.py`; a common variant guards the import
+     (`try: from wheel.bdist_wheel import bdist_wheel / except ImportError: bdist_wheel =
+     None`) and then *silently* drops to a per-interpreter wheel when the import fails.
+     Since setuptools 70.1 `wheel` is no longer returned by
+     `setuptools.build_meta.get_requires_for_build_wheel()`, so the PEP 517 isolated env
+     built from `requires = ["setuptools>=45", "setuptools_scm[toml]>=6.2"]` installs no
+     `wheel` distribution at all — which reads like a guaranteed silent abi3 loss and
+     invites a pyproject patch (plus gotcha 31's `SETUPTOOLS_SCM_PRETEND_VERSION` fallout
+     for the dirtied tree). It is not: setuptools still ships a `wheel.bdist_wheel` shim
+     re-exporting `setuptools.command.bdist_wheel`, so the guarded import resolves and the
+     subclass is installed.
+     - **Settle it in one minute on any host, no target arch involved**: a throwaway
+       project with the same `build-system.requires` and a `setup.py` that prints the
+       import result, built with `python -m build --wheel`, prints
+       `<class 'setuptools.command.bdist_wheel.bdist_wheel'>` (setuptools 84). Do this
+       *before* writing a patch — the wheel filename from the real build is the other
+       proof, and a `cpNN-abi3` tag means the path is live.
+     - **Re-check it when the shim goes away.** It is a compatibility shim, so the negative
+       outcome (a `cpNN-cpNN` wheel from a project whose PyPI files are `cpNN-abi3`) is the
+       signal to revisit; the fix then is upstream's pyproject, not a cibuildwheel knob,
+       because `CIBW_CONFIG_SETTINGS` cannot reach a `cmdclass` that was never registered.

@@ -20,6 +20,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
 - **357** — A single combined-interpreter build job's artifact name needs to match the
 - **380** — A project that splits every release into two independently-named PyPI
 - **370** — `.queue.yml` lives on `main` in a checkout shared by every concurrently
+- **413** — `git -C <dir> apply <glob>` hands git the *literal* glob — the shell expands
 
 ---
 
@@ -360,3 +361,49 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
       backend-only or frontend-only smoke test cannot catch a packaging mismatch (an
       `RPATH`/install-location assumption, a version skew between the two) between the
       halves that only surfaces when they are installed side by side.
+
+
+413. **`git -C <dir> apply <glob>` hands git the literal glob, because the shell
+    expands it in the step's own cwd and `-C` only moves git — use
+    `working-directory:` instead.** Symptom: a patch step that dies about 30 seconds
+    into the job with `error: can't open patch
+    '../python-wheels/patches/<pkg>/<ver>/00*.patch': No such file or directory` and
+    exit 128, on a branch where that patch file is demonstrably committed (`git
+    ls-tree -r origin/<branch> -- patches/<pkg>/` lists it).
+    - **The message names a path that is correct, for a file that never existed.** A
+      `run:` step starts in `$GITHUB_WORKSPACE`, and bash expands the glob there,
+      before git runs at all. With no `nullglob`/`failglob`, a glob that matches
+      nothing is passed through verbatim, so git receives the six characters `00*.patch`
+      as a filename and only *then* resolves it relative to `-C`'s directory. The
+      error therefore quotes a directory that does exist and a file name that cannot.
+    - **This repo makes the mismatch invisible rather than loud.** The runner
+      workspace is `/home/runner/work/python-wheels/python-wheels`, so the repo name
+      doubles: `../python-wheels` evaluated from the workspace root resolves back onto
+      the workspace *itself*, which exists. The glob fails quietly instead of erroring
+      on a missing directory, and the relative path reads correctly in review because
+      it *is* the right path — from the package subdirectory.
+    - **Fix: give the shell and git one base.** For an upstream checkout under `path:
+      <pkg>`, use the shape the rest of the repo already uses —
+      ```yaml
+      - name: Patch <pkg> source
+        working-directory: <pkg>
+        run: git apply ../python-wheels/patches/<pkg>/${{ env.<PKG>_VERSION }}/00*.patch
+      ```
+      (`build-ray.yml`, `build-tink.yml`, `build-torch.yml`, `build-labmaze.yml`,
+      `build-minorminer.yml`, `build-pyicu-binary.yml`). When upstream is checked out
+      at the workspace root with no `path:`, the plain `git apply
+      python-wheels/patches/...` form is already correct — there is no `..` to get
+      wrong. Never reach for `git -C` here.
+    - **An x86_64 or local rehearsal cannot catch this class of bug at all.** The
+      defect lives in the workflow's directory wiring, not in the build: a rehearsal
+      that clones upstream and runs cmake by hand in a differently-shaped tree
+      exercises none of it, so "built and tested on x86_64 as a rehearsal" is not
+      evidence the patch step works. Anything that depends on the *runner's* layout
+      (`$GITHUB_WORKSPACE`, `path:`-relative paths, `working-directory`) is only
+      proven by a real CI run — budget the first riscv64 run as the test of the YAML,
+      not of the code.
+    - **While you are in the triggers, list `patches/<pkg>/**` alongside the workflow
+      and `docs/packages/<pkg>.yaml`** in both `pull_request: paths` and `push: paths`
+      (136 of this repo's 188 patched packages already do). Without it a follow-up
+      commit that only edits a patch produces no run at all, which looks exactly like
+      gotcha 89 and wastes a cycle on the wrong hypothesis.

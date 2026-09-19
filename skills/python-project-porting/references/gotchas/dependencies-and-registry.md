@@ -39,6 +39,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
   keeps resolving to a newer, wheel-less release.
 - **375** — `uv` can reject a real `abi3` wheel resolved by name from an index as "has no
   usable wheels" even though the identical wheel installs fine as a local file.
+- **399** — A dependency we already publish can satisfy a dependent's *runtime* link and still
+  be unusable as its *build* input: a wheel ships `.so` files, not headers or a CMake package.
 
 ---
 
@@ -721,3 +723,39 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       `UV_INDEX_STRATEGY=unsafe-best-match` shape gotcha 244 already documents** — this
       entry is about a *specific* `cp3X-abi3` + riscv64 + registry-resolution combination
       breaking, not a blanket "don't use uv for index-resolved abi3 wheels" rule.
+
+399. **A dependency we already publish can satisfy a dependent's *runtime* link and still be
+    unusable as its *build* input: a wheel ships `.so` files, not headers or a CMake package,
+    and the upstream recipe's header source can be conda-forge (the cadquery-ocp/VTK case).**
+    Gotcha 30 says check `pypi.riseproject.dev` before declaring a dependency unavailable, and
+    gotchas 17/121 cover linking an extension against another wheel we ship. Neither covers the
+    *C++ SDK* half of a wheel-shipped dependency, and that is a separate question with a
+    separate answer. `vtk-9.7.0-cp313-cp313-manylinux_2_39_riscv64.whl` on our registry holds
+    614 entries and 197 `libvtk*.so` — and **zero** `.h` files and **zero** CMake config files,
+    exactly like Kitware's own PyPI wheels, because VTK's wheel `setup.py` packages only
+    `vtkmodules/` even though `build-vtk.yml` configures with `-DVTK_INSTALL_SDK=ON`.
+    `cadquery-ocp`'s build needs both halves: OCCT's `USE_VTK=ON` wants
+    `3RDPARTY_VTK_INCLUDE_DIR`, and OCP's generated `CMakeLists.txt` opens with
+    `find_package(VTK REQUIRED COMPONENTS WrappingPythonCore RenderingCore RenderingOpenGL2
+    CommonDataModel CommonExecutionModel freetype)`. Upstream fills the header half with
+    `micromamba install vtk=<ver>` plus a hand-written `vtk-config.cmake`, and conda-forge's
+    `linux-riscv64` subdir carries 1,970 packages with **0** vtk and **0** occt (gotcha 42's
+    read-the-body count, against 3,221 vtk in `linux-64`) — so on riscv64 the headers have no
+    source at all while the libraries are already sitting on our registry.
+    - **Check for headers and a CMake package, not just for the wheel:**
+      `unzip -l <dep>.whl | grep -cE '\.h$|cmake'`. A "yes, we ship it" answer from gotcha 30
+      is about the runtime link only; it says nothing about whether anything can *compile*
+      against it.
+    - **An exact `==` pin on such a dependency is a second, independent wall.** The wheel's
+      own metadata pins `vtk==9.6.2` while our registry has 9.7.0 only, and PyPI publishes no
+      riscv64 VTK for *any* version — so even a successful build ships metadata that cannot
+      resolve on riscv64 unless the pin is diverged from upstream's, which also means the
+      SDK you assemble has to match whichever version we do ship, not the pinned one.
+    - **Per-interpreter coverage caps the matrix on top of that** (gotchas 67/84): our vtk
+      wheels start at cp312, so cp310/cp311 can never be built even though upstream ships
+      them.
+    - **The disposition is `blocked-on-dependency`, and the fix belongs in the *dependency's*
+      port** — teach `build-<dep>.yml` to publish an SDK artifact (or a second, SDK-bearing
+      wheel) — not in a one-off "configure the dep from source just for its headers" step
+      bolted onto the dependent, which is an invented mechanism upstream has no analogue for
+      and which has to be kept ABI-identical to the published wheel by hand.

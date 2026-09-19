@@ -1,0 +1,179 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Upstream publishes no wheel-building workflow; this mirrors the GitLab
+# wheel_builder job that produced the riscv64 wheels until now.
+name: Build soundfile wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/soundfile.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-soundfile.yml'
+      - 'docs/packages/soundfile.yaml'
+      - 'patches/soundfile/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-soundfile.yml'
+      - 'docs/packages/soundfile.yaml'
+      - 'patches/soundfile/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  LIBSNDFILE_VERSION: '1.2.2'
+  # flac, lame and mpg123 are the codecs libsndfile links that ship source RPMs.
+  CODEC_PACKAGES: flac-devel lame-devel libogg-devel libvorbis-devel mpg123-devel opus-devel
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: soundfile
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build soundfile ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      SOUNDFILE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-soundfile ${{ env.SOUNDFILE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: bastibe/python-soundfile
+          ref: ${{ env.SOUNDFILE_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # Only some versions need patching, so a missing directory is not an error.
+      - name: Patch soundfile source
+        run: |
+          patches="python-wheels/patches/soundfile/$SOUNDFILE_VERSION"
+          if [ -d "$patches" ]; then
+            git apply "$patches"/*.patch
+          fi
+
+      # The wheel is pure Python plus a bundled libsndfile, so one wheel serves
+      # every interpreter; there is no riscv64 libsndfile to download, so it is
+      # built from source against the image's codec packages.
+      - name: Build libsndfile and the wheel
+        run: |
+          mkdir -p wheelhouse
+          docker run -i --rm \
+            -v "$PWD:/work" -w /work \
+            -e LIBSNDFILE_VERSION -e CODEC_PACKAGES \
+            -e PYSOUNDFILE_PLATFORM=linux -e PYSOUNDFILE_ARCHITECTURE=riscv64 \
+            "$MANYLINUX_RISCV64_IMAGE" bash -s <<'BUILD_EOF'
+          set -euxo pipefail
+
+          dnf install -y --setopt=install_weak_deps=False cmake $CODEC_PACKAGES
+
+          git clone --depth 1 --branch "$LIBSNDFILE_VERSION" \
+            https://github.com/libsndfile/libsndfile.git /tmp/libsndfile
+          cmake -S /tmp/libsndfile -B /tmp/libsndfile/build -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_PROGRAMS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          cmake --build /tmp/libsndfile/build --config Release
+
+          cp "$(ls /tmp/libsndfile/build/libsndfile.so.1.*)" _soundfile_data/libsndfile_riscv64.so
+          cp /tmp/libsndfile/COPYING _soundfile_data/COPYING
+
+          PY=/opt/python/cp312-cp312/bin/python
+          "$PY" -m pip install --no-cache-dir build setuptools wheel auditwheel cffi
+          "$PY" -m build --wheel --no-isolation --outdir dist
+          "$PY" -m auditwheel repair --wheel-dir wheelhouse dist/*.whl
+
+          for tag in cp312-cp312 cp313-cp313 cp314-cp314; do
+            PY="/opt/python/$tag/bin/python"
+            "$PY" -m pip install --no-cache-dir \
+              --extra-index-url https://pypi.riseproject.dev/simple/ \
+              --only-binary=numpy pytest numpy
+            "$PY" -m pip install --no-cache-dir wheelhouse/*.whl
+            "$PY" -m pytest
+            "$PY" -m pip uninstall -y soundfile
+          done
+          BUILD_EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: soundfile-${{ env.SOUNDFILE_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      SOUNDFILE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # auditwheel vendors the codec libraries libsndfile links into the wheel.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: flac lame mpg123 libogg libvorbis opus
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: soundfile-${{ env.SOUNDFILE_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish soundfile ${{ matrix.version }}
+    needs: [setup, build_wheel, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: soundfile-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: soundfile-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: flac, lame, mpg123, libogg, libvorbis and opus, bundled into the wheel by auditwheel

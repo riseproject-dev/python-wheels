@@ -23,6 +23,12 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
 - **363** — A `libraries=[...]` entry can go missing from the link line with *no* error —
 - **368** — Linking several codecs against Rocky 10's system libraries instead of
 - **395** — When a project dlopen()s a differently-named shared library per major version
+- **400** — A `setup.py` knob that feeds a downloaded dependency's *sources* into
+  `Extension(sources=...)` needs a path relative to the project root, so the tarball has
+  to be extracted inside the checkout, not into `/tmp`.
+- **415** — Turning an optional native codec OFF can select a stub whose signature has
+  drifted from its declaration; the ELF links anyway and the first `dlopen` is where it
+  dies.
 
 ---
 
@@ -522,3 +528,63 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
       present in the wheel is the one-line proof that the FFmpeg the container built is
       the FFmpeg that got linked; a silent fallback to a different major would otherwise
       only surface as an ImportError on a user's machine.
+
+400. **A `setup.py` env-var knob that feeds a downloaded dependency's *sources* into
+    `Extension(sources=...)` needs a path **relative to the project root** — distutils
+    hard-errors on an absolute one, so the tarball has to be extracted inside the
+    checkout, not into `/tmp` (the cvxopt/SuiteSparse case).** Gotcha 53's shape is a
+    `before-all` that curls a dependency tarball, builds it and links the resulting
+    library; the variant here compiles the dependency's own `.c` files straight into the
+    extension instead, through a knob like cvxopt's `CVXOPT_SUITESPARSE_SRC_DIR` (its
+    `setup.py` globs `<dir>/AMD/Source/*.c`, `<dir>/CHOLMOD/Core/c*.c`, … into
+    `sources=`). Extracting to `/tmp` and pointing the knob there — the obvious choice,
+    since it keeps the checkout clean — dies at `build_wheel` with `error: Error: setup
+    script specifies an absolute path: /tmp/<dep>/… setup() arguments must *always* be
+    /-separated paths relative to the setup.py directory, *never* absolute paths`. That
+    check is distutils' own and the project cannot opt out of it, so the fix is
+    `tar xzf /tmp/<dep>.tar.gz -C {project}` plus the bare directory name as the value.
+    - **The knob's own upstream usage is the tell, and it differs per knob kind**: the
+      same `setup.py` takes absolute values happily for every `*_LIB_DIR`/`*_INC_DIR`
+      (they only ever reach `library_dirs`/`include_dirs`), and upstream's own CI writes
+      the *source* one relative (`CVXOPT_SUITESPARSE_SRC_DIR=SuiteSparse-${VERSION}`
+      after untarring into the checkout). Sources are the restricted argument; search
+      paths are not.
+    - **An untracked dependency tree inside the checkout does not poison a
+      `setuptools_scm` version.** Gotcha 31's hazard is *modified tracked* files;
+      `git describe --dirty` ignores untracked paths, so a 31 MB `SuiteSparse-7.11.0/`
+      plus three staged `LICENSE.<dep>` files at the checkout root still produced a plain
+      `1.3.3` wheel, with no `SETUPTOOLS_SCM_PRETEND_VERSION` needed.
+
+415. **Turning an optional native codec/feature OFF can select a disabled-path stub whose
+    signature has drifted out of sync with its declaration — the shared object links
+    anyway, and the first `dlopen` is where it dies (the torchcodec `decode_avif` case).**
+    torchcodec 0.16.0 needs `TORCHCODEC_BUILD_AVIF=0` on riscv64 (libavif comes only from
+    upstream's S3 bucket, which has no riscv64 build, and is packaged in neither Rocky 10
+    nor a riscv64 EPEL). That selects `DecodeAvif.cpp`'s `#if !TORCHCODEC_ENABLE_AVIF`
+    branch — a stub that raises an actionable "not compiled with libavif support" error.
+    Except the stub still had the *three*-parameter signature from before `num_threads`
+    was added, while `DecodeAvif.h`, the real implementation and the op registration
+    (`m.impl("decode_avif", TORCH_BOX(&decode_avif))`) all use four. The stub therefore
+    defined a different overload and the four-parameter one existed nowhere. Because an
+    ELF shared object may carry undefined symbols, `libtorchcodec_image.so` linked, the
+    wheel built, `auditwheel repair` was happy, and all four jobs failed ~50 minutes in at
+    the test step with `OSError: ... undefined symbol:
+    _ZN8facebook10torchcodec11decode_avifERKN5torch6stable6TensorElll`. Same mechanism as
+    gotcha 160, different trigger: there an arch `select()` supplied no sources, here a
+    feature flag supplied the wrong stub.
+    - **Whenever you flip a `*_BUILD_<FEATURE>=0` knob, diff the disabled stub against the
+      declaration before you push.** `grep -rn '#if !.*_ENABLE_' <src>` lists every
+      such branch; for each, compare the stub's parameter list with the header's and with
+      whatever takes the function's *address* (an op/dispatch registration table is the
+      usual caller — taking `&f` needs an exact-signature definition, whereas a plain
+      call would have failed at compile time). A project whose own CI always builds the
+      feature ON never compiles that branch, so the drift is invisible upstream and the
+      fix is a real upstream bug report, not a riscv64 workaround.
+    - **`ldd -r` over every `.so` in the built wheel enumerates *all* unresolved symbols
+      in one pass; `dlopen` reports only the first.** Run it in the manylinux image with
+      the dependency's library directory on `LD_LIBRARY_PATH` (`<venv>/.../torch/lib` for
+      a libtorch extension, plus the wheel's own `<pkg>.libs/`), and ignore the `Py*` and
+      `_Py*` lines — those are resolved from the statically linked interpreter at run time
+      and are expected on manylinux. Anything else is a real dangling reference. That
+      turned "is there a second bug hiding behind this one?" into a fact for five
+      libraries at once, instead of one more multi-hour CI cycle per symbol.
