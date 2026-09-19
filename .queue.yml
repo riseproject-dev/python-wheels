@@ -1935,10 +1935,58 @@ packages:
 - pkg: xformers
   version: 0.0.35
   home: https://facebookresearch.github.io/xformers/
-  repo: https://facebookresearch.github.io/xformers/
-  status: queued
+  repo: https://github.com/facebookresearch/xformers
+  status: parked
   pr: null
-  notes: '1 Linux wheels upstream (abi: py39); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Parked: the riscv64 build succeeds and the wheel it produces is functionally empty
+    -- new gotcha 415, disposition per gotcha 183 (installable and importable, primary function
+    unreachable rather than degraded). 0.0.35 confirmed latest (PyPI info.version; upstream''s
+    newest tag is v0.0.35); repo field corrected to github.com/facebookresearch/xformers.
+    WHAT THE ONE py39 WHEEL IS: xformers-0.0.35-py39-none-manylinux_2_28_x86_64.whl (3.2 MB)
+    is not gotcha 27''s cosmetic tag -- it holds a real 11.6 MB xformers/_C.so built with CUDA
+    12.8 against torch 2.10.0+cu128 (xformers/cpp_lib.json), NEEDED libcudart.so.12 +
+    libc10_cuda.so + libtorch_cuda.so. The py39-none tag is upstream''s own
+    bdist_wheel_abi_none.get_tag() returning ("py39", "none", plat): the .so talks only to
+    torch''s stable ABI (STABLE_TORCH_LIBRARY_FRAGMENT, the build_ext get_export_symbols()
+    override returning [], no PyInit_), so one wheel covers every CPython 3.9+ including
+    free-threaded ("All builds are python-version agnostic" in .github/workflows/wheels.yml).
+    NOT CUDA-BLOCKED AT BUILD TIME (unlike humming-kernels / gotcha 386): setup.py
+    get_extensions() sets extension = CppExtension and only promotes it to CUDAExtension when
+    (torch.cuda.is_available() and CUDA_HOME and torch.version.cuda) or FORCE_CUDA=1 or
+    TORCH_CUDA_ARCH_LIST != "", with the HIP branch behind torch.version.hip -- so gotcha
+    411''s bitsandbytes test passes. Verified both ways: pip wheel . --no-deps
+    --no-build-isolation against torch 2.14.0+cpu built a py39-none-linux_x86_64 wheel in
+    seconds, and the same build was rehearsed under QEMU in
+    quay.io/pypa/manylinux_2_39_riscv64 (cp312) with torch 2.14.0+cpu from pypi.riseproject.dev,
+    producing xformers-0.0.35-py39-none-linux_riscv64.whl with no patches and no toolkit.
+    THE BLOCKER IS WHAT THAT BUILD CONTAINS: the non-CUDA source list is
+    xformers/csrc/**/*.cpp minus hip_fmha = exactly 2 files / 44 lines
+    (attention/attention.cpp, sparse24/sparse24.cpp), all m.def() schema declarations, and
+    attention.cpp''s entire body sits inside #if defined(USE_ROCM) so it contributes nothing;
+    every m.impl lives in a .cu (or HIP .cpp) that only the CUDA/ROCm branches compile. The
+    riscv64 _C.so is 223 KB with 2 defined dynamic symbols (x86 CPU build: 233 KB, 5), none of
+    them an operator, against 11.6 MB upstream. Runtime proof, on the riscv64 wheel itself
+    installed under QEMU (and identically on the x86 one): import xformers works and
+    xformers._has_cpp_library is True (it only checks that the .so
+    loaded), but torch.ops.xformers.sparse24_largest_mask_2d raises NotImplementedError "Could
+    not run ... with arguments from the ''CPU'' backend" and
+    xformers.ops.memory_efficient_attention raises "No operator found ... device=cpu
+    (supported: {''cuda''})" -- every fmha op class (cutlass, cutlass_blackwell, flash, flash3,
+    triton_splitk, ck, ck_splitk) declares SUPPORTED_DEVICES = {"cuda"}, and
+    _is_triton_available() returns False without torch.cuda. Only the pure-Python helpers
+    (checkpoint, attn_bias builders, unbind) work, and none of them touch the compiled half.
+    UPSTREAM SHIPS NO CPU WHEEL ANYWHERE: wheels.yml''s target determinator emits only
+    toolkit_type cuda (cu126/cu128/cu130) and rocm 7.1 and upload_pip filters
+    *torch2.10.0+cu128*, so a CPU-only wheel is an artifact upstream builds on no platform
+    (gotcha 24''s divergence test) -- the opposite of bitsandbytes, whose CPU wheel already
+    exists for macOS/win-arm. Nothing to test with either (gotcha 6): the sdist''s tests/ omits
+    tests/utils.py and the xformers.components package, so 12 of 20 test modules fail
+    collection even on x86 CPU, and the rest is @cuda_only / compute_capability-gated.
+    Dependencies are not the problem (torch>=2.10, numpy; the registry serves torch
+    2.13.0+cpu and 2.14.0+cpu for cp312-cp314t). No workflow, docs/packages entry, patches or
+    PR created. Revisit only if upstream grows a real CPU backend (a CPU m.impl, or an
+    eager/torch-SDPA fallback op whose SUPPORTED_DEVICES includes "cpu"), or if a
+    CUDA-enabled riscv64 torch ever exists.'
 - pkg: mitmproxy-linux
   version: 0.12.11
   home: ''

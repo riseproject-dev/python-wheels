@@ -147,6 +147,12 @@ The porting gotchas (379 of them) live in [`references/gotchas/`](gotchas/), spl
   recording a conda blocker; `api.anaconda.org/package/conda-forge/<name>` answers subdir
   coverage per package, and micromamba itself does ship a riscv64 binary
   (the cadquery-ocp-novtk case).
+- **419** — Gotcha 411's "is the CPU backend the default?" test can pass and still not yield
+  a port: a torch extension's non-CUDA branch can compile operator *schemas* with no
+  implementations, so the build succeeds in seconds against a CPU-only torch and the wheel
+  is a dead stub — count the sources that branch globs, diff the built `.so` against the
+  published CUDA one, and call an op instead of trusting a "did the extension load" flag
+  (the xformers case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
