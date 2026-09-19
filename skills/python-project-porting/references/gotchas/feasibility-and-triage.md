@@ -2138,3 +2138,54 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       `macosx_10_9/10_13/10_15_x86_64`, `macosx_11_0_arm64`,
       `manylinux_2_27/2_28_{x86_64,aarch64}` and `win_amd64` for cp310–cp314. Parked; no
       worktree/branch/PR — there is no build input to stage a workflow around.
+393. **The *bindings* half of a "bindings wheel + vendored-SDK wheel" pair looks unblocked
+     from its sdist and is not: the pin that blocks it is written by the vendor's release
+     step, not by the sources, and the real coupling is a `RUNPATH` into the sibling wheel's
+     install directory (the pyqt6 case).** Gotcha 385 parked `pyqt6-qt6`, the SDK half, for
+     scope. `pyqt6`, the bindings half, fails every signal that usually marks a blocked
+     package: it publishes a real GPL-3.0 sdist on every release, the sdist holds actual
+     C++/`.sip` sources for 35 binding sets, and it builds with two public, pure-Python
+     tools (`sip`, `PyQt-builder`). Its sdist `PKG-INFO` declares exactly one dependency —
+     `Requires-Dist: PyQt6-sip (>=13.11, <14)`, which this registry already serves. The
+     published wheel's `METADATA` declares two: that one (relaxed to `>=13.8`) **and**
+     `PyQt6-Qt6 (>=6.11.0, <6.12.0)`. Nothing in the project or in PyQt-builder writes the
+     second line — the only `Requires-Dist` in `pyqtbuild` is `bundle/qt_wheel.py`, which
+     writes it *into* the Qt wheel, and `bundle/bundle.py`, which *deletes* it from the
+     bindings wheel when `pyqt-bundle` bundles Qt inside. It is added by the vendor's own
+     release pipeline. So **the sdist's metadata is not the wheel's metadata**: read the
+     published wheel's `METADATA` (one range request, gotcha 41) and settle the pin with the
+     resolver rather than by eye —
+     `uv run ci_scripts/check_riscv64_deps.py --python 312 -- 'PyQt6-Qt6>=6.11.0,<6.12.0'`
+     answers `UNRESOLVABLE ... (from versions: none)`.
+     - **One `readelf -d` on one extension module proves the coupling.**
+       `wheel_contents.py <pkg> --match <linux wheel> --member PyQt6/QtCore.abi3.so` then
+       `readelf -d`: `NEEDED libQt6Core.so.6` next to `RUNPATH $ORIGIN/Qt6/lib` — and the
+       wheel ships no `Qt6/lib` at all (893 entries, 40.6 MB uncompressed: `.abi3.so`s,
+       `.pyi` stubs and one `Qt6/qsci/api` file). That directory is filled by the *sibling*
+       wheel at install time. A wheel that resolves its shared libraries out of another
+       distribution's install path is structurally incomplete on its own, whatever its own
+       sources build.
+     - **Building against the distro SDK instead is a real option, and the sibling's
+       *dlopened* payload is what defeats it.** Everything upstream about such a build is
+       permissive: `project.py` rejects only `qt_version >> 16 != 6` (no minimum minor),
+       PyQt-builder derives the sip tag from the *discovered* `qt_version_tag`
+       (`bindings.py`), and sipbuild's `update_buildable_bindings()` *silently deletes* any
+       bindings whose config test fails, so a build against Rocky 10 riscv64's Qt 6.10.1
+       (`qmake6` is in `qt6-qtbase-devel`; 28 module `-devel` packages in AppStream)
+       configures and produces a reduced, Qt-6.10-API wheel under a 6.11.0 version number
+       (gotcha 383's divergence, with gotcha 382's "a warning must not make the product
+       decision" on top). auditwheel then bundles the Qt libraries the extensions *link*.
+       It cannot bundle what Qt `dlopen`s — the platform plugins (`platforms/libqxcb.so`,
+       `libqoffscreen.so`), the imageformat and sqldriver plugins, the QML module tree — and
+       the bundled distro `libQt6Core` keeps its compiled-in `/usr/lib64/qt6/plugins` prefix,
+       so the wheel imports cleanly and then dies at the first `QApplication` with "no Qt
+       platform plugin could be initialized". **When the sibling wheel supplies plugins, QML
+       and data as well as libraries, auditwheel's linked-library bundling is not a
+       substitute for it** — reproducing that payload *is* the sibling's port.
+     - **For a vendor pair `<pkg>` + `<pkg>-<sdk>`, triage the SDK entry first; it decides
+       both.** `pyqt5`/`pyqt5-qt5`, `pyqt6`/`pyqt6-qt6` and the pyside6 family are the same
+       shape three times over. Mark the bindings half `blocked-on-dependency` pointing at the
+       SDK entry (gotcha 382's rule: the blocker is a sibling port, not absent source), keep
+       the two entries' notes pointed at each other, and do not re-run the SDK investigation
+       on the bindings entry — record only what is new on the *consumer* side (the wheel-vs-
+       sdist metadata split, the `RUNPATH`, the resolver output).

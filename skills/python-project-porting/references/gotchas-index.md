@@ -130,6 +130,10 @@ The porting gotchas (374 of them) live in [`references/gotchas/`](gotchas/), spl
   `License: <permissive> AND LicenseRef-*` is gotcha 372's second lock; and an open-source
   org's monorepo hits can all be the closed-source package's *consumer*
   (the livekit-local-inference case).
+- **393** — The bindings half of a "bindings wheel + vendored-SDK wheel" pair looks unblocked
+  from its sdist and is not: the blocking pin is added by the vendor's release step, not by the
+  sources, and the coupling is a `RUNPATH` into the sibling wheel's directory; a distro-SDK
+  build is defeated by the sibling's dlopened plugin/QML payload (the pyqt6 case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
