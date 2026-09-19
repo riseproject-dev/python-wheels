@@ -51,6 +51,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **376** — A permissive `License:` field on the wrapper package says nothing about whether
   the payload it ships has any source at all — check the binary's own content, not the
   metadata's license family (the tableauhyperapi case).
+- **381** — A CUDA-only PyPI wheel does not make the *project* CUDA-only: a
+  device-selecting build env var can produce a genuinely portable CPU distribution from the
+  same tree, and upstream may already carry riscv64 kernels for it (the vllm case).
 
 ---
 
@@ -1623,3 +1626,52 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     - Parked (`.queue.yml`); no worktree/branch/PR created — diagnosed read-only against
       the real 0.0.26359 wheel contents (`unzip -l`, `file`/`strings` on both native
       binaries) and Tableau's own installation/hardware-requirements documentation.
+
+381. **A CUDA-only PyPI wheel does not make the *project* CUDA-only — look for a
+    device-selecting build env var before parking a GPU package (the vllm case).** Gotchas
+    41 (triton), 284, and the `sglang`/`cuda-tile` parked entries all triage a GPU package
+    by what its *published wheel* requires, and for those that was the whole story. vLLM
+    looks identical at that level and is not: `pypi.org/pypi/vllm/json` shows two
+    `cp38-abi3-manylinux_2_28_{x86_64,aarch64}` wheels of ~310 MB whose `requires_dist` is
+    unconditionally NVIDIA — `flashinfer-python`, `nvidia-cutlass-dsl[cu13]`,
+    `PyNvVideoCodec`, `nvtx`, `tilelang`, `quack-kernels`, none of them behind a marker. But
+    `setup.py` reads `VLLM_TARGET_DEVICE` (auto-detected from the *build host*, which is why
+    the published wheels are CUDA), `get_requirements()` selects
+    `requirements/<device>.txt` from it, and `get_vllm_version()` appends a `+cpu` local
+    segment — so the same tag builds a second, differently-versioned distribution under the
+    same name whose dependency closure has no NVIDIA package in it at all. The port target
+    is `0.29.0+cpu`, the same shape `torch` is already published as here.
+    - **Read `requirements/<device>.txt` for our arch's marker before anything else — it is
+      upstream stating which arches it expects to work.** vLLM's `requirements/cpu.txt`
+      already excludes `torchaudio`, `torchvision`, `torchcodec`, `llguidance` and
+      `xgrammar` on `platform_machine == "riscv64"` and pins `torch==2.13.0` there
+      specifically (the aarch64/x86_64 lines pin `2.13.0+cpu` instead). An upstream that has
+      written per-arch markers for riscv64 has already done the dependency triage for you;
+      confirm with `grep -rn riscv cmake/ csrc/` that real kernels back them
+      (`cmake/cpu_extension.cmake` has a `CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64"` branch,
+      `csrc/cpu/` has RVV intrinsics and `cpu_types_riscv*.hpp`, `vllm/platforms/` has a
+      `CpuArchEnum.RISCV`), or you are reading aspirational markers.
+    - **The docs are not the test — code and requirements markers are.** vLLM's
+      `docs/getting_started/installation/cpu.md` lists only x86/ARM/Apple/S390X, its
+      `docker/Dockerfile.cpu` handles only `amd64`/`arm64`, and no CI job builds riscv64. An
+      arch can be fully implemented and simply undocumented; conversely a documented arch
+      can be stale. Grep the build system, not the prose.
+    - **The remaining blocker is usually one ordinary dependency, and the marker list tells
+      you how upstream already handles it.** Here it is `numba` (gotcha 40/187's
+      llvmlite/conda wall), required by `cpu.txt` on every arch *except* s390x. That is not
+      automatically a `blocked-on-dependency` park: the project declares numba optional
+      (`vllm/utils/import_utils.py::is_numba_available()`), degrades to a non-numba path
+      when it is missing, and already ships s390x in exactly that configuration — so
+      extending the existing exclusion to riscv64 is a one-line marker patch that reproduces
+      a state upstream already supports, not a fork of its architecture. Park only when the
+      absent dependency has *no* upstream-supported degraded mode; check for an
+      `is_<dep>_available()`-style probe and an arch already excluded from the same
+      requirement line before deciding.
+    - **A native runner's `/proc/cpuinfo` is not a wheel's target.** `cpu_extension.cmake`
+      auto-detects `VLLM_RVV_VLEN` by grepping the build host's `zvl<N>b`, then compiles
+      `-march=rv64gcv_zvfh…zvl<N>b`. On this repo's native `ubuntu-24.04-riscv` runners that
+      silently bakes whatever vector extensions that machine happens to have into a wheel
+      every riscv64 user installs — gotcha 259/274's "compiled with RVV means assumes RVV",
+      reached through host auto-detection rather than a hardcoded flag. Force the baseline
+      explicitly (`CMAKE_ARGS=-DVLLM_RVV_VLEN=0`, upstream's documented scalar `rv64gc`
+      mode); it also disables the oneDNN dependency, which is gated on the same probes.

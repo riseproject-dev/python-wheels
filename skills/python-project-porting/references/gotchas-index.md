@@ -91,6 +91,7 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
   when the thing it `dlopen()`s at runtime is proprietary with zero source and no riscv64
   build at the vendor, official or unofficial (the cx_Oracle case).
 - **376** — A permissive `License:` field on the wrapper package says nothing about whether
+- **381** — A CUDA-only PyPI wheel does not make the *project* CUDA-only: a device-selecting build env var can produce a portable CPU distribution from the same tree
   the payload it ships has any source at all — check the binary's own content, not the
   metadata's license family (the tableauhyperapi case).
 
