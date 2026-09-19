@@ -79,6 +79,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **392** — With no project URL and a stock `Generator:`, the *conda-forge feedstock* is the
   cheapest source-availability oracle; and `readelf -S` splits a real compiled extension into
   engine vs embedded-model-weights in one command (the livekit-local-inference case).
+- **405** — An NVIDIA-owned, profiler-adjacent package can have no CUDA dependency whatsoever
+  — read the extension's header set and `libraries=` list before filing it with the GPU batch
+  (the nvtx case).
 
 ---
 
@@ -2189,3 +2192,31 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
        the two entries' notes pointed at each other, and do not re-run the SDK investigation
        on the bindings entry — record only what is new on the *consumer* side (the wheel-vs-
        sdist metadata split, the `RUNPATH`, the resolver output).
+
+405. **An NVIDIA-owned, profiler-adjacent package can have no CUDA dependency whatsoever —
+     read the extension's own header set and `libraries=` list before filing it with the GPU
+     batch (the nvtx case; see `build-nvtx.yml`).** Gotcha 284 covers CUDA symbols that turn
+     out to be `dlopen`ed at runtime; this is the step before it, where there are no CUDA
+     symbols at all and only the vendor's name suggests otherwise. The PyPI `nvtx`
+     distribution is the `python/` subdirectory of `NVIDIA/NVTX`: five Cython modules over a
+     header-only C annotation API. `setup.py` declares a single
+     `Extension('*', sources=['src/nvtx/_lib/*.pyx'], include_dirs=[<repo>/c/include])` with
+     no `libraries=` at all, and the only `cdef extern from` headers across its `.pxd` files
+     are `nvtx3/nvToolsExt{,Counters,Payload}.h`, `nvtx3/nvToolsExtSemantics*.h` and
+     `nvtxw3/nvtxw3*.h` — no `cuda.h`, no `cuda_runtime.h`, nothing to link. The GPU is the
+     *consumer*, not a dependency: annotations are inert until an external profiler injects a
+     library through `NVTX_INJECTION64_PATH`, and `nvtx.enabled()` is literally
+     `not os.getenv("NVTX_DISABLE")` with no hardware probe anywhere.
+     - **Two checks settle it, both cheaper than a CI cycle**: `grep -rn 'libraries=' setup.py`
+       plus `grep -rn 'cdef extern from\|#include' <extension sources>` (an instrumentation
+       SDK's own headers only), and then `auditwheel show` on a locally built wheel — one that
+       references nothing but `libc.so.6` has no GPU runtime to find.
+     - **The cost of getting this wrong is not one entry.** An annotation SDK shows up in the
+       `Requires-Dist` of GPU-ecosystem distributions (vllm's CUDA wheels among them), so
+       parking it on "NVIDIA ⇒ GPU-only" converts one bad triage into a fake blocker for every
+       consumer that is itself portable.
+     - **What actually distinguishes the parked set** (`onnxruntime-gpu`, `cupy-cuda12x`/
+       `-cuda13x`, `jax-cuda*-plugin`, `numba-cuda`) is that those need the toolkit's own
+       headers and libraries — or nvcc — *at build time* (gotcha 387). A vendor's profiling,
+       tracing or annotation library typically needs neither, and belongs in the ordinary
+       Cython/C-extension lane.

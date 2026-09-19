@@ -134,6 +134,9 @@ The porting gotchas (374 of them) live in [`references/gotchas/`](gotchas/), spl
   from its sdist and is not: the blocking pin is added by the vendor's release step, not by the
   sources, and the coupling is a `RUNPATH` into the sibling wheel's directory; a distro-SDK
   build is defeated by the sibling's dlopened plugin/QML payload (the pyqt6 case).
+- **405** — An NVIDIA-owned, profiler-adjacent package can have no CUDA dependency whatsoever:
+  no CUDA header, no `libraries=`, the GPU only ever the *consumer* of the annotations — and
+  parking it fakes a blocker for every portable consumer that depends on it (the nvtx case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -167,6 +170,9 @@ The porting gotchas (374 of them) live in [`references/gotchas/`](gotchas/), spl
   wrong commit — check `git merge-base --is-ancestor <tag> origin/main` before trusting it.
 - **352** — A gitlink with no `.gitmodules` entry breaks `actions/checkout`'s own
   persist-credentials cleanup, not the checkout itself.
+- **406** — Gotcha 103's byte-for-byte sdist proof cannot come out clean when upstream cuts
+  releases from a non-public tree: a `[tool.cibuildwheel]`-only difference is not a wrong pin,
+  and the released sdist's `test-command` can name a script that never existed (the nvtx case).
 
 ### cibuildwheel mechanics, the matrix & abi3 — [`gotchas/cibuildwheel-matrix-and-abi3.md`](gotchas/cibuildwheel-matrix-and-abi3.md)
 
