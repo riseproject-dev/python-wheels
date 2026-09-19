@@ -45,6 +45,7 @@ jobs:
           VERSION_GLOB: ${{ inputs.version }}
           BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
+          set -euo pipefail
           # The docs branch only records what was just published, so building
           # anything from it would rebuild versions that are already released.
           if [ "$BRANCH" = "github-actions/update-doc" ]; then
@@ -52,6 +53,20 @@ jobs:
             echo "Versions to build: [] (documentation branch)"
             exit 0
           fi
-          versions=$(uv run --quiet ci_scripts/pending_versions.py ${VERSION_GLOB:+--glob "$VERSION_GLOB"} "$PACKAGE")
+          # A version reaches its release hours before the shared documentation
+          # PR records it in docs/packages, and until then this YAML still reads
+          # as pending - so any push to main inside that window rebuilt it and
+          # published a second release of the same version. The release tags are
+          # the record that does not lag; hand them over so those versions are
+          # skipped. An explicit glob still rebuilds whatever it names.
+          #
+          # ls-remote over the REST API: no rate limit to share between the 700
+          # build workflows, and a draft release carries no tag, so a publish
+          # still in flight does not count as released.
+          released="$RUNNER_TEMP/released-tags.txt"
+          git ls-remote --tags --refs origin |
+            sed 's#.*refs/tags/##' > "$released"
+          versions=$(uv run --quiet ci_scripts/pending_versions.py \
+            --released "$released" ${VERSION_GLOB:+--glob "$VERSION_GLOB"} "$PACKAGE")
           echo "versions=$versions" >> "$GITHUB_OUTPUT"
           echo "Versions to build: $versions"

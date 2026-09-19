@@ -146,6 +146,20 @@ def find_patch_dir(slug, version):
     return None
 
 
+def block_scalar(dumper, data):
+    """
+    Keep a multi-line string in `|` block form, the way it was hand-written.
+    PyYAML would otherwise reflow it into a quoted scalar, which changes no
+    meaning but rewrites the entry in every documentation PR that touches the
+    file.
+    """
+    style = "|" if "\n" in data else None
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style=style)
+
+
+yaml.SafeDumper.add_representer(str, block_scalar)
+
+
 def yaml_line(key, value):
     """Render a single `key: value` YAML mapping line, quoted as needed."""
     return yaml.safe_dump(
