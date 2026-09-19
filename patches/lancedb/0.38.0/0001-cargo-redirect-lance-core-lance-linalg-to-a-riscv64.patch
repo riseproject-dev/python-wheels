@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 03 Sep 2026 00:00:00 +0000
+Subject: [PATCH] cargo: redirect lance-core/lance-linalg to a riscv64-patched
+ checkout
+
+lance-core's SIMD_SUPPORT static (rust/lance-core/src/utils/cpu.rs) and
+lance-linalg's f32x8/f32x16/i32x8/f64x4/f64x8 SIMD types
+(rust/lance-linalg/src/simd/{f32,i32,f64}.rs) are compiled for
+x86_64/aarch64/loongarch64 only, with no fallback arm for any other
+architecture: the SIMD_SUPPORT closure has no trailing expression on
+riscv64 ("expected SimdSupport, found ()"), and the SIMD type structs are
+defined only under those three `#[cfg(target_arch = ...)]` attributes
+while every method implementing them is unconditional, so riscv64 hits
+"cannot find type `f32x8` in this scope" as soon as lance-linalg is
+built.
+
+Both crates are pulled in from crates.io at a pinned `=10.0.0`, so the
+fix cannot be applied in place. Redirect them to a checkout of the same
+v10.0.0 tag carrying a portable scalar fallback for both, see
+0002-lance-linalg-add-a-portable-riscv64-simd-fallback.patch. `exclude`
+keeps that checkout's own [workspace] from being silently absorbed into
+this one, which would drop its `[workspace.package]` inheritance
+(version, edition, ...) for lance-core and lance-linalg.
+
+Only the source line of the lance-core/lance-linalg entries changes in
+Cargo.lock, so every other dependency stays pinned exactly as upstream
+released it.
+
+Upstream-Status: Inappropriate [redirects two pinned dependencies to a local checkout; the fix itself belongs in lancedb/lance]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ Cargo.toml | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/Cargo.toml b/Cargo.toml
+index a47e59e..ab6cf5c 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,5 +1,10 @@
+ [workspace]
+ members = ["rust/lancedb", "nodejs", "python"]
++# ./lance (see [patch.crates-io] below) carries its own [workspace]; excluding
++# it keeps that workspace independent instead of being silently absorbed into
++# this one, which would drop its `[workspace.package]` inheritance (version,
++# edition, ...) for lance-core and lance-linalg.
++exclude = ["lance"]
+ resolver = "2"
+ 
+ [workspace.package]
+@@ -80,3 +85,10 @@ debug = false
+ debug-assertions = false
+ strip = "debuginfo"
+ incremental = false
++
++# lance-core's SIMD_SUPPORT and lance-linalg's f32x8/f32x16/i32x8/f64x4/f64x8
++# SIMD types compile only for x86_64/aarch64/loongarch64 upstream; ./lance is
++# the same v10.0.0 tag with a riscv64 scalar fallback added to both.
++[patch.crates-io]
++lance-core = { path = "lance/rust/lance-core" }
++lance-linalg = { path = "lance/rust/lance-linalg" }
+-- 
+2.43.0
