@@ -39,6 +39,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **360** — A `setup.py`'s own `bdist_wheel --plat-name` insertion can hardcode
   `manylinux1_` + `platform.machine()` regardless of the actual container libc, making
   musllinux unbuildable no matter how the CMake/C++ side is patched.
+- **391** — A project's real cibuildwheel recipe can live in a *separate packaging repo* that the
+  source tree never references — the source repo can carry no GitHub Actions at all.
 
 ---
 
@@ -759,3 +761,27 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
       keystone-engine never built musllinux either — see gotcha 34's "the default four"
       logic) is the lower-risk, upstream-faithful choice when this is caught on the first
       port rather than treated as a regression to fix.
+
+391. **A project's real cibuildwheel recipe can live in a *separate packaging repo* that
+    the source tree never references — the source repo can carry no GitHub Actions at all
+    (the cassandra-driver case).** `pyproject.toml` has no `[tool.cibuildwheel]` table, the
+    release tag has no `.github/` directory, and the only CI file is a `Jenkinsfile` that
+    builds no wheel (it is the CCM/DSE integration matrix, installing the driver
+    `--editable`). Read only the source repo and the port looks like it has no upstream
+    recipe to mirror, which is how a workflow ends up invented from scratch — exactly the
+    divergence goal 2 forbids. Here it was `datastax/python-driver-wheels`, a `multibuild`
+    repo carrying the driver as a git submodule, named once in `README-dev.rst`'s release
+    checklist ("Update the `python-driver` submodule of `python-driver-wheels` … Trigger
+    the Github Actions necessary to build wheels"); its `build_wheels_linux.yml` holds the
+    whole recipe — `CIBW_BUILD`, `CIBW_SKIP`, `CIBW_BEFORE_ALL`, `CIBW_ENVIRONMENT` and the
+    `CIBW_TEST_*` set.
+    - **Where to look, in order**: the developer/release doc (`README-dev`,
+      `CONTRIBUTING`, `RELEASING`) for the name of a wheels/packaging repo; then that
+      repo's `.github/workflows/`; then its `config.sh`/`build_wheel.sh` if it is a
+      `multibuild` project — the pre-cibuildwheel hooks (`pre_build`, `run_tests`) often
+      still hold the *real* wheel-verification script that the cibuildwheel workflow later
+      replaced with a stub, which is the gotcha 94 answer for that package handed over
+      ready-made.
+    - Distinct from gotcha 338: there the packaging fork *is* where the released wheels
+      come from and it drags in a sibling dependency of its own; here the packaging repo is
+      upstream's and only holds the recipe, so the port still builds the source tag.
