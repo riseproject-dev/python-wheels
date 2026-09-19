@@ -39,7 +39,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **360** — A `setup.py`'s own `bdist_wheel --plat-name` insertion can hardcode
   `manylinux1_` + `platform.machine()` regardless of the actual container libc, making
   musllinux unbuildable no matter how the CMake/C++ side is patched.
-- **388** — A project's real cibuildwheel recipe can live in a *separate packaging repo* that the
+- **391** — A project's real cibuildwheel recipe can live in a *separate packaging repo* that the
   source tree never references — the source repo can carry no GitHub Actions at all.
 
 ---
@@ -762,7 +762,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
       logic) is the lower-risk, upstream-faithful choice when this is caught on the first
       port rather than treated as a regression to fix.
 
-388. **A project's real cibuildwheel recipe can live in a *separate packaging repo* that
+391. **A project's real cibuildwheel recipe can live in a *separate packaging repo* that
     the source tree never references — the source repo can carry no GitHub Actions at all
     (the cassandra-driver case).** `pyproject.toml` has no `[tool.cibuildwheel]` table, the
     release tag has no `.github/` directory, and the only CI file is a `Jenkinsfile` that

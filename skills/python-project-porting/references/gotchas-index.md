@@ -192,7 +192,7 @@ The porting gotchas (374 of them) live in [`references/gotchas/`](gotchas/), spl
 - **360** — A `setup.py`'s own `bdist_wheel --plat-name` insertion can hardcode
   `manylinux1_` + `platform.machine()` regardless of the actual container libc, making
   musllinux unbuildable no matter how the CMake/C++ side is patched.
-- **388** — A project's real cibuildwheel recipe can live in a *separate packaging repo* that the
+- **391** — A project's real cibuildwheel recipe can live in a *separate packaging repo* that the
   source tree never references — the source repo can carry no GitHub Actions at all.
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
