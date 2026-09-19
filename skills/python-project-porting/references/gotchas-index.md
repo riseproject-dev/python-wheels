@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (380 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (382 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -152,6 +152,12 @@ The porting gotchas (380 of them) live in [`references/gotchas/`](gotchas/), spl
   ships x86-64 `liblapack.so.3`/`libblas.so.3`/`libgfortran.so.3` beside a real aarch64
   `libopenblas.so.0`, because one prebuilt tarball covers all of Linux — `file`/`readelf -h`
   every `.so` in the sibling wheel before mirroring its build (the paddlepaddle case).
+- **419** — Gotcha 411's "is the CPU backend the default?" test can pass and still not yield
+  a port: a torch extension's non-CUDA branch can compile operator *schemas* with no
+  implementations, so the build succeeds in seconds against a CPU-only torch and the wheel
+  is a dead stub — count the sources that branch globs, diff the built `.so` against the
+  published CUDA one, and call an op instead of trusting a "did the extension load" flag
+  (the xformers case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -334,6 +340,9 @@ The porting gotchas (380 of them) live in [`references/gotchas/`](gotchas/), spl
 - **397** — A CMake build that shells out to a bare `python3` for one vendored sub-extension
   silently builds it for the container's default interpreter, not the one the wheel is for
   (the coremltools/kmeans1d case).
+- **421** — `pierotofy/set-swap-space` is a no-op on the riscv64 runners (`/` is overlayfs, so
+  `swapon` fails and the action soft-passes): a heavy link gets 15GB of RAM and nothing behind
+  it.
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
@@ -388,6 +397,10 @@ The porting gotchas (380 of them) live in [`references/gotchas/`](gotchas/), spl
 - **401** — Rocky 10 riscv64 ships OpenBLAS, LAPACK and FFTW but no SuiteSparse, GSL or
   GLPK, and a numeric package's optional-extension set has to be cut along that line
   (Alpine riscv64 has all of them, but ships no licence texts).
+- **420** — Gotcha 139's binutils-too-old trap recurs inside a Bazel dependency's microkernel
+  library (XNNPACK's `zvfh` kernels), where the fix is that dependency's own feature
+  `--define` rather than an `-march` probe — and `--keep_going` hides a single-cause failure
+  behind five hours of unrelated progress, making it look like a timeout.
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
@@ -467,6 +480,9 @@ The porting gotchas (380 of them) live in [`references/gotchas/`](gotchas/), spl
 - **399** — A dependency we already publish can satisfy a dependent's *runtime* link and still
   be unusable as its *build* input: a wheel ships `.so` files, not headers or a CMake package,
   and the upstream recipe's header source can be conda-forge (the cadquery-ocp/VTK case).
+- **422** — A build container you drive yourself needs `PIP_EXTRA_INDEX_URL` on the *build*
+  `podman run`, not only on the test one — otherwise its `pip install -r requirements.txt`
+  source-builds numpy and dies on Pillow (the paddlepaddle case).
 
 ### Build-tool drift & pins — [`gotchas/build-tool-drift-and-pins.md`](gotchas/build-tool-drift-and-pins.md)
 
