@@ -21,6 +21,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
 - **233** — A package can have no Python build backend at all — the wheel comes from an
 - **397** — A CMake build that shells out to a bare `python3` for one vendored sub-extension
   silently builds it for the container's default interpreter, not the one the wheel is for.
+- **421** — `pierotofy/set-swap-space` is a no-op on the riscv64 runners — a heavy link gets
+  the runner's 15GB of RAM and nothing behind it.
 
 ---
 
@@ -410,3 +412,24 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       style post-processing steps that protobuf codegen rules commonly carry; the ones that
       use `${PYTHON_EXECUTABLE}` are already correct, and the ones that do not are the list
       the PATH export exists to cover.
+
+421. **`pierotofy/set-swap-space` is a no-op on the riscv64 runners — a heavy link gets
+    the runner's 15GB of RAM and nothing behind it.** The step goes green in under a
+    second either way: the action creates and `mkswap`s `/swapfile`, then swallows
+    `swapon: /swapfile: swapon failed: Invalid argument` behind its own
+    `WARNING: swapon failed ... Continuing without swap.` line. The cause is one line
+    above it in the log — `Creating swapfile at /swapfile on filesystem type: overlay`
+    — and a swap file has to live on a block-backed filesystem, so no size, no
+    allocation method and no `swap-size-gb` value fixes it. Two different runners in the
+    fleet (a failed paddlepaddle build and a *green* deltalake one) report it
+    identically, so treat it as the whole fleet.
+    - **Copying the step from `build-vtk.yml` does not buy the headroom its comment
+      claims.** Ten workflows carry it today and every one of them is really building
+      inside `free -h`'s 15Gi. Size the link to that instead: shared libraries rather
+      than one monolithic `.so` (Paddle's `WITH_SHARED_PHI`/`WITH_SHARED_IR`, VTK's
+      per-module objects), and expect to cap the parallel job count if the tail of the
+      build is what OOMs.
+    - **Read a soft-failing action once instead of trusting its conclusion.** A
+      `##[end-action ... outcome=success` sitting next to a `WARNING:` in the same step
+      is the shape; `swapon --show` in the action's own "after" report printing `0B` is
+      the proof.

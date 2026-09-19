@@ -41,6 +41,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
   usable wheels" even though the identical wheel installs fine as a local file.
 - **399** — A dependency we already publish can satisfy a dependent's *runtime* link and still
   be unusable as its *build* input: a wheel ships `.so` files, not headers or a CMake package.
+- **422** — A build container you drive yourself needs `PIP_EXTRA_INDEX_URL` on the *build*
+  `podman run`, not only on the test one.
 
 ---
 
@@ -759,3 +761,33 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       wheel) — not in a one-off "configure the dep from source just for its headers" step
       bolted onto the dependent, which is an invented mechanism upstream has no analogue for
       and which has to be kept ABI-identical to the published wheel by hand.
+
+422. **A build container you drive yourself needs `PIP_EXTRA_INDEX_URL` on the *build*
+    `podman run`, not only on the test one.** A cibuildwheel port states the registry
+    once in `CIBW_ENVIRONMENT` and it covers before-build, build and test alike; a
+    gotcha 15-style container gets exactly the `-e` flags written on that one
+    invocation, and it is easy to wire the registry into the `test` step (where the
+    wheel's runtime deps obviously need it) while the `build` step's own
+    `pip install -r <project>/requirements.txt` still sees public PyPI alone.
+    build-paddlepaddle.yml did that: numpy compiled from its sdist for 21 minutes and
+    Pillow then failed outright with `RequiredDependencyException: jpeg` (the manylinux
+    image carries no libjpeg headers), burning 42 minutes of a scarce riscv64 runner
+    before a line of the project's own C++ was compiled.
+    - **The symptom in the log is a download, not an error.** `Downloading
+      <dep>-<ver>.tar.gz` for any compiled dependency of a *build* step means the
+      registry is not being consulted; grep for `Downloading .*\.tar\.gz` before
+      reading the traceback at the end, because the traceback names whichever sdist
+      happened to fail first, not the missing index.
+    - **Add `PIP_ONLY_BINARY=<the compiled deps>` in the same edit** (gotchas 30/67):
+      with the extra index alone pip still takes the highest version across *both*
+      indexes, so the first day our registry is a release behind puts the sdist build
+      back. Scope it to the names, never `:all:`.
+    - **Rehearse the resolution off-target for free**, from any host and any arch:
+      `PIP_EXTRA_INDEX_URL=… PIP_ONLY_BINARY=… pip install --dry-run --report r.json
+      --python-version 3.12 --implementation cp --only-binary=:all: --platform
+      manylinux_2_39_riscv64 --platform manylinux_2_38_riscv64 -r requirements.txt`,
+      then read `download_info.url` per entry in the report to see which index each
+      requirement came from. Read it for "is every requirement a wheel", not for the
+      exact versions: a pip running on an older interpreter than `--python-version`
+      backtracks past wheels whose `Requires-Python` excludes the *running* one (pip
+      24.0 on 3.11 walked numpy 2.5.3 → 2.4.3 with `--python-version 3.12`).

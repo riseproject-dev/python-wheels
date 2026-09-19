@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (380 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (382 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -340,6 +340,9 @@ The porting gotchas (380 of them) live in [`references/gotchas/`](gotchas/), spl
 - **397** — A CMake build that shells out to a bare `python3` for one vendored sub-extension
   silently builds it for the container's default interpreter, not the one the wheel is for
   (the coremltools/kmeans1d case).
+- **421** — `pierotofy/set-swap-space` is a no-op on the riscv64 runners (`/` is overlayfs, so
+  `swapon` fails and the action soft-passes): a heavy link gets 15GB of RAM and nothing behind
+  it.
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
@@ -477,6 +480,9 @@ The porting gotchas (380 of them) live in [`references/gotchas/`](gotchas/), spl
 - **399** — A dependency we already publish can satisfy a dependent's *runtime* link and still
   be unusable as its *build* input: a wheel ships `.so` files, not headers or a CMake package,
   and the upstream recipe's header source can be conda-forge (the cadquery-ocp/VTK case).
+- **422** — A build container you drive yourself needs `PIP_EXTRA_INDEX_URL` on the *build*
+  `podman run`, not only on the test one — otherwise its `pip install -r requirements.txt`
+  source-builds numpy and dies on Pillow (the paddlepaddle case).
 
 ### Build-tool drift & pins — [`gotchas/build-tool-drift-and-pins.md`](gotchas/build-tool-drift-and-pins.md)
 
