@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheel_linux` job of
+# https://github.com/scikit-image/scikit-image/blob/v0.26.0/.github/workflows/wheels-recipe.yaml
+name: Build scikit-image wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/scikit-image.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-scikit-image.yml'
+      - 'docs/packages/scikit-image.yaml'
+      - 'patches/scikit-image/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-scikit-image.yml'
+      - 'docs/packages/scikit-image.yaml'
+      - 'patches/scikit-image/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: scikit-image
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build scikit-image ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      SCIKIT_IMAGE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout scikit-image v${{ env.SCIKIT_IMAGE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: scikit-image/scikit-image
+          ref: v${{ env.SCIKIT_IMAGE_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply -v python-wheels/patches/scikit-image/${{ env.SCIKIT_IMAGE_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy/scipy have riscv64 wheels only on our registry; cython/meson-python/
+          # pythran build from sdist there, same as upstream's own build-time resolution.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy
+          # Upstream's default test-extras ("test", "optional") pulls in SimpleITK, which has
+          # no riscv64 wheel and fails to build from source; use upstream's own aarch64/
+          # win_arm64/musllinux override (gotcha 336) instead.
+          CIBW_TEST_EXTRAS: test,optional_free_threaded
+          # 0.26.0's own tests pass raw itertools.product() generators to parametrize();
+          # pytest 9.1 deprecates that and this project's filterwarnings=error turns it
+          # into a collection error (fixed upstream post-0.26.0). Cap at the ceiling
+          # 0.26.0 was actually tested against (gotcha 339).
+          CIBW_TEST_REQUIRES: pytest<9.1
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: scikit-image-${{ env.SCIKIT_IMAGE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish scikit-image ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: scikit-image-${{ matrix.version }}-*-manylinux_riscv64
