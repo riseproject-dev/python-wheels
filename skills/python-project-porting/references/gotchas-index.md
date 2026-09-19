@@ -357,6 +357,9 @@ The porting gotchas (374 of them) live in [`references/gotchas/`](gotchas/), spl
 - **390** — libev is one of the `-devel` packages that *is* in Rocky 10's riscv64 repos, so an
   upstream `yum install -y libev libev-devel` needs no replacement — but its header is
   `/usr/include/ev.h`.
+- **401** — Rocky 10 riscv64 ships OpenBLAS, LAPACK and FFTW but no SuiteSparse, GSL or
+  GLPK, and a numeric package's optional-extension set has to be cut along that line
+  (Alpine riscv64 has all of them, but ships no licence texts).
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
@@ -378,6 +381,9 @@ The porting gotchas (374 of them) live in [`references/gotchas/`](gotchas/), spl
 - **363** — A `libraries=[...]` entry can go missing from the link line with *no* error —
 - **368** — Linking several codecs against Rocky 10's system libraries instead of
 - **395** — When a project dlopen()s a differently-named shared library per major
+- **400** — A `setup.py` knob that feeds a downloaded dependency's *sources* into
+  `Extension(sources=...)` needs a path relative to the project root, so the tarball has
+  to be extracted inside the checkout, not into `/tmp`.
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 
