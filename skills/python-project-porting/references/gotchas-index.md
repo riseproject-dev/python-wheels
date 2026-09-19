@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (379 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (380 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -147,6 +147,11 @@ The porting gotchas (379 of them) live in [`references/gotchas/`](gotchas/), spl
   recording a conda blocker; `api.anaconda.org/package/conda-forge/<name>` answers subdir
   coverage per package, and micromamba itself does ship a riscv64 binary
   (the cadquery-ocp-novtk case).
+- **418** — An upstream wheel for another non-x86 architecture is only a precedent for the parts
+  of it that are actually that architecture: the released paddlepaddle `linux_aarch64` wheel
+  ships x86-64 `liblapack.so.3`/`libblas.so.3`/`libgfortran.so.3` beside a real aarch64
+  `libopenblas.so.0`, because one prebuilt tarball covers all of Linux — `file`/`readelf -h`
+  every `.so` in the sibling wheel before mirroring its build (the paddlepaddle case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
