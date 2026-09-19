@@ -1,0 +1,148 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/lincolnloop/pyuwsgi-wheels/blob/2.0.30.post1/.github/workflows/build.yml
+name: Build pyuwsgi wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyuwsgi.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyuwsgi.yml'
+      - 'docs/packages/pyuwsgi.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyuwsgi.yml'
+      - 'docs/packages/pyuwsgi.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyuwsgi
+      version: ${{ inputs.version }}
+
+  build_sdist:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyuwsgi ${{ matrix.version }} sdist
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      PYUWSGI_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyuwsgi-wheels ${{ env.PYUWSGI_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: lincolnloop/pyuwsgi-wheels
+          ref: ${{ env.PYUWSGI_VERSION }}
+          # The uwsgi submodule's HEAD is the revision `make sdist` packages.
+          submodules: recursive
+          persist-credentials: false
+
+      # `make sdist` repacks the uwsgi checkout with a patched setup.py that
+      # hardcodes the pyuwsgi version, so the wheel carries it verbatim.
+      - run: make sdist
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyuwsgi-${{ env.PYUWSGI_VERSION }}-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_sdist]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyuwsgi ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # No free-threaded build: upstream skips cp31?t too.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+
+    env:
+      PYUWSGI_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyuwsgi-wheels ${{ env.PYUWSGI_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: lincolnloop/pyuwsgi-wheels
+          ref: ${{ env.PYUWSGI_VERSION }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: pyuwsgi-${{ env.PYUWSGI_VERSION }}-sdist
+          path: dist
+
+      # pre_build.sh builds jansson and pcre2 into the build container, but it
+      # is not part of the sdist, so it has to be staged inside the extracted
+      # tree that cibuildwheel copies in as the project.
+      - id: sdist
+        run: |
+          tar xzf dist/*.tar.gz
+          cp pre_build.sh "pyuwsgi-$PYUWSGI_VERSION/"
+          chmod +x "pyuwsgi-$PYUWSGI_VERSION/pre_build.sh"
+          echo "dir=pyuwsgi-$PYUWSGI_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          package-dir: ./${{ steps.sdist.outputs.dir }}
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: UWSGI_PROFILE=pyuwsginossl
+          CIBW_BEFORE_BUILD_LINUX: "find . -name '*.o' -delete && ./pre_build.sh && dnf install -y zlib-devel"
+          CIBW_TEST_COMMAND: "pyuwsgi --help"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyuwsgi-${{ env.PYUWSGI_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyuwsgi ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pyuwsgi-${{ matrix.version }}-*-manylinux_riscv64
