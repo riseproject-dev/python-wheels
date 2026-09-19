@@ -19,6 +19,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
 - **202** — A monorepo's "regenerate deps from Bazel" helper may already tolerate a missing
 - **219** — GDAL's cmake build produces no `gdal-config` script — a second consumer of the
 - **233** — A package can have no Python build backend at all — the wheel comes from an
+- **382** — A CMake build that shells out to a bare `python3` for one vendored sub-extension
+  silently builds it for the container's default interpreter, not the one the wheel is for.
 
 ---
 
@@ -386,3 +388,25 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       sibling wheels and `entry_points.txt` shims for other targets; only
       `write_base_packages` (the base `pip` wheel) matters here, so the heredoc
       reproduces that function alone and ignores the rest of the tool.
+
+382. **A CMake build that shells out to a bare `python3` for one vendored sub-extension
+    silently builds it for the container's default interpreter, not the one the wheel is
+    for (the coremltools/kmeans1d case).** Driving the container yourself means every
+    per-interpreter loop iteration passes the interpreter explicitly — `-DPYTHON_EXECUTABLE`,
+    `$PYBIN/python3`, a venv — and that covers the targets CMake compiles itself. It does not
+    cover an `execute_process(COMMAND python3 setup.py build_ext --inplace WORKING_DIRECTORY
+    ${DEPS}/kmeans1d)` buried in the same `CMakeLists.txt`: that resolves `python3` from
+    `PATH` at *configure* time, so a `-DPYTHON_EXECUTABLE=/opt/python/cp312-cp312/bin/python3`
+    build happily ships `_core.cpython-311-<arch>-linux-gnu.so` inside a cp312 wheel. It is
+    invisible in a green build and a green import — the module is only imported by the
+    palettization code path, so the whole suite can pass — and `unzip -l <whl> | grep '\.so'`
+    is what catches it.
+    - **Upstream never sees it** because its own build script activates a conda env first,
+      making `python3` and `PYTHON_EXECUTABLE` the same binary. Reproducing that is one line
+      in the build script — `export PATH="$PYBIN:$PATH"` before `cmake` — and is strictly
+      safer than auditing every `execute_process` for the hardcoded name.
+    - **Grep for the bare interpreter name, not for `PYTHON_EXECUTABLE`.** `grep -rn
+      'COMMAND python' CMakeLists.txt cmake/` finds both this and the `python -m lib2to3`
+      style post-processing steps that protobuf codegen rules commonly carry; the ones that
+      use `${PYTHON_EXECUTABLE}` are already correct, and the ones that do not are the list
+      the PATH export exists to cover.

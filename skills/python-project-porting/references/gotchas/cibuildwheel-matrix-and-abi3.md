@@ -39,6 +39,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **360** — A `setup.py`'s own `bdist_wheel --plat-name` insertion can hardcode
   `manylinux1_` + `platform.machine()` regardless of the actual container libc, making
   musllinux unbuildable no matter how the CMake/C++ side is patched.
+- **381** — A `cpXY-none-<platform>` wheel is the third plat-name shape: `setup.py` declares
+  no `ext_modules` at all, and a sibling CMake build both compiles the extension modules and
+  hands `bdist_wheel` the tag.
 
 ---
 
@@ -759,3 +762,33 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
       keystone-engine never built musllinux either — see gotcha 34's "the default four"
       logic) is the lower-risk, upstream-faithful choice when this is caught on the first
       port rather than treated as a regression to fix.
+
+381. **A `cpXY-none-<platform>` wheel is the third plat-name shape: `setup.py` declares no
+    `ext_modules` at all, and a sibling CMake build both compiles the extension modules and
+    hands `bdist_wheel` the tag (the coremltools case; see `build-coremltools.yml`).**
+    Gotcha 27 reads `py3-none-<platform>` as "the platform half was forced by hand, nothing
+    is compiled"; gotcha 81 adds the ctypes-payload exception. Neither covers a wheel tagged
+    `cpXY-**none**-<platform>` — an interpreter tag with no ABI tag — which is what you get
+    when the compiled modules are real, per-interpreter pybind11 `.so`s, but setuptools never
+    sees them: coremltools' `setup.py` has zero `ext_modules` and ships
+    `libmilstoragepython.so`/`libmodelpackage.so` through `package_data` globs, while
+    `CMakeLists.txt` builds them and then invokes `setup.py bdist_wheel
+    --plat-name=<plat> --python-tag=cp${MAJOR}${MINOR}` itself. Read the interpreter half
+    before concluding anything from the missing ABI tag: `cpXY-none` means per-interpreter
+    content that setuptools was not told about, whereas gotcha 27's `py3-none` means no
+    per-interpreter content at all.
+    - **The architecture of the whole wheel is then one string in the build system, not a
+      `platform.machine()` call.** Gotcha 360's keystone-engine case at least interpolated
+      the real machine; coremltools' CMakeLists is `elseif(... MATCHES "Linux")
+      set(PLAT_NAME "manylinux1_x86_64")` — a literal, so a riscv64 build silently produces
+      an x86_64-tagged wheel that installs on the wrong machine. Grep the build system for
+      `plat-name`/`plat_name`, not just `setup.py`, whenever `setup.py` has no `ext_modules`
+      but the released wheels carry a platform tag.
+    - **Patch it to a libc-neutral `linux_<arch>` and let `auditwheel repair` retag**, the
+      same resolution gotcha 360 points at, and keep the existing x86_64 branch byte for
+      byte so the diff is upstreamable: `if(${CMAKE_SYSTEM_PROCESSOR} MATCHES "x86_64")` →
+      the old literal, `else()` → `linux_${CMAKE_SYSTEM_PROCESSOR}`.
+    - **cibuildwheel is the wrong tool for this shape.** It drives a PEP 517 build, which
+      here would run `setup.py` on its own and emit a `py3-none-any` wheel containing
+      riscv64 `.so`s — worse than a wrong platform tag. Drive the container yourself
+      (gotcha 15) and run the project's own `dist` target.
