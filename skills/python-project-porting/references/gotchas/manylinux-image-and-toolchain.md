@@ -56,6 +56,11 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **374** — `find_package(Python3 REQUIRED COMPONENTS Interpreter Development)` fails on
   manylinux's static-libpython CPython, on any architecture — only `Development.Module`
   is ever needed to build an extension module, not the `Development.Embed` half.
+- **390** — libev is one of the `-devel` packages that *is* in Rocky 10's riscv64 repos, so an
+  upstream `yum install -y libev libev-devel` needs no replacement — but its header is
+  `/usr/include/ev.h`.
+- **401** — Rocky 10 riscv64 ships OpenBLAS, LAPACK and FFTW but no SuiteSparse, GSL or
+  GLPK, and a numeric package's optional-extension set has to be cut along that line.
 
 ---
 
@@ -1028,3 +1033,60 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
     - **Reproduce locally first**: a plain `python -m build -w` with the flag on vs. off
       on `manylinux_2_39_aarch64` (gotcha 101) settles which of the two is responsible
       in minutes, and shows the exact deprecated symbols by name.
+
+390. **libev is one of the `-devel` packages that *is* in Rocky 10's riscv64 repos, so an
+    upstream `yum install -y libev libev-devel` needs no replacement — but its header is
+    `/usr/include/ev.h`, not `/usr/include/libev/ev.h` (completes gotchas 51/337).**
+    Gotcha 51's EPEL-is-absent rule makes every inherited `yum install` line suspect, and
+    libev is EPEL-only on older RHEL derivatives, so the reflex is to build it from source
+    in `CIBW_BEFORE_ALL_LINUX` (as upstream's own `multibuild` `config.sh` does, from a
+    2016 tarball whose `config.guess` predates riscv64 and would not configure). Checked
+    instead of guessed, `libev` 4.33 is in **baseos** and `libev-devel`/`libev-source` in
+    **crb**, which the manylinux image already has enabled — a plain `yum install -y libev
+    libev-devel` installs both on riscv64, so the upstream line ships unchanged.
+    - **Fedora/RHEL put libev's header at the include root**, while Debian/Ubuntu use
+      `/usr/include/libev/ev.h`; a project carrying a hardcoded include-path list (the
+      driver's `[tool.cassandra-driver] libev-includes`) only builds because the list also
+      contains a bare `/usr/include`. `rpm -ql libev-devel` settles it in one command and
+      `dnf -q list <pkg>` settles availability — for the whole question offline, gotcha
+      369's repodata fetch.
+    - **The image's licence texts are dropped by `tsflags=nodocs`**, so
+      `/usr/share/licenses/libev/LICENSE` is absent until `dnf -y reinstall
+      --setopt=tsflags= libev` restores it (gotcha 137); it is byte-identical to the 4.33
+      tarball's `LICENSE`, which is the text a vendored-licence patch should carry. libev
+      is dual `BSD-2-Clause OR GPL-2.0-or-later`, so taking the BSD option means shipping
+      the notice and *no* `gpl_sources` job.
+
+401. **Rocky 10 riscv64 ships OpenBLAS, LAPACK and FFTW but no SuiteSparse, GSL or GLPK —
+    for a numeric package whose extensions are one-per-library, that split *is* the
+    feature set, so settle it before writing any YAML (the cvxopt case).** Same shape as
+    gotcha 337's lexbor/re2/uchardet gap, on the numeric side of the catalogue:
+    `openblas`/`openblas-devel` (crb — and its `libopenblas.so.0` exports the LAPACK entry
+    points too, so `-lopenblas` covers both `CVXOPT_BLAS_LIB` and `CVXOPT_LAPACK_LIB`),
+    `lapack`/`lapack-devel` (crb), `flexiblas*` and the whole `fftw*` family (appstream)
+    are all present, while `suitesparse`, `gsl` and `glpk` are in none of
+    baseos/appstream/crb — and there is no `epel-release` for riscv64 to fall back on,
+    which is where a RHEL-family upstream normally gets GLPK (gotcha 51). A package like
+    cvxopt, which compiles a separate extension per optional library behind
+    `CVXOPT_BUILD_<LIB>` flags, therefore keeps upstream's `fftw` module and drops
+    `glpk`/`gsl`/`dsdp`, while its *mandatory* umfpack/cholmod/amd extensions have to come
+    from a from-source SuiteSparse (gotcha 400) rather than being droppable at all.
+    - **Check it without paying for QEMU `dnf`**: `dnf repoquery` inside the riscv64 image
+      is minutes per call under emulation (and `dnf provides` re-downloads filelists), so
+      pull the three repos' primary metadata over plain HTTPS instead (gotcha 369) and
+      grep the name list once.
+    - **The musl half of the same image pair is the *opposite* — Alpine 3.22 riscv64 has
+      all of them.** `apk search -x` inside `quay.io/pypa/musllinux_1_2_riscv64` finds
+      `openblas-dev`, `fftw-dev`, `lapack-dev` **and** `suitesparse-dev` (7.8.2),
+      `gsl-dev`, `glpk-dev`, so upstream's own `apk add` line needs no edit at all and the
+      musl wheel could carry more extensions than the glibc one. Two things still argue
+      against just enabling it: the per-libc feature asymmetry that creates within one
+      version, and the fact that **Alpine ships no `/usr/share/licenses` at all** — so
+      gotcha 137's "copy the licence the package installed" has no source on musl and
+      every bundled library's text would have to come from somewhere else.
+    - **A metapackage's licence text is not under its own name.** `fftw`'s COPYING is
+      installed by the subpackage auditwheel actually vendors —
+      `/usr/share/licenses/fftw-libs-double/COPYING`, not `/usr/share/licenses/fftw/` — so
+      a `cp` written from the `dnf install` name fails the whole `before-all`. `ls
+      /usr/share/licenses/` in the image once and copy from what is really there
+      (openblas does use the plain `/usr/share/licenses/openblas/LICENSE`).

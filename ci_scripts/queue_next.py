@@ -28,6 +28,7 @@ Usage:
 import argparse
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -35,7 +36,21 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 QUEUE_PATH = REPO_ROOT / ".queue.yml"
-CLAIMS_PATH = REPO_ROOT / ".git" / "pw-locks" / "queue-claims.json"
+
+
+def _git_common_dir():
+    # REPO_ROOT/.git is a *file* (not a directory) inside a git worktree, so
+    # the claims lock must live under the shared common dir instead.
+    result = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "rev-parse", "--git-common-dir"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return Path(result.stdout.strip())
+
+
+CLAIMS_PATH = _git_common_dir() / "pw-locks" / "queue-claims.json"
 
 BLOCK_PATTERNS = [
     r"\bdo not attempt\b",

@@ -254,6 +254,16 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
       shared `github-actions/update-doc` docs PR, which only `_publish-wheel.yml` pushes
       to, and only on a run whose ref was `main`. Read the `push` run's conclusion and
       the docs PR; the YAML on `main` lags the wheels by however long the maintainer takes.
+    - **The `.queue.yml` entry is the *other* direction of the same trap: its `status`/`notes`
+      are a pre-port research snapshot, not live state, so a fully published package can still
+      read `status: porting`, `pr: null` with a note asserting "no riscv64 on PyPI or
+      pypi.riseproject.dev".** Nothing rewrites an entry when the PR merges or the publish
+      lands — only an agent does, and one that stops early (or whose push got clobbered per
+      gotcha 370) leaves the entry contradicting `main` indefinitely. Never take the queue note
+      as the current state of a port: settle it against `main` and the registry with 173's three
+      calls first. py-ed25519-zebra-bindings 1.3.0 was already merged (#1241), released and live
+      on the registry for twelve days while its entry still said `porting`; the whole "port"
+      reduced to verifying the four wheels and correcting the entry.
 
 208. **A fresh `main` publish run finishing green does not mean
     `pypi.riseproject.dev/simple/<pkg>/` is live yet — it can 404 for a while first.**

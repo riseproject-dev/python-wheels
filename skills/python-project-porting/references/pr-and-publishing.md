@@ -31,6 +31,14 @@ mode that makes sense):
 Needs `project` scope on the gh token (`gh auth refresh -h github.com -s project`) on top of
 `repo`/`workflow`. PR #390 <-> issue #405 is the reference pair to diff a new one against.
 
+## PR title
+
+Exactly `<pkg>: Add version <ver>` — matches the existing merged-PR convention (e.g. "iminuit:
+Add version 2.33.0", "statsmodels: Add version 0.15.0"). Use the wheel version string as it
+appears in `docs/packages/<pkg>.yaml` (so `+cpu`/local-version suffixes are kept, e.g. "vllm:
+Add version 0.29.0+cpu"). No other wording ("add riscv64 wheel build", "build N wheels for
+riscv64", etc.) — set/fix the title at creation time, not just the body.
+
 ## PR description template
 
 Use this verbatim. Median merged-PR description is 358 words; this should land at 100-200.
