@@ -118,6 +118,14 @@ jobs:
       - name: pytest tests/unit
         # The checkout's own pinecone/ source tree would otherwise shadow the
         # installed wheel on sys.path (no compiled pinecone/_grpc there) — gotcha 25.
+        # 10.0.0 added source-scanning meta tests (test_path_param_encoding_417.py,
+        # test_orphaned_helpers.py, test_declared_dependencies.py, test_api_coverage.py,
+        # test_legacy_index_translation.py::TestPurity) that read pinecone/<file>.py via
+        # Path(__file__).resolve().parents[N] — independent of sys.path, so simply
+        # renaming pinecone/ away (the old fix) breaks them with FileNotFoundError.
+        # Overwriting pinecone/ with the *installed* (compiled) copy satisfies both:
+        # same relative paths for the scanners, the real _grpc extension for imports —
+        # gotcha 39's dulwich fix, applied to a wheel install instead of build_ext -i.
         #
         # test_async_transport_calls_module_level_compute_backoff deselected: its
         # asyncio.get_event_loop() call raises "There is no current event loop" once
@@ -136,7 +144,9 @@ jobs:
         # runner (gotcha 176) -- raised via `-o` rather than dropping the ini file.
         run: |
           set -euo pipefail
-          mv pinecone pinecone-src
+          site_dir=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+          rm -rf pinecone
+          cp -a "$site_dir/pinecone" pinecone
           python -m pytest tests/unit -v -o timeout=60 \
             --deselect tests/unit/_internal/test_retry_transport.py::test_async_transport_calls_module_level_compute_backoff \
             --deselect "tests/unit/_internal/test_bulk_upsert_storm.py::test_query_namespaces_bounded_fan_out_under_quota[asyncio]"
