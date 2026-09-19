@@ -427,6 +427,9 @@ The porting gotchas (374 of them) live in [`references/gotchas/`](gotchas/), spl
   keeps resolving to a newer, wheel-less release.
 - **375** — `uv` can reject a real `abi3` wheel resolved by name from an index as "has no
   usable wheels" even though the identical wheel installs fine as a local file.
+- **399** — A dependency we already publish can satisfy a dependent's *runtime* link and still
+  be unusable as its *build* input: a wheel ships `.so` files, not headers or a CMake package,
+  and the upstream recipe's header source can be conda-forge (the cadquery-ocp/VTK case).
 
 ### Build-tool drift & pins — [`gotchas/build-tool-drift-and-pins.md`](gotchas/build-tool-drift-and-pins.md)
 
