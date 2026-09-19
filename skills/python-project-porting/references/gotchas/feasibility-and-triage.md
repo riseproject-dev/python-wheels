@@ -88,6 +88,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **407** — An upstream recipe can stop being conda-based between releases, so read it at the
   *newest* tag before pricing a port or recording a conda blocker (the cadquery-ocp-novtk
   case).
+- **418** — An upstream wheel for *another* non-x86 architecture is only a precedent for the
+  parts of it that are actually that architecture — `readelf -h` every `.so` in it (the
+  paddlepaddle case).
 
 ---
 
@@ -2280,3 +2283,35 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       read them out of the tag the job checks out instead of hardcoding them, and assert
       that `WHEEL` equals the version in `docs/packages/<pkg>.yaml` so a bump that moves
       them fails loudly.
+
+418. **An upstream wheel for *another* non-x86 architecture is only a precedent for the
+    parts of it that are actually that architecture — `readelf -h` every `.so` in it (the
+    paddlepaddle case).** Gotcha 186 warns that a vendor publishing one *artifact shape*
+    says nothing about another; this is the sharper version, where the vendor publishes
+    the right shape for the wrong ISA and ships it anyway. Paddle's CMake knows four
+    non-x86 architectures (`WITH_ARM`/`WITH_SW`/`WITH_MIPS`/`WITH_LOONGARCH`), each
+    turning off Xbyak, MKL and AVX, and upstream publishes `linux_aarch64` wheels off the
+    first — which reads as "the non-x86 CPU path is maintained, mirror it". It mostly is.
+    But `cmake/external/lapack.cmake` takes **one prebuilt tarball for the whole of
+    Linux** (`lapack_lnx_v3.10.0.20210628.tar.gz`, x86-64 only — the comment beside it
+    says "lapack need fortran compiler which many machines don't have"), and `setup.py`
+    copies `LAPACK_LIB`/`BLAS_LIB`/`GFORTRAN_LIB`/`GNU_RT_LIB_1` into `paddle/libs/`
+    unconditionally. So the released
+    `paddlepaddle-3.3.1-cp312-cp312-linux_aarch64.whl` carries x86-64
+    `liblapack.so.3`, `libblas.so.3`, `libgfortran.so.3` and `libquadmath.so.0` beside a
+    genuinely aarch64 `libopenblas.so.0`.
+    - **The check is two commands and needs no build.** Download the sibling-arch wheel,
+      then `unzip -q -j <whl> '<pkg>/libs/*' -d x && file x/*` (or `readelf -h`) — a
+      mismatched `Machine:` line names every payload whose build step is
+      architecture-blind. Do it before writing the workflow: it is the difference between
+      "mirror upstream" and "mirror upstream and fix what it got wrong", and it is the
+      only way to find these, because nothing links against them (Paddle `dlopen`s
+      LAPACK through `phi/backends/dynload/lapack.cc`, so the build is green and the
+      failure is a runtime `paddle.linalg` error).
+    - **A prebuilt-for-one-arch dependency is not automatically gotcha 35's wall.** Ask
+      what it would take to *produce* the missing artifact. Here it is Reference-LAPACK
+      v3.10.0 — the same release the tarball packages — built by its own CMake against
+      the manylinux image's `gfortran`, i.e. a 30-line `ExternalProject_Add`, not gotcha
+      186's "authoring a new build system". Gate the source build on the new arch flag so
+      x86-64 and macOS keep the tarball, and say in the patch that the fix would repair
+      the sibling arch too.
