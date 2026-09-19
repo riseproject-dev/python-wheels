@@ -1,0 +1,219 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `generate-license` and `build-manylinux-*` jobs of
+# https://github.com/apache/datafusion-python/blob/54.0.0/.github/workflows/build.yml
+# and on https://github.com/apache/datafusion-python/blob/54.0.0/.github/workflows/test.yml
+name: Build datafusion wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/datafusion.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-datafusion.yml'
+      - 'docs/packages/datafusion.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-datafusion.yml'
+      - 'docs/packages/datafusion.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: datafusion
+      version: ${{ inputs.version }}
+
+  # The wheel's LICENSE.txt is not plain Apache-2.0 but an aggregated third-party
+  # notice upstream generates from cargo-license before every wheel build.
+  generate_license:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Generate datafusion ${{ matrix.version }} LICENSE.txt
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      DATAFUSION_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout datafusion-python ${{ env.DATAFUSION_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: apache/datafusion-python
+          ref: ${{ env.DATAFUSION_VERSION }}
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Generate LICENSE.txt
+        run: |
+          set -euo pipefail
+          cargo install cargo-license
+          python3 dev/create_license.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: datafusion-${{ env.DATAFUSION_VERSION }}-license
+          path: LICENSE.txt
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, generate_license]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build datafusion ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # `tag` is a real matrix dimension, not an include-only key: two includes
+        # that add the same new key collapse into one job (gotcha 383).
+        tag: [cp310-abi3, cp314t]
+        include:
+          # crates/core enables `abi3`/`abi3-py310` by default, so one wheel covers
+          # every GIL-ful interpreter; the free-threaded build drops the default
+          # features and puts mimalloc back, exactly as upstream's build-wheel
+          # action does. cp313t is dropped: the riscv64 manylinux image ships none.
+          - tag: cp310-abi3
+            # pyarrow is a hard runtime dependency and our registry publishes no
+            # riscv64 build below cp312, so the abi3 wheel is built on cp312 and
+            # re-tested on cp313/cp314 via find_compatible_wheel.
+            build: >-
+              cp312-manylinux_riscv64 cp313-manylinux_riscv64
+              cp314-manylinux_riscv64
+            features: --features protoc,substrait
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+            features: --no-default-features --features mimalloc,protoc,substrait
+
+    env:
+      DATAFUSION_VERSION: ${{ matrix.version }}
+
+    steps:
+      # Checked out at the workspace root: crates/core is a member of the
+      # datafusion-python Cargo workspace and builds against crates/util. The
+      # submodules carry the CSV/Avro/Parquet fixtures the test suite reads.
+      - name: Checkout datafusion-python ${{ env.DATAFUSION_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: apache/datafusion-python
+          ref: ${{ env.DATAFUSION_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          sparse-checkout: patches/datafusion
+          persist-credentials: false
+
+      - name: Apply datafusion patches
+        run: git apply -v python-wheels/patches/datafusion/${{ env.DATAFUSION_VERSION }}/0001*.patch
+
+      - run: rm LICENSE.txt
+
+      - name: Download generated LICENSE.txt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: datafusion-${{ env.DATAFUSION_VERSION }}-license
+          path: .
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+
+      # Same OOM guard build-deltalake.yml/build-pylance.yml need on these runners
+      # for a comparably sized Rust workspace.
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 16
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          # The arguments upstream's build-wheel action computes for a manylinux
+          # job (`protoc` vendors and compiles protoc, which the image has no
+          # package for), less its `--interpreter` and with `--release` spelled the
+          # way the PEP 517 hook accepts it. Upstream's thin LTO is kept;
+          # codegen-units goes 2 -> 16 for this workspace's size on the 4-core
+          # riscv64 runners (same tradeoff as build-pylance.yml).
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            MATURIN_PEP517_ARGS="--profile release --strip ${{ matrix.features }}"
+            CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+            CARGO_BUILD_JOBS=2
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Without this pip prefers PyPI's newer releases, which have no riscv64
+          # wheel, and source-builds them in the container.
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=pyarrow,numpy,cffi,psutil
+          # Upstream's dev group minus nanoarrow and arro3-core (see the patch),
+          # plus cffi and psutil, which let test_dataframe.py and the file-handle
+          # test collect instead of skipping.
+          CIBW_TEST_REQUIRES: pytest pytest-asyncio pytest-timeout numpy cffi psutil
+          # testpaths covers python/tests and the `--doctest-modules` sweep of
+          # python/datafusion; the fixtures are read relative to the project root.
+          CIBW_TEST_SOURCES: >-
+            pyproject.toml conftest.py python/tests python/datafusion
+            testing parquet
+          CIBW_TEST_COMMAND: python -m pytest -v --import-mode=importlib
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: datafusion-${{ env.DATAFUSION_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish datafusion ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: datafusion-${{ matrix.version }}-*-manylinux_riscv64
