@@ -1,0 +1,187 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# This workflow is based on: https://github.com/apple/coremltools/blob/main/scripts/build.sh
+name: Build coremltools wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/coremltools.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-coremltools.yml'
+      - 'docs/packages/coremltools.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-coremltools.yml'
+      - 'docs/packages/coremltools.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: coremltools
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build coremltools ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream stops at 3.13, and the vendored pybind11 2.13.1 predates 3.14.
+        python: [cp312-cp312, cp313-cp313]
+
+    env:
+      COREMLTOOLS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout apple/coremltools ${{ env.COREMLTOOLS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: apple/coremltools
+          ref: ${{ env.COREMLTOOLS_VERSION }}
+          path: coremltools
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch coremltools source
+        run: git -C coremltools apply ../python-wheels/patches/coremltools/${{ env.COREMLTOOLS_VERSION }}/00*.patch
+
+      - name: Build the C++ libraries and the wheel
+        run: |
+          mkdir -p output "$HOME/.cache/coremltools-ccache"
+          docker run -i --rm \
+            -v "$PWD/coremltools:/coremltools" \
+            -v "$PWD/output:/output" \
+            -v "$HOME/.cache/coremltools-ccache:/ccache" \
+            -e CCACHE_DIR=/ccache \
+            -e COREMLTOOLS_VERSION \
+            "$MANYLINUX_RISCV64_IMAGE" bash -s <<'COREMLTOOLS_BUILD_EOF'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+
+          COREMLTOOLS_VERSION="${COREMLTOOLS_VERSION:?must be set, e.g. 9.0}"
+          PYBIN=/opt/python/${{ matrix.python }}/bin
+          # CMakeLists.txt builds the vendored kmeans1d with a bare `python3`, so the
+          # interpreter this wheel is for has to be the one that wins on PATH.
+          export PATH="$PYBIN:$PATH"
+          # The vendored protobuf 3.19 declares cmake_minimum_required(VERSION 3.0.0).
+          export CMAKE_POLICY_VERSION_MINIMUM=3.5
+
+          dnf install -y --setopt=install_weak_deps=False libuuid-devel
+
+          python3 -m pip install -U setuptools wheel auditwheel
+
+          # Upstream's NOTICE.txt covers only kmeans1d; the rest of deps/ is compiled
+          # into the shipped .so files, and auditwheel grafts in libuuid.
+          cp /coremltools/deps/protobuf/LICENSE /coremltools/LICENSE.protobuf
+          cp /coremltools/deps/pybind11/LICENSE /coremltools/LICENSE.pybind11
+          cp /coremltools/deps/nlohmann/LICENSE.MIT /coremltools/LICENSE.nlohmann-json
+          cp /coremltools/deps/FP16/LICENSE /coremltools/LICENSE.FP16
+          uuid_pkg=$(rpm -qf --qf '%{NAME}\n' "$(ldconfig -p | awk '/libuuid\.so\.1 /{print $NF; exit}')")
+          dnf reinstall -y --setopt=tsflags= "$uuid_pkg" || true
+          cat /usr/share/licenses/"$uuid_pkg"/* > /coremltools/LICENSE.libuuid 2>/dev/null \
+            || rpm -q --qf '%{NAME} %{VERSION}: %{LICENSE}\n' "$uuid_pkg" > /coremltools/LICENSE.libuuid
+
+          CCACHE_ARGS=""
+          command -v ccache >/dev/null 2>&1 && \
+            CCACHE_ARGS="-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
+
+          cmake -S /coremltools -B /tmp/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPYTHON_EXECUTABLE:FILEPATH="$PYBIN/python3" \
+            -DOVERWRITE_PB_SOURCE=0 \
+            ${CCACHE_ARGS}
+          cmake --build /tmp/build -j "$(nproc)"
+          cmake --build /tmp/build --target dist
+
+          auditwheel repair --strip /tmp/build/dist/coremltools-*.whl -w /output
+          ls -la /output
+          COREMLTOOLS_BUILD_EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: coremltools-${{ env.COREMLTOOLS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: output/*.whl
+          if-no-files-found: error
+
+      - name: Test coremltools wheel
+        run: |
+          docker run -i --rm \
+            -v "$PWD/output:/output" \
+            -e PIP_EXTRA_INDEX_URL \
+            -e PIP_ONLY_BINARY=numpy,pillow \
+            "$MANYLINUX_RISCV64_IMAGE" bash -s <<'COREMLTOOLS_TEST_EOF'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+
+          PYBIN=/opt/python/${{ matrix.python }}/bin
+
+          "$PYBIN/pip" install -U pytest pytest-timeout parameterized pillow
+          "$PYBIN/pip" install /output/coremltools-*.whl
+
+          "$PYBIN/python3" -c "
+          from coremltools import libmilstoragepython, libmodelpackage
+          assert libmilstoragepython.__file__.endswith('.so'), libmilstoragepython.__file__
+          assert libmodelpackage.__file__.endswith('.so'), libmodelpackage.__file__
+          "
+
+          # Upstream's scripts/test.sh runs the suite out of the installed wheel with
+          # --pyargs, from a directory that is not the checkout. torch, tensorflow,
+          # scikit-learn and xgboost have no riscv64 wheels, so this is the subset of
+          # upstream's coremltools.test / mil jobs that collects without them; the two
+          # -k exclusions are tests that import torch inside the test body.
+          mkdir -p /tmp/testrun && cd /tmp/testrun
+          "$PYBIN/python3" -m pytest -v -ra --timeout=600 \
+            -k "not (TestApiVisibilities and test_optimize) and not test_model_save_no_extension" \
+            --pyargs \
+            coremltools.test.api \
+            coremltools.test.blob \
+            coremltools.test.modelpackage.test_modelpackage \
+            coremltools.converters.mil.backend \
+            coremltools.converters.mil.mil.tests.test_types
+          COREMLTOOLS_TEST_EOF
+
+  publish:
+    name: Publish coremltools ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: coremltools-${{ matrix.version }}-*-manylinux_riscv64
