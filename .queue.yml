@@ -726,7 +726,7 @@ packages:
   repo: https://code.qt.io/cgit/pyside/pyside-setup.git/
   status: queued
   pr: null
-  notes: '2 Linux wheels upstream (abi: cp310); no riscv64 on PyPI or pypi.riseproject.dev. Depends on shiboken6 being available first (runtime requires-dist, and pyside6-essentials own build self-generates its bindings against an installed shiboken6-generator the same way shiboken6 does). shiboken6 6.11.2 riscv64 port is in progress (PR #1696, see that entry) - not merged/published yet. Key finding for whoever picks up pyside6-essentials/pyside6/pyside6-addons: the libclang dependency is NOT libclang-scale (unlike build-libclang.yml, PR #866, ~10h from-source LLVM/Clang compile) - Rocky 10 riscv64s AppStream repo (manylinux_2_39_riscv64 base) ships prebuilt clang-devel/llvm-devel 21.1.8 (ClangConfig.cmake/LLVMConfig.cmake/libclang.so/headers) AND qt6-qtbase-devel (Qt6Config.cmake/qtpaths6) - both installable via a plain `dnf install`, confirmed against the real repodata at dl.rockylinux.org. pyside6-essentials/pyside6/pyside6-addons will need the FULL Qt6 module set they bind (qt6-qt5compat, qt6-qtdeclarative, qt6-qtsvg, etc. - check which are in AppStream vs CRB-only per module before assuming coverage), not just qtbase, and will additionally need shiboken6-generator installed (build it the same way build-shiboken6.yml does, or wait for it to be published once shiboken6 is scoped in). Do not attempt until shiboken6 is merged and published.'
+  notes: '2 Linux wheels upstream (abi: cp310); no riscv64 on PyPI or pypi.riseproject.dev. Depends on shiboken6 being available first (runtime requires-dist, and pyside6-essentials own build self-generates its bindings against an installed shiboken6-generator the same way shiboken6 does). UPDATE: shiboken6 6.11.2 riscv64 is now merged and published (PR #1696, live on pypi.riseproject.dev) - this entry is UNBLOCKED. This is the actual base of the pyside6 family dependency chain (pyside6 and pyside6-addons are both blocked-on-dependency on this entry landing first; see their notes and gotchas 382/383/384 in skills/python-project-porting/references/gotchas/feasibility-and-triage.md before starting). Key findings for whoever picks this up: (1) the libclang dependency is NOT libclang-scale (unlike build-libclang.yml, PR #866, ~10h from-source LLVM/Clang compile) - Rocky 10 riscv64s AppStream repo (manylinux_2_39_riscv64 base) ships prebuilt clang-devel/llvm-devel 21.1.8 and qt6-qtbase-devel, both installable via plain `dnf install` (confirmed against real repodata, and in-image dnf/repoquery DOES work through the egress proxy with --network host + proxy env vars + importing the proxy CA via update-ca-trust, contrary to what two earlier queue entries assumed - see gotcha 384). (2) At tag 6.11.2, pyside-setups own build_scripts/config.py only allows four --build-type values (all/shiboken6/shiboken6-generator/pyside6) - there is NO separate essentials/addons build target; a single `--build-type=pyside6 --standalone` build produces one tree, and the distinct wheels (PySide6_Essentials, PySide6_Addons, PySide6 meta-wheel, PySide6_Examples) are carved out AFTER the build by the repos own create_wheels.py. The right shape is ONE port/workflow owning that single build + create_wheels.py, then publishing pyside6-essentials + pyside6-addons + pyside6 as separate wheel artifacts from it via disjoint _publish-wheel.yml artifact-patterns (gotcha 380/382) - not three independent per-package workflows. (3) 9 of 41 addon modules (QtWebEngine*, QtPdf*, QtGraphs*, QtHttpServer, QtWebView*) have no Qt6 provider anywhere in the riscv64/x86_64/aarch64 image repos (RHEL 10 ships no Qt6 WebEngine, no chromium, no gn) - the other 32 are covered by prebuilt Rocky 10 riscv64 AppStream -devel packages; a first port likely ships the reduced 32/41 module set and documents the WebEngine gap. (4) IMPORTANT, not previously flagged: the manylinux_2_39_riscv64 image ships Qt 6.10.1 via dnf (confirmed via repoquery over all ~100 qt6-* packages; this repos own published shiboken6 wheel is already tagged .../shiboken6-6.11.2-6.10.1-.../), not 6.11.x - the resulting wheels would expose a Qt 6.10 API surface under a 6.11.2 version number (e.g. QtCanvasPainter, new in 6.11, has no provider). Not a hard blocker (no minimum Qt version is asserted at configure time) but must be called out explicitly in the PR description, same as any other upstream-vs-build-environment version skew in this repo. Will additionally need shiboken6-generator installed (build it the same way build-shiboken6.yml does).'
 - pkg: pycocotools
   version: 2.0.11
   home: https://github.com/ppwwyyxx/cocoapi
@@ -872,9 +872,71 @@ packages:
   version: 6.11.2
   home: https://pyside.org
   repo: https://code.qt.io/cgit/pyside/pyside-setup.git/
-  status: queued
+  status: blocked-on-dependency
   pr: null
-  notes: '2 Linux wheels upstream (abi: cp310); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: '2 Linux wheels upstream of 5 total (abi: cp310-abi3; manylinux_2_34_x86_64 + manylinux_2_39_aarch64,
+    0.57 MB each); no riscv64 on PyPI or pypi.riseproject.dev (checked directly: /simple/pyside6/,
+    /simple/pyside6-essentials/ and /simple/pyside6-addons/ all 404; only shiboken6 6.11.2
+    riscv64 is live). 6.11.2 re-confirmed latest 2026-09-19, both as PyPI info.version and
+    as the newest tag on code.qt.io/pyside/pyside-setup (v6.11.2; v6.11.1, v6.10.3 behind it).
+    Blocked on BOTH pyside6-essentials and pyside6-addons - pyside6 is the tip of the chain,
+    not its base. requires_dist off PyPI: shiboken6==6.11.2 (published, PR #1696) +
+    PySide6_Essentials==6.11.2 + PySide6_Addons==6.11.2, so the critical path is shiboken6 ->
+    pyside6-essentials -> pyside6-addons -> pyside6, and a green pyside6 build today would ship
+    a wheel whose two exact pins are unsatisfiable on riscv64 from either index - the same
+    consumer-side dead end pyqt5/pyqt5-qt5 is parked for. See the pyside6-addons entry
+    (blocked-on-dependency) and gotcha 382 for the shared structural finding: there is no
+    per-distribution build target (build_scripts/config.py:get_allowed_top_level_build_values()
+    at 6.11.2 allows only all, shiboken6, shiboken6-generator, pyside6), the distributions are
+    carved out after one full build by the root-level create_wheels.py, and the right shape is
+    ONE port owned by whoever takes pyside6-essentials that runs `--build-type=pyside6
+    --standalone` once and publishes essentials + addons + this meta-wheel from that single
+    build (gotcha 380 for the disjoint artifact-pattern publish). Deliberately NOT folded into
+    that port here: two product decisions are still open (the reduced 32/41 addons module set,
+    and the Qt minor skew below), and neither is mine to settle unilaterally. What this entry
+    adds beyond the addons one, recorded as gotcha 383: (1) the pyside6 wheel carries ZERO
+    compiled content - the real manylinux_2_39_aarch64 wheel is 67 entries / 4.9 MB uncompressed
+    and holds no .so at all, just 59 generated Qt*.pyi stubs plus PySide6/__init__.py, _config.py,
+    _git_pyside_version.py, py.typed and dist-info. Its cp310-abi3-manylinux tag comes from a
+    deliberately fake extension: wheel_artifacts/setup.py.base declares
+    ext_modules=[Extension("PySide6/QtCore", [], py_limited_api=True)] with no sources beside a
+    no-op build_ext Command, and says in a comment that it exists only to make setuptools think
+    there are extension modules (with py_limited_api/plat_name set in
+    wheel_artifacts/pyproject.toml.base). (2) That does NOT make it a gotcha-27 "no port needed"
+    case like watchdog: pyside6 publishes no sdist on any version, so riscv64 pip has nothing to
+    fall back to and the wheel genuinely is required - just last. (3) It must be cut from the
+    SAME build tree as its siblings, not merely a later one: create_wheels.py:get_simple_manifest
+    gives it the one-line manifest `prune PySide6`, which with include_package_data=True keeps
+    only the top-level files of build/<env>a/package_for_wheels/PySide6 (dropping Qt/, scripts/,
+    support/), and the 59 stubs it keeps span essentials modules, addons modules AND the nine
+    WebEngine-family modules whose .so lives elsewhere - so an umbrella built from a different
+    run than the published siblings can advertise stubs for modules those wheels do not contain.
+    (4) New and unweighed by any entry so far: the build image ships Qt 6.10.1, NOT 6.11.x.
+    `dnf repoquery qt6*` inside quay.io/pypa/manylinux_2_39_riscv64 (Rocky Linux 10.2) reports
+    6.10.1 for all ~100 qt6-* packages across appstream/crb, and this repo''s own published
+    shiboken6-6.11.2-6.10.1-cp37-abi3-manylinux_2_39_riscv64.whl already encodes it (that 6.10.1
+    is a wheel build tag carrying the Qt version). Not a hard stop -
+    sources/pyside6/cmake/PySideSetup.cmake marks only Core/Gui/Widgets/PrintSupport/Sql/Network/
+    Test/Concurrent REQUIRED (all in qt6-qtbase*, present), leaves the rest OPTIONAL_COMPONENTS,
+    and derives PYSIDE_QT_VERSION from the discovered Qt6Core_VERSION instead of asserting a
+    minimum, so a 6.11.2-against-6.10.1 configure succeeds and shiboken''s typesystem `since=`
+    gating drops the newer API - but the published wheels would then expose a Qt 6.10 API surface
+    under a 6.11.2 version number, and QtCanvasPainter (new in 6.11, present in upstream''s stub
+    set) has no provider in the image at all. That is a second divergence from upstream stacked on
+    top of the missing-WebEngine one and should be decided explicitly by the combined port; the
+    pyside6-essentials entry does not mention it yet. Also corrected, as gotcha 384: in-image dnf
+    is NOT blocked by a TLS-intercepting egress proxy (as the pyqt5-qt5 and pyside6-addons entries
+    record) - `docker run --network host`, passing the proxy env vars through, plus copying the
+    proxy CA into /etc/pki/ca-trust/source/anchors and running update-ca-trust extract, makes
+    dnf/repoquery work normally inside the riscv64 image; that is how the Qt 6.10.1 version fact
+    above was obtained. Local validation reached: manylinux_2_39_riscv64 image pulled and the
+    full qt6-*/clang-devel/llvm-devel inventory enumerated by repoquery in-image; NO build was
+    attempted, because there is no pyside6-only thing to build (see above) and a full PySide6
+    bindings build needs shiboken6-generator compiled first, which is many hours under QEMU - the
+    confirmatory `dnf install` of the 30-package Qt6 -devel set was still running after ~15 min on
+    a contended host when this was recorded. No worktree, branch, PR or workflow created; no
+    docs/packages/pyside6.yaml added. Re-queue only once pyside6-essentials and pyside6-addons
+    riscv64 wheels are published, or fold this entry into that combined port.'
 - pkg: vtk
   version: 9.7.0
   home: https://vtk.org
@@ -1230,9 +1292,9 @@ packages:
   version: 54.0.0
   home: https://datafusion.apache.org/python
   repo: https://github.com/apache/datafusion-python
-  status: porting
-  pr: null
-  notes: '4 Linux wheels upstream (abi: cp310,cp314); no riscv64 on PyPI or pypi.riseproject.dev. Maturin/PyO3 build (crates/core, workspace also has crates/util), MSRV rust 1.88, no repo-root rust-toolchain.toml (stable channel via maturin-action, no nightly pin). crates/core/Cargo.toml: `default = ["mimalloc", "abi3"]` with `abi3 = ["pyo3/abi3", "pyo3/abi3-py310"]`, so a plain build already yields the same cp310-abi3 tag PyPI ships; upstream''s own build-wheel composite action builds a second, free-threaded cp314-cp314t wheel per interpreter with `--no-default-features --features mimalloc,protoc,substrait --interpreter python3.14t`. `protoc` (`datafusion-substrait/protoc`, vendors+compiles protoc from source) is required on manylinux since the image has no system protoc, same as upstream''s own manylinux jobs (2_28) pass. `cargo metadata --filter-platform riscv64gc-unknown-linux-gnu` resolves cleanly (365 crates for the abi3 feature set, including ring/rustls/mimalloc/zstd-sys, none arch-gated against riscv64). quay.io/pypa/ manylinux_2_39_riscv64 (confirmed via `docker run --platform linux/riscv64`) ships /opt/python/cp310-cp310 through cp314-cp314t, so both wheel legs build in-container with no extra interpreter provisioning; astral-sh/python-build-standalone also publishes riscv64 cp314/cp314t builds for the host-side test venv (uv). Wheel''s LICENSE.txt is not the plain Apache-2.0 text but an aggregated third-party notice from upstream''s own dev/create_license.py + cargo-license (verified: 74614 bytes / 2537 lines in the real PyPI wheel) - replicated with a `generate-license` job on ubuntu-latest (cargo-license needs no riscv64-specific info) feeding the riscv64 build job via artifact, matching upstream''s own job split. Test suite: python/tests + python/datafusion doctests (pyproject `--doctest-modules`), needs the arrow-testing/parquet-testing git submodules for fixture data (`submodules: true` on checkout) and MUST invoke the bare `pytest` console script, never `python -m pytest` - `-m` inserts cwd onto sys.path and shadows the installed wheel with the source checkout''s python/datafusion (no compiled _internal there), whereas invoking `pytest` directly plus `--import-mode=importlib` (upstream''s own flag) resolves `datafusion` from site-packages; verified end-to-end locally against the real PyPI cp310-abi3 macosx_11_0_arm64 wheel with submodules checked out: 1328 passed, 8 skipped in 3.56s, all skips pre-existing optional-dependency guards (pandas, polars, pyarrow.cffi/cffi, psutil) plus one from our own patch. One patch needed: python/tests/test_expr.py imports `arro3.core` and `nanoarrow` (each a separate maturin/C-extension project, no riscv64 wheel published by either) at module scope for a single test (test_scalar_conversion); made lazy via `pytest.importorskip` inside that test so the other ~185 tests in the file still collect (Upstream-Status: Inappropriate). Only local gap found: a `cargo check --target riscv64gc-unknown-linux-gnu` cross-compile rehearsal from an arm64 Debian trixie container needs `libc6-dev-riscv64-cross` (not just `gcc-riscv64-linux-gnu`) for the sysroot headers zstd-sys/lz4-sys etc. need - a local rehearsal-only gotcha, irrelevant to the real riscv64 runner which compiles natively. Worktree/branch created at .claude/worktrees/datafusion.'
+  status: in-review
+  pr: https://github.com/riseproject-dev/python-wheels/pull/2108
+  notes: 'PR https://github.com/riseproject-dev/python-wheels/pull/2108 (branch port/datafusion). build-datafusion.yml mirrors upstream build.yml''s generate-license + build-manylinux-* jobs: a generate_license job on ubuntu-latest runs dev/create_license.py through cargo-license and hands LICENSE.txt to the riscv64 job as an artifact (the wheel''s LICENSE.txt is the aggregated third-party notice, not plain Apache-2.0), then two cibuildwheel legs - cp310-abi3 (--features protoc,substrait) and cp314t (--no-default-features --features mimalloc,protoc,substrait) - exactly upstream''s build-wheel composite action minus its --interpreter. protoc is the vendored protobuf-src path upstream uses on manylinux; the image has cmake 4.4.3 but no protoc package. One patch (Upstream-Status: Inappropriate): python/tests/test_expr.py''s module-scope `import arro3.core` / `import nanoarrow` made lazy via pytest.importorskip, because nanoarrow ships no riscv64 wheel anywhere and the import otherwise kills collection of ~185 tests in that file (arro3-core 0.8.x IS on pypi.riseproject.dev, nanoarrow is not). TWO REAL BUGS FOUND AND FIXED WHILE PORTING, both recorded in the skill: (1) gotcha 383 - a two-leg matrix whose legs come only from `include:` entries introducing the same new keys collapses to ONE job, silently dropping the abi3 leg; primp 2.0.0/2.0.1 and arro3-core 0.8.2 each published only their cp314t wheel this way, green (run 35310255186 has two build jobs, both cp314t). This workflow makes `tag` a real matrix dimension instead. (2) `maturin pep517 build-wheel` has no `--release` flag at all, so upstream''s `maturin build --release` must be translated to `--profile release` - noted under gotcha 141. Local validation before the PR: cargo metadata --filter-platform riscv64gc resolves 366 crates clean for the protoc,substrait feature set; the full suite reproduced on x86 against the released cp310-abi3 wheel with the exact CIBW_TEST_SOURCES staging and the patch applied - 1660 passed, 7 skipped (pandas x3, polars x3, arro3/nanoarrow x1; both absent from the test requires by design, as upstream also skips them); pip resolves pyarrow 25.0.1 / numpy 2.5.3 / cffi 2.1.1 / psutil 7.2.2 as riscv64 wheels for cp312, cp313, cp314 and cp314t from our registry (pyarrow has no riscv64 build below cp312, which is why the abi3 leg builds on cp312 rather than its cp310 floor); maturin inside quay.io/pypa/manylinux_2_39_riscv64 under QEMU accepts the argument string and emits `maturin pep517 write-dist-info ... --profile release --strip --features protoc,substrait --interpreter /opt/python/cp312-cp312/bin/python`; actionlint clean apart from the repo-wide `$/` reusable-workflow prefix and the self-hosted riscv label. STILL RUNNING at hand-off (host is shared with several sibling agents, load ~19 on 4 cores, so both are slow): a native-speed riscv64 cross-compile of the whole 366-crate graph from a Debian trixie container, and an in-image QEMU build of protobuf-src 2.1.1+27.1 (the one riscv64-native unknown the cross rehearsal cannot cover - if protobuf 27.1 turns out not to configure under the image''s cmake 4.4.3, the one-line fallback is pylance''s `yum install -y protobuf-compiler protobuf-devel` plus `--features substrait` without protoc). CI on the PR had not started at hand-off.'
 - pkg: coremltools
   version: '9.0'
   home: https://github.com/apple/coremltools
@@ -1384,9 +1446,39 @@ packages:
   version: 0.2.5
   home: https://github.com/lightseekorg/tokenspeed
   repo: https://github.com/lightseekorg/tokenspeed
-  status: queued
+  status: parked
   pr: null
-  notes: '2 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Not feasible, and there is no longer a gap to close: the queue note''s "2 Linux wheels upstream
+    (abi: py3)" describes 0.2.5, but upstream has since removed the arch-specific payload -- new gotcha
+    388. 0.2.0-0.2.8 each publish py3-none-manylinux_2_28_{x86_64,aarch64} (~0.75 MB) and no sdist, while
+    the current latest 0.2.9 publishes a single py3-none-any wheel (0.15 MB) that already installs on
+    riscv64 unmodified, so riscv64 gets exactly what x86_64 gets and there is nothing arch-specific left
+    to build (gotcha 24''s "already installs" reasoning, reached via gotcha 388''s latest-vs-queued check
+    rather than from the queued version''s files). Verified, not assumed: (1) uv run ci_scripts/queue_triage.py
+    tokenspeed-mla --deps (new helper) flags the entry stale and tables the per-version tag/size collapse.
+    (2) The 0.75 MB of platform-only content in 0.2.5 was two prebuilt NVIDIA Blackwell cubins, tokenspeed_mla/objs/cute_dsl_fmha_fp8_e4m3_to_bf16_hd192_sm_{100a,103a}_x86_64.so
+    (1.45 MB + 1.37 MB uncompressed), loaded by tokenspeed_mla/fmha_binary.py via cutlass.cute.runtime.load_module(...,
+    enable_tvm_ffi=True) after torch.cuda.get_device_properties() picks the sm_<major><minor>a_<machine>
+    filename -- an AOT CuTe DSL build for compute capability 10.0/10.3, i.e. Blackwell SM100/SM103 only.
+    Both that module and the whole objs/ directory are gone from 0.2.9. NVIDIA ships no riscv64 CUDA:
+    redist/redistrib_13.0.0.json lists only linux-x86_64, linux-sbsa, windows-x86_64, linux-all (gotcha
+    41''s check). (3) Runtime deps are a hard wall regardless of the wheel shape. Inside quay.io/pypa/manylinux_2_39_riscv64
+    under qemu, a full binary-only resolve of tokenspeed-mla==0.2.9 with --extra-index-url pypi.riseproject.dev
+    fails on "tokenspeed-triton>=3.8.10.post20260906 (from versions: none)" -- that sibling is the vendor
+    triton rebuild parked in this same queue (gotcha 381/41), no riscv64 wheel and no sdist at any version.
+    nvidia-cutlass-dsl is a py3-none-any *facade* that downloads fine with --no-deps and still blocks:
+    resolving it fully is ResolutionImpossible because it pins nvidia-cutlass-dsl-libs-{base,cu12}==4.7.1,
+    published cp310-cp314(t)-manylinux_2_28_{x86_64,aarch64} only, no sdist, ~88 MB of CUDA payload each
+    (gotcha 40''s dependency-blocked shape, gotcha 388''s facade note). Only apache-tvm-ffi and torch are
+    actually served for riscv64 (both on pypi.riseproject.dev; torch 2.14.0+cpu cp312 resolved). (4) Installed
+    the 0.2.9 wheel in the riscv64 container: import tokenspeed_mla succeeds, but __init__.py wraps every
+    import in one try/except ImportError and swaps in _unavailable stubs, so tokenspeed_mla_decode() raises
+    "ImportError: tokenspeed_mla requires PyTorch, CUDA bindings, and NVIDIA CuTe DSL runtime dependencies"
+    -- gotcha 183''s importable-but-unusable shape, and a property of the wheel upstream ships for every
+    arch, not a riscv64 defect. Same vendor family and same disposition as the parked tokenspeed-triton
+    entry, which predicted this one. Version left at 0.2.5 to match the queue snapshot (latest is 0.2.9);
+    no workflow, docs/packages entry, patches or PR created. Revisit only if NVIDIA ships a riscv64 CUDA
+    toolkit and TokenSpeed publishes riscv64 builds of tokenspeed-triton and the CuTe DSL payload wheels.'
 - pkg: tokenspeed-triton
   version: 3.8.10.post20260721
   home: https://github.com/triton-lang/triton/
@@ -1461,9 +1553,9 @@ packages:
   version: 14.2.0
   home: https://cupy.dev/
   repo: https://github.com/cupy/cupy
-  status: queued
+  status: parked
   pr: null
-  notes: '12 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Not feasible: cupy-cuda12x is not a separate project, it is the cupy/cupy tree built against a CUDA 12.x toolkit, and the distribution name is injected out-of-tree -- cupy/cupy''s own pyproject.toml declares name = "cupy", while cupy-release-tools'' dist_config.py maps the build target 12.x (and 12.x-aarch64) to {name: cupy-cuda12x, kind: cuda, image: cupy/cupy-release-tools:cuda-runfile-12.9.0-el8-amd64} and dist.py calls rename_project(pyproject.toml, package_name) to rewrite project.name before building. Every entry in that table is a proprietary GPU toolkit (cuda 12.x/13.x, rocm-7.0) and there is no CPU kind, so there is no CPU-only shape of this distribution (contrast gotcha 79''s opencv-python-headless; same conclusion as the parked onnxruntime-gpu, reached from a different direction -- new gotcha 387). The build is toolkit-bound, not runtime-detected (contrast gotcha 284/fastsafetensors): install/cupy_builder/_features.py''s CUDA_cuda feature is required=True and configures by compiling a probe that reads CUDA_VERSION from cuda.h (rejecting anything below 12000); its includes are cuda_runtime.h/cublas_v2.h/cufft.h/curand.h/cusparse.h, its link list is cudart_static+cublas+cufft+curand+cusparse+cuda+nvrtc, four .cu sources (cupy_cub.cu, cupy_thrust.cu, cupy_distributions.cu, cupy_cufftXt.cu) need nvcc, and setup.py exits 1 when a required feature fails to configure. NVIDIA ships no riscv64 CUDA toolkit: all 24 CUDA 12.x redistributable manifests (redistrib_12.0.0 through 12.9.2) list only linux-x86_64, linux-sbsa, linux-aarch64, linux-ppc64le, linux-all and windows-x86_64 -- zero riscv64 -- as do the PyPI republications (nvidia-cuda-runtime-cu12 12.9.79, nvidia-cublas-cu12 12.9.2.10, nvidia-cuda-nvrtc-cu12 12.9.86: manylinux x86_64/aarch64 and Windows only), and CUDA-on-RISC-V remains an announced future capability for RVA23 server-class platforms with no released nvcc, cuDNN, TensorRT or libcuda.so.1 driver. The published wheel confirms the coupling rather than hiding it: cupy/.data/_wheel.json reads {"cuda": "12.x", "packaging": "pip", "nccl": ...} and the wheel bundles no CUDA .so at all (only cupy''s own ~300 MB of extensions plus vendored CCCL/jitify/xsf headers), so the toolkit is a hard external dependency resolved at runtime via cuda-pathfinder and the ctk extra (cuda-toolkit[cudart,nvrtc,cublas,cufft,cusolver,cusparse,curand]==12.*), which has no riscv64 files either. Two apparent escapes were checked and rejected: (a) the un-suffixed cupy project on PyPI is sdist-only -- no wheel on any arch or interpreter, i.e. gotcha 50/126, no riscv64 gap to close -- and that sdist builds through the same required CUDA feature, so this entry was not retargeted to it; (b) CUPY_INSTALL_USE_STUB=1 (auto-set when READTHEDOCS=True) defines CUPY_NO_CUDA, pins the compile-time CUPY_CUDA_VERSION to 0 and compiles against cupy_backends/stub/*.h, headers whose banner reads "This file is a stub header file of cuda for Read the Docs" and whose entry points all return cudaSuccess (cudaDriverGetVersion writes 0), so it builds clean with no toolkit and yields a wheel that computes nothing -- gotcha 41''s rejected offline-build escape hatch behind a friendlier switch. Latest upstream release reconfirmed as 14.2.0, matching the queued version. Registry checked: no cupy, cupy-cuda12x or cuda-pathfinder on pypi.riseproject.dev (404). Same disposition and reason as the parked onnxruntime-gpu and sglang entries; the sibling cupy-cuda13x entry is the same tree with the same blocker (the CUDA 13.x manifests are linux-x86_64/linux-sbsa/linux-aarch64/windows only). No workflow, docs/packages yaml, patches or PR created; revisit only if NVIDIA ships a riscv64 CUDA toolkit.'
 - pkg: awkward-cpp
   version: '56'
   home: https://github.com/scikit-hep/awkward-1.0
@@ -1519,9 +1611,9 @@ packages:
   version: 6.11.2
   home: https://www.riverbankcomputing.com/software/pyqt/
   repo: https://www.riverbankcomputing.com/software/pyqt/
-  status: queued
+  status: parked
   pr: null
-  notes: '2 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: '2 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev (checked directly: /simple/pyqt6-qt6/ and /simple/pyqt6/ both 404; only pyqt6-sip is live). 6.11.2 re-confirmed latest on PyPI (2026-09-19). Parked after read-only triage; no worktree, branch, PR or workflow created. NOT the same stop as pyqt5-qt5, and the difference is worth keeping: PyQt6-Qt6 also has zero sdists across its entire history (41 releases, 184 files, all py3-none-<platform> bdist_wheel, repo field is a marketing page), but its build recipe IS public. dist-info/WHEEL says `Generator: pyqt-qt-wheel`, which is a console script of the sibling distribution PyQt-builder 1.19.1 (BSD-2-Clause, sdist on PyPI): pyqtbuild/bundle/qt_wheel.py plus the payload manifest pyqtbuild/bundle/packages/pyqt6.py. So there is an upstream recipe to mirror - it just is not a build. qt_wheel() compiles nothing; it copies files out of --qt-dir and writes a dist-info from prototypes, so the port''s input is an official Qt installation tree for the target arch, not a source tree. Running gotcha 35/41''s vendor-artifact-index check one level up settles it: download.qt.io/online/qtsdkrepository/ offers exactly linux_x64, linux_arm64, mac_x64, windows_x86, windows_arm64 - a 1:1 match with the six wheels Riverbank publishes (manylinux_2_34_x86_64, manylinux_2_39_aarch64, macosx_10_14_x86_64, macosx_11_0_arm64, win_amd64, win_arm64). The wheel matrix is the Qt Company''s prebuilt-binary matrix; riscv64 is absent from both, so there is nothing to repackage. The tool is additionally hard-wired to that layout: abstract_package.py takes the Qt version from os.path.basename(os.path.dirname(qt_dir)) and qt_wheel.py maps os.path.basename(qt_dir) through a closed arch table (gcc_64, gcc_arm64, macos/clang_64/x86_64/arm64, msvc*) and otherwise raises UserException("Qt architecture ''<x>'' is unsupported") - so --qt-dir must be <prefix>/6.11.2/gcc_64. That table is the ONLY riscv64 blocker inside the tool (bundle_qt() branches only on the manylinux*/macosx*/win* prefix), i.e. a few-line patch to a third-party build dependency, not a rewrite. The wall is the payload, not the packaging. Inspected the real 6.11.2 aarch64 wheel''s zip central directory over HTTP range requests via ci_scripts/wheel_contents.py (nothing downloaded): 2572 entries, 85.5 MB compressed / 226.7 MB uncompressed, zero .py files - 96 libQt6*.so.6 modules spanning ~22 Qt repos (qtbase incl. XcbQpa/EglFS, qtdeclarative, qtquickcontrols2, qtquick3d, qtquick3dphysics, qtquicktimeline, qtquickeffects, qtshadertools, qtsvg, qttools (Designer/Help), qtmultimedia, qtspeech, qtsensors, qtserialport, qtconnectivity (Bluetooth/Nfc), qtpositioning, qtremoteobjects, qtscxml, qtwebchannel, qtwebsockets, qtwebview, qtwayland) plus QtPdf/QtPdfQuick/QtPdfWidgets, a bundled ICU 73 (libicudata/libicui18n/libicuuc.so.73, 39 MB) and a bundled FFmpeg 7.1 (libavcodec.so.61, libavformat.so.61, libavutil.so.59, libswresample.so.5, libswscale.so.8), plus 82 plugins, 2160 QML files and 217 translations. Producing that for riscv64 means a from-source Qt 6.11.2 SDK bring-up plus ICU, FFmpeg and PDFium - gotcha 186 scale, the same scope stop pyqt5-qt5 reached by a different route, and an order of magnitude past build-libclang.yml (the largest from-source build this repo carries). No in-image shortcut. Rocky 10.2 riscv64 (the manylinux_2_39_riscv64 base) does ship a broad Qt6 - 76 qt6-* packages in AppStream and 28 in CRB, enumerated straight from the repodata at dl.rockylinux.org - but at 6.10.1, not 6.11.2, so it cannot back a wheel carrying upstream''s 6.11.2 version (same minor-version divergence gotcha 383 flags for the pyside6 family), and it has no qt6-qtpdf, qt6-qtwebengine, qt6-qtquick3dphysics or qt6-qtwebview, and no ffmpeg, chromium or gn. QtPdf comes from the qtwebengine repo (PDFium, a Chromium subset), so those three modules are the same Chromium-for-riscv64 wall the pyside6-addons entry records. Pointing pyqt-qt-wheel at a distro Qt is also a silent downgrade rather than a substitute: packages/pyqt6.py hardcodes the vendor''s own libicu*.so.73 and libav*/libsw* sonames as other_lib_deps, and bundle_qt(..., ignore_missing=True) only warns, so the wheel would quietly ship without ICU or FFmpeg and resolve them from the host. Consumer side: PyQt6 6.11.0 pins PyQt6-Qt6>=6.11.0,<6.12.0, and pyqt6 is itself now blocked-on-dependency on this entry (see its note, and gotcha 393 for the consumer-side evidence) and unpublished, so this wheel alone would not make `pip install PyQt6` work on riscv64 - but unlike the frozen x86_64-only Qt5 line, PyQt6 does publish an sdist and Riverbank does extend new Linux arches on the Qt6 line, so the pair is not a dead end, just out of scope until someone stands up a Qt-for-riscv64 SDK build. Re-triage trigger: if such a build lands (in-repo or upstream), this becomes a thin repackaging job - patch pyqt-builder''s arch table, run `pyqt-qt-wheel --qt-dir <qt>/6.11.2/<arch> PyQt6`. Not reusable from the pyside6 line: that family compiles bindings against a Qt6 SDK (and can use the distro''s 6.10.1), it does not produce a Qt6 SDK. No local build attempted - there is nothing to build without the input tree. Pattern recorded as gotcha 385 (feasibility-and-triage).'
 - pkg: netifaces
   version: 0.11.0
   home: https://github.com/al45tair/netifaces
@@ -1566,11 +1658,11 @@ packages:
   notes: '10 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev. PyPI project_urls points at Python-SIP/sip (the sip build-tool repo, versioned 6.x) but that repo does not contain PyQt6-sip''s C sources (sip_core.c etc) - it is a different project by the same maintainer. No canonical git repo hosts PyQt6-sip''s actual source; Riverbank publishes it as a PyPI sdist only (gotcha 156 pattern). Building from the fetched sdist. BSD-2-Clause, self-contained C extension, no native deps. Merged (#1046). Issue #1070 linked, publish dispatched on main. Not yet confirmed on the registry. Confirmed live on pypi.riseproject.dev.'
 - pkg: humming-kernels
   version: 0.1.13
-  home: ''
-  repo: ''
-  status: queued
+  home: https://github.com/inclusionAI/humming
+  repo: https://github.com/inclusionAI/humming
+  status: parked
   pr: null
-  notes: '2 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev. PyPI records no project URL; locate upstream during research.'
+  notes: 'Not feasible: CUDA/NVIDIA-GPU-only at every layer -- new gotcha 386, same disposition as the parked sglang entry. Upstream located despite the missing PyPI project URL: the long_description names it (github.com/inclusionAI/humming, Apache-2.0, tags v0.1.2..v0.1.15 present, upstream .github/workflows/build-wheel.yml shipped inside the sdist), so unlike tokenspeed-triton (gotcha 381) provenance is clean and public -- "Humming", a JIT-compiled quantization GEMM kernel library for NVIDIA GPUs "SM75+ (Turing) and beyond", inspired by DeepGEMM/Marlin/CUTLASS. Nothing about the wheel objects: 338 KB, py3-none-manylinux_2_28_{x86_64,aarch64} at 0.1.13, no vendor blobs, so gotcha 41''s payload tell is absent; it is blocked below that. (1) Native payload (read over HTTP ranges with ci_scripts/wheel_contents.py): humming/_native/<arch>/{libhumming_launcher.so, libcubinpatch.so, nvrtc_compile, manifest.json}, selected by get_native_arch() in humming/utils/jit.py, which maps only x86_64|amd64 and aarch64|arm64 -- riscv64 returns None, so build_native() raises "Unsupported architecture" and every get_precompiled_artifact_path() returns None. 0.1.14/0.1.15 add _device_info.abi3.so and retag cp310-abi3, so this entry''s "abi: py3" is already stale (latest is 0.1.15; identically blocked). (2) Build-time CUDA is unconditional, i.e. gotcha 284''s greps come out the opposite way from fastsafetensors: humming/csrc/launcher/{launcher.cpp,tensor.h,tma.h} #include <cuda.h>, csrc/nvrtc_compile.cpp #includes <nvrtc.h>, and humming/build.py:_find_cuda_include() hard-fails without cuda.h from nvidia-cuda-runtime-cu12 or CUDA_HOME. (3) The decisive wall is torch''s CUDA half, not the toolkit: build_launcher() links _torch_library("libtorch_cuda.so"), which raises "is required; build with a CUDA-enabled torch wheel". pypi.riseproject.dev serves torch 2.13.0+cpu/2.14.0+cpu for riscv64 and PyPI has zero riscv64 torch files, so no libtorch_cuda.so exists for the arch and none can be built without a riscv64 CUDA toolkit first. Stubbing is not the missing idea -- upstream already links against a generated empty libcuda.so (-Wl,-soname,libcuda.so.1) and relies on the real driver at run time, while the torch CUDA libraries are linked as real files. (4) Two hard runtime deps have no riscv64 wheel and no sdist anywhere: triton 3.8.0 (manylinux_2_27/2_28 x86_64+aarch64 only -- the gotcha 41 project this repo already ruled out) and cuda-bindings 13.4.2 (x86_64/aarch64/win only). Both are imported at import time -- import humming -> humming.ops -> ops/input.py "import triton" and "from triton.language.extra.cuda import gdc_wait"; eleven humming/kernel/*.py and jit/{compiler,runtime}.py "import cuda.bindings.driver" -- so per gotcha 40 a wheel we published could be neither installed nor smoke-tested. (5) Runtime needs the NVIDIA driver and NVRTC regardless: jit/compiler.py NVRTC-compiles the shipped .cuh sources at first call (nvrtc_compile --nvrtc-path libnvrtc.so), utils/device.py imports pynvml, libhumming_launcher.so links -lcuda. NVIDIA ships nothing riscv64: redistrib_13.0.0/13.2.0/13.4.2.json list only linux-x86_64, linux-sbsa, windows-x86_64/arm64 with zero "riscv" strings, and nvidia-cuda-nvrtc 13.4.92 / nvidia-cuda-runtime-cu12 12.9.79 publish x86_64/aarch64/win wheels only; CUDA-on-RISC-V was announced as a host-CPU target in July 2025 (RVA23 + RISC-V server SoC/platform specs, restated at Hot Chips 2026) with no release and no shipped artifact. No workflow, docs/packages entry, patches or PR created, and nothing to rehearse under QEMU since the build cannot start. Revisit only when NVIDIA ships a riscv64 CUDA redist (nvrtc + cuda_runtime), a CUDA-enabled riscv64 torch exists, and triton + cuda-bindings publish riscv64 wheels.'
 - pkg: nvtx
   version: 0.2.16
   home: https://github.com/NVIDIA/NVTX
@@ -1603,9 +1695,54 @@ packages:
   version: 6.11.0
   home: https://www.riverbankcomputing.com/software/pyqt/
   repo: https://www.riverbankcomputing.com/software/pyqt/
-  status: queued
+  status: blocked-on-dependency
   pr: null
-  notes: '2 Linux wheels upstream (abi: cp310); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: '2 Linux wheels upstream (abi: cp310); no riscv64 on PyPI or pypi.riseproject.dev.
+    6.11.0 re-confirmed latest on PyPI (2026-09-19; 6 files - macosx/win_amd64/win_arm64/manylinux_2_34_x86_64/manylinux_2_39_aarch64
+    wheels plus an sdist). Blocked on pyqt6-qt6 (parked, see that entry + gotcha 385:
+    PyQt6-Qt6 is Riverbank repackaging the Qt Company''s own prebuilt installer tree,
+    whose matrix has no riscv64, so shipping it means a from-source Qt6 SDK bring-up).
+    Read-only triage; no worktree, branch, PR or workflow created. Not the same stop as
+    pyqt5: PyQt6 is genuinely open and buildable - GPL-3.0 sdist on every release, real
+    C++/.sip sources for 35 binding sets, builds with two public pure-Python tools (sip
+    >=6.15,<7 and PyQt-builder >=1.19,<2), and pyqt6-sip is already live on our registry
+    (13.12.0, cp310-cp314, satisfies the >=13.8,<14 pin). The blocker is the runtime pair,
+    and it is sharper than metadata: the published wheel''s METADATA requires PyQt6-Qt6
+    (>=6.11.0, <6.12.0), and ci_scripts/check_riscv64_deps.py --python 312 -- ''PyQt6-Qt6>=6.11.0,<6.12.0''
+    answers UNRESOLVABLE (from versions: none) against PyPI + our registry. Worth recording
+    because the sdist disagrees with the wheel: the sdist''s PKG-INFO declares only
+    ''Requires-Dist: PyQt6-sip (>=13.11, <14)'' and nothing in project.py or in PyQt-builder
+    ever emits the PyQt6-Qt6 line (pyqtbuild''s only Requires-Dist writes are bundle/qt_wheel.py,
+    which puts it *in* the Qt wheel, and bundle/bundle.py, which *removes* it when pyqt-bundle
+    bundles Qt inside the bindings wheel) - it comes from Riverbank''s release step, so
+    judging feasibility from the sdist alone would have said "unblocked". The physical
+    coupling is the decisive evidence: pulled PyQt6/QtCore.abi3.so out of the 6.11.0
+    manylinux_2_39_aarch64 wheel with ci_scripts/wheel_contents.py --member (nothing
+    downloaded beyond that member) and readelf -d shows NEEDED libQt6Core.so.6 with
+    RUNPATH $ORIGIN/Qt6/lib, while the wheel itself ships no Qt6/lib (893 entries, 40.6 MB
+    uncompressed: .abi3.so modules, .pyi stubs, one Qt6/qsci/api file) - the directory is
+    populated by the sibling pyqt6-qt6 wheel at install time. Building against a distro Qt6
+    instead was checked and does not rescue it, though it is technically possible: project.py
+    only rejects qt_version >> 16 != 6 (no minimum minor), PyQt-builder takes the sip tag
+    from the discovered qt_version_tag, sipbuild''s update_buildable_bindings() silently
+    drops bindings whose config test fails, and Rocky 10.2 riscv64 does have what such a
+    build needs (qmake6 in qt6-qtbase-devel, 76 qt6-* in AppStream + 28 in CRB, 28 module
+    -devel packages - enumerated from the repodata, not dnf). But that build yields a
+    Qt-6.10.1 API surface under a 6.11.0 version number (gotcha 383''s divergence; same
+    shape as this repo''s published shiboken6-6.11.2-6.10.1 build tag), silently drops
+    QtPdf/QtPdfWidgets (no qt6-qtpdf on any Rocky 10 arch), and - decisive - auditwheel can
+    only bundle the Qt libraries the extensions link, not what Qt dlopens: the platform
+    plugins (platforms/libqxcb.so, libqoffscreen.so), imageformat/sqldriver plugins and the
+    QML tree all live in pyqt6-qt6''s payload, and the bundled distro libQt6Core keeps its
+    compiled-in /usr/lib64/qt6/plugins prefix, so such a wheel would import fine and then
+    fail at the first QApplication with "no Qt platform plugin could be initialized".
+    Shipping that under the pyqt6 name is a broken product, not a reduced one. Re-triage
+    trigger: the moment a riscv64 Qt6 SDK exists (in-repo or upstream) and pyqt6-qt6 lands,
+    this becomes a straightforward sdist build - pip install "sip>=6.15,<7" "PyQt-builder>=1.19,<2",
+    build from the PyPI sdist in the manylinux_2_39_riscv64 image against that SDK, keep the
+    upstream shape (no bundled Qt, RUNPATH $ORIGIN/Qt6/lib), cp310-abi3 single wheel. Consumer
+    pattern recorded as gotcha 393 (feasibility-and-triage); no need to redo the pyqt6-qt6
+    investigation, which is captured on that entry and in gotcha 385.'
 - pkg: ibmmq
   version: 2.1.0
   home: https://ibm.com/software/products/en/ibm-mq
@@ -1629,11 +1766,11 @@ packages:
   notes: '4 Linux wheels upstream (abi: cp39); no riscv64 on PyPI or pypi.riseproject.dev. Tag v0.3.5 commits generated src/parser.c, so no generate-then-build workaround needed. Merged (#1054). Issue #1067 linked, publish dispatched on main. Not yet confirmed on the registry. Confirmed live on pypi.riseproject.dev.'
 - pkg: livekit-local-inference
   version: 0.2.7
-  home: ''
+  home: https://pypi.org/project/livekit-local-inference/
   repo: ''
-  status: queued
+  status: parked
   pr: null
-  notes: '10 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev. PyPI records no project URL; locate upstream during research.'
+  notes: 'Not feasible, closed source (gotcha 392; same double lock as gotcha 372/376). Genuinely a LiveKit Inc. package - livekit-agents core `dependencies` lists `livekit-local-inference>=0.2.7` and `livekit/agents/inference/vad.py`, `inference/eot/transports.py` and `ipc/_preload.py` all `from livekit.local_inference import VAD/EOT` - but livekit/agents is the *consumer*, not the source: none of the 79 public repos in the livekit GitHub org contains it, PyPI records no project URL/home_page/author, and `dist-info/WHEEL` says `Generator: setuptools (84.0.0)` (a stock generator, so gotcha 385''s lead is a dead end). The decisive read was conda-forge: `conda-forge/livekit-local-inference-feedstock`''s recipe/recipe.yaml states verbatim "This package is closed-source and ships only binary wheels on PyPI (no sdist)" and its `source:` is a nest of `if: target_platform`/`if: match(python, ...)` blocks each naming a files.pythonhosted.org **wheel** URL - i.e. conda-forge repackages upstream''s wheels per (platform, interpreter) and compiles nothing, so riscv64 has nothing to repackage either. Zero sdist across the entire release history (120 files over 0.2.2-0.2.7, every one a bdist_wheel; tags only macosx_10_9/10_13/10_15_x86_64, macosx_11_0_arm64, manylinux_2_27/2_28_{x86_64,aarch64}, win_amd64 for cp310-cp314), so gotcha 77''s build-it-yourself escape hatch fails at the first step. Wheel content (real compiled extension, not a gotcha 27/35/81 py3-none facade): 14 entries, 35.0 MB of a 35.1 MB wheel is one stripped ELF `livekit/local_inference/_native.cpython-3XX-<arch>-linux-gnu.so`; `readelf -S` shows `.text` 0x444ad (~280 KB) vs `.rodata` 0x21168f8 (~34.8 MB), so 99.2% is the proprietary model weights baked into the binary, with a ~280 KB hand-written pybind11 v12 C++ engine around them (DT_NEEDED is only libstdc++/libm/libgcc_s/libpthread/libc - no ONNX Runtime; .comment `GCC (GNU) 14.2.1 Red Hat`; the shipped _native.pyi says "Eagerly init the EOT model singleton (~108 MB)"). Second, independent lock: `License: Apache-2.0 AND LicenseRef-LiveKit-Model` with two files under dist-info/licenses/ - the bundled MODEL_LICENSE (LIVEKIT MODEL LICENSE AGREEMENT) forbids using the models "on a standalone basis or with any frameworks other than LiveKit Agents" and bars making them available to third parties except under that agreement, so even lifting the weights out of an existing .so into a self-built riscv64 wheel is foreclosed. Consequence for the queue: livekit-agents core is uninstallable on riscv64 while this leaf has no wheel. Verified read-only (PyPI JSON for all releases, ci_scripts/wheel_contents.py, one wheel downloaded and readelf''d, the conda-forge recipe, GitHub org/code search); no workflow, docs/packages entry, worktree, branch or PR created. Re-check only if LiveKit publishes the engine''s sources or ships riscv64 wheels itself.'
 - pkg: manifold3d
   version: 3.5.2
   home: https://github.com/elalish/manifold
@@ -1727,11 +1864,11 @@ packages:
   notes: '4 Linux wheels upstream (abi: cp310); no riscv64 on PyPI or pypi.riseproject.dev. Release tag v0.26.4 commits generated src/parser.c, so no generate-then-build workaround needed (unlike tree-sitter-swift). Merged (#1055). Issue #1066 linked, publish dispatched on main. Not yet confirmed on the registry. Confirmed live on pypi.riseproject.dev.'
 - pkg: cadquery-ocp
   version: 7.9.3.1.1
-  home: ''
-  repo: ''
-  status: queued
+  home: https://pypi.org/project/cadquery-ocp/
+  repo: https://github.com/CadQuery/ocp-build-system
+  status: blocked-on-dependency
   pr: null
-  notes: '10 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev. PyPI records no project URL; locate upstream during research.'
+  notes: '10 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev. Upstream located: the cadquery-ocp *distribution* is built by CadQuery/ocp-build-system (tag v7.9.3.1.1: .github/workflows/build-ocp.yml plus .github/actions/{build-sdks,build-ocp-source,build-ocp,test-ocp}), not by CadQuery/OCP, which only publishes conda packages and pre-generated sources - hence the empty project_urls on PyPI. Neither code generation nor build time is the problem. Generation: with PYWRAP=false the recipe simply downloads the CadQuery/OCP release asset 7.9.3.1.1/OCP_src_stubs_Linux.zip (6.3 MB -> 639 .cpp / 30.2 MB of generated pybind11, plus 325 .pyi for the stubs wheel), which is architecture-independent, so no pywrap/libclang/micromamba generation step is needed for riscv64. Cost, measured locally on a 4-core x86 (gcc 13): OCCT V7_9_3 configures clean (5,618 ninja steps) and did 1,103 of them in 600 s at -j4 => ~51 min wall / ~3.4 core-h for the whole kernel, and the generated OCP TUs cost 11.0 s (Adaptor2d), 12.9 s (BRepPrimAPI), 15.1 s (TopoDS) and 89.3 s (gp, 538 KB) each => ~2.7 core-h for all 639; scaling by this repo''s own vtk datapoint (12,192 ninja steps ~= 18 h wall at 4 cores on ubuntu-24.04-riscv) puts riscv64 at roughly 5-7 h for OCCT plus 4-6 h per interpreter for OCP, i.e. 10-15 h jobs - inside the 48 h timeout build-vtk.yml already uses, and OCCT is Python-independent so gotcha 15 lets it be built once per version. THE BLOCKER (recorded as gotcha 399): the wheel needs a riscv64 VTK *SDK* and nothing provides one. OCP''s generated CMakeLists.txt opens with find_package(VTK REQUIRED COMPONENTS WrappingPythonCore RenderingCore RenderingOpenGL2 CommonDataModel CommonExecutionModel freetype), and OCCT''s USE_VTK=ON needs 3RDPARTY_VTK_INCLUDE_DIR/3RDPARTY_VTK_LIBRARY_DIR; upstream satisfies the header half with "micromamba install vtk=9.6.2" plus a hand-written cmake/vtk-config-linux.cmake, and the library half by copying vtkmodules/libvtk*.so out of the PyPI vtk wheel. On riscv64 the library half is fine and the header half has no source at all: conda-forge''s linux-riscv64 subdir carries 1,970 packages with 0 vtk and 0 occt (verified by reading repodata.json per gotcha 42; linux-64 has 3,221 vtk), PyPI publishes no riscv64 vtk for any version (9.6.2 is x86_64/aarch64/macos/win only), and our own vtk-9.7.0-cp313-cp313-manylinux_2_39_riscv64.whl holds 197 libvtk*.so but 0 .h and 0 cmake files, because VTK''s wheel setup.py packages only vtkmodules/ even though build-vtk.yml configures with VTK_INSTALL_SDK=ON. Two further walls stack on that: the wheel metadata pins vtk==9.6.2 exactly while our registry has 9.7.0 only, so the pin would have to be diverged from upstream''s and the SDK matched to 9.7.0, whose IVtk compatibility with OCCT 7.9.3 nobody has tested; and our vtk wheels start at cp312, so cp310/cp311 can never be covered (gotchas 67/84). Do NOT work around this by building cadquery-ocp with USE_VTK=OFF under the cadquery-ocp name: cadquery/occ_impl/shapes.py imports OCP.IVtkOCC and OCP.IVtkVTK for toVtkPolyData, so the four IVtk* TUs are load-bearing for the ecosystem, and the vtk== dependency is part of what the name promises. Resume plan, in order: (1) do the sibling queue entry cadquery-ocp-novtk first - same build with USE_VTK=OFF plus upstream''s sed dropping OCP/IVtk* and the find_package(VTK) block, its only dependency is cadquery-ocp-proxy==7.9.3.1.1 (a 3.3 KB py3-none-any wheel already on PyPI, nothing to port), so it needs no VTK whatsoever and can cover all of cp310-cp314, and it proves OCCT-on-riscv64, the 639-TU OCP compile and the pypi/ packaging path (ocp-tree.py, auditwheel repair, patchelf --add-rpath) at a fraction of the risk (gotcha 382: several distributions, one build); (2) then extend build-vtk.yml to publish a VTK SDK (headers + a vtk-config.cmake) alongside its wheels, and only then return here. Groundwork already done for whoever resumes: Rocky 10 riscv64 has freetype-devel, fontconfig-devel, libXcursor-devel, tbb-devel and ninja-build (crb) and already carries mesa-libGL-devel/libX11-devel/libglvnd-devel, but has NO rapidjson-devel, freeimage-devel or fmt-devel - rapidjson and fmt are header-only (fetch from source; OCP pulls fmt in only via OCP_specific.inc under -DFMT_HEADER_ONLY) and USE_FREEIMAGE has to go OFF; the image is gcc 14.3.1 + cmake 4.4.3 so OCCT needs -DCMAKE_POLICY_VERSION_MINIMUM=3.5 (upstream already passes it, gotchas 257/358); OCP''s CMakeLists find_package(Python REQUIRED COMPONENTS Interpreter Development) must be patched to Development.Module (gotcha 374); and upstream''s _GLIBCXX_USE_CXX11_ABI=0/1 switch is an artifact of the x86_64 PyPI vtk wheel only - our riscv64 vtk wheel is built in the manylinux image, so the default new ABI applies. Local validation: inside quay.io/pypa/manylinux_2_39_riscv64 under QEMU, dnf repoquery settled the package availability above (with the proxy CA appended per gotcha 384) and OCCT V7_9_3''s own cmake configure SUCCEEDED on riscv64 - rc=0, 74.2 s configuring + 18.7 s generating, Xlib and FreeType 2.13.2 both detected, "TKIVtk and TKIVtkDraw toolkits excluded due to VTK usage is disabled", and the same 5,618 ninja steps as on x86; ninja then accepted that graph and began compiling, but no edge finished inside the window (QEMU on a 4-core host also running a dozen other agents'' riscv64 containers), so the emulated run proves configure + graph validity only and every throughput figure above comes from native x86.'
 - pkg: databento-dbn
   version: 0.68.0
   home: https://databento.com
@@ -2060,7 +2197,7 @@ packages:
   repo: https://github.com/bpcreech/PyMiniRacer
   status: ci-running
   pr: 1875
-  notes: '4 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev. v8 has a mature riscv64 codegen backend; build routes around Chromium prebuilt clang via v8''s own riscv64-linux-gnu- gcc_toolchain.'
+  notes: '4 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev. v8 has a mature riscv64 codegen backend; build routes around Chromium prebuilt clang via v8''s own riscv64-linux-gnu- gcc_toolchain. The 2026-09-13 run was not cancelled by anyone: the build_dll job ran exactly 1440 minutes and died on its own timeout-minutes, with ninja at 1970/2176 and still progressing normally (23h30m of ninja only reached 90%), so 24h was never enough for a full V8 compile on these 4-core runners. Raised to 2880 like build-nodejs-wheel-binaries.yml and build-vtk.yml, and gave build_wheel an explicit 720. That run''s ninja -k 1000 collected all six remaining failures at once: five are -Werror diagnostics GCC emits and clang does not, all benign, now cleared in one go by the declared treat_warnings_as_errors=false gn arg instead of one source cast per day-long cycle; the sixth is a real error where third_party/highway falls back to HWY_SCALAR (its EMU128 opt-out excludes every GCC below 16.0 at the revision v8 pins) and json-stringifier.cc then asks for a FixedTag<T,16> that does not exist there -- fixed by backporting highway''s own upstream RISC-V carve-out, which names V8''s JSON stringifier as the breakage. Both source hunks were dry-run against the real pinned v8/highway sources before pushing. Separately, the branch had drifted behind main over the six days it sat: _setup.yml now requires a package: input and pr-checks.yml enforces it, so the first re-push produced a startup_failure with no jobs at all. Workflow brought to the current shape (docs/packages/mini-racer.yaml added -- it was missing entirely, matrix.version from setup instead of a hardcoded 0.14.1, the missing push: trigger, app-private-key passed to _publish-wheel.yml), PR title/body brought to the template. All four PR checks now green and build_dll queued for a runner as of 2026-09-19; expect ~27h of V8 compile before build_wheel starts, so do not push to this branch again -- it would restart the day.'
 - pkg: brotlipy
   version: 0.7.0
   home: https://github.com/python-hyper/brotlipy/
@@ -2500,9 +2637,9 @@ packages:
   version: 1.3.3
   home: https://cvxopt.org
   repo: https://github.com/cvxopt/cvxopt
-  status: porting
-  pr: null
-  notes: '32 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp38,cp39); no riscv64 on PyPI or pypi.riseproject.dev.'
+  status: in-review
+  pr: https://github.com/riseproject-dev/python-wheels/pull/2110
+  notes: 'PR #2110 open (build-cvxopt.yml + docs/packages/cvxopt.yaml, no patches). 1.3.3 confirmed latest on PyPI; nothing on pypi.riseproject.dev (404). Zero install_requires and pytest is the only test dep, so no registry/dependency wall. Builds the seven mandatory extensions (base, blas, lapack, umfpack, cholmod, amd, misc_solvers) plus the optional fftw one, on cp312/cp313/cp314/cp314t, modelled on build-scs.yml. BLAS/LAPACK come from Rocky 10 openblas-devel (crb; its libopenblas.so.0 exports the LAPACK entry points, so -lopenblas covers both) and fftw-devel (appstream). Rocky 10 riscv64 packages NO suitesparse/gsl/glpk and there is no riscv64 EPEL, so umfpack/cholmod/amd are compiled from the SuiteSparse 7.11.0 tarball upstream''s own linux_build.yml pins (same sha256), via cvxopt''s CVXOPT_SUITESPARSE_SRC_DIR route which upstream tests in CI and uses on Windows; the gsl/glpk/dsdp extensions are left off (all three skip cleanly in upstream''s suite and no example uses them). CVXOPT_SUITESPARSE_SRC_DIR must be RELATIVE to the checkout -- distutils rejects absolute Extension(sources=) paths -- so the tarball is extracted into {project}; the untracked tree does not poison setuptools_scm (wheel came out plain 1.3.3). Licensing needs no patch: setuptools'' default LICEN[CS]E* glob still fires despite the legacy license={file=...} table, so LICENSE.openblas/.suitesparse/.fftw staged at the checkout root land in dist-info/licenses (verified in a built wheel); fftw''s COPYING lives under /usr/share/licenses/fftw-libs-double/, not /usr/share/licenses/fftw/. auditwheel vendors libopenblas, libfftw3, libgfortran and libquadmath, so a gpl_sources job collects the gcc and fftw srpms plus the pinned SuiteSparse tarball (UMFPACK and CHOLMOD/Supernodal are GPL-2.0-or-later). Local validation: full cibuildwheel runs on x86_64/manylinux_2_34 for cp312 AND cp314t both green (8 extensions, 4 licence files, 28 passed / 12 skipped each; cp314t emits the expected GIL-re-enable RuntimeWarning, harmless since upstream sets no -W error). On the real manylinux_2_39_riscv64 image under qemu the dnf installs, licence paths, SuiteSparse staging, metadata and the fftw/base/blas/lapack extensions all validated (linked with -L/usr/lib64 -lfftw3 -lopenblas) before the shared 4-core host made the remaining ~250 SuiteSparse translation units too slow to finish locally -- the umfpack/cholmod/amd compile is the one piece only CI will confirm. musllinux left out although cvxopt is exactly gotcha 221''s zero-dependency shape: Alpine 3.22 riscv64 actually has openblas-dev, fftw-dev, suitesparse-dev, gsl-dev AND glpk-dev, but it ships no /usr/share/licenses at all so there is no licence text to bundle, and enabling it would give the musl wheel more extensions than the glibc one -- worth revisiting as a follow-up. Gotchas 400 (relative Extension(sources=) paths) and 401 (Rocky 10 riscv64 numeric-library availability, incl. the Alpine contrast) added on main separately. CI: all three pr-checks jobs and setup are green (so the workflow registered), but the four build_wheels legs and gpl_sources were still queued ~50 min after the push -- the self-hosted riscv64 pool is saturated, so no wheel has been built in CI yet and this needs watching/triage in a later session.'
 - pkg: typos
   version: 1.49.1
   home: https://github.com/crate-ci/typos#typos
@@ -3396,16 +3533,16 @@ packages:
   version: 0.11.1
   home: https://github.com/jax-ml/jax
   repo: https://github.com/jax-ml/jax
-  status: queued
+  status: parked
   pr: null
-  notes: '12 Linux wheels upstream (abi: cp312,cp313,cp314,cp315); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Parked: JAX''s CUDA 12 backend plugin is fundamentally NVIDIA-GPU-only (links the CUDA 12/13 toolkit''s runtime/driver libraries at build and/or import time). NVIDIA does not ship a CUDA toolkit for riscv64 at all today (see the onnxruntime-gpu/cupy-cuda12x/cuda-tile entries for the same finding), so there is no toolchain to build this against and no driver for a resulting wheel to load on riscv64 hardware even if it did build. Revisit if/when NVIDIA ships a riscv64 CUDA toolkit.'
 - pkg: jax-cuda12-pjrt
   version: 0.11.1
   home: https://github.com/jax-ml/jax
   repo: https://github.com/jax-ml/jax
-  status: queued
+  status: parked
   pr: null
-  notes: '2 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Parked: JAX''s CUDA 12 PJRT runtime is fundamentally NVIDIA-GPU-only (links the CUDA 12/13 toolkit''s runtime/driver libraries at build and/or import time). NVIDIA does not ship a CUDA toolkit for riscv64 at all today (see the onnxruntime-gpu/cupy-cuda12x/cuda-tile entries for the same finding), so there is no toolchain to build this against and no driver for a resulting wheel to load on riscv64 hardware even if it did build. Revisit if/when NVIDIA ships a riscv64 CUDA toolkit.'
 - pkg: certbot-dns-multi
   version: 5.4.0
   home: ''
@@ -3536,9 +3673,9 @@ packages:
   version: 0.30.4
   home: https://nvidia.github.io/numba-cuda/
   repo: https://github.com/NVIDIA/numba-cuda
-  status: queued
+  status: parked
   pr: null
-  notes: '10 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Parked: Numba''s CUDA target/toolchain is fundamentally NVIDIA-GPU-only (links the CUDA 12/13 toolkit''s runtime/driver libraries at build and/or import time). NVIDIA does not ship a CUDA toolkit for riscv64 at all today (see the onnxruntime-gpu/cupy-cuda12x/cuda-tile entries for the same finding), so there is no toolchain to build this against and no driver for a resulting wheel to load on riscv64 hardware even if it did build. Revisit if/when NVIDIA ships a riscv64 CUDA toolkit.'
 - pkg: mkl
   version: 2026.1.0
   home: https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html
@@ -3956,9 +4093,9 @@ packages:
   version: 14.2.0
   home: https://cupy.dev/
   repo: https://github.com/cupy/cupy
-  status: queued
+  status: parked
   pr: null
-  notes: '12 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Parked: CuPy built against CUDA 13.x is fundamentally NVIDIA-GPU-only (links the CUDA 12/13 toolkit''s runtime/driver libraries at build and/or import time). NVIDIA does not ship a CUDA toolkit for riscv64 at all today (see the onnxruntime-gpu/cupy-cuda12x/cuda-tile entries for the same finding), so there is no toolchain to build this against and no driver for a resulting wheel to load on riscv64 hardware even if it did build. Revisit if/when NVIDIA ships a riscv64 CUDA toolkit.'
 - pkg: pgserver
   version: 0.1.4
   home: https://github.com/orm011/pgserver
@@ -4334,9 +4471,9 @@ packages:
   version: 0.11.1
   home: https://github.com/jax-ml/jax
   repo: https://github.com/jax-ml/jax
-  status: queued
+  status: parked
   pr: null
-  notes: '12 Linux wheels upstream (abi: cp312,cp313,cp314,cp315); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Parked: JAX''s CUDA 13 backend plugin is fundamentally NVIDIA-GPU-only (links the CUDA 12/13 toolkit''s runtime/driver libraries at build and/or import time). NVIDIA does not ship a CUDA toolkit for riscv64 at all today (see the onnxruntime-gpu/cupy-cuda12x/cuda-tile entries for the same finding), so there is no toolchain to build this against and no driver for a resulting wheel to load on riscv64 hardware even if it did build. Revisit if/when NVIDIA ships a riscv64 CUDA toolkit.'
 - pkg: pyopengl-accelerate
   version: 3.1.10
   home: https://mcfletch.github.io/pyopengl/
@@ -4348,9 +4485,9 @@ packages:
   version: 0.11.1
   home: https://github.com/jax-ml/jax
   repo: https://github.com/jax-ml/jax
-  status: queued
+  status: parked
   pr: null
-  notes: '2 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Parked: JAX''s CUDA 13 PJRT runtime is fundamentally NVIDIA-GPU-only (links the CUDA 12/13 toolkit''s runtime/driver libraries at build and/or import time). NVIDIA does not ship a CUDA toolkit for riscv64 at all today (see the onnxruntime-gpu/cupy-cuda12x/cuda-tile entries for the same finding), so there is no toolchain to build this against and no driver for a resulting wheel to load on riscv64 hardware even if it did build. Revisit if/when NVIDIA ships a riscv64 CUDA toolkit.'
 - pkg: kuzu
   version: 0.11.3
   home: https://kuzudb.com/
@@ -5237,9 +5374,9 @@ packages:
   version: 26.8.0
   home: https://github.com/rapidsai/dask-cuda
   repo: https://github.com/rapidsai/dask-cuda
-  status: queued
+  status: parked
   pr: null
-  notes: '1 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Parked: Dask''s RAPIDS/CUDA GPU-cluster integration is fundamentally NVIDIA-GPU-only (links the CUDA 12/13 toolkit''s runtime/driver libraries at build and/or import time). NVIDIA does not ship a CUDA toolkit for riscv64 at all today (see the onnxruntime-gpu/cupy-cuda12x/cuda-tile entries for the same finding), so there is no toolchain to build this against and no driver for a resulting wheel to load on riscv64 hardware even if it did build. Revisit if/when NVIDIA ships a riscv64 CUDA toolkit.'
 - pkg: grpcio-observability
   version: 1.83.1
   home: https://grpc.io
@@ -6280,16 +6417,16 @@ packages:
   version: 3.0.1
   home: https://github.com/AntonKueltz/fastecdsa
   repo: https://github.com/AntonKueltz/fastecdsa
-  status: porting
-  pr: null
-  notes: '10 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp39); no riscv64 on PyPI or pypi.riseproject.dev.'
+  status: in-review
+  pr: https://github.com/riseproject-dev/python-wheels/pull/2109
+  notes: 'PR #2109. 3.0.1 confirmed latest on PyPI; upstream ships manylinux x86_64/i686 + macOS only, no riscv64 anywhere (404 on our registry). Plain setup.py C extension: two modules (curvemath, _ecdsa) built from the bundled src/ curve math, dynamically linked against GMP, which is a system dependency (not vendored) -- gmp-devel 6.2.1-12.el10 is in Rocky 10''s riscv64 repos, so upstream''s `yum install -y gmp-devel` becomes a plain `dnf -y install`. No patch needed. auditwheel vendors libgmp into fastecdsa.libs/, and the wheel otherwise ships only fastecdsa''s own LICENSE, so before-all stages GMP''s four licence files at the project root as LICENSE.gmp.* (setuptools'' default PEP 639 glob still applies despite the legacy `license = {file = "LICENSE"}` table, verified on a real wheel, so gotcha 349 does not bite here) plus a gpl_sources job for gcc + gmp. pyproject.toml is deliberately not staged into the test cwd: its addopts demand pytest-cov and its `pythonpath = ["."]` would shadow the wheel. Validated locally under QEMU in quay.io/pypa/manylinux_2_39_riscv64: cp312 wheel built, repaired to manylinux_2_38/2_39_riscv64, 79/79 tests passed; `dnf download --source gcc gmp` also confirmed to resolve for the gpl_sources job.'
 - pkg: json-tools-rs
   version: 0.9.30
   home: https://github.com/amaye15/JSON-Tools-rs
   repo: https://github.com/amaye15/JSON-Tools-rs
-  status: porting
-  pr: null
-  notes: '76 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp315,cp39,pp311); no riscv64 on PyPI or pypi.riseproject.dev.'
+  status: in-review
+  pr: https://github.com/riseproject-dev/python-wheels/pull/2107
+  notes: 'PR #2107 open, CI not yet reported -- needs watching in a later session. Ordinary maturin/PyO3 port, no patches: build-from-checkout + cibuildwheel, rustup in CIBW_BEFORE_ALL_LINUX, musllinux dropped (no riscv64 musl toolchain on rustup.rs). [tool.maturin] features = ["python"], python-source = "python", module-name = "json_tools_rs" are all inherited through PEP 517, so no MATURIN_PEP517_ARGS; pyo3 0.29 carries no abi3 feature, so the build is per-interpreter, and Cargo.toml sets no [tool.maturin] profile, so maturin uses its own release profile (gotcha 141 does not bite). Matrix is cp312/cp313/cp314: cp314t is dropped because orjson -- a hard runtime dependency, imported lazily from src/python.rs via PyOnceLock -- publishes no free-threaded wheel on PyPI or pypi.riseproject.dev, so the test venv cannot be built (gotcha 84); everything else the suite touches (pandas/polars/pyarrow/pyspark) is behind importorskip/has_* guards and skips cleanly, matching upstream''s own manylinux test job of pytest + orjson only. CIBW_TEST_SOURCES stages pyproject.toml alongside python/tests because [tool.pytest.ini_options] adds tests.py to python_files -- without it pytest collects nothing. Feasibility settled before any CI cycle: sonic-rs 0.5.8 (64-bit-only dependency) has a portable src/util/arch/fallback.rs and sonic-simd 0.1.x has v128/v256/v512 fallbacks, so the x86/NEON gates are not a wall; the s390x job upstream disabled is a big-endian simd-json issue that does not apply. A full cross-compile of the 146-crate riscv64 graph with upstream''s real fat-LTO/codegen-units=1/opt-level=3 release profile (gotcha 182: --features python --features pyo3/extension-module, PYO3_CROSS_PYTHON_VERSION=3.12) linked a real riscv64 .so in 13m54s on a contended 4-core x86 host, so timeout-minutes: 360 is ample. A QEMU rehearsal in quay.io/pypa/manylinux_2_39_riscv64 (gotcha 188 profile knockdown, opt-level kept at 3 because the suite has ops/sec assertions) got through rustup, the maturin/patchelf riscv64 build requirements and metadata prep and was still compiling when the session ended -- the wheel build and test run were not observed, so the test step is the one part still unvalidated locally. License needs nothing: the published wheel already carries LICENSE-MIT and LICENSE-APACHE under dist-info/licenses, and nothing third-party is vendored. PR also adds ci_scripts/check_riscv64_deps.py (per-interpreter pip resolution against PyPI + our registry), which is what settled the matrix.'
 - pkg: atomic-dict
   version: 0.5.0
   home: https://github.com/terpstra/atomic-dict
@@ -6455,9 +6592,9 @@ packages:
   version: 0.3.13.post1
   home: https://github.com/kvcache-ai/Mooncake
   repo: https://github.com/kvcache-ai/Mooncake
-  status: queued
+  status: parked
   pr: null
-  notes: '8 Linux wheels upstream (abi: cp310,cp311,cp312,cp313); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Parked: Mooncake''s CUDA 13 transfer-engine build is fundamentally NVIDIA-GPU-only (links the CUDA 12/13 toolkit''s runtime/driver libraries at build and/or import time). NVIDIA does not ship a CUDA toolkit for riscv64 at all today (see the onnxruntime-gpu/cupy-cuda12x/cuda-tile entries for the same finding), so there is no toolchain to build this against and no driver for a resulting wheel to load on riscv64 hardware even if it did build. Revisit if/when NVIDIA ships a riscv64 CUDA toolkit.'
 - pkg: cyscale
   version: 0.8.0
   home: https://github.com/thewhaleking/cy-scale-codec
@@ -10459,9 +10596,9 @@ packages:
   version: 4.2.0
   home: https://github.com/colmap/colmap
   repo: https://github.com/colmap/colmap
-  status: queued
+  status: parked
   pr: null
-  notes: '5 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Parked: pycolmap''s CUDA 12 GPU-accelerated build is fundamentally NVIDIA-GPU-only (links the CUDA 12/13 toolkit''s runtime/driver libraries at build and/or import time). NVIDIA does not ship a CUDA toolkit for riscv64 at all today (see the onnxruntime-gpu/cupy-cuda12x/cuda-tile entries for the same finding), so there is no toolchain to build this against and no driver for a resulting wheel to load on riscv64 hardware even if it did build. Revisit if/when NVIDIA ships a riscv64 CUDA toolkit.'
 - pkg: passagemath-tachyon
   version: 10.8.10
   home: https://passagemath.org/docs/latest

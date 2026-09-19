@@ -33,6 +33,36 @@
     `git config user.email "git@ludovic.dev"`, and check `git log -1 --format='%an <%ae>'`
     before pushing. The `pre-commit` hook is not always installed locally, so nothing else
     catches it.
+- **Bookkeeping commits (`.queue.yml`, a new gotcha, a `ci_scripts/` fix) go straight to
+  `origin/main`, never a feature branch** — but many agents do this concurrently, so use
+  `ci_scripts/safe_push_main.sh` instead of a bare `git push`. It always pushes `HEAD` (a bare
+  `git push origin main` pushes your local `main` branch, which may be stale, if you aren't
+  literally on a branch named `main`), fetches and rebases onto the latest `origin/main` first,
+  retries on a race with another agent's concurrent push, and refuses to push if `.queue.yml`'s
+  package count would shrink (a signal you rebased onto a stale snapshot and are about to
+  silently revert someone else's already-landed commit — this has nearly happened more than
+  once). If it reports a real rebase conflict, resolve it by hand before re-running it.
+  Before writing a new gotcha number, run `ci_scripts/next_gotcha.sh` (and again right before
+  the final push) — concurrent agents have repeatedly collided on the same next number.
+- **A single commit must never mix a package port (`.github/workflows/`,
+  `docs/packages/<pkg>.yaml`, `patches/<pkg>/<version>/`) with bookkeeping (`skills/`,
+  `ci_scripts/`, `.queue.yml`, anything else)** — they go to different places (the port to
+  its own PR branch, bookkeeping straight to `main` per the bullet above), so a commit that
+  mixes them puts the wrong half wherever it lands. This has been violated repeatedly: an
+  agent researching a port legitimately finds a new gotcha or writes a helper script, and it
+  rides along in the same commit as the port itself. Run `ci_scripts/check_port_pr_scope.sh
+  --branch` before your final push to catch it across a whole branch's commits. Better:
+  install it as a local pre-commit hook once per clone so every future commit is checked as
+  you make it — `git config core.hooksPath ci_scripts/git-hooks` (this setting lives in
+  `.git/config`, not the tracked tree, so it does need setting again in a clone that doesn't
+  have it yet; `git config --get core.hooksPath` shows whether it's already set — but it *is*
+  shared across all worktrees of one clone once set, main checkout included). The check is
+  about what a commit's diff contains, not what branch you're on — a bookkeeping-only commit
+  passes from any branch, including a worktree that can never literally check out `main`
+  itself. One important limitation: a worktree's hook runs whatever `ci_scripts/check_port_pr_scope.sh`
+  is actually committed *in that worktree's own checkout* — if the script itself has a fix on
+  `main` that this worktree hasn't picked up yet (it was created before the fix, or hasn't
+  merged since), the hook still runs the old logic until that worktree syncs with `main`.
 
 - **Pushing workflow files needs `workflow` scope** on the gh token, else the push is
   rejected ("refusing to allow an OAuth App to create or update workflow … without
