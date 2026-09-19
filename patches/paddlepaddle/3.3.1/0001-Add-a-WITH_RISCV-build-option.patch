@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000001 Mon Sep 17 00:00:00 2001
+From: RISE Project CI <ci@riseproject.dev>
+Date: Fri, 19 Sep 2026 00:00:00 +0000
+Subject: [PATCH 1/3] Add a WITH_RISCV build option
+
+riscv64 is the first architecture Paddle's CMake knows nothing about:
+WITH_ARM, WITH_SW, WITH_MIPS and WITH_LOONGARCH each turn off the
+x86-only pieces (Xbyak's x86 JIT assembler, MKL, AVX) and define a
+PADDLE_WITH_<ARCH> macro the C++ tree tests, but there is no equivalent
+for riscv64, so a riscv64 build takes every x86 branch.
+
+WITH_RISCV mirrors the WITH_LOONGARCH block, plus three riscv64-specific
+additions:
+
+ - WITH_SLEEF=OFF. Paddle only reaches SLEEF through AVX code paths
+   (paddle/phi/kernels/funcs/sleef_vectorized_math.h gates every use on
+   __AVX__/__AVX2__/__AVX512F__), so building it buys nothing here.
+
+ - -latomic on the link lines. riscv64 has no inline instructions for
+   1- and 2-byte atomics, so GCC emits libatomic calls; without this
+   libpaddle.so fails to load with "undefined symbol:
+   __atomic_exchange_1", as reported for a native riscv64 build in
+   PaddlePaddle/Paddle#62037.
+
+ - cmake/flags.cmake's unconditional -m64, which riscv64 GCC rejects
+   ("unrecognized command line option '-m64'"), gated the same way the
+   other non-x86 architectures already gate it.
+
+Upstream-Status: To upstream
+
+Paddle builds linux_aarch64 wheels from WITH_ARM but has no riscv64 CI
+to validate a WITH_RISCV option against, so submitting it upstream needs
+a riscv64 build running there first.
+
+Signed-off-by: RISE Project CI <ci@riseproject.dev>
+---
+ CMakeLists.txt    | 21 +++++++++++++++++++++
+ cmake/flags.cmake |  3 ++-
+ 2 files changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index a07b810..884b37d 100755
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -330,6 +330,7 @@ option(WITH_ARM "Compile PaddlePaddle with arm support" OFF)
+ option(WITH_SW "Compile PaddlePaddle with sw support" OFF)
+ option(WITH_MIPS "Compile PaddlePaddle with mips support" OFF)
+ option(WITH_LOONGARCH "Compile PaddlePaddle with loongarch support" OFF)
++option(WITH_RISCV "Compile PaddlePaddle with riscv support" OFF)
+ option(WITH_MUSL "Compile with musl libc instead of glibc" OFF)
+ option(WITH_UNITY_BUILD "Compile with UnityBuild mode" OFF)
+ option(WITH_STRIP "Strip so files of Whl packages" OFF)
+@@ -684,6 +685,26 @@ if(WITH_LOONGARCH)
+   add_definitions(-DPADDLE_WITH_LOONGARCH)
+ endif()
+ 
++if(WITH_RISCV)
++  set(WITH_XBYAK
++      OFF
++      CACHE STRING "Disable XBYAK when compiling WITH_RISCV=ON" FORCE)
++  set(WITH_MKL
++      OFF
++      CACHE STRING "Disable MKL when compiling WITH_RISCV=ON." FORCE)
++  set(WITH_AVX
++      OFF
++      CACHE STRING "Disable AVX when compiling WITH_RISCV=ON." FORCE)
++  set(WITH_SLEEF
++      OFF
++      CACHE STRING "Disable SLEEF when compiling WITH_RISCV=ON." FORCE)
++  # riscv64 has no inline instructions for sub-word atomics, so GCC emits calls
++  # into libatomic that are otherwise left undefined in libpaddle.so.
++  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -latomic")
++  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -latomic")
++  add_definitions(-DPADDLE_WITH_RISCV)
++endif()
++
+ if(WITH_ONEMKL)
+   add_definitions(-DPADDLE_WITH_ONEMKL)
+ endif()
+diff --git a/cmake/flags.cmake b/cmake/flags.cmake
+index 67269aa..f86b569 100644
+--- a/cmake/flags.cmake
++++ b/cmake/flags.cmake
+@@ -225,7 +225,8 @@ if(NOT WIN32)
+      AND NOT WITH_ARM
+      AND NOT WITH_SW
+      AND NOT WITH_MIPS
+-     AND NOT WITH_LOONGARCH)
++     AND NOT WITH_LOONGARCH
++     AND NOT WITH_RISCV)
+     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -m64")
+   endif()
+ endif()
+-- 
+2.51.0
