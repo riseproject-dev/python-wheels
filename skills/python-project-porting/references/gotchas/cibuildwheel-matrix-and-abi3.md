@@ -44,6 +44,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
   hands `bdist_wheel` the tag.
 - **391** — A project's real cibuildwheel recipe can live in a *separate packaging repo* that the
   source tree never references — the source repo can carry no GitHub Actions at all.
+- **402** — A two-leg abi3 + free-threaded matrix expressed only through `include:` collapses
+  into a single job, so the abi3 wheel is never built and nothing fails.
 
 ---
 
@@ -818,3 +820,39 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
       here would run `setup.py` on its own and emit a `py3-none-any` wheel containing
       riscv64 `.so`s — worse than a wrong platform tag. Drive the container yourself
       (gotcha 15) and run the project's own `dist` target.
+
+402. **A two-leg abi3 + free-threaded matrix expressed only through `include:` collapses
+    into a *single* job, and the abi3 wheel is never built (the primp/arro3-core case).**
+    The idiom several workflows here use is a base matrix of just
+    `version: ${{ fromJSON(needs.setup.outputs.versions) }}` plus two `include:` objects
+    that each introduce the same brand-new keys (`tag`, `build`, `features`). GitHub only
+    *adds* an include object's keys to the existing combinations when none of them
+    overwrites an **original** matrix value — `tag` is not an original key, so the first
+    include adds `tag: cpNN-abi3` to the one combination and the second overwrites it with
+    `tag: cp314t`. One job runs, the free-threaded wheel publishes, and nothing fails: the
+    abi3 leg simply does not exist. `build-primp.yml` shipped only
+    `primp-2.0.0-cp314-cp314t` and `primp-2.0.1-cp314-cp314t` that way (run 35310255186
+    has exactly two build jobs, both `cp314t-manylinux_riscv64`), and
+    `build-arro3-core.yml` did the same for 0.8.2 after publishing both wheels for 0.8.1.
+    - **Fix: make the leg a real matrix dimension**, so each include *updates* the
+      matching combination instead of adding a key:
+      ```yaml
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        tag: [cp310-abi3, cp314t]
+        include:
+          - tag: cp310-abi3
+            build: cp312-manylinux_riscv64 cp313-manylinux_riscv64
+            features: --features abi3-py310
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+            features: ''
+      ```
+    - **A single `include:` object is safe** (`build-css-inline.yml`): the collapse needs
+      two entries competing for the same new key. It is also why this only became latent
+      when the `version` vector replaced the older per-interpreter base vector — with
+      `python:` or `tag:` in the base matrix the includes only ever *updated* legs.
+    - **Diagnose it from the job list, not the log**: count the `Build <pkg> <ver>
+      <tag>-manylinux_riscv64` jobs against the legs declared before believing a green
+      run. `docs/packages/<pkg>.yaml` is the after-the-fact tell — a published version
+      carrying only the free-threaded wheel where an earlier version carried both.

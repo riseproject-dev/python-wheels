@@ -208,6 +208,10 @@ The porting gotchas (374 of them) live in [`references/gotchas/`](gotchas/), spl
 - **396** — A `cpXY-none-<platform>` wheel is the third plat-name shape: `setup.py` declares
   no `ext_modules` at all, and a sibling CMake build both compiles the extension modules and
   hands `bdist_wheel` the tag (the coremltools case).
+- **402** — A two-leg abi3 + free-threaded matrix expressed only through `include:` collapses
+  into a single job, so the abi3 wheel is never built and nothing fails — make the leg a real
+  matrix dimension (the primp/arro3-core case: two already-published packages are quietly
+  shipping only their free-threaded wheel).
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
