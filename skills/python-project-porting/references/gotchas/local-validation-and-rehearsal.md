@@ -248,6 +248,15 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
       by package `name=` attribute to jump straight to its block rather than loading
       the whole file, and delete it when done; it is Rocky's own public mirror data,
       not anything project-specific worth keeping.
+    - **When even `dl.rockylinux.org` is unreachable, the packaging *sources* answer the
+      same questions**: Rocky 10 rebuilds CentOS Stream 10, whose spec files are served as
+      plain files from
+      `https://gitlab.com/redhat/centos-stream/rpms/<pkg>/-/raw/c10s/<pkg>.spec`. The
+      `%files devel` section settles whether a `-devel` package installs a CMake package
+      config (`%{_libdir}/cmake/Foo/`, i.e. whether `find_package(Foo)` can work in CONFIG
+      mode at all) and the `%license` lines settle which licence file a
+      `/usr/share/licenses/<pkg>/` sweep will find — both of which repodata alone answers
+      only indirectly.
 
 383. **A project that links libtorch cannot be rehearsed on an x86_64 host with the
     `torch` wheel PyPI serves, because that one is a CUDA build: `find_package(Torch)`
