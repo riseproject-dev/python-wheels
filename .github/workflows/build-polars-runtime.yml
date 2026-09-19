@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version glob to (re)build; empty builds every version of docs/packages/polars-runtime-32.yaml not released yet'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/polars-runtime-{32,64}.yaml not released yet'
         required: false
         default: ''
   pull_request:
@@ -55,21 +55,53 @@ defaults:
     shell: bash
 
 jobs:
+  # Both runtimes come out of one checkout, but each is its own package with
+  # its own docs/packages/<package>.yaml, and the nightly declares a new
+  # version in one at a time -- so resolve, build and publish them separately.
   setup:
     uses: $/.github/workflows/_setup.yml
     with:
-      # Both runtimes come out of one checkout; keep docs/packages/polars-runtime-64.yaml's versions in lockstep.
       package: polars-runtime-32
       version: ${{ inputs.version }}
 
+  setup-64:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: polars-runtime-64
+      version: ${{ inputs.version }}
+
+  plan:
+    needs: [setup, setup-64]
+    runs-on: ubuntu-latest
+    outputs:
+      # [{"package": ..., "version": ...}, ...], one entry per wheel to build.
+      builds: ${{ steps.plan.outputs.builds }}
+      # The versions those wheels need a base package built from.
+      versions: ${{ steps.plan.outputs.versions }}
+    steps:
+      - id: plan
+        env:
+          VERSIONS_32: ${{ needs.setup.outputs.versions || '[]' }}
+          VERSIONS_64: ${{ needs.setup-64.outputs.versions || '[]' }}
+        run: |
+          set -euo pipefail
+          builds=$(jq -cn --argjson v32 "$VERSIONS_32" --argjson v64 "$VERSIONS_64" \
+            '[$v32[] | {package: "polars-runtime-32", version: .}]
+             + [$v64[] | {package: "polars-runtime-64", version: .}]')
+          versions=$(jq -cn --argjson v32 "$VERSIONS_32" --argjson v64 "$VERSIONS_64" \
+            '$v32 + $v64 | unique')
+          echo "builds=$builds" >> "$GITHUB_OUTPUT"
+          echo "versions=$versions" >> "$GITHUB_OUTPUT"
+          echo "Wheels to build: $builds"
+
   base-package:
-    needs: [setup]
-    if: needs.setup.outputs.versions != '[]'
+    needs: [plan]
+    if: needs.plan.outputs.versions != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        version: ${{ fromJSON(needs.plan.outputs.versions) }}
 
     env:
       POLARS_VERSION: ${{ matrix.version }}
@@ -120,15 +152,14 @@ jobs:
           path: dist
 
   build_wheels:
-    needs: [setup, base-package]
-    if: needs.setup.outputs.versions != '[]'
-    name: Build ${{ matrix.package }} ${{ matrix.version }} ${{ matrix.job_config }}
+    needs: [plan, base-package]
+    if: needs.plan.outputs.builds != '[]'
+    name: Build ${{ matrix.build.package }} ${{ matrix.build.version }} ${{ matrix.job_config }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        package: [polars-runtime-32, polars-runtime-64]
+        build: ${{ fromJSON(needs.plan.outputs.builds) }}
         job_config: [linux-riscv64]
         include:
           - job_config: linux-riscv64
@@ -137,7 +168,7 @@ jobs:
             target: riscv64gc-unknown-linux-gnu
 
     env:
-      POLARS_VERSION: ${{ matrix.version }}
+      POLARS_VERSION: ${{ matrix.build.version }}
 
     steps:
       # Checked out at the workspace root: the runtime crate is a member of
@@ -192,7 +223,7 @@ jobs:
           target: ${{ matrix.target }}
           args: >
             --profile dist-release
-            --manifest-path py-polars/runtime/${{ matrix.package }}/Cargo.toml
+            --manifest-path py-polars/runtime/${{ matrix.build.package }}/Cargo.toml
             --out dist
           manylinux: '2_39'
           before-script-linux: git config --global --add safe.directory "*"
@@ -205,14 +236,14 @@ jobs:
       - name: Upload wheel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: ${{ matrix.package }}-${{ env.POLARS_VERSION }}-${{ matrix.job_config }}
+          name: ${{ matrix.build.package }}-${{ env.POLARS_VERSION }}-${{ matrix.job_config }}
           path: dist/*.whl
           if-no-files-found: error
 
   publish:
-    name: Publish ${{ matrix.package }} ${{ matrix.version }}
-    needs: [setup, build_wheels]
-    if: needs.setup.outputs.versions != '[]'
+    name: Publish ${{ matrix.build.package }} ${{ matrix.build.version }}
+    needs: [plan, build_wheels]
+    if: needs.plan.outputs.builds != '[]'
     permissions:
       contents: write
       pull-requests: write
@@ -222,7 +253,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        package: [polars-runtime-32, polars-runtime-64]
+        build: ${{ fromJSON(needs.plan.outputs.builds) }}
     with:
-      artifact-pattern: ${{ matrix.package }}-${{ matrix.version }}-*
+      artifact-pattern: ${{ matrix.build.package }}-${{ matrix.build.version }}-*
