@@ -170,6 +170,9 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
 - **360** — A `setup.py`'s own `bdist_wheel --plat-name` insertion can hardcode
   `manylinux1_` + `platform.machine()` regardless of the actual container libc, making
   musllinux unbuildable no matter how the CMake/C++ side is patched.
+- **383** — A two-leg abi3 + free-threaded matrix expressed only through `include:`
+  collapses into a single job, so the abi3 wheel is never built and nothing fails —
+  make the leg a real matrix dimension.
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
