@@ -110,6 +110,11 @@ The porting gotchas (371 of them) live in [`references/gotchas/`](gotchas/), spl
   `dist-info/WHEEL`'s `Generator:` before parking it for "no source anywhere"; a
   vendor-named generator is usually a *repackager*, which moves the stop to whether the
   vendor publishes the payload for our arch (the pyqt6-qt6 case).
+- **386** — A GPU-only package can be small, source-open and blob-free and still be
+  unportable: in a JIT kernel library the compiled part is a few-hundred-KB shim, so gotcha
+  41's vendor-payload tell is absent and the wall is what that shim links — `libtorch_cuda.so`,
+  which our CPU-only riscv64 torch can never provide; refines gotchas 249 and 284 (the
+  humming-kernels case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

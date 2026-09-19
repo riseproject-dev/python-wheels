@@ -66,6 +66,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   `dist-info/WHEEL`'s `Generator:` before parking it for "no source anywhere"; a
   vendor-named generator is usually a *repackager*, which moves the stop to whether the
   vendor publishes the payload for our arch (the pyqt6-qt6 case).
+- **386** — A GPU-only package can be small, source-open and blob-free and still be
+  unportable: in a JIT kernel library the compiled part is a few-hundred-KB shim, so gotcha
+  41's vendor-payload tell is absent and the wall is what that shim links — `libtorch_cuda.so`,
+  which our CPU-only riscv64 torch can never provide (the humming-kernels case).
 
 ---
 
@@ -1885,3 +1889,64 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       Recording *which* park this is matters for re-triage later: "no recipe exists" never
       becomes actionable, while "the recipe exists, its input artifact does not" becomes
       actionable the moment anyone stands up a Qt-for-riscv64 SDK build.
+
+386. **A GPU-only package can be small, source-open and blob-free and still be unportable —
+     in a JIT kernel library the compiled part is a few-hundred-KB shim, so gotcha 41's
+     "big vendor payload" tell is absent and the wall is what that shim *links*: torch's own
+     CUDA libraries (the humming-kernels case).** Every earlier CUDA verdict here had a loud
+     tell — triton's 140 MB of downloaded `ptxas`/`nvdisasm` (gotcha 41), sglang's
+     `cuda-python` requirement, a closed vendor blob (gotcha 157). A JIT kernel library has
+     none of them: humming-kernels 0.1.13 is a 338 KB `py3-none-manylinux_2_28_{x86_64,aarch64}`
+     wheel of Apache-2.0 source (`github.com/inclusionAI/humming`, tagged per release) whose
+     "kernels" are `.cuh` headers compiled by NVRTC on the user's GPU at first call, so the
+     only native content is three small shims — `humming/_native/<arch>/{libhumming_launcher.so,
+     libcubinpatch.so, nvrtc_compile}`. Nothing about the wheel's size, licence or provenance
+     objects; the port is dead anyway. Four checks, cheapest first, and the third is the one
+     no other gotcha covers:
+     - **Read the package's own arch table before anything else.** A project that ships
+       per-arch precompiled artifacts has a `platform.machine()` map somewhere, and it is a
+       one-line statement of upstream's supported set — here `get_native_arch()` in
+       `humming/utils/jit.py` maps only `x86_64|amd64` and `aarch64|arm64`, so on riscv64 it
+       returns `None`, `build_native()` raises `Unsupported architecture`, and every
+       `get_precompiled_artifact_path()` lookup returns `None` (the pure-Python half then
+       silently has no kernels). Adding `"riscv64"` to that dict is a one-word patch that
+       fixes nothing, which is the tell that the blocker is below it.
+     - **Run gotcha 284's two greps and accept the answer when it comes out the other way.**
+       fastsafetensors passed because it `dlopen`s CUDA and includes no toolkit headers; here
+       `humming/csrc/launcher/{launcher.cpp,tensor.h,tma.h}` `#include <cuda.h>` and
+       `csrc/nvrtc_compile.cpp` `#include <nvrtc.h>`, and `humming/build.py:_find_cuda_include()`
+       hard-fails without `cuda.h` from `nvidia-cuda-runtime-cu12` or `CUDA_HOME`. NVIDIA's
+       redist index answers that for good: `redistrib_13.0.0/13.2.0/13.4.2.json` list only
+       `linux-x86_64`, `linux-sbsa`, `windows-x86_64/arm64` and contain zero `riscv` strings,
+       and `nvidia-cuda-nvrtc`/`nvidia-cuda-runtime-cu12` publish x86_64/aarch64/win wheels
+       only. CUDA-on-RISC-V was announced as a *host CPU* target in July 2025 (RVA23 plus the
+       RISC-V server SoC/platform specs) with no release and no shipped artifact since.
+     - **`libtorch_cuda.so` is its own wall, and our riscv64 torch can never clear it.** This
+       is the new one: a torch-extension build that links the CUDA half of torch —
+       `_torch_library("libtorch_cuda.so")` raising *"is required; build with a CUDA-enabled
+       torch wheel"*, or equivalently a `torch.utils.cpp_extension.CUDAExtension`, or an
+       `#include <c10/cuda/CUDAStream.h>` — is blocked by *our own registry*, independently of
+       the toolkit question. pypi.riseproject.dev serves `torch-2.13.0+cpu`/`2.14.0+cpu` for
+       riscv64 and PyPI serves no riscv64 torch file at all, so no `libtorch_cuda.so` /
+       `libc10_cuda.so` exists for the arch and none can be produced without a CUDA toolkit
+       for it first. Gotcha 249's lesson generalizes: `Requires-Dist: torch` looking portable
+       says nothing about *which* torch libraries the build links. Note this survives even a
+       fully stubbed link line — upstream already generates an empty `libcuda.so` stub with
+       `-Wl,-soname,libcuda.so.1` to link the launcher without a driver present, which proves
+       stubbing is not the missing idea; the torch CUDA libraries are linked as real files.
+     - **Then confirm the wheel could not even be smoke-tested** (gotcha 40's criterion):
+       `import humming` → `humming.ops` → `ops/input.py`'s `import triton` plus
+       `from triton.language.extra.cuda import gdc_wait`, and `import cuda.bindings.driver` in
+       eleven `humming/kernel/*.py` and in `jit/{compiler,runtime}.py`. `triton` (gotcha 41's
+       own project) and `cuda-bindings` both publish manylinux x86_64/aarch64 wheels and **no
+       sdist**, so the install fails before any import runs.
+     Record it `parked` with the unreachable primitive named, as with sglang. Upstream's
+     `.github/workflows/build-wheel.yml` is worth reading for the shape even so: it builds
+     inside `quay.io/pypa/manylinux_2_28_{x86_64,aarch64}` with `torch==2.11.0` plus
+     `nvidia-cuda-{runtime,nvrtc}-cu12` from `download.pytorch.org/whl/cu126`, runs a
+     `tools/build_native.py` that **is not in the sdist**, then hand-retags the wheel with
+     `python -m wheel tags --python-tag py3 --abi-tag none --platform-tag …` — i.e. a
+     `py3-none-<platform>` tag that is neither gotcha 27's cosmetic tag nor gotcha 145's
+     maturin binary, but a per-arch C++ shim retagged by hand (0.1.14+ adds a
+     `_device_info.abi3.so` and becomes honestly `cp310-abi3`, so an `abi: py3` note in the
+     queue goes stale on a package like this).
