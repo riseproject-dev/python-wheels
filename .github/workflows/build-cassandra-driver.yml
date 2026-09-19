@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/datastax/python-driver-wheels/blob/master/.github/workflows/build_wheels_linux.yml
+name: Build cassandra-driver wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cassandra-driver.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cassandra-driver.yml'
+      - 'docs/packages/cassandra-driver.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cassandra-driver.yml'
+      - 'docs/packages/cassandra-driver.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cassandra-driver
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cassandra-driver ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Per-interpreter (not abi3): the Cython extensions link the version-specific ABI.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    env:
+      CASSANDRA_DRIVER_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout cassandra-driver ${{ env.CASSANDRA_DRIVER_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: apache/cassandra-python-driver
+          ref: ${{ env.CASSANDRA_DRIVER_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # auditwheel bundles the image's libev, whose notice the explicit
+      # pyproject license-files list would otherwise drop (gotcha 105).
+      - name: Patch cassandra-driver source
+        run: git apply python-wheels/patches/cassandra-driver/${{ env.CASSANDRA_DRIVER_VERSION }}/00*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL: yum install -y libev libev-devel
+          CIBW_ENVIRONMENT: >-
+            CFLAGS='-s -fno-strict-overflow -Wsign-compare -DNDEBUG -g -O3 -Wall'
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # tox.ini's [base] deps, minus kerberos (needs krb5 headers and only gates
+          # integration tests) and minus gevent on cp314t, which it has no build for.
+          # setuptools is what gives pyximport a distutils on 3.12+ (gotcha 211).
+          CIBW_TEST_REQUIRES: >-
+            pytest packaging setuptools cython>=3.0 eventlet twisted[tls] pure-sasl lz4
+            cryptography>=42.0 numpy
+            ${{ matrix.python == 'cp314t' && '' || 'gevent' }}
+          # cassandra/ would shadow the installed wheel, so only the two .pyx files
+          # tests/unit/cython/types_testhelper.pyx includes by relative path are staged.
+          CIBW_TEST_SOURCES: tests cassandra/ioutils.pyx cassandra/cython_marshal.pyx
+          # VERIFY_CYTHON is how the Jenkinsfile makes the Cython and numpy tests fail
+          # instead of skip when the extensions are missing. PIP_PREFER_BINARY keeps pip
+          # on our registry's gevent instead of compiling PyPI's newer release.
+          CIBW_TEST_ENVIRONMENT: VERIFY_CYTHON=True PIP_PREFER_BINARY=1
+          # The extension check is config.sh's run_tests verification from upstream's
+          # wheels repo: setup.py swallows every Cython failure, so without it a degraded
+          # pure-Python wheel passes the suite under a manylinux_riscv64 tag.
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m; f=[str(p) for p in m.files('cassandra-driver')]; assert any(s.endswith('licenses/LICENSE.libev') for s in f), f" &&
+            python -c "import importlib; mods=[importlib.import_module('cassandra.'+m) for m in ('cluster','concurrent','connection','cqltypes','metadata','pool','protocol','query','util','bytesio','cython_marshal','cython_utils','deserializers','ioutils','numpy_parser','obj_parser','parsing','row_parser')]; bad=[m.__name__ for m in mods if not m.__file__.endswith('.so')]; assert not bad, bad; from cassandra.cmurmur3 import murmur3; assert murmur3('key') == -6847573755651342660; import cassandra.io.libevwrapper as libev; libev.Loop(); from cassandra.protocol import cython_protocol_handler; from cassandra.obj_parser import ListParser, LazyParser; from cassandra.numpy_parser import NumpyParser; [cython_protocol_handler(p()) for p in (ListParser, LazyParser, NumpyParser)]" &&
+            python -m pytest tests/unit
+            --deselect tests/unit/advanced/cloud/test_cloud.py::CloudTests::test_use_default_tempdir
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cassandra-driver-${{ env.CASSANDRA_DRIVER_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cassandra-driver ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: cassandra-driver-${{ matrix.version }}-*-manylinux_riscv64
