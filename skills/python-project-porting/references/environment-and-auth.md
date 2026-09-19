@@ -23,6 +23,27 @@
   do not use the user's address from your own session context, which is a *different*
   address. A `pre-commit` hook rejects any other identity (and any workflow adding
   `BUILD_VERBOSITY`); if it fires, fix the command, don't bypass the hook.
+  - **`ci_scripts/git-identity.sh` is for CI, not for you — never run it.** It sets
+    `user.name`/`user.email` to `github-actions[bot]` (or the App bot when `APP_SLUG` is set)
+    so *workflow* commits are attributed to the bot. Run locally it silently rewrites
+    `.git/config`, and because `git config` in a worktree writes the **common** config, it
+    clobbers the identity for the shared checkout and every other worktree/agent too — the
+    next commit anywhere lands as `github-actions[bot]`. Read it if you need to know what CI
+    does; restore with `git config user.name "Ludovic Henry"` and
+    `git config user.email "git@ludovic.dev"`, and check `git log -1 --format='%an <%ae>'`
+    before pushing. The `pre-commit` hook is not always installed locally, so nothing else
+    catches it.
+- **Bookkeeping commits (`.queue.yml`, a new gotcha, a `ci_scripts/` fix) go straight to
+  `origin/main`, never a feature branch** — but many agents do this concurrently, so use
+  `ci_scripts/safe_push_main.sh` instead of a bare `git push`. It always pushes `HEAD` (a bare
+  `git push origin main` pushes your local `main` branch, which may be stale, if you aren't
+  literally on a branch named `main`), fetches and rebases onto the latest `origin/main` first,
+  retries on a race with another agent's concurrent push, and refuses to push if `.queue.yml`'s
+  package count would shrink (a signal you rebased onto a stale snapshot and are about to
+  silently revert someone else's already-landed commit — this has nearly happened more than
+  once). If it reports a real rebase conflict, resolve it by hand before re-running it.
+  Before writing a new gotcha number, run `ci_scripts/next_gotcha.sh` (and again right before
+  the final push) — concurrent agents have repeatedly collided on the same next number.
 
 - **Pushing workflow files needs `workflow` scope** on the gh token, else the push is
   rejected ("refusing to allow an OAuth App to create or update workflow … without
