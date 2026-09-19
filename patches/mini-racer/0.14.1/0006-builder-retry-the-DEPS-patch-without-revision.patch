@@ -1,0 +1,137 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 13 Sep 2026 06:38:56 +0200
+Subject: [PATCH] builder: retry the DEPS patch without --revision
+
+CI proved the retry itself wrong: gclient still passed
+--revision v8@branch-heads/14.4 on the second sync, so it re-resolved
+and re-checked-out the v8 solution as normal (branch-heads/14.4 is a
+branch name, not a pinned hash, so the current_revision fast path
+never applied) -- which refused to proceed over our uncommitted DEPS
+edit:
+
+  You have uncommitted changes.
+  cd into v8, run git status to see changes,
+  and commit, stash, or reset.
+
+Drop --revision from the retry instead. The .gclient's
+"managed: False" for the v8 solution only takes effect when there is
+no revision override for it (gclient.py: 'if not revision_override and
+not self.managed: revision_override = "unmanaged"'), which then skips
+its git step entirely ("unmanaged solution; skipping v8") rather than
+touching the working tree -- leaving the patch in place for the
+retry's DEPS reprocessing.
+
+Upstream-Status: To upstream [not yet submitted to bpcreech/PyMiniRacer]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ builder/v8_build.py | 88 +++++++++++++++++++++++----------------------
+ 1 file changed, 45 insertions(+), 43 deletions(-)
+
+diff --git a/builder/v8_build.py b/builder/v8_build.py
+index 37a1f15..aeaf0a3 100644
+--- a/builder/v8_build.py
++++ b/builder/v8_build.py
+@@ -177,8 +177,6 @@ solutions = [
+         executable,
+         str(get_depot_tools_path() / "gclient.py"),
+         "sync",
+-        "--revision",
+-        f"v8@{revision}",
+     ]
+ 
+     if machine().lower() == "riscv64":
+@@ -189,47 +187,51 @@ solutions = [
+         # from concurrent workers racing to fetch it), so do the same here.
+         gclient_args += ["--jobs", "1"]
+ 
+-        try:
+-            run(*gclient_args, cwd=get_workspace_path())
+-        except CalledProcessError:
+-            # v8 is already fully cloned by this point (gclient always
+-            # fetches the solution itself before resolving CIPD packages):
+-            # two of its DEPS entries, buildtools/reclient
+-            # (infra/rbe/client) and third_party/siso/cipd (the siso build
+-            # tool), are unconditioned on riscv64 (their conditions exclude
+-            # s390x/ppc64/zos, and arm64 on Linux, but not riscv64) even
+-            # though neither package is published for linux-riscv64. Both
+-            # are optional build accelerators that plain gn gen + ninja
+-            # never asks for. gn and ninja share the exact same guard
+-            # clause and *do* have riscv64 packages, so this can't be fixed
+-            # by overriding gclient's host_cpu var (it would also disable
+-            # gn/ninja); patch the two conditions out of the checkout
+-            # instead.
+-            deps_file = get_v8_path() / "DEPS"
+-            if not deps_file.exists():
+-                raise
+-
+-            text = deps_file.read_text()
+-            for condition in (
+-                '(host_os == "linux" or host_os == "mac" or '
+-                'host_os == "win") and host_cpu != "s390x" and '
+-                'host_os != "zos" and host_cpu != "ppc64" and '
+-                '(host_cpu != "arm64" or host_os == "mac")',
+-                'not build_with_chromium and host_cpu != "s390x" and '
+-                'host_os != "zos" and host_cpu != "ppc64"',
+-            ):
+-                text = text.replace(
+-                    condition, f'{condition} and host_cpu != "riscv64"', 1
+-                )
+-            deps_file.write_text(text)
+-
+-            # Retrying re-resolves "v8@{revision}" to the same commit we
+-            # are already sitting on, so gclient's git step is a no-op (it
+-            # only touches the working tree on mismatch, or with
+-            # --reset/--force, neither of which we pass) and the DEPS
+-            # patch survives into this second sync's dependency processing.
+-            run(*gclient_args, cwd=get_workspace_path())
+-    else:
++    try:
++        run(*gclient_args, "--revision", f"v8@{revision}", cwd=get_workspace_path())
++    except CalledProcessError:
++        if machine().lower() != "riscv64":
++            raise
++
++        # v8 is already fully cloned by this point (gclient always fetches
++        # the solution itself before resolving CIPD packages): two of its
++        # DEPS entries, buildtools/reclient (infra/rbe/client) and
++        # third_party/siso/cipd (the siso build tool), are unconditioned on
++        # riscv64 (their conditions exclude s390x/ppc64/zos, and arm64 on
++        # Linux, but not riscv64) even though neither package is published
++        # for linux-riscv64. Both are optional build accelerators that
++        # plain gn gen + ninja never asks for. gn and ninja share the exact
++        # same guard clause and *do* have riscv64 packages, so this can't
++        # be fixed by overriding gclient's host_cpu var (it would also
++        # disable gn/ninja); patch the two conditions out of the checkout
++        # instead.
++        deps_file = get_v8_path() / "DEPS"
++        if not deps_file.exists():
++            raise
++
++        text = deps_file.read_text()
++        for condition in (
++            '(host_os == "linux" or host_os == "mac" or '
++            'host_os == "win") and host_cpu != "s390x" and '
++            'host_os != "zos" and host_cpu != "ppc64" and '
++            '(host_cpu != "arm64" or host_os == "mac")',
++            'not build_with_chromium and host_cpu != "s390x" and '
++            'host_os != "zos" and host_cpu != "ppc64"',
++        ):
++            text = text.replace(
++                condition, f'{condition} and host_cpu != "riscv64"', 1
++            )
++        deps_file.write_text(text)
++
++        # Retry *without* --revision: "branch-heads/14.4" isn't a pinned
++        # hash, so passing it again makes gclient re-resolve and re-check-
++        # out the v8 solution as normal, which refuses to proceed over our
++        # uncommitted DEPS edit ("You have uncommitted changes"). Our
++        # .gclient marks the v8 solution "managed: False", which gclient
++        # only honors (skipping its git step entirely, "unmanaged
++        # solution; skipping v8") when there is *no* revision override for
++        # it -- leaving our patch in place for this sync's DEPS
++        # reprocessing.
+         run(*gclient_args, cwd=get_workspace_path())
+ 
+     link_name = get_v8_path() / "custom_deps" / "mini_racer"

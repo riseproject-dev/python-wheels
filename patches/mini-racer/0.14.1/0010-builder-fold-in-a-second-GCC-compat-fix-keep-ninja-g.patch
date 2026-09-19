@@ -1,0 +1,144 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 13 Sep 2026 13:54:30 +0200
+Subject: [PATCH] builder: fold in a second GCC compat fix, keep ninja going on
+ riscv64
+
+CI got past the unicode.h fix and ~46% (1011/2176) into the ninja
+build before hitting another GCC-only warning-as-error:
+
+  ../../src/bigint/mul-karatsuba.cc:51:38: error: comparison of
+    integer expressions of different signedness: 'uint32_t' and 'int'
+    [-Werror=sign-compare]
+    if (shift >= 2 && (len & additive) < (1 << (shift - 2))) {
+
+'1 << (shift - 2)' is int, 'len & additive' is uint32_t; clang doesn't
+flag this particular comparison, GCC does. Cast it explicitly, the
+same way the line above already assigns '1 << shift' into a uint32_t.
+
+Rename the accumulating patch to 0001-riscv64-gcc-compat.patch (was
+scoped to the unicode.h fix alone) since this is evidently a class of
+issue, not a one-off, and pass ninja -k 1000 on riscv64 so one build
+surfaces as many of these as it can find, instead of one discovery per
+multi-hour CI cycle.
+
+Upstream-Status: To upstream [not yet submitted to bpcreech/PyMiniRacer]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ builder/0001-riscv64-gcc-compat.patch         | 28 ++++++++++++++++++
+ ...cv64-gcc-unicode-write-leading-ascii.patch | 17 -----------
+ builder/v8_build.py                           | 29 ++++++++++++++-----
+ 3 files changed, 49 insertions(+), 25 deletions(-)
+ create mode 100644 builder/0001-riscv64-gcc-compat.patch
+ delete mode 100644 builder/0001-riscv64-gcc-unicode-write-leading-ascii.patch
+
+diff --git a/builder/0001-riscv64-gcc-compat.patch b/builder/0001-riscv64-gcc-compat.patch
+new file mode 100644
+index 0000000..ee8eb3a
+--- /dev/null
++++ b/builder/0001-riscv64-gcc-compat.patch
+@@ -0,0 +1,28 @@
++--- src/bigint/mul-karatsuba.cc	2026-09-13 13:52:35
+++++ src/bigint/mul-karatsuba.cc	2026-09-13 13:52:35
++@@ -48,7 +48,7 @@
++   // Round up, unless we're only just above the threshold. This smoothes
++   // the steps by which time goes up as input size increases.
++   uint32_t additive = ((1 << shift) - 1);
++-  if (shift >= 2 && (len & additive) < (1 << (shift - 2))) {
+++  if (shift >= 2 && (len & additive) < static_cast<uint32_t>(1 << (shift - 2))) {
++     return len;
++   }
++   return ((len + additive) >> shift) << shift;
++--- src/strings/unicode.h	2026-09-13 13:52:35
+++++ src/strings/unicode.h	2026-09-13 13:52:35
++@@ -215,14 +215,6 @@
++   template <typename Char>
++   static size_t WriteLeadingAscii(const Char* src, char* dest, size_t size);
++ 
++-  template <>
++-  size_t WriteLeadingAscii<uint8_t>(const uint8_t* src, char* dest,
++-                                    size_t size);
++-
++-  template <>
++-  size_t WriteLeadingAscii<uint16_t>(const uint16_t* src, char* dest,
++-                                     size_t size);
++-
++   // Encode the given characters as Utf8 into the provided output buffer.
++   struct EncodingResult {
++     size_t bytes_written;
+diff --git a/builder/0001-riscv64-gcc-unicode-write-leading-ascii.patch b/builder/0001-riscv64-gcc-unicode-write-leading-ascii.patch
+deleted file mode 100644
+index 6efd1ce..0000000
+--- a/builder/0001-riscv64-gcc-unicode-write-leading-ascii.patch
++++ /dev/null
+@@ -1,17 +0,0 @@
+---- src/strings/unicode.h	2026-09-13 10:38:02
+-+++ src/strings/unicode.h	2026-09-13 10:38:02
+-@@ -214,14 +214,6 @@
+- 
+-   template <typename Char>
+-   static size_t WriteLeadingAscii(const Char* src, char* dest, size_t size);
+--
+--  template <>
+--  size_t WriteLeadingAscii<uint8_t>(const uint8_t* src, char* dest,
+--                                    size_t size);
+--
+--  template <>
+--  size_t WriteLeadingAscii<uint16_t>(const uint16_t* src, char* dest,
+--                                     size_t size);
+- 
+-   // Encode the given characters as Utf8 into the provided output buffer.
+-   struct EncodingResult {
+diff --git a/builder/v8_build.py b/builder/v8_build.py
+index 77cbb87..a5457e7 100644
+--- a/builder/v8_build.py
++++ b/builder/v8_build.py
+@@ -361,12 +361,23 @@ def run_build(build_dir: Path, args: Args) -> None:
+     )
+ 
+     # Finally, actually do the build:
+-    run(
++    ninja_args = [
+         executable,
+         str(get_depot_tools_path() / "ninja.py"),
+         # "-vv",  # too much spam for GitHub Actions
+         "-C",
+         str(build_dir),
++    ]
++    if target_cpu == "riscv64":
++        # This is the first time this codebase has been compiled with GCC
++        # for this target in anger, so there is a long tail of small
++        # GCC-vs-clang source incompatibilities to find (see apply_patch()
++        # calls above). Keep going past failures so one build surfaces as
++        # many of them as possible, instead of one per multi-hour CI cycle:
++        ninja_args += ["-k", "1000"]
++
++    run(
++        *ninja_args,
+         str(Path("custom_deps") / "mini_racer"),
+         cwd=get_v8_path(),
+     )
+@@ -395,13 +406,15 @@ def build_v8(args: Args) -> None:
+ 
+     if machine().lower() == "riscv64":
+         # GCC (used instead of clang on riscv64, see is_clang=false above)
+-        # rejects unibrow::Utf8::WriteLeadingAscii's explicit specializations
+-        # declared inside the class body ("explicit specialization in
+-        # non-namespace scope 'class unibrow::Utf8'"); clang accepts it as
+-        # an extension. The out-of-line definitions in unicode.cc are
+-        # already namespace-scope and standard-conformant on their own, so
+-        # the in-class declarations are both redundant and non-portable:
+-        apply_patch("0001-riscv64-gcc-unicode-write-leading-ascii.patch")
++        # is stricter than clang about a few things in v8's C++, e.g. an
++        # explicit specialization declared inside a class body
++        # (unibrow::Utf8::WriteLeadingAscii in unicode.h -- the out-of-line
++        # definitions in unicode.cc are already namespace-scope and
++        # standard-conformant on their own) and a signed/unsigned
++        # comparison under -Werror=sign-compare (bigint/mul-karatsuba.cc).
++        # Both are narrow, mechanical fixes; accumulate any more of this
++        # kind we hit in the same patch:
++        apply_patch("0001-riscv64-gcc-compat.patch")
+ 
+     build_dir = get_v8_path() / "out.gn" / "build"
+ 
