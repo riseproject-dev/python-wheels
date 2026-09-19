@@ -100,8 +100,8 @@ jobs:
           path: python-wheels
           persist-credentials: false
 
-      # lance-core and lance-linalg 9.0.0 (build-dependencies of re_datafusion
-      # via lance) have per-arch SIMD structs/closures with cfg arms for
+      # lance-core and lance-linalg (build-dependencies of re_datafusion via
+      # lance) have per-arch SIMD structs/closures with cfg arms for
       # aarch64/x86_64/loongarch64 and no catch-all, so they don't compile on
       # riscv64: lance-core's SIMD-tier-detection closure evaluates to `()`
       # instead of `SimdSupport` (E0308), and lance-linalg's f32x8/f32x16/
@@ -109,22 +109,40 @@ jobs:
       # gotchas 287/300). There is no compatible bugfix release to `cargo
       # update` to, so riscv64-fixed copies are vendored here (the crates.io
       # tarballs, already free of the workspace-inherited fields the git
-      # checkouts carry) and wired in via `[patch.crates-io]`.
+      # checkouts carry) and wired in via `[patch.crates-io]`. The pinned
+      # lance version moves between rerun releases (9.0.0 through 0.37.x,
+      # 10.0.0 from 0.38.0), so it is read out of the just-checked-out
+      # Cargo.lock rather than hardcoded.
       - name: Vendor riscv64-fixed lance-core and lance-linalg
         run: |
-          curl -fsSL -A "python-wheels (https://github.com/riseproject-dev/python-wheels)" -o lance-core.tar.gz https://crates.io/api/v1/crates/lance-core/9.0.0/download
-          mkdir lance-core-9.0.0-riscv64
-          tar xzf lance-core.tar.gz -C lance-core-9.0.0-riscv64 --strip-components=1
-          rm lance-core.tar.gz
-          patch -p1 -d lance-core-9.0.0-riscv64 < python-wheels/patches/rerun-sdk/${{ env.RERUN_SDK_VERSION }}/0001-lance-core-riscv64-simd-fallback.patch
+          LANCE_VERSION=$(awk '$0 == "name = \"lance-core\""{getline; print; exit}' Cargo.lock | sed -E 's/^version = "(.*)"$/\1/')
 
-          curl -fsSL -A "python-wheels (https://github.com/riseproject-dev/python-wheels)" -o lance-linalg.tar.gz https://crates.io/api/v1/crates/lance-linalg/9.0.0/download
-          mkdir lance-linalg-9.0.0-riscv64
-          tar xzf lance-linalg.tar.gz -C lance-linalg-9.0.0-riscv64 --strip-components=1
+          curl -fsSL -A "python-wheels (https://github.com/riseproject-dev/python-wheels)" -o lance-core.tar.gz "https://crates.io/api/v1/crates/lance-core/${LANCE_VERSION}/download"
+          mkdir "lance-core-${LANCE_VERSION}-riscv64"
+          tar xzf lance-core.tar.gz -C "lance-core-${LANCE_VERSION}-riscv64" --strip-components=1
+          rm lance-core.tar.gz
+          patch -p1 -d "lance-core-${LANCE_VERSION}-riscv64" < python-wheels/patches/rerun-sdk/${{ env.RERUN_SDK_VERSION }}/0001-lance-core-riscv64-simd-fallback.patch
+
+          curl -fsSL -A "python-wheels (https://github.com/riseproject-dev/python-wheels)" -o lance-linalg.tar.gz "https://crates.io/api/v1/crates/lance-linalg/${LANCE_VERSION}/download"
+          mkdir "lance-linalg-${LANCE_VERSION}-riscv64"
+          tar xzf lance-linalg.tar.gz -C "lance-linalg-${LANCE_VERSION}-riscv64" --strip-components=1
           rm lance-linalg.tar.gz
-          patch -p1 -d lance-linalg-9.0.0-riscv64 < python-wheels/patches/rerun-sdk/${{ env.RERUN_SDK_VERSION }}/0003-lance-linalg-riscv64-simd-fallback.patch
+          patch -p1 -d "lance-linalg-${LANCE_VERSION}-riscv64" < python-wheels/patches/rerun-sdk/${{ env.RERUN_SDK_VERSION }}/0003-lance-linalg-riscv64-simd-fallback.patch
 
           git apply python-wheels/patches/rerun-sdk/${{ env.RERUN_SDK_VERSION }}/0002-cargo-patch-lance-crates-for-riscv64.patch
+
+      # re_importer moved from crates/store/re_importer (0.37.x) to
+      # crates/data_flow/re_importer (0.38.0+) upstream; CIBW_TEST_SOURCES
+      # below needs its importer_mcap test-assets path to track whichever one
+      # the checked-out tag actually has.
+      - name: Resolve re_importer crate path
+        run: |
+          for dir in crates/data_flow/re_importer crates/store/re_importer; do
+            if [ -d "$dir" ]; then
+              echo "RE_IMPORTER_DIR=$dir" >> "$GITHUB_ENV"
+              break
+            fi
+          done
 
       # This workspace links ~760 crates (datafusion, lance, tonic, hdf5-pure,
       # ...) concurrently; same OOM guard build-deltalake.yml/
@@ -170,11 +188,22 @@ jobs:
             from pathlib import Path
             from rerun_pixi_env.pyo3_config import generate_config_file
             generate_config_file(Path('rerun_py/pyo3-build.cfg'))"
+          # rerun's workspace Cargo.toml bakes `lto = "thin"` +
+          # `codegen-units = 1` straight into the standard `release` profile
+          # (not a custom-named one), so it cannot be swapped out the way
+          # deltalake's `python-release` is; override it with
+          # `CARGO_PROFILE_RELEASE_*` instead (CLAUDE.md gotcha 141). 0.38.x's
+          # larger workspace (re_datafusion, re_hdf5, re_mcap, ... added since
+          # 0.37.2) pushed the single-codegen-unit LTO link of rerun_bindings
+          # past what CARGO_BUILD_JOBS=2 + 10 GB swap alone can hold, and
+          # rustc aborted with a heap-corruption crash instead of a clean OOM.
           CIBW_ENVIRONMENT_LINUX: >-
             PATH="$PATH:$HOME/.cargo/bin"
             PROTOC_INCLUDE=/usr/include
             RERUN_ALLOW_MISSING_BIN=1
             CARGO_BUILD_JOBS=2
+            CARGO_PROFILE_RELEASE_LTO=off
+            CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
           # Without this pip prefers PyPI's newer numpy/pillow/pandas/torch,
           # none of which have riscv64 wheels, and falls back to slow source
@@ -192,13 +221,14 @@ jobs:
           # test-sources resolves against the checkout root, not package-dir.
           # tests/assets is the workspace-level fixture dir test_asset3d.py
           # reads via `Path(__file__).parents[3] / "tests" / "assets"`; the
-          # importer_mcap assets and the animated_urdf example data are the
-          # same shape for test_mcap_reader.py / test_urdf_tree.py. Cargo.toml
-          # is test_version.py's own fixture (it parses the workspace version
-          # straight out of it).
+          # importer_mcap assets (path resolved above -- see the
+          # "Resolve re_importer crate path" step) and the animated_urdf
+          # example data are the same shape for test_mcap_reader.py /
+          # test_urdf_tree.py. Cargo.toml is test_version.py's own fixture
+          # (it parses the workspace version straight out of it).
           CIBW_TEST_SOURCES: >-
             rerun_py/tests rerun_py/pyproject.toml tests/assets
-            crates/store/re_importer/src/importer_mcap/tests/assets
+            ${{ env.RE_IMPORTER_DIR }}/src/importer_mcap/tests/assets
             examples/rust/animated_urdf/data Cargo.toml
           # e2e_redap_tests needs the "server" Cargo feature (not built, see
           # the scope note above) to start its local catalog server.
