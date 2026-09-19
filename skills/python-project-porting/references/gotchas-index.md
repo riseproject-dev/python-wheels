@@ -407,6 +407,9 @@ The porting gotchas (379 of them) live in [`references/gotchas/`](gotchas/), spl
 - **400** — A `setup.py` knob that feeds a downloaded dependency's *sources* into
   `Extension(sources=...)` needs a path relative to the project root, so the tarball has
   to be extracted inside the checkout, not into `/tmp`.
+- **415** — Turning an optional native codec OFF can select a stub whose signature has
+  drifted from its declaration; the ELF links anyway and the first `dlopen` is where it
+  dies.
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 
@@ -571,6 +574,8 @@ The porting gotchas (379 of them) live in [`references/gotchas/`](gotchas/), spl
   only on `cp314t`, with no riscv64 or correctness bug behind it — free-threaded
   CPython's deferred reference counting doesn't guarantee the ordering GIL-serialized
   builds do.
+- **416** — A conftest-time `ImportError` is reported by pytest *without* the exception
+  chain, so a `dlopen` failure reaches the log stripped of its cause.
 - **414** — A stochastic test whose native RNG is seeded from `time(NULL)` is a wall-clock
   lottery, not an arch or libc difference — replay consecutive epoch seconds through the
   library's own seed setter to measure the real failure rate.
@@ -628,6 +633,8 @@ The porting gotchas (379 of them) live in [`references/gotchas/`](gotchas/), spl
 - **410** — Gotcha 188's "lower the optimisation level for the local rehearsal only" can
   silently produce a broken wheel when the project has a C99 `inline` helper with no
   `static` — and the suite still passes, because the pure-Python fallback catches it.
+- **417** — A QEMU riscv64 rehearsal of a cibuildwheel job needs `CI=1` for
+  scikit-build-core's CMake probe, and needs `CIBW_BEFORE_ALL`'s staging replayed.
 - **412** — When no riscv64 image or cross-toolchain is reachable, rename a C/C++ source's
   arch macros in a scratch copy to exercise its generic architecture path natively — a
   restricted-egress host can still prove compilability without a container (the

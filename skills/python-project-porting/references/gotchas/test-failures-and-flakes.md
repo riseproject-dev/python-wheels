@@ -34,6 +34,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **362** — A `multiprocessing.Process().join()` regression test for a native threadpool's
   fork safety can hang the full length of its `pytest.mark.timeout` deterministically,
   not flakily, on the riscv64 runner.
+- **416** — A conftest-time `ImportError` is reported by pytest *without* the exception
+  chain, so a `dlopen` failure reaches the log stripped of its cause.
 - **414** — A native RNG seeded from `time(NULL)` makes a stochastic test a wall-clock
   lottery: replay consecutive epoch seconds through the library's own seed setter to
   measure the real failure rate instead of re-running the suite.
@@ -955,3 +957,22 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       failure really did track a vendored dependency, and gotcha 379/362, where the
       failure reproduced *deterministically*. Wall-clock seeding fails that test: nothing
       about the wheel, the libc or the arch enters the seed.
+
+416. **pytest reports a conftest-time `ImportError` without the exception chain, so a
+    `dlopen` failure arrives in the CI log stripped of the one line that diagnoses it (the
+    torchcodec case).** The whole evidence four failed jobs produced was
+    `OSError: Could not load this library: .../libtorchcodec_image.so` — which names the
+    file and says nothing about why. The cause is that loaders wrap the real error:
+    torch's `torch.ops.load_library` does `except Exception as e: raise OSError(f"Could
+    not load this library: {path}") from e`, and pytest's `ConftestImportFailure` renders
+    only the final exception, dropping the `__cause__` that carries ld.so's message
+    (`undefined symbol: ...` or `cannot open shared object file`).
+    - **Re-run the import outside pytest — `python -c "import <pkg>"` prints the full
+      chain**, including the `The above exception was the direct cause of...` section with
+      the symbol name. Under a reproduction you control, `ctypes.CDLL("<path>.so")` on the
+      offending library is even more direct: it is exactly what the loader does, minus the
+      wrapping.
+    - **A conftest that imports the package under test turns any load failure into a
+      collection error**, so this shape recurs for every wheel whose test suite has a
+      `conftest.py` doing `from <pkg> import ...` — the failure looks like a test-harness
+      problem and is really a link-time one.
