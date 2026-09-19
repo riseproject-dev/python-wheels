@@ -137,6 +137,13 @@ The porting gotchas (374 of them) live in [`references/gotchas/`](gotchas/), spl
 - **405** — An NVIDIA-owned, profiler-adjacent package can have no CUDA dependency whatsoever:
   no CUDA header, no `libraries=`, the GPU only ever the *consumer* of the annotations — and
   parking it fakes a blocker for every portable consumer that depends on it (the nvtx case).
+- **407** — An upstream recipe can stop being conda-based between releases: the tag the queue
+  entry names built its C++ SDK inside micromamba (conda-forge has no `linux-riscv64`
+  freeimage) while the newest tag uses `dnf` plus uv, so read the recipe — and the component
+  versions in its workflow `env:` block — at the newest tag before pricing the port or
+  recording a conda blocker; `api.anaconda.org/package/conda-forge/<name>` answers subdir
+  coverage per package, and micromamba itself does ship a riscv64 binary
+  (the cadquery-ocp-novtk case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

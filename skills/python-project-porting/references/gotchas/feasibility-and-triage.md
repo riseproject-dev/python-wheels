@@ -82,6 +82,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **405** — An NVIDIA-owned, profiler-adjacent package can have no CUDA dependency whatsoever
   — read the extension's header set and `libraries=` list before filing it with the GPU batch
   (the nvtx case).
+- **407** — An upstream recipe can stop being conda-based between releases, so read it at the
+  *newest* tag before pricing a port or recording a conda blocker (the cadquery-ocp-novtk
+  case).
 
 ---
 
@@ -2220,3 +2223,29 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
        headers and libraries — or nvcc — *at build time* (gotcha 387). A vendor's profiling,
        tracing or annotation library typically needs neither, and belongs in the ordinary
        Cython/C-extension lane.
+
+407. **An upstream recipe can stop being conda-based between releases, so read it at the
+    *newest* tag before pricing a port or recording a conda blocker (the
+    cadquery-ocp-novtk case).** Gotcha 388 says the queue entry's wheel *shape* is a
+    snapshot; the recipe's *build environment* is one too. `CadQuery/ocp-build-system` at
+    `v7.9.3.1.1` — the version the queue entry named — builds the OCCT SDK for Linux
+    inside a micromamba environment (`environment.yml`'s python plus `micromamba install
+    fontconfig freetype freeimage`), which is gotcha 40's wall: conda-forge has
+    `linux-riscv64` freetype and fontconfig but **no** freeimage. At `v8.0.1.0.0`,
+    released since that entry was written, the same repo's Linux path is `dnf` system
+    libraries plus `astral-sh/setup-uv`, and conda survives only on macOS/Windows — so
+    the riscv64 port needs no conda at all and is an ordinary CMake build.
+    - **`https://api.anaconda.org/package/conda-forge/<name>` is the per-package form of
+      gotcha 42's subdir count** — one small JSON per dependency,
+      `{f["attrs"]["subdir"] for f in d["files"]}`, with no 100 MB `repodata.json`
+      download, which is what makes "which of these conda deps is missing for riscv64" a
+      one-minute question.
+    - **micromamba itself is never the blocker.**
+      `https://micro.mamba.pm/api/micromamba/linux-riscv64/latest` serves a real riscv64
+      ELF (8.3 MB), so a conda-based recipe fails on *package* coverage only.
+    - **Diff the recipe, not just the version string** (`git log --oneline v<old>..v<new>
+      -- .github/` on the recipe repo). The same diff decides which component versions
+      you build: upstream's workflow `env:` block carries `WHEEL`, `OCP` and `OCCT`, so
+      read them out of the tag the job checks out instead of hardcoding them, and assert
+      that `WHEEL` equals the version in `docs/packages/<pkg>.yaml` so a bump that moves
+      them fails loudly.
