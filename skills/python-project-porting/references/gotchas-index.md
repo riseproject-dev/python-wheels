@@ -183,6 +183,12 @@ The porting gotchas (431 of them) live in [`references/gotchas/`](gotchas/), spl
   `detect_host_arch.py`, `gcc_toolchain("riscv64")`) and the only two CIPD packages missing for
   `linux-riscv64` — siso and reclient — which `.gclient` `custom_deps` nulls out (the
   comfy-angle/ANGLE case).
+- **442** — A vendored dependency's build system can silently omit a capability flag its other
+  build system defaults on: XNNPACK's Bazel build never defines `XNN_ENABLE_RISCV_VECTOR` where
+  its CMake build defaults it ON, so half its riscv64 RVV dispatch sites (no runtime
+  `getauxval(AT_HWCAP)` check) compile out to scalar only by that omission — re-verify on every
+  XNNPACK version bump, since fixing it upstream would make the ungated blocks go live (the
+  mediapipe case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

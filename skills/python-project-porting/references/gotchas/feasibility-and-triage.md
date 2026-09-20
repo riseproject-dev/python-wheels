@@ -108,6 +108,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   OSes and build from source on the one that matters, so decide gotcha 35/157/431 per OS; plus the
   depot_tools/gn/CIPD riscv64 readiness check and the two CIPD gaps `custom_deps` removes (the
   comfy-angle/ANGLE case).
+- **442** — A vendored dependency's *build system* can silently omit a capability flag its other
+  build system defaults on, and only auditing every dispatch site (not just "does it build")
+  proves which one actually shipped (the mediapipe/XNNPACK case).
 
 ---
 
@@ -2616,3 +2619,31 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       licences of the tree actually built instead — the project's own `LICENSE` plus an aggregate
       of the `third_party` `LICENSE`/`LICENCE`/`COPYING` files — and collect it by directory so it
       over-reports rather than omit something statically linked.
+
+442. **A vendored dependency's build system can silently omit a capability flag its *other* build
+    system defaults on, and only auditing every dispatch site proves which one actually shipped
+    (the mediapipe case).** mediapipe vendors XNNPACK, whose riscv64 RVV (vector) microkernels are
+    gated behind a preprocessor macro, `XNN_ENABLE_RISCV_VECTOR`. XNNPACK's **CMake** build defines
+    it (`XNNPACK_ENABLE_RISCV_VECTOR` option, default ON); XNNPACK's **Bazel** build — the one
+    mediapipe actually uses — never defines it at all, in any `.bzl`/`BUILD.bazel` file. An
+    undefined macro in `#if`/`#elif` evaluates to 0, so every RVV dispatch block compiles out to
+    its scalar `#else` branch. That matters because roughly half of those dispatch blocks
+    (68 of 128 in `src/configs/`, audited exhaustively) have **no runtime `getauxval(AT_HWCAP)`
+    check** before selecting an RVV kernel — they assume the macro means what CMake's default
+    would mean. On a `manylinux_riscv64` wheel, which must not crash on V-less hardware, those
+    ungated blocks going live would SIGILL — and QEMU cannot catch this in rehearsal, since it
+    reports the V bit set regardless of what real hardware has.
+    - **"The build passed" and "the fp16 build passed" are different claims.** Gotcha 420's
+      `--define=xnn_enable_riscv_fp16_vector=false` fixed a *different*, narrower macro (the
+      fp16-vector family, which failed at the assembler for an unrelated ISA-string reason). It
+      does not touch `XNN_ENABLE_RISCV_VECTOR`, and fixing one does not tell you the state of the
+      other — check each capability macro independently by grepping the actual build files for
+      where the wheel's *build system* defines it, not by pattern-matching on the vendor's most
+      publicized default.
+    - **The safety here is an omission, not a guarantee — re-verify on every version bump.**
+      Two changes would silently turn this into a shipping SIGILL bug: XNNPACK's Bazel build
+      catching up to `build_defs.bzl`'s own pattern (every sibling `XNN_ENABLE_*` macro is already
+      emitted there) and adding the missing definition, or mediapipe/TFLite switching XNNPACK's
+      build from Bazel to CMake. On any XNNPACK version bump inside a Bazel-built riscv64 wheel,
+      re-grep `build_defs.bzl` for `XNN_ENABLE_RISCV_VECTOR`; if it appears, the ungated dispatch
+      blocks go live and `--define=xnn_enable_riscv_vector=false` becomes mandatory, not optional.
