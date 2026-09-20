@@ -1,0 +1,381 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# This workflow is based on:
+# https://github.com/google/grain/blob/main/.github/workflows/build_and_publish_template.yml
+# and https://github.com/google/grain/blob/main/grain/oss/build_whl.sh
+---
+name: Build grain wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/grain.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-grain.yml'
+      - 'docs/packages/grain.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-grain.yml'
+      - 'docs/packages/grain.yaml'
+
+run-name: build-grain ${{ inputs.version && format('- {0}', inputs.version) || '' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Upstream pins 7.2.1, fetched through setup-bazel, which publishes no riscv64
+  # binary; 7.5.0 is the version this repo bootstraps from source.
+  BAZEL_VERSION: '7.5.0'
+  # versions bazel 7.5.0's MODULE.bazel pins; both need a riscv64 fix below
+  RULES_PYTHON_VERSION: '0.33.2'
+  RULES_JAVA_VERSION: '7.6.5'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: grain
+      version: ${{ inputs.version }}
+
+  bazel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Bootstrap bazel (riscv64)
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+
+    env:
+      GRAIN_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Restore bazel binary
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: bazel-bin
+          key: bazel-${{ env.BAZEL_VERSION }}-manylinux_riscv64
+
+      - name: Bootstrap bazel ${{ env.BAZEL_VERSION }}
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p bazel-bin
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e BAZEL_VERSION="${BAZEL_VERSION}" \
+            -e RULES_PYTHON_VERSION="${RULES_PYTHON_VERSION}" \
+            -e RULES_JAVA_VERSION="${RULES_JAVA_VERSION}" \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+
+          # rules_python 0.33.2's PLATFORMS has no riscv64 entry, aborting the bootstrap
+          # (bazelbuild/bazel#23018). Any linux entry is a safe stand-in: the toolchain it names
+          # is never selected on a riscv64 host. Fixed in bazel 8.2.0; the 7.x backport is open.
+          mkdir -p /tmp/rules_python
+          curl -fsSLo /tmp/rules_python.tar.gz "https://github.com/bazel-contrib/rules_python/releases/download/${RULES_PYTHON_VERSION}/rules_python-${RULES_PYTHON_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_python.tar.gz -C /tmp/rules_python --strip-components=1
+          sed -i 's|fail("No platform declared for host OS {} on arch {}".format(os_name, arch))|return "x86_64-unknown-linux-gnu"|' \
+            /tmp/rules_python/python/private/toolchains_repo.bzl
+
+          # rules_java 7.x maps riscv64 to a stray-colon include path, so a JNI library
+          # can't find jni_md.h. Fixed in rules_java 8.x, never backported.
+          mkdir -p /tmp/rules_java
+          curl -fsSLo /tmp/rules_java.tar.gz "https://github.com/bazelbuild/rules_java/releases/download/${RULES_JAVA_VERSION}/rules_java-${RULES_JAVA_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_java.tar.gz -C /tmp/rules_java
+          sed -i 's|\[":include/linux"\]|["include/linux"]|g' /tmp/rules_java/toolchains/BUILD
+
+          mkdir -p /tmp/bazel-src
+          cd /tmp/bazel-src
+          curl -fsSLo dist.zip "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-dist.zip"
+          unzip -q dist.zip
+
+          EXTRA_BAZEL_ARGS="--tool_java_runtime_version=local_jdk \
+            --override_module=rules_python=/tmp/rules_python \
+            --override_module=rules_java=/tmp/rules_java" \
+            bash ./compile.sh
+          install -m 0755 output/bazel /work/bazel-bin/bazel
+          SCRIPT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin/bazel
+          if-no-files-found: error
+
+  build_wheels:
+    name: Build grain ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    needs: [setup, bazel]
+    if: needs.setup.outputs.versions != '[]'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream supports 3.11-3.14 and publishes no free-threaded wheel; 3.11 is
+        # dropped because array-record ships no cp311 riscv64 wheel.
+        # tag is a real dimension: legs introduced only through include collapse
+        # into a single job, keeping the last one (gotcha 402).
+        tag: [cp312, cp313, cp314]
+        include:
+          - {tag: cp312, python: '3.12'}
+          - {tag: cp313, python: '3.13'}
+          - {tag: cp314, python: '3.14'}
+
+    env:
+      GRAIN_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout grain ${{ matrix.version }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: google/grain
+          ref: v${{ env.GRAIN_VERSION }}
+          path: grain
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download bazel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin
+
+      - name: Build wheel
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
+          PROJECT_RULES_PYTHON_VERSION: '1.6.0'
+        run: |
+          mkdir -p wheelhouse
+          set -o pipefail
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e PYTHON_VERSION \
+            -e PROJECT_RULES_PYTHON_VERSION \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT' 2>&1 | tee build.log
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip rsync
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+          install -m 0755 /work/bazel-bin/bazel /usr/local/bin/bazel
+
+          PYTAG="cp${PYTHON_VERSION/./}"
+          export PYTHON_BIN="/opt/python/${PYTAG}-${PYTAG}/bin/python"
+          export PATH="/opt/python/${PYTAG}-${PYTAG}/bin:${PATH}"
+          "${PYTHON_BIN}" -m pip install -q -U setuptools wheel auditwheel
+
+          # protobuf declares a pip hub for CPython 3.8, which python-build-standalone
+          # does not publish for riscv64, and rules_python aborts on the missing
+          # interpreter even though nothing uses that hub.
+          mkdir -p /tmp/rules_python
+          curl -fsSLo /tmp/rules_python.tar.gz \
+            "https://github.com/bazel-contrib/rules_python/releases/download/${PROJECT_RULES_PYTHON_VERSION}/rules_python-${PROJECT_RULES_PYTHON_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_python.tar.gz -C /tmp/rules_python --strip-components=1
+          python3 - <<'PATCH'
+          path = "/tmp/rules_python/python/private/pypi/extension.bzl"
+          source = open(path).read()
+          old = "        if python_name not in available_interpreters:\n            fail(("
+          new = (
+              "        if python_name not in available_interpreters:\n"
+              "            python_name = sorted(available_interpreters)[0]\n"
+              "        if False:\n"
+              "            fail(("
+          )
+          assert old in source
+          open(path, "w").write(source.replace(old, new, 1))
+          PATCH
+
+          cd /work/grain
+
+          rm -f .bazelrc
+          cat > .bazelrc <<'RC'
+          build --incompatible_default_to_explicit_init_py
+          build --enable_platform_specific_config
+          build --cxxopt=-Wno-deprecated-declarations --host_cxxopt=-Wno-deprecated-declarations
+          build --cxxopt=-Wno-parentheses --host_cxxopt=-Wno-parentheses
+          build --cxxopt=-Wno-sign-compare --host_cxxopt=-Wno-sign-compare
+          common --check_direct_dependencies=error
+          RC
+          {
+            echo "build --@rules_python//python/config_settings:python_version=${PYTHON_VERSION}"
+            echo "build --override_module=rules_python=/tmp/rules_python"
+            # A long build's default curses progress output is large enough that
+            # GitHub drops the job log, taking the failure with it.
+            echo "common --curses=no --show_progress_rate_limit=60"
+          } >> .bazelrc
+
+          unset PYTHONPATH
+          unset PYTHONHOME
+
+          # Upstream builds `...`, which needs the @pypi hub; its lock pins jaxlib and
+          # scipy wheels that exist for no riscv64 and ship no sdist. These are the
+          # only targets whose output reaches the wheel.
+          bazel build \
+            //grain/_src/python/experimental/index_shuffle/python:index_shuffle_module.so \
+            //grain/_src/python/experimental/index_shuffle:index_shuffle \
+            //grain/proto:execution_summary_py_pb2 \
+            --action_env PYTHON_BIN_PATH="${PYTHON_BIN}"
+
+          STAGE="$(mktemp -d)"
+          cp README.md setup.py pyproject.toml LICENSE "${STAGE}"
+          rsync -avm -L --exclude="__pycache__/*" grain "${STAGE}"
+          rsync -avm -L --include="*.so" --include="*_pb2.py" \
+            --exclude="*.runfiles" --exclude="*_obj" --include="*/" --exclude="*" \
+            bazel-bin/grain "${STAGE}"
+
+          # The extension statically links these; upstream ships neither licence, so
+          # collect them from the sources bazel built.
+          OUTPUT_BASE="$(bazel info output_base)"
+          for repo in abseil-cpp pybind11; do
+            dir="$(find "${OUTPUT_BASE}/external" -mindepth 1 -maxdepth 1 -type d \
+              \( -name "${repo}" -o -name "${repo}~" -o -name "*~${repo}" \) | head -1)"
+            file="$(find "${dir}" -maxdepth 1 -type f -iname 'LICENSE*' | head -1)"
+            cp "${file}" "${STAGE}/LICENSE.${repo}"
+          done
+
+          cd "${STAGE}"
+          "${PYTHON_BIN}" setup.py bdist_wheel --python-tag "py3${PYTHON_VERSION#*.}"
+          auditwheel repair --plat manylinux_2_39_riscv64 -w /work/wheelhouse dist/*.whl
+          SCRIPT
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: grain-${{ env.GRAIN_VERSION }}-${{ matrix.tag }}-build-log
+          path: build.log
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: grain-${{ env.GRAIN_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+      - name: Test wheel
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
+          PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+        run: |
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e PYTHON_VERSION \
+            -e PIP_EXTRA_INDEX_URL \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          PYTAG="cp${PYTHON_VERSION/./}"
+          PYTHON_BIN="/opt/python/${PYTAG}-${PYTAG}/bin/python"
+          "${PYTHON_BIN}" -m pip install /work/wheelhouse/*.whl
+
+          # jax is the one test requirement with no riscv64 build: it resolves jaxlib,
+          # which ships no riscv64 wheel and no sdist.
+          grep -v '^jax$' /work/grain/test_requirements.in > /tmp/test_requirements.in
+          "${PYTHON_BIN}" -m pip install -r /tmp/test_requirements.in --only-binary pyarrow
+
+          SITE="$("${PYTHON_BIN}" -c 'import grain, pathlib; print(pathlib.Path(grain.__file__).parent)')"
+
+          "${PYTHON_BIN}" - <<'PY'
+          import importlib.metadata
+
+          from grain._src.python.experimental.index_shuffle.python import index_shuffle_module
+
+          assert index_shuffle_module.__file__.endswith(".so"), index_shuffle_module.__file__
+          assert index_shuffle_module.index_shuffle(3, 10, 7, 4) in range(10)
+
+          licenses = {
+              str(f).rsplit("/", 1)[1]
+              for f in importlib.metadata.files("grain")
+              if ".dist-info/licenses/" in str(f)
+          }
+          assert licenses == {"LICENSE", "LICENSE.abseil-cpp", "LICENSE.pybind11"}, licenses
+          PY
+
+          # what upstream's profiler_test_no_framework target sets
+          export EXPECTED_FRAMEWORK=NO_FRAMEWORK
+
+          # One process per file, as upstream's py_test targets run: a single pytest
+          # over the package leaks state between files.
+          # /work holds the checkout, whose root would shadow the installed wheel.
+          cd /tmp
+          : > /tmp/failed
+          find "${SITE}" -name '*_test.py' | sort | while read -r test; do
+            case "$(basename "${test}")" in
+              # need jax or tensorflow, neither of which builds for riscv64
+              base_test.py | batch_test.py | device_put_test.py | \
+                jax_import_smoke_test.py | packing_test.py | \
+                shared_memory_array_test.py | tf_import_smoke_test.py | \
+                tree_lib_jax_test.py) continue ;;
+              # upstream declares no test target for it and its __main__ calls an
+              # undefined name
+              multiprocessing_test.py) continue ;;
+            esac
+            # by module, not by path: bazel puts the runfiles root on sys.path, and
+            # ipc/queue.py shadows the stdlib queue if its own directory goes first
+            module="grain.$(printf '%s' "${test#"${SITE}/"}" | sed 's/\.py$//; s|/|.|g')"
+            case "$(basename "${test}")" in
+              # the only three targets upstream passes this to; the files that do
+              # not use absltest reject the flag
+              data_loader_test.py | data_sources_test.py | tfrecord_dataset_test.py)
+                "${PYTHON_BIN}" -m "${module}" --test_srcdir="${SITE}/_src/python" \
+                  || echo "${module}" >> /tmp/failed ;;
+              # its two execution-summary tests wait on a summary-logging thread that
+              # only reports under upstream's own runner; pytest is what makes the
+              # RUN_IN_PYTEST expectedFailure grain ships for one of them apply
+              dataset_test.py)
+                "${PYTHON_BIN}" -m pytest "${test}" -q -k 'not test_execution_summary' \
+                  || echo "${module}" >> /tmp/failed ;;
+              *)
+                "${PYTHON_BIN}" -m "${module}" || echo "${module}" >> /tmp/failed ;;
+            esac
+          done
+          if [ -s /tmp/failed ]; then
+            echo 'failed:'
+            cat /tmp/failed
+            exit 1
+          fi
+          SCRIPT
+
+  publish:
+    name: Publish grain ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: grain-${{ matrix.version }}-*-manylinux_riscv64

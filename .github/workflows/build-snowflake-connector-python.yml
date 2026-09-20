@@ -53,6 +53,11 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Per-interpreter (not abi3): the Cython extension links the version-specific ABI.
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        # `include` entries that share no key with another axis merge into every
+        # combination in order, so without the `python` axis above the last entry
+        # here (cp314t) silently overwrote matrix.python for every version and the
+        # cp312/cp313/cp314 legs never ran.
         include:
           - python: "cp312"
             pytest_dist: "-n auto --dist loadfile"
@@ -133,7 +138,10 @@ jobs:
           # The first three -k names need a native minicore blob, which upstream
           # ships for eight platforms but not riscv64; the last five chmod a path
           # and expect the EACCES that root - which cibuildwheel runs the tests
-          # as - never gets.
+          # as - never gets. test_auth_keypair_ecdsa_unsupported_curve generates a
+          # SECP192R1 key as test setup; our riscv64 cryptography wheel's OpenSSL
+          # build has no legacy provider, so cryptography itself raises
+          # UnsupportedAlgorithm before the connector's own curve check runs.
           CIBW_TEST_COMMAND: >-
             python -c "from snowflake.connector.nanoarrow_arrow_iterator import PyArrowRowIterator" &&
             pytest -m "unit and not sso and not pandas and not lambda and not aio"
@@ -144,7 +152,8 @@ jobs:
             and not test_log_debug_config_file_parent_dir_permissions
             and not test_read_only
             and not test_config_file_inaccessible_path
-            and not test_put_error"
+            and not test_put_error
+            and not test_auth_keypair_ecdsa_unsupported_curve"
             ${{ matrix.pytest_dist }}
             --ignore {package}/test/unit/aio
             --ignore {package}/test/unit/test_ocsp.py
@@ -180,5 +189,7 @@ jobs:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
     with:
       artifact-pattern: snowflake-connector-python-${{ matrix.version }}-*-manylinux_riscv64

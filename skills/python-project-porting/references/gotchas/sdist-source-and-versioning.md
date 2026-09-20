@@ -31,6 +31,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
 - **274** — A build-from-checkout package can tag releases in a format the version
 - **319** — A release tag can exist, be reachable, and check out cleanly, yet still be the
 - **315** — `versioneer` has no `SETUPTOOLS_SCM_PRETEND_VERSION` equivalent for gotcha 31's
+- **406** — Gotcha 103's byte-for-byte sdist proof cannot come out clean when upstream cuts
+  releases from a non-public tree — judge it on the content that builds, and never inherit a
+  `test-command` from the released sdist (the nvtx case).
 
 ---
 
@@ -590,7 +593,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
     needed, and `persist-credentials: false`'s only purpose (not leaking the checkout
     token into the built artifact) is moot for plain, unauthenticated `git clone`/`fetch`.
 
-382. **A host-side `git apply` -> commit -> `git tag -f` fix for a `versioneer` dirty tree
+406. **Gotcha 103's "prove the pinned commit byte-for-byte against the PyPI sdist" cannot come
+    out clean when upstream cuts releases from a non-public tree — judge it on the content that
+    builds, and read the leftover discrepancy as the tell it is (the nvtx case).**
+    `NVIDIA/NVTX` pushes no tag for any Python release (its `v3.*` tags are the C/C++ library)
+    and its wheel job is `workflow_dispatch`-only, so gotcha 103 applies: pin the last commit
+    before the sdist's `upload_time_iso_8601`. The diff against the 0.2.16 sdist came out
+    identical for everything that builds — `python/src`, `setup.py`, `MANIFEST.in`,
+    `LICENSE.txt`, `README.md` and the whole `include/` tree (the sdist's copy of `c/include`,
+    which `setup.py` otherwise reaches as `../c/include`) — but *not* for `pyproject.toml`: the
+    released `[tool.cibuildwheel]` block matches no commit on any branch, and its `test-command`
+    names `python/tests/run_ci_tests.py`, which `git log --all -- <path>` shows has never
+    existed in the public repo.
+    - **A CI-config-only difference is not a wrong pin.** Check the sources, headers, licence
+      files and the declared version; stop expecting a `[tool.cibuildwheel]`, `.github/` or
+      `setup.cfg` block to match. (setuptools' own sdist step rewrites `setup.cfg` whitespace
+      and appends an empty `[egg_info] tag_build` — harmless, and not the same thing as gotcha
+      22's `tag_build = dev`.)
+    - **Do not inherit a `test-command` from the released sdist** — it can name a script that
+      does not exist anywhere. Take upstream's test configuration from the public checkout you
+      are actually building, which is also the only place the real suite lives: nvtx's sdist
+      ships `tests/test_*.py` but omits `tests/__init__.py`, `tests/conftest.py` and
+      `tests/injection/`, so its `--enable-injection` option and the suite's
+      `from .conftest import ...` are simply absent there (gotcha 152's partial-copy trap).
+    - Together those two make build-from-checkout the right shape for a monorepo-subdirectory
+      package like this, not sdist→bdist: the checkout supplies the headers the `setup.py`
+      reaches for *and* the test helpers the sdist drops.
+
+452. **A host-side `git apply` -> commit -> `git tag -f` fix for a `versioneer` dirty tree
     (gotcha 315's mechanism) can still leave the tree dirty *inside* the cibuildwheel
     container if the project's own `before-build` hook also modifies a tracked file (the
     pandas case).** `build-pandas.yml`'s "Patch pandas source" step applies the riscv64

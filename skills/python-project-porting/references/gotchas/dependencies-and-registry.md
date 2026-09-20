@@ -39,6 +39,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
   keeps resolving to a newer, wheel-less release.
 - **375** — `uv` can reject a real `abi3` wheel resolved by name from an index as "has no
   usable wheels" even though the identical wheel installs fine as a local file.
+- **399** — A dependency we already publish can satisfy a dependent's *runtime* link and still
+  be unusable as its *build* input: a wheel ships `.so` files, not headers or a CMake package.
+- **422** — A build container you drive yourself needs `PIP_EXTRA_INDEX_URL` on the *build*
+  `podman run`, not only on the test one.
 
 ---
 
@@ -721,3 +725,69 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       `UV_INDEX_STRATEGY=unsafe-best-match` shape gotcha 244 already documents** — this
       entry is about a *specific* `cp3X-abi3` + riscv64 + registry-resolution combination
       breaking, not a blanket "don't use uv for index-resolved abi3 wheels" rule.
+
+399. **A dependency we already publish can satisfy a dependent's *runtime* link and still be
+    unusable as its *build* input: a wheel ships `.so` files, not headers or a CMake package,
+    and the upstream recipe's header source can be conda-forge (the cadquery-ocp/VTK case).**
+    Gotcha 30 says check `pypi.riseproject.dev` before declaring a dependency unavailable, and
+    gotchas 17/121 cover linking an extension against another wheel we ship. Neither covers the
+    *C++ SDK* half of a wheel-shipped dependency, and that is a separate question with a
+    separate answer. `vtk-9.7.0-cp313-cp313-manylinux_2_39_riscv64.whl` on our registry holds
+    614 entries and 197 `libvtk*.so` — and **zero** `.h` files and **zero** CMake config files,
+    exactly like Kitware's own PyPI wheels, because VTK's wheel `setup.py` packages only
+    `vtkmodules/` even though `build-vtk.yml` configures with `-DVTK_INSTALL_SDK=ON`.
+    `cadquery-ocp`'s build needs both halves: OCCT's `USE_VTK=ON` wants
+    `3RDPARTY_VTK_INCLUDE_DIR`, and OCP's generated `CMakeLists.txt` opens with
+    `find_package(VTK REQUIRED COMPONENTS WrappingPythonCore RenderingCore RenderingOpenGL2
+    CommonDataModel CommonExecutionModel freetype)`. Upstream fills the header half with
+    `micromamba install vtk=<ver>` plus a hand-written `vtk-config.cmake`, and conda-forge's
+    `linux-riscv64` subdir carries 1,970 packages with **0** vtk and **0** occt (gotcha 42's
+    read-the-body count, against 3,221 vtk in `linux-64`) — so on riscv64 the headers have no
+    source at all while the libraries are already sitting on our registry.
+    - **Check for headers and a CMake package, not just for the wheel:**
+      `unzip -l <dep>.whl | grep -cE '\.h$|cmake'`. A "yes, we ship it" answer from gotcha 30
+      is about the runtime link only; it says nothing about whether anything can *compile*
+      against it.
+    - **An exact `==` pin on such a dependency is a second, independent wall.** The wheel's
+      own metadata pins `vtk==9.6.2` while our registry has 9.7.0 only, and PyPI publishes no
+      riscv64 VTK for *any* version — so even a successful build ships metadata that cannot
+      resolve on riscv64 unless the pin is diverged from upstream's, which also means the
+      SDK you assemble has to match whichever version we do ship, not the pinned one.
+    - **Per-interpreter coverage caps the matrix on top of that** (gotchas 67/84): our vtk
+      wheels start at cp312, so cp310/cp311 can never be built even though upstream ships
+      them.
+    - **The disposition is `blocked-on-dependency`, and the fix belongs in the *dependency's*
+      port** — teach `build-<dep>.yml` to publish an SDK artifact (or a second, SDK-bearing
+      wheel) — not in a one-off "configure the dep from source just for its headers" step
+      bolted onto the dependent, which is an invented mechanism upstream has no analogue for
+      and which has to be kept ABI-identical to the published wheel by hand.
+
+422. **A build container you drive yourself needs `PIP_EXTRA_INDEX_URL` on the *build*
+    `podman run`, not only on the test one.** A cibuildwheel port states the registry
+    once in `CIBW_ENVIRONMENT` and it covers before-build, build and test alike; a
+    gotcha 15-style container gets exactly the `-e` flags written on that one
+    invocation, and it is easy to wire the registry into the `test` step (where the
+    wheel's runtime deps obviously need it) while the `build` step's own
+    `pip install -r <project>/requirements.txt` still sees public PyPI alone.
+    build-paddlepaddle.yml did that: numpy compiled from its sdist for 21 minutes and
+    Pillow then failed outright with `RequiredDependencyException: jpeg` (the manylinux
+    image carries no libjpeg headers), burning 42 minutes of a scarce riscv64 runner
+    before a line of the project's own C++ was compiled.
+    - **The symptom in the log is a download, not an error.** `Downloading
+      <dep>-<ver>.tar.gz` for any compiled dependency of a *build* step means the
+      registry is not being consulted; grep for `Downloading .*\.tar\.gz` before
+      reading the traceback at the end, because the traceback names whichever sdist
+      happened to fail first, not the missing index.
+    - **Add `PIP_ONLY_BINARY=<the compiled deps>` in the same edit** (gotchas 30/67):
+      with the extra index alone pip still takes the highest version across *both*
+      indexes, so the first day our registry is a release behind puts the sdist build
+      back. Scope it to the names, never `:all:`.
+    - **Rehearse the resolution off-target for free**, from any host and any arch:
+      `PIP_EXTRA_INDEX_URL=… PIP_ONLY_BINARY=… pip install --dry-run --report r.json
+      --python-version 3.12 --implementation cp --only-binary=:all: --platform
+      manylinux_2_39_riscv64 --platform manylinux_2_38_riscv64 -r requirements.txt`,
+      then read `download_info.url` per entry in the report to see which index each
+      requirement came from. Read it for "is every requirement a wheel", not for the
+      exact versions: a pip running on an older interpreter than `--python-version`
+      backtracks past wheels whose `Requires-Python` excludes the *running* one (pip
+      24.0 on 3.11 walked numpy 2.5.3 → 2.4.3 with `--python-version 3.12`).

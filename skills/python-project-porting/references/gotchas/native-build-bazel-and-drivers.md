@@ -19,6 +19,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
 - **202** — A monorepo's "regenerate deps from Bazel" helper may already tolerate a missing
 - **219** — GDAL's cmake build produces no `gdal-config` script — a second consumer of the
 - **233** — A package can have no Python build backend at all — the wheel comes from an
+- **397** — A CMake build that shells out to a bare `python3` for one vendored sub-extension
+  silently builds it for the container's default interpreter, not the one the wheel is for.
+- **421** — `pierotofy/set-swap-space` is a no-op on the riscv64 runners — a heavy link gets
+  the runner's 15GB of RAM and nothing behind it.
+- **423** — A depot_tools/gclient checkout downloads no GCS dependency on riscv64 until
+  `VPYTHON_BYPASS` is set (gsutil's vpython venv pins a crcmod wheel that has no riscv64 build).
+- **424** — Audit a chromium-style DEPS for riscv64-less CIPD packages with `cipd describe`
+  before spending a build cycle finding them one at a time.
+- **427** — Under `VPYTHON_BYPASS` the checkout's own *DEPS-pinned* depot_tools breaks next:
+  its gsutil 4.68 vendors a six that cannot import on python ≥ 3.12.
+- **432** — A vendored submodule whose version the project's CMake "fixes up" with `git
+  checkout <tag>` stays on its stale recorded commit in CI, because `actions/checkout`
+  clones submodules without tags.
+- **434** — `EXTERNAL_PROJECT_LOG_ARGS` (or any `LOG_CONFIGURE 1`) hides the only useful
+  line of a third_party failure in a stamp log — print the stamp logs on failure.
+- **437** — The same `git checkout <tag>` inside an `ExternalProject_Add` `PATCH_COMMAND`
+  aborts the build outright — fetch the missing tag, and sweep every dependency at once.
+- **440** — The version-only bazel cache key is shared repo-wide, so a new workflow's
+  bootstrap step never runs and a copied bootstrap's broken `${VAR}` stays latent.
+- **441** — `VPYTHON_BYPASS` also strips `gclient.py` of *its own* vpython venv: install
+  `httplib2==0.13.1` on the ambient interpreter or the sync dies on `import httplib2`.
+- **443** — An upstream CMake arch block that `set(... CACHE ... FORCE)`s features OFF can
+  run *after* `include(third_party)`, making the FORCE dead for that configure.
+- **445** — gclient ignores a `custom_deps` `None` for a `cipd` dep: edit the DEPS entry
+  instead (424's audit finds them), and add `use_siso=false` when the dropped one is siso.
+- **451** — bazel 7.7.0/7.7.1 cannot bootstrap from source anywhere: their `MODULE.bazel`
+  reaches `bazel_features`, which reads the version-less bootstrap binary as newer than
+  bazel 8 and emits a `globals.bzl` re-exporting `macro()`. Bootstrap 7.5.0.
 
 ---
 
@@ -233,13 +261,16 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
 133. **bazel 7.x pins the same rules_python/rules_java across the whole minor series, so
     gotcha 47's bootstrap script is version-portable — and it belongs in its own cached
     job.** bazel 7.7.1's `MODULE.bazel` pins `rules_python` 0.33.2 and `rules_java`
-    7.6.5, byte-identical to 7.5.0's, so the riscv64 bootstrap recipe carries over by
-    changing one env var. Confirm with
+    7.6.5, byte-identical to 7.5.0's, so the *rules* half of the riscv64 bootstrap recipe
+    carries over by changing one env var. Confirm with
     `curl -sL https://raw.githubusercontent.com/bazelbuild/bazel/<ver>/MODULE.bazel | grep rules_` —
     cheaper than downloading the 250 MB dist archive. Put the bootstrap in a separate job
     keyed on the bazel version with `actions/cache` + `upload-artifact`: a warm cache
     turns a fresh bootstrap into a ~40 s restore, so every later iteration on the real
     build starts immediately instead of rebuilding bazel.
+    - **The same two `grep rules_` lines are not enough to clear a version, though** —
+      grep the *whole* `MODULE.bazel` diff. 7.7.0 and 7.7.1 keep those pins and still
+      cannot bootstrap at all, for an unrelated dependency bump; see gotcha 451.
 
 136. **Upstream builds its wheels in a vcpkg image: replace the image, keep the workflow
     (the pyogrio case; see `ci/pyogrio/manylinux_riscv64-gdal.Dockerfile`).** A project
@@ -386,3 +417,436 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       sibling wheels and `entry_points.txt` shims for other targets; only
       `write_base_packages` (the base `pip` wheel) matters here, so the heredoc
       reproduces that function alone and ignores the rest of the tool.
+
+397. **A CMake build that shells out to a bare `python3` for one vendored sub-extension
+    silently builds it for the container's default interpreter, not the one the wheel is
+    for (the coremltools/kmeans1d case).** Driving the container yourself means every
+    per-interpreter loop iteration passes the interpreter explicitly — `-DPYTHON_EXECUTABLE`,
+    `$PYBIN/python3`, a venv — and that covers the targets CMake compiles itself. It does not
+    cover an `execute_process(COMMAND python3 setup.py build_ext --inplace WORKING_DIRECTORY
+    ${DEPS}/kmeans1d)` buried in the same `CMakeLists.txt`: that resolves `python3` from
+    `PATH` at *configure* time, so a `-DPYTHON_EXECUTABLE=/opt/python/cp312-cp312/bin/python3`
+    build happily ships `_core.cpython-311-<arch>-linux-gnu.so` inside a cp312 wheel. It is
+    invisible in a green build and a green import — the module is only imported by the
+    palettization code path, so the whole suite can pass — and `unzip -l <whl> | grep '\.so'`
+    is what catches it.
+    - **Upstream never sees it** because its own build script activates a conda env first,
+      making `python3` and `PYTHON_EXECUTABLE` the same binary. Reproducing that is one line
+      in the build script — `export PATH="$PYBIN:$PATH"` before `cmake` — and is strictly
+      safer than auditing every `execute_process` for the hardcoded name.
+    - **Grep for the bare interpreter name, not for `PYTHON_EXECUTABLE`.** `grep -rn
+      'COMMAND python' CMakeLists.txt cmake/` finds both this and the `python -m lib2to3`
+      style post-processing steps that protobuf codegen rules commonly carry; the ones that
+      use `${PYTHON_EXECUTABLE}` are already correct, and the ones that do not are the list
+      the PATH export exists to cover.
+
+421. **`pierotofy/set-swap-space` is a no-op on the riscv64 runners — a heavy link gets
+    the runner's 15GB of RAM and nothing behind it.** The step goes green in under a
+    second either way: the action creates and `mkswap`s `/swapfile`, then swallows
+    `swapon: /swapfile: swapon failed: Invalid argument` behind its own
+    `WARNING: swapon failed ... Continuing without swap.` line. The cause is one line
+    above it in the log — `Creating swapfile at /swapfile on filesystem type: overlay`
+    — and a swap file has to live on a block-backed filesystem, so no size, no
+    allocation method and no `swap-size-gb` value fixes it. Two different runners in the
+    fleet (a failed paddlepaddle build and a *green* deltalake one) report it
+    identically, so treat it as the whole fleet.
+    - **Copying the step from `build-vtk.yml` does not buy the headroom its comment
+      claims.** Ten workflows carry it today and every one of them is really building
+      inside `free -h`'s 15Gi. Size the link to that instead: shared libraries rather
+      than one monolithic `.so` (Paddle's `WITH_SHARED_PHI`/`WITH_SHARED_IR`, VTK's
+      per-module objects), and expect to cap the parallel job count if the tail of the
+      build is what OOMs.
+    - **Read a soft-failing action once instead of trusting its conclusion.** A
+      `##[end-action ... outcome=success` sitting next to a `WARNING:` in the same step
+      is the shape; `swapon --show` in the action's own "after" report printing `0B` is
+      the proof.
+
+423. **A depot_tools/gclient checkout (V8, Chromium, Skia, ANGLE) cannot download a
+    single GCS dependency on riscv64 until `VPYTHON_BYPASS` is set.** `gclient sync`
+    dies minutes in, on whichever `dep_type: 'gcs'` entry it reaches first (for V8 that
+    is `third_party/llvm-build/Release+Asserts`), with the resolver error nested inside
+    a gclient traceback:
+    ```
+    Exception: 1: [E...] Creating virtual environment at: .../vpython-root.0/store/uv_venv-...
+      × No solution found when resolving dependencies:
+      ╰─▶ Because crcmod==1.7+chromium.4 has no wheels with a matching
+          platform tag (e.g., `manylinux_2_39_riscv64`) ...
+    ```
+    Every gcs dep *and* every `download_from_google_storage.py` hook (V8's
+    `wasm_spec_tests`, `wasm_js`, `bazel`, `gcmole`, ...) is run as
+    `vpython3 gsutil.py`, and `depot_tools/gsutil.vpython.toml` pins
+    `crcmod==1.7+chromium.4`, which chromium's wheel mirror builds for
+    x86_64/aarch64/arm/mac/windows only. It is the *venv* that is unbuildable, not the
+    tool.
+    - **The fix is depot_tools' own escape hatch**, as a job-level env var:
+      `VPYTHON_BYPASS: manually managed python not supported by chrome operations`
+      (the literal string `vpython3` compares against — anything else is ignored).
+      `vpython3` then execs `python3` from `PATH`, and gsutil uses crcmod only as an
+      optional hash accelerator, so the download just works. It also makes the DEPS
+      `vpython3_common` hook (`vpython3 -vpython-tool install`), which would resolve the
+      same riscv64-less wheel set, exit 0 — the bypass short-circuits any
+      `-vpython-tool*` argument.
+    - **Nothing else in depot_tools is missing for riscv64**, so do not conclude the
+      approach is dead: `cipd_client_version.digests` carries a `linux-riscv64` line, and
+      `infra/3pp/tools/cpython3/linux-riscv64` (the hermetic python) and
+      `infra/tools/luci/vpython3/linux-riscv64` both exist. A
+      `Platform linux-riscv64 is not supported by the CIPD client bootstrap` line in the
+      same log is a **red herring from a relative invocation**: `cipd` derives
+      `DEPOT_TOOLS_DIR` from `$0`, so `depot_tools/gclient --version` leaves it looking
+      for `depot_tools/cipd_client_version.digests` after it has cd'd into depot_tools.
+      Invoke these entry points through an absolute path (`"${PWD}/depot_tools/gclient"`).
+    - **Rehearse it for the price of a clone**, no source checkout and no build: in
+      `quay.io/pypa/manylinux_2_39_riscv64` under qemu-riscv64, clone depot_tools and run
+      gclient's own gcs code path against the one object that failed —
+      `python3 -c "import download_from_google_storage as d;
+      print(d.Gsutil(d.GSUTIL_DEFAULT_PATH).check_call('cp', '<gs://url>', '/tmp/o'))"`
+      is literally what `gclient.py`'s `DownloadGoogleStorage` calls. It reproduces the
+      resolver error bare and returns 0 under the bypass.
+
+424. **Audit a chromium-style DEPS for riscv64-less CIPD packages with `cipd describe`
+    before you spend a build cycle discovering them one at a time.** gclient aborts on
+    the first unavailable package, so a checkout with three missing ones costs three
+    cycles — and for a project like V8 each cycle is the whole fetch+sync. Two commands
+    settle it from an x86 host, because the CIPD *registry* is arch-independent:
+    `depot_tools/cipd describe <pkg>/linux-riscv64 -version <the pin from DEPS>` and
+    `depot_tools/cipd ls <pkg-prefix>` for the list of platforms that do exist. For V8
+    13.1.201.22: `gn/gn/linux-riscv64` and `infra/3pp/tools/ninja/linux-riscv64` are
+    published, while `infra/rbe/client` (reclient), `infra/build/siso` and
+    `infra/tools/luci/{isolate,swarming}` are not.
+    - **Enumerate the candidates mechanically rather than by eye**, with depot_tools'
+      own evaluator: for every `cipd`/`gcs` block in DEPS,
+      `gclient_eval.EvaluateCondition(cond, {"host_os": "linux", "host_cpu": "riscv64",
+      "build_with_chromium": False, ...})` says whether riscv64 will try to fetch it.
+      That is also the check that proves a DEPS patch does what it claims: the same
+      evaluation after the edit must leave gn and ninja `True` and the unpublished ones
+      `False`.
+    - **You cannot fix this by lying about `host_cpu`**, because the conditions gating
+      the packages that *are* published have the same shape
+      (`host_cpu != "s390" and host_os != "zos" and ...`) as the ones that are not —
+      excluding riscv64 wholesale would drop gn and ninja too. Append
+      `and host_cpu != "riscv64"` to the conditions of the missing packages only, and
+      keep them in one list so the next version bump has one place to re-verify.
+
+427. **`VPYTHON_BYPASS` decides *which interpreter* gsutil gets, and a chromium-style
+    checkout carries two gsutils of different ages — the one its DEPS pins is the one that
+    breaks on python ≥ 3.12.** Gotcha 423's bypass is what makes gsutil runnable on riscv64
+    at all, but it also replaces vpython's hermetic 3.8 with whatever `python3` is on PATH
+    (in `manylinux_2_39_riscv64` that is 3.12). V8's DEPS pins its own
+    `third_party/depot_tools`, whose `gsutil.py` bootstraps **gsutil 4.68**, which vendors
+    **six 1.12**, whose `_SixMetaPathImporter` only implements the legacy `find_module()`
+    that CPython **removed in 3.12** — so every hook shelling out to
+    `third_party/depot_tools/download_from_google_storage.py` dies half an hour into the
+    sync, long past the gotcha 423/424 walls:
+    ```
+    File ".../external_bin/gsutil/gsutil_4.68/gsutil/gslib/__main__.py", line 36
+        from six.moves import configparser
+    ModuleNotFoundError: No module named 'six.moves'
+    ```
+    - **Nothing about this needs riscv64 to reproduce** — it is purely the interpreter, so
+      settle it on the x86 host in seconds instead of in CI:
+      `curl -sO https://storage.googleapis.com/pub/gsutil_4.68.zip && unzip -q gsutil_4.68.zip`,
+      then `python3.11 gsutil/gsutil version` prints `4.68` while `python3.12 gsutil/gsutil
+      version` raises the CI traceback verbatim.
+    - **The first-class `dep_type: 'gcs'` deps are unaffected**, which is exactly why the
+      sync now gets as far as the hooks: those run through the gsutil of the *outer*
+      depot_tools clone driving the sync (5.35, six 1.17). Read the gsutil version out of the
+      traceback path, not out of your own clone. That the deps came down is also how you
+      learn the container's `python3` is 3.12 — gsutil 5.35 dies on 3.13 in its vendored
+      `cryptography`, so a newer container python moves this wall rather than removing it.
+    - **Condition the offending hooks off; do not chase interpreters.** With V8
+      13.1.201.22's default DEPS vars only `wasm_spec_tests` and `wasm_js` reach gsutil, and
+      both only unpack test suites a `v8_monolith` build never reads. Inject
+      `'condition': 'host_cpu != "riscv64"'` into those two hook dicts from the same
+      post-checkout DEPS edit that carries gotcha 424's CIPD conditions, and prove it the
+      same way — `gclient_eval.Parse` then `EvaluateCondition` over `local_scope["hooks"]`
+      must drop exactly those two for `host_cpu: riscv64` and change nothing for x64.
+    - **Audit the hooks that run *after* the failing one in the same pass**, since they own
+      the next unattended half hour, and rehearse them locally for free: V8's `lastchange`
+      is pure git, `vpython3_common` exits 0 because depot_tools' `vpython3` wrapper returns
+      0 for any `-vpython-tool*` argument under the bypass, and `configure_reclient_cfgs
+      --skip_remoteexec_cfg_fetch` and `configure_siso` each only template one cfg file —
+      copy those two scripts out of `buildtools`/`build` (plus
+      `reclient_cfgs/reproxy_cfg_templates/`) and run them with the arguments DEPS passes.
+
+432. **A monorepo that vendors its C++ dependencies as git submodules *and* has CMake
+    "fix up" their versions with `git checkout <tag>` builds the stale recorded commit in
+    CI, because `actions/checkout` clones submodules without tags — and the only sign is a
+    one-line warning hundreds of lines before the real error (the paddlepaddle case).**
+    Paddle's `cmake/external/openblas.cmake` runs `git describe --abbrev=6 --always --tags`
+    in `third_party/openblas`, compares it to `CBLAS_TAG` (`v0.3.28` on Linux) and, on a
+    mismatch, runs `git checkout ${CBLAS_TAG}` — with `execute_process` and **no
+    `RESULT_VARIABLE`**, so nothing checks that it worked. In a CI checkout it cannot:
+    `submodules: true` fetches the pinned commit and no tags, so `describe` returns a bare
+    abbreviated hash and the checkout fails with `error: pathspec 'v0.3.28' did not match
+    any file(s) known to git`. Configure then completes normally against whatever commit
+    the monorepo actually recorded — for Paddle v3.3.1 that is `5f36f18`, a 0.3.7-era
+    OpenBLAS whose `getarch.c` has no riscv64 target at all, so 33 minutes later the build
+    dies at `getarch.c: error: #error "This arch/CPU is not supported by OpenBLAS."`
+    against a version that has supported riscv64 for years.
+    - **Read the configure output for `checkout`/`pathspec`/`describe` noise before
+      reading the compiler error.** `error: pathspec '<tag>' did not match` and a
+      `version is not <hash>, checkout to <tag>` warning are the same event, and they name
+      the dependency whose source tree is not what the version numbers in the build log
+      claim. Grepping the job log for `did not match any file` costs nothing and is worth
+      doing on *every* submodule-vendoring project, since upstream never notices: on
+      x86-64 the stale tree still autodetects the host and builds.
+    - **Fix it in the workflow, not the patch: move the submodule to the tag the project's
+      own CMake asks for.** One shallow tag fetch in the submodule (`git fetch --depth 1
+      origin tag <tag>` then `git checkout <tag>`, under `working-directory:`) makes
+      `describe` agree with `CBLAS_TAG`, so upstream's own version logic goes quiet
+      instead of being patched out. Do not `git fetch --tags` — that pulls every tag's
+      tree. The alternative, deleting the submodule directory so the project's
+      `file(GLOB)`-guarded `git clone -b <tag>` branch runs instead, costs a full clone of
+      the dependency inside the configure step.
+    - **Check the *recorded* submodule commit against the version the build advertises.**
+      The checkout step prints `Submodule path 'third_party/<dep>': checked out '<sha>'`;
+      resolve that sha upstream before believing any tag name in the CMake. A file's line
+      count is enough to tell two releases apart — the `#error` in the failing
+      `getarch.c` was at line 1193 where v0.3.28 has it at 1853.
+
+434. **Any `ExternalProject_Add` under a project-wide log-to-file setting (`LOG_CONFIGURE
+    1`, Paddle's `EXTERNAL_PROJECT_LOG_ARGS`) reports a failed dependency as `Command
+    failed: 1` and nothing else — add an `if: failure()` step that prints the stamp logs,
+    or the round costs you the diagnosis as well as the build.** The job log gives the full
+    `cmake` command line and the path of the log it *would* have told you about
+    (`<build>/third_party/<dep>/src/<dep>-stamp/<dep>-configure-*.log`), which is on the
+    runner's disk and gone when the job ends. The steps that are logged to file are exactly
+    the cheap ones (configure, install) — `LOG_BUILD 0` means the compiler errors you can
+    already see are the ones that were never hidden.
+    - **The dump is one step, and it applies to every dependency at once**, because the
+      stamp-log layout is fixed: `tail -n 40 -v <build>/third_party/*/src/*-stamp/*-*-*.log
+      || true`, guarded by `if: failure()`. Put it straight after the build step; a
+      container build that bind-mounts the source tree leaves the logs on the host, so the
+      step needs no container of its own.
+    - **Do not spend a round proving which of several candidate causes it was.** A
+      dependency you can take from the image (gotcha 401's Rocky packages) instead of
+      building removes the failure class rather than diagnosing it, and one fewer
+      `ExternalProject` is a real saving on a 4-core riscv64 runner.
+
+437. **When gotcha 432's `git checkout <tag>` sits in an `ExternalProject_Add`
+    `PATCH_COMMAND` instead of an unchecked `execute_process`, the tagless submodule clone
+    does not build the stale tree quietly — it aborts the whole build, and there is one of
+    these per dependency, so enumerate them all in one round instead of paying a CI cycle
+    each.** Paddle's `gloo.cmake` sets `PATCH_COMMAND git checkout -- . && git checkout
+    ${GLOO_TAG}`, so run 5 of the paddlepaddle port died 40 minutes in, at 6% with the
+    project's own C++ tree still untouched, on `Performing patch step for 'extern_gloo'` /
+    `error: pathspec 'v0.0.3' did not match any file(s) known to git`. Same cause as 432,
+    opposite symptom: fatal and named, rather than silent and diagnosed hours later.
+    - **Check whether the recorded commit already *is* the tag before moving anything.**
+      `git ls-tree <tag> third_party/<dep>` in a `--filter=blob:none --no-checkout --depth 1`
+      clone of the monorepo gives the gitlink, and `git ls-remote <dep-url> refs/tags/<tag>
+      refs/tags/<tag>^{}` gives the tag's commit — for gloo both were `8b6b61d`, and for
+      protobuf the gitlink `f0dc78d` was `refs/tags/v21.12^{}`. When they match, the tree is
+      already right and only the *ref* is missing: `git fetch --depth 1 origin tag <tag>` in
+      the submodule is the whole fix, with no checkout of your own and no tree change.
+      Prefer that fetch over `git tag <tag>` pointing at HEAD — the fetch stays correct, and
+      keeps failing loudly, if a later version bump moves the gitlink off the tag.
+    - **Sweep every `cmake/external/*.cmake` for the pattern in one pass, then split the
+      hits by whether the tag is a name or a commit.** `grep -rn 'checkout'
+      cmake/external/` plus the `set(<DEP>_TAG ...)` lines is enough: a `*_TAG` that is a
+      SHA is safe, because the recorded commit is the one `actions/checkout` fetched, while a
+      tag or branch *name* is a live failure unless its `if()` is false in your
+      configuration. For Paddle v3.3.1 on riscv64 that left exactly two live (gloo,
+      protobuf — the second being an unconditional `cd <src> && git checkout v21.12` in
+      `build_protobuf()`, which `find_package` only skips if the image ships that exact
+      version), against tag-name checkouts already gated off by `GCC < 9` (pybind11),
+      `APPLE` (pocketfft), `WITH_TESTING OR WITH_DISTRIBUTE` (gtest), CUDA (cub, cccl, the
+      `paddle/fluid/fp8` cutlass switch), `WITH_OPENVINO`, and the parameter-server tree
+      (rocksdb).
+    - **Rehearse it off-target in seconds: the CI state is reproducible exactly.** `git init`,
+      `git remote add origin <url>`, `git fetch --depth 1 origin <recorded-sha>`, `git
+      checkout FETCH_HEAD` is what `git submodule update --init` leaves behind; the tag
+      checkout then fails with the identical `pathspec` line, the tag fetch fixes it, and
+      `git rev-parse HEAD` proves the commit did not move. No riscv64 runner needed.
+
+440. **Gotcha 133's version-keyed bazel cache is shared by *every* workflow in this repo, so
+    a new workflow's bootstrap step never executes — and a bootstrap script with a broken
+    variable reference can sit latent and green for months (the array-record case).** The
+    cache key gotcha 133 recommends is `bazel-${BAZEL_VERSION}-manylinux_riscv64`, with
+    nothing package-specific in it. That is the point — a warm cache turns a fresh bootstrap
+    into a ~40 s restore — but it also means the `if: steps.cache.outputs.cache-hit != 'true'`
+    step in a brand-new workflow is **skipped on its very first run**, so copying a
+    bootstrap job never proves that copy works. `build-array-record.yml` demonstrates the
+    consequence: its bootstrap `docker run` passes `-e RULES_PYTHON_VERSION` but the script
+    inside interpolates `${PROJECT_RULES_PYTHON_VERSION}`, a variable exported only in that
+    workflow's *build* job. Under the script's own `set -eux` (the `-u`) that download would
+    abort immediately — it has simply never run, because `bazel-7.5.0-manylinux_riscv64` was
+    already populated by ray/labmaze.
+    - **So diff a copied bootstrap against a workflow whose cache was cold**, not against
+      the nearest neighbour: `build-ray.yml` and `build-labmaze.yml` both use
+      `${RULES_PYTHON_VERSION}` consistently and are the ones to copy.
+    - **The mechanical check needs no CI**: for every `${VAR}` the heredoc expands, confirm
+      the same `docker run` names it in a `-e` flag. The heredoc is quoted (`<<'SCRIPT'`), so
+      nothing is substituted by the outer shell and a typo cannot be caught at YAML level —
+      only the container's `set -u` sees it, and only when the step actually runs.
+    - **Corollary for triage**: "the bazel job was green" is not evidence the bootstrap
+      works. Check whether the step reported a cache hit before crediting it, and if you need
+      to exercise a bootstrap deliberately, bump `BAZEL_VERSION` or change the key.
+
+441. **Gotcha 423's `VPYTHON_BYPASS` does not only change which interpreter gsutil gets — it
+    takes `gclient.py`'s *own* vpython venv away too, so depot_tools' third-party imports
+    must be present on the ambient interpreter, and `httplib2` is the one that stops the sync
+    before it fetches anything.** `depot_tools/gclient` ends in `exec vpython3
+    "$base_dir/gclient.py"`, which the bypass turns into plain `python3 gclient.py`;
+    `gclient.py` imports `gclient_scm`, which imports `gerrit_util`, which does `import
+    httplib2` and `import httplib2.socks` at module scope. A manylinux `/opt/python/cp3xx-cp3xx`
+    has neither, so `gclient sync` dies ~80 s in with a bare
+    `ModuleNotFoundError: No module named 'httplib2'` plus a `CalledProcessError` from
+    whatever driver script ran it — nothing in the log mentions vpython, and the traceback
+    looks like a broken checkout rather than a missing venv.
+    - **Fix it in the workflow, pinned: `pip install -q httplib2==0.13.1`** (the version
+      depot_tools' own `.vpython3` pins) on the interpreter that is first on `PATH`, before
+      the driver script runs. **Unpinned is not a fix**: `pip install httplib2` resolves to
+      0.32.0, and `httplib2.socks` ships up to 0.22.0 and is gone from 0.30.0 on, so the
+      second import fails exactly like the first. The wheel is `py3-none-any`, so this needs
+      no registry index and no riscv64 wheel — it is not the CIPD wheel problem again.
+    - **Do not pre-install the rest of `.vpython3` while you are there.** The `lxml` and
+      `crcmod` whose missing `linux-riscv64` builds forced the bypass are reached only by
+      PRESUBMIT and as an optional gsutil hash accelerator. Prove the set instead of guessing:
+      unpack the pinned depot_tools from gitiles (`+archive/<rev>.tar.gz` — no clone, 1.2MB),
+      make a bare venv on the *container's* python version, install httplib2, and import every
+      module the sync path touches (`gclient`, `gclient_scm`, `gclient_eval`, `gerrit_util`,
+      `git_cache`, `download_from_google_storage`, `gsutil`, `metrics`, `autoninja`, `siso`,
+      `ninja`, …). All clean in seconds on x86; only httplib2 was ever missing.
+    - **Rehearse the gsutil hooks with a *bare* ambient python, not the host's.** Pointed at a
+      host `python3` that carries a system `cryptography`, `download_from_google_storage.py`
+      dies inside gsutil's vendored google-auth (`pyo3_runtime.PanicException: Python API call
+      failed`) — a host artifact that does not happen in the image. Put a directory holding a
+      `python3` symlink to the bare venv first on `PATH`, and the real hook downloads its
+      object and exits 0 with only httplib2 installed.
+    - **Check whether the checkout pins the same depot_tools revision the driver clones before
+      assuming gotcha 427.** comfy-angle 0.1.1's ANGLE revision pins `third_party/depot_tools`
+      at exactly the sha in `scripts/depot-tools-revision.txt`, so both gsutils are 5.35 (six
+      1.17, fine on 3.12) and the two-gsutils split never arises — `grep` the DEPS for the
+      revision instead of inferring it from the project's age.
+    - **Only vpython-dispatched scripts are affected.** `depot_tools/gn` and `autoninja` run
+      through `python-bin/python3`, the hermetic CIPD cpython, and every hook a standalone
+      ANGLE sync runs on Linux (`clang`, `llvm_objdump`, `rust`, `lastchange`,
+      `configure_siso`) imports nothing outside the stdlib and depot_tools itself — so
+      httplib2 is the whole bill, not the first of many.
+
+443. **A per-architecture block in an upstream `CMakeLists.txt` that turns x86 features off
+    with `set(<OPT> OFF CACHE ... FORCE)` is only as good as its position in the file: when
+    the block sits *after* `include(third_party)`/`include(flags)`/`include(configure)`, the
+    FORCE is read too late and every `add_definitions()` those includes already ran stays in
+    effect for the rest of the build.** Paddle puts `WITH_ARM`, `WITH_SW`, `WITH_MIPS` and
+    `WITH_LOONGARCH` at `CMakeLists.txt:638-686` but includes `cmake/third_party.cmake` at
+    line 591, so a `WITH_RISCV` block copied from them inherits the same defect. In round 6
+    of the paddlepaddle port the configure log said `-- Compile with Sleef support` even
+    though the block FORCEd `WITH_SLEEF OFF`, and the build died 2h33m later at 21% of
+    `phi_core` with eight `error: 'Sleef_sinf1_u35' was not declared in this scope` out of
+    `paddle/phi/kernels/funcs/activation_functor.h`, which gates its `Sine`/`Cosine`
+    specialisations on `PADDLE_WITH_SLEEF` alone.
+    - **The failure mode is a *split* configuration, which is worse than either setting.**
+      `cmake/sleef.cmake` had already run `add_definitions(-DPADDLE_WITH_SLEEF)` at line 591,
+      while `paddle/phi/CMakeLists.txt`'s `if(WITH_SLEEF) list(APPEND PHI_DEPS sleef)` is
+      processed by `add_subdirectory()` *after* the block and did see the OFF — so the tree
+      compiled the SLEEF path and linked no SLEEF. Had the header declared the symbols, the
+      same bug would have surfaced hours further on as undefined references at the final
+      link instead.
+    - **Read the include line numbers before trusting the block, and prefer the project's own
+      early switch.** `grep -n '^include(' CMakeLists.txt` against the block's line number
+      answers it in one command. Paddle already had the right hook 230 lines earlier —
+      `set(WITH_SLEEF_DEFAULT ON)` / `if(WIN32 OR WITH_ROCM)` at line 356, feeding
+      `option(WITH_SLEEF ... ${WITH_SLEEF_DEFAULT})` — so adding `OR WITH_RISCV` there is
+      both minimal and the most upstreamable form, and it reaches the arch variable because
+      `setup.py` forwards every `WITH_*` environment variable as a `-D`, which populates the
+      cache before `CMakeLists.txt` runs at all.
+    - **Check the *other* options the block forces before assuming only one leaked.** Same
+      file, same block: `WITH_AVX` and `WITH_MKL` default to `${AVX_FOUND}` and so were
+      already OFF on riscv64, but `WITH_XBYAK` defaults ON and `cmake/external/xbyak.cmake`
+      does `add_definitions(-DPADDLE_WITH_XBYAK -DXBYAK64)` — which leaked identically. That
+      one happens to be benign (`cpu_info.h` only uses it to *skip* defining `cpuid()`, and
+      the `jit/gen` subdirectory is added after the block, so it was correctly dropped), but
+      it is benign by luck, not by design, and it still builds a dependency nothing uses.
+    - **A third-party library can be missing entry points on riscv64 that exist everywhere
+      else, so "just turn the feature on" is not the alternative fix.** SLEEF 3.6.1's
+      `src/libm/CMakeLists.txt` omits `DSP_SCALAR` from `SLEEF_ARCH_RISCV64`'s header list,
+      alone among its six architectures, and `DSP_SCALAR` is the only entry with no ISA-name
+      argument — `mkrename.c` reads that ninth argv as the suffix, so it is the only section
+      emitting *unsuffixed* scalar declarations. The generated riscv64 `sleef.h` therefore
+      declares `Sleef_sinf1_u35purec` and never `Sleef_sinf1_u35`. Worth reporting upstream
+      to SLEEF, but not something a wheel port should carry a patch for.
+
+445. **The companion to gotcha 424: once you know which CIPD packages have no riscv64
+    build, a `.gclient` `custom_deps` entry set to `None` is *not* how you get rid of them.
+    That removes a `git` dep and is silently ignored for a `cipd` one, so the package
+    survives into the sync anyway — edit the checkout's `DEPS`, either by appending
+    `and host_cpu != "riscv64"` to the entry's condition (424) or by deleting the entry
+    outright.** In `gclient.py`, `_postprocess_deps` copies the DEPS dict
+    verbatim and only ever *adds* custom_deps whose value is truthy; the removal path for a
+    git dep is `Dependency._OverrideUrl`, which asks `get_custom_deps` for the URL and skips
+    the dep when it comes back `None`. `_deps_to_objects` builds a `CipdDependency`
+    straight from the DEPS entry and passes it only `custom_vars` — nothing in that path
+    consults `custom_deps`, and nothing warns. The null looks right in the `.gclient`, the
+    sync proceeds normally for several minutes, and the package still turns up in the
+    `cipd ensure` that ends the sync: `failed to resolve <pkg>/linux-riscv64 (line N): no
+    such package`, one line per unresolvable package, then a bare `CalledProcessError`.
+    - **Run 424's `cipd describe` audit first.** It costs two commands from an x86 host and
+      names the whole set, which is the difference between one fix and one CI round per
+      package. For a standalone ANGLE checkout the answer is the same list 424 already
+      records for V8 — `infra/rbe/client`, siso, and the luci `isolate`/`swarming` tools.
+    - **Rewrite the DEPS entries before the sync, and raise if one is not found.**
+      The driver script already has the checkout on disk before it writes `.gclient`, so a
+      `re.subn(rf"\n  '{re.escape(path)}': \{{\n.*?\n  \}},\n", "\n", text, flags=re.DOTALL)`
+      per path is enough for Chromium-family DEPS formatting. Assert the count is exactly 1:
+      a future revision that reformats DEPS must fail loudly rather than quietly restore the
+      dep you thought you had dropped.
+    - **`cipd ensure` reports *every* unresolvable package at once**, because gclient batches
+      all cipd deps in the tree into a single ensure file for the root. That list is the
+      complete set — fix them in one round instead of expecting another wall per package.
+    - **Read the ensure-file failure by dep entry, not by package.** ANGLE's `tools/luci-go`
+      names three packages and only `isolate` and `swarming` lack a riscv64 build, but they
+      share one entry, so dropping the entry also drops `cas`. Fine when the whole entry is
+      test-distribution tooling; check before assuming.
+    - **Dropping siso means saying so in the GN args, or you just move the failure later.**
+      `//build/toolchain/siso.gni` defaults `use_siso` to false for a non-Chromium checkout,
+      but a project's own `.gn` can override that in `default_args` — ANGLE's sets
+      `use_siso = true` — and `autoninja` chooses siso or ninja by reading `use_siso` back out
+      of `args.gn`. Add `use_siso=false` to the args wherever you remove the siso package.
+      It does reach autoninja despite the args being passed as one space-separated
+      `--args=` string: gn runs `gn format` over that string in `Setup::SaveArgsToFile`, so
+      `args.gn` lands one `key = value` per line, which is the only shape depot_tools'
+      `gn_helper.args` regex matches. Leave `use_remoteexec` unset and `use_reclient` stays
+      false on its own (`use_reclient = use_remoteexec && !use_siso`), so nothing wants the
+      reclient package either.
+    - **All of this is checkable off-target in seconds.** Fetch the pinned `DEPS` and
+      `gclient.py` from gitiles (`?format=TEXT`, base64 — no clone), run the rewrite against
+      the real DEPS, `exec` the result to confirm it still parses and count the deps and
+      hooks, and diff the rendered `.gclient` and gn args for the untouched architectures to
+      prove the port changed nothing for them.
+
+451. **bazel 7.7.0 and 7.7.1 cannot be bootstrapped from source on any architecture: they
+    are the first 7.x releases whose `MODULE.bazel` reaches `bazel_features`, and
+    `bazel_features` reads the version-less bootstrap binary as "newer than bazel 8" (the
+    ai-edge-litert case).** Gotcha 47's recipe dies in `//src:bazel_nojdk` analysis with
+    ```
+    ERROR: .../bazel_features~~version_extension~bazel_features_globals/globals.bzl:4:13:
+      name 'macro' is not defined
+    ERROR: error loading package 'third_party/grpc/bazel'
+    ```
+    The chain is short and entirely off-target checkable:
+    - 7.7.0 bumps `apple_support` 1.8.1 → 1.23.1 (7.5.0 through 7.6.1 all stay on 1.8.1),
+      and apple_support gained `bazel_dep(name = "bazel_features", ...)` in between — so
+      `bazel_features` enters bazel's own module graph for the first time. One line settles
+      it for any candidate version:
+      `curl -sL https://raw.githubusercontent.com/bazelbuild/bazel/<ver>/MODULE.bazel | grep apple_support`.
+    - `bazel_features`' `private/globals_repo.bzl` emits one `<name> = <name>,` line per
+      entry of `private/globals.bzl` whose minimum version is `<= native.bazel_version`,
+      and `private/parse.bzl` maps an **empty** version string to `999999.999999.999999`
+      ("a dev version, greater than anything"). The scratch bazel that
+      `scripts/bootstrap/compile.sh` builds first carries no embedded version label, so
+      every global qualifies — including `"macro": "8.0.0"` — and the 7.x binary evaluating
+      that file has no `macro` builtin. Line 4 of the generated file is always the `macro`
+      line, which is the quickest way to recognise the failure.
+    - **This is not a riscv64 problem** and not fixable with another `--override_module`
+      layer worth carrying: the failure is bazel bootstrapping bazel, so it reproduces on
+      x86_64. **Bootstrap 7.5.0**, what every bazel port in this repo already uses and what
+      the shared `bazel-7.5.0-manylinux_riscv64` cache (gotcha 440) is already warm for.
+    - **An upstream `.bazelversion` of 7.7.0 is usually not a constraint**, because we
+      install the bootstrapped binary directly instead of going through bazelisk, and
+      `.bazelversion` is bazelisk's file. Before overriding it, check the two things that
+      *are* enforced: a `versions.check(minimum_bazel_version = ..., maximum_bazel_version
+      = ...)` in `WORKSPACE` (gotcha 47), and whether the project is bzlmod at all — LiteRT
+      has no `MODULE.bazel` and sets `common --noenable_bzlmod`, so nothing in its build
+      ever reads a version gate.

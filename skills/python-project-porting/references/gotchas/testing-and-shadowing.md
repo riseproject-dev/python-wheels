@@ -26,6 +26,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
 - **329** — A test suite that shells out to the package's own installed CLI binaries at a
 - **347** — A test that asserts "you're running against an editable/in-place install" can
 - **348** — A `glcontext`-based package's `create_context(standalone=True)` defaults to the
+- **389** — A test `.pyx` that Cython-`include`s a checkout-root-relative path can be satisfied by
+  staging just those files; a staged package dir with no `__init__.py` is a namespace
+  portion and does not shadow the wheel.
 
 ---
 
@@ -516,3 +519,27 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
     without copying that same `context=` argument passes on a workstation with a
     display and fails only in CI; grep the checkout's own conftest/test helpers for
     `egl` before writing a headless smoke test from scratch.
+
+389. **A test `.pyx` that Cython-`include`s a path relative to the *checkout root* can be
+    satisfied by staging just those source files: a staged package directory with no
+    `__init__.py` is a namespace portion and does not shadow the installed wheel (the
+    cassandra-driver case).** `tests/unit/cython/types_testhelper.pyx` opens with
+    `include '../../../cassandra/ioutils.pyx'`, so `pyximport` compiling it at test time
+    needs `<test_cwd>/cassandra/ioutils.pyx` — plus the `cython_marshal.pyx` that one
+    includes — present on disk. Gotcha 25 forbids staging the project package beside the
+    tests, which reads as a dead end: either deselect the Cython test modules or shadow the
+    wheel. It is neither. `test-sources` accepts individual files, so
+    `CIBW_TEST_SOURCES: tests cassandra/ioutils.pyx cassandra/cython_marshal.pyx` creates a
+    `cassandra/` directory holding no `__init__.py`, and CPython's import system records
+    such a directory only as a *namespace portion* and keeps scanning the rest of
+    `sys.path` — so `import cassandra` still binds the installed wheel's regular package in
+    `site-packages`.
+    - **Only files reached by a filesystem `include` need staging.** Every `.pxd` the
+      helper `cimport`s (`cassandra/bytesio.pxd`, `cassandra/buffer.pxd`, …) is found by
+      Cython along `sys.path`, and this project ships its `.pxd`/`.pyx` inside the wheel;
+      `cimport` and `include` resolve through different mechanisms, so grep for `include`
+      specifically.
+    - **Prove it rather than reasoning about it**: from the staging directory,
+      `python -c "import cassandra; print(cassandra.__file__)"` must print the
+      `site-packages` path, and running the whole suite that way against upstream's
+      released PyPI wheel costs two minutes on any host (gotcha 52).

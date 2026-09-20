@@ -73,33 +73,35 @@ jobs:
       - name: Set a fixed abi3 floor for the pyo3 extension
         run: |
           set -euo pipefail
-          # litellm ships a single abi3 wheel per arch on PyPI, but the abi3 pyo3
-          # feature that produces it is NOT in the git tag: the tag has
-          # `features = ["extension-module"]`, and BerriAI adds the abi3 feature
-          # only in their release-time packaging (the PyPI sdist's Cargo.toml has
-          # `abi3-py310`; `git checkout v1.97.0` does not). Since we build the sdist
-          # from source rather than consuming the prebuilt PyPI sdist, we must set
-          # the abi3 feature ourselves - otherwise maturin's abi3 probe finds no
-          # abi3 feature and falls back to per-interpreter wheels (cp312-cp312,
-          # cp313-cp313, ...), recompiling the Rust world once per Python.
+          # litellm ships a single abi3 wheel per arch on PyPI, and the floor that
+          # produces it keeps moving: <=1.97 carried it on the pyo3 dependency line,
+          # 1.100 dropped it entirely, 1.101 reintroduced it as a default crate
+          # feature with a py310 floor. We pin our own floor of abi3-py312 (RISE's
+          # minimum published Python) whichever shape the tag has.
           #
-          # We pin an explicit floor of `abi3-py312` (NOT the bare `abi3` feature):
-          #   * bare `abi3` -> maturin tags Abi3Version::CurrentPython, i.e. a
-          #     DIFFERENT cpNN-abi3 per build interpreter (cp313-abi3, cp314-abi3),
-          #     which is exactly the spray we must not publish;
-          #   * `abi3-py312` -> maturin always tags `cp312-abi3` regardless of the
-          #     build interpreter, so every interpreter in the matrix produces the
-          #     one identical wheel (deduped by find_compatible_wheel).
-          # 3.12 is RISE's minimum published Python, so a cp312-abi3 floor (loadable
-          # on 3.12/3.13/3.14) is the right target - we intentionally do NOT mirror
-          # upstream's 3.10 floor. Idempotent: only rewrites the
-          # extension-module-only line; a no-op if an abi3 feature is ever committed
-          # upstream. Bake it in BEFORE building the sdist so maturin captures it.
-          bridge_manifest="litellm-rust/crates/python-bridge/Cargo.toml"
-          sed -i -E 's/^(pyo3 = \{ workspace = true, features = \[)("extension-module")(\] \})/\1\2, "abi3-py312"\3/' "${bridge_manifest}"
-          echo "pyo3 feature line now:"
-          grep -n 'pyo3 = ' "${bridge_manifest}"
-          grep -q 'abi3-py312' "${bridge_manifest}" || { echo "::error::failed to set abi3-py312 (upstream line shape changed?)"; exit 1; }
+          # The floor must be explicit, not the bare `abi3` feature: bare `abi3` tags
+          # Abi3Version::CurrentPython, i.e. a different cpNN-abi3 per build
+          # interpreter, which is exactly the spray we must not publish. With
+          # abi3-py312 maturin always tags cp312-abi3, so every interpreter in the
+          # matrix yields the one identical wheel (deduped by find_compatible_wheel).
+          # Bake it in BEFORE building the sdist so maturin captures it.
+          python3 - <<'PY'
+          import pathlib, re, sys
+
+          p = pathlib.Path("litellm-rust/crates/python-bridge/Cargo.toml")
+          s = p.read_text()
+          out = re.sub(r'(abi3 = \["pyo3/abi3-py)\d+("\])', r'\g<1>312\g<2>', s)
+          if out == s:
+              out = re.sub(r'(pyo3 = \{ workspace = true, features = \["extension-module")("?\] \})',
+                           r'\1, "abi3-py312"\2', s)
+          if out == s:
+              out = s.replace("[features]\n", '[features]\nabi3 = ["pyo3/abi3-py312"]\n', 1)
+              out = re.sub(r'default = \[([^\]]*)\]', r'default = [\1, "abi3"]', out, count=1)
+          if "abi3-py312" not in out or out == s:
+              sys.exit("::error::could not set the abi3-py312 floor (manifest shape changed?)")
+          p.write_text(out)
+          PY
+          grep -nE 'abi3|^default' litellm-rust/crates/python-bridge/Cargo.toml
 
       - name: Build sdist
         id: build_sdist
@@ -219,5 +221,7 @@ jobs:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
     with:
       artifact-pattern: litellm-${{ matrix.version }}-*-manylinux_riscv64

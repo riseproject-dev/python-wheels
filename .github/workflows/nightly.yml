@@ -25,9 +25,22 @@ jobs:
   check_versions:
     runs-on: ubuntu-latest
     steps:
+      # A branch pushed or a PR opened with GITHUB_TOKEN raises no events, so
+      # the per-package PRs would sit there with no checks at all. Push and open
+      # them as the App instead; without its credentials, or on a pull request
+      # (where a fork or Dependabot has none), the job still runs, it just falls
+      # back to the checkless GITHUB_TOKEN.
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        id: app-token
+        if: ${{ vars.RISEPROJECT_APP_CLIENT_ID != '' && github.event_name != 'pull_request' }}
+        with:
+          client-id: ${{ vars.RISEPROJECT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
 
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
         with:
@@ -37,7 +50,7 @@ jobs:
       # declared again per package, on that package's own branch, below.
       - name: Check versions
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
           SINCE: "2026-09-01"
         run: |
           uv run --with-requirements ci_scripts/requirements.txt python3 ci_scripts/check_versions.py \
@@ -49,14 +62,14 @@ jobs:
       - name: Open or update one PR per package
         if: github.event_name != 'pull_request'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
           REPORTS: ${{ runner.temp }}/reports
         run: |
           set -euo pipefail
 
           base=$(git rev-parse HEAD)
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          ci_scripts/git-identity.sh
 
           # Branch off main and re-declare this package alone, so the PR only
           # ever touches its own docs/packages/<pkg>.yaml (plus packages.txt and

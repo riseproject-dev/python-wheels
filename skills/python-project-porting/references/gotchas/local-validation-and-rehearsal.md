@@ -17,6 +17,24 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
 - **223** — For a `bindings = "bin"` CLI's test assertions, `cargo build --release` the tool
 - **298** — A local rehearsal's `pip`-resolved cibuildwheel can be too old for
 - **369** — Without docker, fetch Rocky 10's own dnf repodata over plain HTTPS to
+- **384** — `dnf` failing in the image with `Curl error (60) ... self-signed certificate` is
+- **394** — A libtorch-linking project cannot be rehearsed on x86_64 with PyPI's `torch`
+- **417** — A QEMU riscv64 rehearsal of a cibuildwheel job needs `CI=1` for
+  scikit-build-core's CMake probe, and needs `CIBW_BEFORE_ALL`'s staging replayed.
+- **412** — When no riscv64 image or cross-toolchain is reachable, exercise a C/C++ source's
+  your egress proxy, not the image — install the proxy CA into the container trust store
+- **403** — Prove which build *variant* you are about to produce by stubbing the build
+  backend's `setup()` on the host
+- **404** — For a from-source C++ world, a *full CMake configure* inside the real riscv64
+  image is the honest local ceiling
+- **410** — Gotcha 188's "lower the optimisation level for the local rehearsal only" can
+  silently produce a broken wheel when the project has a C99 `inline` helper with no
+  `static` — and the suite still passes, because the pure-Python fallback catches it.
+- **430** — A `-k`/`--ignore` change is verifiable offline with no wheel at all: rebuild the
+  failed run's node ids into a synthetic test tree, then run the YAML-folded
+  `CIBW_TEST_COMMAND` through `sh -c`.
+- **444** — Verify a hand-edited `.patch` with `git apply --check`, never with `patch`:
+  a wrong `@@` line count makes GNU `patch` silently swallow the *next* hunk and exit 0.
 
 ---
 
@@ -247,3 +265,250 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
       by package `name=` attribute to jump straight to its block rather than loading
       the whole file, and delete it when done; it is Rocky's own public mirror data,
       not anything project-specific worth keeping.
+
+384. **`dnf` failing inside the image with `Curl error (60) ... self-signed certificate in
+    certificate chain` is a fact about *your session's egress proxy*, not about the image —
+    install the proxy CA into the container's trust store instead of recording "in-image dnf
+    is impossible".** A sandbox whose outbound HTTPS goes through a TLS-intercepting proxy
+    gives the host a CA bundle, but a container gets neither that bundle nor the host's
+    loopback proxy, so every `dnf makecache`/`repoquery` dies on `mirrors.rockylinux.org`
+    and it looks like the image cannot reach its own repos. Three things fix it together,
+    and all three are needed:
+    ```
+    docker run --rm --network host \
+      -e HTTPS_PROXY -e HTTP_PROXY -e https_proxy -e http_proxy \
+      -v "$PWD/.git/pw-scratch/<pkg>:/s" "$MANYLINUX_RISCV64_IMAGE" bash -c '
+      cp /s/ca-bundle.crt /etc/pki/ca-trust/source/anchors/proxy.crt
+      update-ca-trust extract
+      dnf repoquery --qf "%{name}|%{version}|%{reponame}\n" "qt6*"'
+    ```
+    `--network host` is what lets the container reach a proxy listening on the host's
+    loopback; the env vars are not inherited unless named; and `update-ca-trust extract`
+    (Rocky's anchors directory, *not* `/etc/ssl/certs`) is what makes curl inside `dnf`
+    accept the intercepted chain. This matters because two queue entries had already
+    recorded the proxy failure as an image limitation and fallen back to gotcha 369's
+    raw-repodata parse — which is still the right tool for "is it packaged, in which repo",
+    but cannot answer what `dnf` actually *resolves*, and cannot show you the installed
+    on-disk layout (`/usr/lib64/cmake/Qt6*`, `ClangConfig.cmake`, real `.so` names) that a
+    CMake `find_package` will or will not hit.
+    - **Use `repoquery` for inventory and reserve `install` for layout questions.** A
+      `repoquery` is metadata-only and answers in seconds even under QEMU — and it returns
+      the SDK's *version*, which is the field most likely to be assumed rather than checked
+      (gotcha 383). Actually installing a large `-devel` set is emulated `rpm` scriptlet
+      work and can take tens of minutes on a loaded host, so do not put it on the critical
+      path of a triage decision; note how far it got and move on.
+    - This is the container half of the rule already stated for the host: never disable TLS
+      verification or unset the proxy variables to make a fetch succeed.
+
+394. **A project that links libtorch cannot be rehearsed on an x86_64 host with the
+    `torch` wheel PyPI serves, because that one is a CUDA build: `find_package(Torch)`
+    pulls in `Caffe2Config.cmake`, which hard-fails with "Your installed Caffe2 version
+    uses CUDA but I cannot find the CUDA libraries" before CMake reaches a single line
+    of the project's own configuration (the torchcodec case).** The failure has nothing
+    to do with the project or with riscv64 — the riscv64 `torch` on our registry is a
+    `+cpu` build whose `Caffe2Config.cmake` has the CUDA branch compiled out, so the same
+    configure succeeds there. Two consequences worth knowing before spending a rehearsal
+    cycle on it:
+    - **A CPU-only torch is the prerequisite for any local rehearsal of a libtorch
+      extension**, and PyPI has none for linux x86_64 (the CPU variants live on
+      `download.pytorch.org/whl/cpu`, a separate index); linux aarch64's PyPI `torch`
+      *is* CPU-only, which is one more reason gotcha 101's aarch64 rehearsal is the right
+      host for this family of packages.
+    - **Everything before `find_package(Torch)` still validates cheaply on x86**, and for
+      a scikit-build-core/CMake project that is most of the interesting surface: the
+      build frontend and `--no-build-isolation` wiring, `pkg-config` discovery of a
+      source-built native dependency, the backend finding `pybind11`, and any
+      licence-guard/env-var gate the project puts in front of a wheel build. Run it and
+      read how far the configure got rather than treating the CUDA error as a dead end.
+
+403. **Prove which build *variant* you are about to produce by stubbing the build
+    backend's `setup()` on the host — it costs seconds and is the only cheap guard on
+    gotcha 79's trap, where the wrong sibling compiles for hours under your artifact
+    name.** For a sibling port selected by env vars plus a pre-stamped generated file
+    (`ENABLE_CONTRIB`/`ENABLE_HEADLESS` + `cv2/version.py`), put a fake module in
+    `sys.modules` exposing whatever `setup.py` imports, have its `setup(**kw)` record
+    `kw["name"]`/`kw["version"]`/`kw["license"]`/`cmake_args` and raise `SystemExit`, then
+    `runpy.run_path("setup.py", run_name="__main__")`. It is arch-independent, needs no
+    toolchain, and works with `.git` already deleted — exactly the tree the container sees.
+    Two habits make it worth the five lines:
+    - **Assert the negative too.** Re-run with the generated file stamped `False` and the
+      env vars still set: if the name does not change, the env vars are decorative and the
+      stamp is the real selector — the fact the workflow's `grep -Fqx` guards. Getting plain
+      `opencv_python` back from a contrib+headless environment turns gotcha 79's warning
+      into something measured rather than quoted.
+    - **Read the `cmake_args` list it captured** instead of re-deriving the flags from the
+      `setup.py` source; a variant's flags are assembled across several conditionals and the
+      captured list is the authoritative answer.
+
+404. **For a from-source C++ world (OpenCV+contrib and friends), a *full CMake configure*
+    inside the real riscv64 image is the honest local ceiling — budget ~40 minutes for it
+    and report what it proved rather than that "a build" was attempted.** Under
+    `qemu-riscv64` binfmt on a loaded 4-core x86_64 host, `cmake` over opencv +
+    opencv_contrib reported `Configuring done (2365.7s)` / `Generating done`; the compile of
+    the ~50 modules that follows is days of emulation and is not a local task. The configure
+    summary carries most of what a reviewer would otherwise take on trust — the
+    extra-modules path and its submodule SHA, the module list, `GUI: NONE` for a headless
+    variant, the baseline `-march=rv64gc` and which SIMD kernels were dropped, and which
+    third-party libraries are vendored (`build (…)`) rather than external. Two setup notes
+    that each cost a restart:
+    - **Mount the source tree read-write.** OpenCV's `OpenCVDownload.cmake` writes a
+      `.cache/` directory *into the source dir*, so a `:ro` mount fails the configure at
+      once with "Read-only file system" — which reads like a real port problem.
+    - **Give the container the egress proxy.** Those same third-party fetches go to
+      `raw.githubusercontent.com`: run with `--network host`, pass the host's `HTTPS_PROXY`,
+      and mount the proxy CA (gotcha 384). Without it the downloads fail and the modules
+      needing them quietly drop out of the summary you are reading.
+
+410. **Gotcha 188's "lower the optimisation level for the local rehearsal only" can
+    silently produce a *broken* wheel when the project has a C99 `inline` helper with no
+    `static`: the extension links, ships, and passes the suite, because the package's own
+    pure-Python fallback catches the ImportError (the cassandra-driver case).**
+    `cassandra/cmurmur3.c` defines `inline int64_t rotl64(...)` — under C99/gnu11 that
+    emits no out-of-line definition, so at `-O3` the call is inlined and at `-O0` the
+    `.so` keeps an undefined `rotl64`. The rehearsal's wheel therefore contained all
+    twenty `.so` files, passed gotcha 20's presence check, passed auditwheel repair, and
+    ran the whole unit suite green — 618 passed — while `cassandra.murmur3`'s
+    `try: from cassandra.cmurmur3 import murmur3 / except ImportError` had quietly fallen
+    back to Python. The identical `-O3` wheel differed by only two tests (the two that
+    skip when the C murmur3 is missing), which is far too small a delta to notice.
+    - **Fix the *check*, not just the rehearsal**: presence in the zip is not proof, so
+      have `CIBW_TEST_COMMAND` **import** every extension and assert `__file__` ends in
+      `.so`, plus one real call per hand-written extension
+      (`murmur3("key") == -6847573755651342660`, `libevwrapper.Loop()`). Then a degraded
+      or unimportable build fails the job instead of passing it. `readelf --dyn-syms -W
+      <ext>.so | grep UND` on the built wheel is the direct confirmation, and it works on
+      a riscv64 `.so` from an x86 host.
+    - **Prefer `-O1`/`-O2` over `-O0`** when trading fidelity for QEMU time, and re-run the
+      import assertions against a wheel built with upstream's real `CFLAGS` before
+      believing a green rehearsal.
+
+412. **When no riscv64 image or cross-toolchain is reachable, exercise a C/C++ source's
+    *generic* architecture path natively by renaming the arch macros in a scratch copy —
+    `-U__x86_64__` cannot do it, because glibc's own headers key off the same macro.**
+    Gotchas 9/101/180 all assume a container: `quay.io` for the manylinux images,
+    `deb.debian.org`/`dl-cdn.alpinelinux.org` for a compiler inside a `--platform
+    linux/riscv64` base. A restricted-egress host can have working QEMU/binfmt and still
+    reach none of them, leaving no way to compile a single line for riscv64. The
+    substitute question is nearly as good: *does the source's non-x86, non-aarch64 branch
+    compile at all?* — which is the branch riscv64 takes, and it compiles on any host.
+    The obvious spelling fails: `g++ -U__x86_64__` dies in `/usr/include/gnu/stubs.h`
+    with `fatal error: gnu/stubs-32.h: No such file or directory`, because undefining the
+    macro flips glibc's own multilib selection, not just the project's `#if`s. Rename the
+    macros in the project's sources instead, in a copy under `.git/pw-scratch/<pkg>/`:
+    ```bash
+    cp -a <checkout>/csrc .git/pw-scratch/<pkg>/csrc && cd .git/pw-scratch/<pkg>/csrc
+    sed -i 's/__x86_64__/__FAKE_X86__/g; s/_M_X64/FAKE_M_X64/g;
+            s/__aarch64__/__FAKE_A64__/g; s/_M_ARM64/FAKE_M_ARM64/g;
+            s/__i386__/__FAKE_I386__/g' *.cpp *.h
+    g++ -std=c++17 -O2 -fopenmp -I. -c <each source> -o /dev/null
+    ```
+    The system headers keep their real macros, the project's guards all evaluate false, and
+    what compiles is the scalar fallback path. For bitsandbytes this settled in seconds that
+    every `immintrin.h`/`arm_neon.h` block in `csrc/cpu_ops.{cpp,h}` has a working generic
+    `#else` — the one real riscv64 unknown — without a single emulated instruction.
+    - **It proves compilability, not codegen or correctness**, so it substitutes for the
+      *pre-flight*, never for the CI build: an arch-specific miscompile, an alignment
+      assumption or a numeric divergence (gotcha 172's territory) still only shows up on the
+      real runner. Pair it with the `pip download --platform manylinux_2_39_riscv64` check
+      (gotcha 101) so the dependency side is settled on the host too.
+    - **Check what the egress policy actually allows before giving up on the container**:
+      `mirror.gcr.io` proxies Docker Hub and often survives a policy that blocks `quay.io`
+      and Docker Hub's own CDN, which is enough to install binfmt
+      (`docker run --privileged --rm mirror.gcr.io/tonistiigi/binfmt --install riscv64`,
+      after `mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc` if the host has not
+      mounted it) and to pull `mirror.gcr.io/riscv64/debian`. A riscv64 shell with no
+      reachable package mirror still cannot compile anything, which is what sends you here.
+
+417. **Rehearsing a cibuildwheel job by hand under docker+QEMU: the two things that fail
+    for reasons that have nothing to do with the port (the torchcodec rehearsal).**
+    Running the workflow's steps yourself inside `quay.io/pypa/manylinux_2_39_riscv64`
+    (rather than through cibuildwheel) is the honest way to reproduce a riscv64 failure on
+    an x86 host — it is how the `decode_avif` undefined symbol of gotcha 415 was found and
+    fixed without spending a CI cycle. Two traps sit in front of it:
+    - **Export `CI=1`, or scikit-build-core cannot find CMake.** Its `cmake --version`
+      probe runs under a short timeout (`scikit_build_core/program_search.py`'s
+      `compute_timeout`, whose base value is *quadrupled* when `CI` is set). Emulated
+      riscv64 blows through the base value, and the build dies with
+      `scikit_build_core.errors.CMakeNotFoundError: Could not find CMake with version
+      >=3.18` — preceded by the real tell, `WARNING - Accessing CMake timed out,
+      ignoring` — even though `cmake` is in the image and works fine when you run it.
+      GitHub Actions sets `CI=true` for every step, so real CI never sees this and it is
+      purely a rehearsal artifact. Same reasoning applies to any other tool that scales a
+      timeout by `CI`.
+    - **Replay `CIBW_BEFORE_ALL` in full, including anything it stages into `{project}`.**
+      Skipping the licence-staging half of torchcodec's before-all made the *metadata*
+      step fail with `Every pattern in "project.license-files" must match at least one
+      file: 'LICENSE.*' did not match any`, because PEP 639 requires every declared
+      pattern to match — a build error that exists only because the rehearsal was
+      incomplete (see gotcha 105 for the patch that adds that pattern). A before-all that
+      writes files into the project directory is part of the build, not setup.
+    - **You can cut the rehearsal's own dependencies down as long as you keep the
+      interfaces.** FFmpeg was built `--disable-everything` here: torchcodec's image
+      library links no FFmpeg at all and the core libraries only need the full `libav*`
+      API surface, which is exported whatever codecs are enabled. That turned a 36-minute
+      FFmpeg build into a few minutes and changed nothing about the bug under
+      investigation — but say so in the PR, because it does mean the *decode* tests were
+      left to CI.
+
+430. **A `-k`/`--ignore` change is verifiable offline with no wheel at all: rebuild the
+    failed run's node ids into a synthetic test tree, then run the YAML-folded
+    `CIBW_TEST_COMMAND` through `sh -c` (the torchcodec case).** Dropping a couple of
+    hundred failing tests by name risks two silent mistakes, each costing a full CI cycle:
+    a clause that misses some failures (job still red) and a substring that also matches a
+    test that *passed* (coverage lost quietly, job green). Both are decidable on the host.
+    Scrape `FAILED <nodeid>` out of the failed job's log, generate one throwaway module per
+    test file — a class per class, and for a parametrised test
+    `@pytest.mark.parametrize("p", [pytest.param(0, id="<the exact param string>")])` so
+    the ids match character for character — add a handful of ids you know passed, and run
+    `pytest --collect-only -q -k "<expr>"` in a plain `python:3.x-slim` container: the
+    deselected count must equal the failures in scope, and every known-passing id must
+    still be selected. Then close the loop on the workflow file itself rather than on your
+    draft of the expression: `yaml.safe_load()` it, pull `CIBW_TEST_COMMAND` out of the
+    `cibuildwheel` step's `env`, assert `cmd.count("\n") == 0` (gotcha 93's folding trap)
+    and run `subprocess.run(["sh", "-c", cmd], cwd=<synthetic tree>)` — which is exactly
+    how cibuildwheel invokes it, so this also catches a shell-quoting bug in the `-k`
+    string. One artefact to expect: the log truncates a long parametrised id in its
+    `FAILED` line, so the generated tree grows both a truncated and a full variant of the
+    same test and the "passing test dropped" list fills with truncated twins — compare
+    names, not counts, before believing you have collateral damage.
+
+444. **When you hand-edit a hunk in `patches/<pkg>/<version>/*.patch`, validate it with `git
+    apply --check`, not with `patch --dry-run`: if the `@@ -a,b +c,d @@` counts disagree with
+    the hunk body, GNU `patch` does not fail — it consumes `b` lines, treats the remainder as
+    trailing garbage, silently drops every *following* hunk in that file, writes no `.rej`,
+    and exits 0.** Adding a one-line hunk to paddlepaddle's patch 1/5 with `@@ -356,4 +357,4
+    @@` over a five-line body cost a full debug loop: `patch -p1 -F 0` printed only `patching
+    file CMakeLists.txt`, and the *third* hunk — the whole `if(WITH_RISCV)` block — was
+    simply absent from the result. `git apply` rejects the same file outright, which is also
+    what the workflow's `git apply ../python-wheels/patches/...` step would have done, in CI,
+    an hour into the job.
+    - **Rehearse against the pristine upstream files, off-target, in seconds.** Fetch just
+      the files the patch touches from `raw.githubusercontent.com/<org>/<repo>/<tag>/<path>`
+      into a scratch tree, then `git apply --check --directory=<scratch> -p1 <patch>` from
+      inside this repo (git resolves paths from the worktree root, so `--directory` is what
+      makes a scratch subtree work). Expect one `has type 100644, expected 100755` warning
+      when the source file is executable upstream and `curl` dropped the bit — that is
+      cosmetic, and `--check` still exits 0.
+    - **Grep the applied result for the symbol you added, do not trust the exit code.**
+      `grep -n '<new option>' <file>` after a real apply is the cheap confirmation that every
+      hunk landed; a count of hunks in the patch versus `grep -c '^@@' <patch>` catches the
+      same class of error before you even run anything.
+    - **Better still, generate hunks rather than writing them.** Gotcha 435's note on this
+      port already records a hand-written hunk whose context matched byte-for-byte being
+      rejected; producing the diff with `difflib` from the pristine and edited files, and
+      then pasting it in, removes both failure modes at once.
+    - **A *blank* context line is a line containing one space, and transcribing a diff by
+      hand eats it.** Re-typing a generated diff into stpyv8's patch 0003 silently turned its
+      three empty context lines into truly empty ones; `git apply` then failed with nothing
+      but `error: patch failed: setup.py:236`, which reads like bad context rather than lost
+      whitespace. Assemble the file mechanically instead — write the commit message and the
+      `git diff` output to separate files and concatenate the *bytes* — and audit any patch
+      you did edit with `awk '/^diff --git/{d=1} d && /^$/{print NR}'`, which must print
+      nothing.
+    - **Apply the whole directory the way the workflow does, not patch by patch.** The step
+      is one `git apply patches/<pkg>/<version>/*.patch`, and a later patch's context has to
+      match the tree *after* the earlier ones land, so a single-patch rehearsal can pass
+      where CI fails. Rehearse with the same glob against a pristine scratch checkout, and
+      note that a failed multi-patch `git apply` does not roll the earlier patches back —
+      re-checkout the scratch tree before retrying or the next run fails on already-applied
+      hunks and sends you chasing the wrong file.
