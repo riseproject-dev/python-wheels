@@ -87,6 +87,15 @@ jobs:
         run: |
           git apply ../python-wheels/patches/paddlepaddle/${{ matrix.version }}/*.patch
 
+      # The recorded submodule commit is a 0.3.7-era tree that knows no riscv64
+      # target; openblas.cmake means to move it to CBLAS_TAG itself, but its
+      # `git checkout v0.3.28` fails silently against a tagless submodule clone.
+      - name: Move the OpenBLAS submodule to the tag openblas.cmake builds
+        working-directory: Paddle/third_party/openblas
+        run: |
+          git fetch --depth 1 origin tag v0.3.28
+          git checkout v0.3.28
+
       # Parity with build-vtk.yml's own guard, though swapon fails on these
       # runners (/ is overlayfs), so 15GB of RAM is the real link budget.
       - name: Set swap space
@@ -106,6 +115,11 @@ jobs:
 
           case "$1" in
           build)
+            # patch 3/5 resolves LAPACK_LIB/BLAS_LIB/GFORTRAN_LIB/GNU_RT_LIB_1
+            # to these, in place of an x86-64-only prebuilt tarball.
+            dnf install -y --setopt=install_weak_deps=False lapack blas \
+              libgfortran libquadmath
+
             "${python_exe}" -m pip install -U pip setuptools wheel
             "${python_exe}" -m pip install -r /paddle/python/requirements.txt
             "${python_exe}" -m pip install -r /paddle/paddle/scripts/compile_requirements.txt
@@ -154,7 +168,7 @@ jobs:
             cd /tmp
             # Upstream's documented post-install verification.
             python -c "import paddle; paddle.utils.run_check()"
-            # Exercises the LAPACK backend patch 0003 builds from source.
+            # Exercises the liblapack.so.3 patch 3/5 puts in paddle/libs/.
             python -c "import paddle; x = paddle.rand([8, 8]); q, r = paddle.linalg.qr(x); assert paddle.allclose(q @ r, x, atol=1e-5)"
             ;;
           *)
@@ -182,6 +196,14 @@ jobs:
             --pull=newer \
             "${MANYLINUX_RISCV64_IMAGE}" \
             bash /paddle/riscv64-build-and-test.sh build
+
+      # Paddle's EXTERNAL_PROJECT_LOG_ARGS sends every third_party configure and
+      # install step to a stamp log instead of stdout, so a failure there says
+      # only "Command failed: 1" in the step above.
+      - name: Show third_party stamp logs
+        if: failure()
+        run: |
+          tail -n 40 -v Paddle/build/third_party/*/src/*-stamp/*-*-*.log || true
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -216,7 +238,7 @@ jobs:
 
     steps:
       # setup.py copies GFORTRAN_LIB and GNU_RT_LIB_1 into paddle/libs/, which
-      # patch 0003 resolves to the image's own libgfortran.so.5 and
+      # patch 3/5 resolves to the image's own libgfortran.so.5 and
       # libquadmath.so.0.
       - name: Collect gcc source RPM from manylinux_riscv64
         uses: riseproject-dev/python-wheels/actions/collect-gpl-sources@main

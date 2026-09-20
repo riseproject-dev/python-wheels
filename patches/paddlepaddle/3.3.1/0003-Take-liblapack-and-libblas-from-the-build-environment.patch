@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000003 Mon Sep 17 00:00:00 2001
+From: RISE Project CI <ci@riseproject.dev>
+Date: Fri, 19 Sep 2026 00:00:00 +0000
+Subject: [PATCH 3/5] Take liblapack and libblas from the build environment
+
+cmake/external/lapack.cmake takes one prebuilt tarball for the whole of
+Linux, lapack_lnx_v3.10.0.20210628.tar.gz on paddlepaddledeps.bj.bcebos.com,
+and that tarball only ever held x86-64 binaries. Nothing links against
+them -- paddle/phi/backends/dynload/lapack.cc dlopen()s liblapack.so.3 at
+first use -- but setup.py copies LAPACK_LIB, BLAS_LIB, GFORTRAN_LIB and
+GNU_RT_LIB_1 into paddle/libs/ unconditionally, so a non-x86 wheel ships
+four x86-64 ELFs and every LAPACK-backed paddle.linalg op fails at
+runtime. This is already true of the released
+paddlepaddle-3.3.1-cp312-cp312-linux_aarch64.whl: its liblapack.so.3,
+libblas.so.3 and libgfortran.so.3 all report "ELF 64-bit LSB shared
+object, x86-64" next to a genuinely aarch64 libopenblas.so.0.
+
+Resolve the same four sonames out of the build environment instead, which
+is where GFORTRAN_LIB and GNU_RT_LIB_1 have to come from on any
+architecture the tarball does not cover, and fail at configure time
+rather than at wheel-packing time when one is missing. Reference-LAPACK
+is what distributions package as liblapack.so.3, so this keeps shipping
+the same ABI the tarball did.
+
+Scoped to WITH_RISCV so the x86-64 and macOS builds keep using the
+tarball, but the same fix would repair the aarch64 wheel.
+
+Upstream-Status: To upstream
+
+Depends on patch 1/5's WITH_RISCV option, so it can only go upstream
+together with it.
+
+Signed-off-by: RISE Project CI <ci@riseproject.dev>
+---
+ cmake/external/lapack.cmake | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/cmake/external/lapack.cmake b/cmake/external/lapack.cmake
+--- a/cmake/external/lapack.cmake
++++ b/cmake/external/lapack.cmake
+@@ -20,6 +20,29 @@ set(LAPACK_DOWNLOAD_DIR
+ set(LAPACK_INSTALL_DIR ${THIRD_PARTY_PATH}/install/lapack)
+ set(LAPACK_LIB_DIR ${LAPACK_INSTALL_DIR}/lib)
+
++if(WITH_RISCV)
++  # paddlepaddledeps.bj.bcebos.com publishes lapack_lnx_v3.10.0.20210628.tar.gz
++  # as an x86-64 build only, so on any other Linux architecture the block below
++  # hands setup.py four x86-64 ELFs to copy into paddle/libs/, which
++  # phi/backends/dynload/lapack.cc can then never dlopen.
++  macro(lapack_system_lib var soname)
++    execute_process(
++      COMMAND ${CMAKE_C_COMPILER} -print-file-name=${soname}
++      OUTPUT_VARIABLE ${var}
++      OUTPUT_STRIP_TRAILING_WHITESPACE)
++    if(NOT IS_ABSOLUTE "${${var}}")
++      message(FATAL_ERROR "WITH_RISCV needs ${soname} on the library path")
++    endif()
++    message(STATUS "Using ${${var}} for ${var}")
++  endmacro()
++  lapack_system_lib(LAPACK_LIB liblapack.so.3)
++  lapack_system_lib(BLAS_LIB libblas.so.3)
++  lapack_system_lib(GFORTRAN_LIB libgfortran.so.5)
++  lapack_system_lib(GNU_RT_LIB_1 libquadmath.so.0)
++  add_custom_target(extern_lapack)
++  return()
++endif()
++
+ # Note(zhouwei): lapack need fortran compiler which many machines don't have, so use precompiled library.
+ # use lapack tag v3.10.0 on 06/28/2021 https://github.com/Reference-LAPACK/lapack
+ if(LINUX)
+-- 
+2.51.0
