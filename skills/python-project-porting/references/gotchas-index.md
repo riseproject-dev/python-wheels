@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (384 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (385 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -158,6 +158,12 @@ The porting gotchas (384 of them) live in [`references/gotchas/`](gotchas/), spl
   is a dead stub — count the sources that branch globs, diff the built `.so` against the
   published CUDA one, and call an op instead of trusting a "did the extension load" flag
   (the xformers case).
+- **426** — A `-cpu` sibling can be an *x86_64-only label* rather than a portable CPU variant:
+  where the base package's wheel is already CPU-only on every non-x86 arch, the sibling closes
+  no riscv64 gap, is never cheaper than the base, and inherits the base's park — scan the
+  sibling's whole release history for platform tags, compare the base's per-arch wheel sizes,
+  and re-verify any sibling-family blocker at the revision your target actually pins
+  (the tensorflow-cpu case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
