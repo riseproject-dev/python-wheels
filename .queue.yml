@@ -2695,9 +2695,44 @@ packages:
   version: 0.4.1
   home: https://developer.nvidia.com/nccl
   repo: https://github.com/NVIDIA/nccl
-  status: queued
+  status: parked
   pr: null
-  notes: '12 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Parked after read-only triage; no worktree/branch/PR created. nccl4py is NVIDIA''s
+    first-party Python binding for NCCL and its source is public (NVIDIA/nccl, bindings/nccl4py,
+    Apache-2.0), so this is not a no-source park like pyqt5-qt5/saxonche -- it is a hard
+    NVIDIA-GPU requirement, the same class as the parked sglang, cuda-tile and onnxruntime-gpu
+    entries (gotchas 386/387; gotcha 284''s "runtime dlopen or build-time headers?" test comes
+    out on the headers side). Three independent walls, each verified rather than assumed:
+    (1) BUILD. bindings/nccl4py/setup.py''s BuildExt.build_extensions() calls _cuda_include_dir(),
+    which raises PlatformError("CUDA_HOME is not set") and then requires $CUDA_HOME/include to
+    exist; the four Cython extensions (nccl.bindings.{nccl,cynccl,_internal.nccl,_internal.utils})
+    compile against CUDA toolkit headers. Upstream''s own README says it outright: "Installing a
+    published wheel does not require CUDA_HOME or a local CUDA Toolkit. Compiling nccl4py from
+    source does." NVIDIA ships no riscv64 toolkit -- redistrib_13.3.0/13.2.0 list exactly
+    linux-x86_64, linux-sbsa, windows-x86_64 (12.9.0 adds linux-aarch64/linux-all), zero riscv
+    strings -- matching the triton (gotcha 41), cupy-cuda12x and cuda-tile findings.
+    (2) INSTALL. The unconditional, non-extra dependencies are cuda-core~=1.0 and
+    cuda-pathfinder>=1.5.4; cuda-core 1.2.0 publishes only manylinux_2_28_{x86_64,aarch64} and
+    win_amd64 wheels and NO sdist, so `pip install nccl4py` cannot resolve on riscv64 at all
+    (gotcha 40). The trap is that the CUDA-named requirements (cuda-bindings, nvidia-nccl-cu12/cu13,
+    nvidia-cutlass-dsl) sit behind the [cu12]/[cu13] extras while the actual blocker is in the
+    base dependency list.
+    (3) RUNTIME. Unzipped nccl4py-0.4.1-cp312-cp312-manylinux_2_28_x86_64.whl: 50 files, 11.4 MB
+    uncompressed, and no vendored vendor blob at all (contrast gotchas 41/157) -- it is Cython
+    bindings plus pure Python. nccl/bindings/_internal/nccl.*.so dlopens libcuda.so.1 (the NVIDIA
+    driver, which has no riscv64 build anywhere), libnccl.so.2 is supplied by nvidia-nccl-cu12/cu13
+    (py3-none-manylinux_2_18_{x86_64,aarch64} only), nccl/core/cuda.py does an unconditional
+    `from cuda.core import Device, Stream` at import time, and nccl/core/device/cute/_bindings.py
+    resolves libnccl_device.bc via cuda.pathfinder. There is no CPU-only mode to fall back to:
+    NCCL exists to move data between NVIDIA GPUs over NVLink/NVSwitch/PCIe P2P/IB, and its own
+    build is nvcc device code (makefiles/common.mk: NVCC ?= $(CUDA_HOME)/bin/nvcc, NVCC_GENCODE
+    -gencode arch=compute_60..120), so "build libnccl from source for riscv64 first" is not an
+    escape hatch either.
+    Latest release re-checked per gotcha 388: 0.5.0 ships the same 12 Linux wheels for
+    x86_64/aarch64 only (cp310-cp314 plus cp314t), so the gap is unchanged. No new gotcha added --
+    the shape is fully covered by 386 (GPU-only, blob-free, source-open, still unportable), 387
+    (ask NVIDIA''s redist index for our arch) and 284 (build-time CUDA headers vs runtime dlopen).
+    Not a candidate to revisit unless/until NVIDIA ships a CUDA toolkit and driver for riscv64.'
 - pkg: pynvvideocodec
   version: 2.2.2
   home: https://docs.nvidia.com/video-technologies/pynvvideocodec/index.html
