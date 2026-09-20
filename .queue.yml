@@ -2288,21 +2288,21 @@ packages:
     Wayland / GBM, tests / SwiftShader / dawn / GL / wgpu / validation-layers all off), so riscv64
     needed only the architecture added to that build rather than a Chromium-scale port. Every layer
     below already supports riscv64, which is what makes this cheap: depot_tools detect_host_arch.py
-    maps riscv* to riscv64; CIPD publishes linux-riscv64 for the cipd client, cpython3, ninja, gn
-    and luci-go; Chromium build/toolchain/linux/BUILD.gn has gcc_toolchain("riscv64") with toolprefix
+    maps riscv* to riscv64; CIPD publishes linux-riscv64 for the cipd client, cpython3, ninja and gn;
+    Chromium build/toolchain/linux/BUILD.gn has gcc_toolchain("riscv64") with toolprefix
     riscv64-linux-gnu, which BUILDCONFIG selects once is_clang=false, and config/compiler/BUILD.gn
     carries riscv64 cflags; ANGLE''s own gni/angle.gni lists riscv64 among the 64-bit CPUs, so gn
-    analysis does not hit its "Unknown current CPU" assert. Only two real gaps: buildtools/reclient
-    and third_party/siso/cipd publish no linux-riscv64 package and would abort gclient sync before
-    anything compiles. Neither is used here (use_remoteexec is false, and use_siso_default in
-    build/toolchain/siso.gni is false unless build_with_chromium, which a standalone ANGLE checkout
-    is not), so the patch nulls both through the same custom_deps mechanism build_linux.py already
-    uses for SwiftShader / VK-GL-CTS / catapult; reclient has no linux-arm64 build either, which is
-    why upstream''s DEPS already carves arm64 out of that dep. The patch otherwise reuses upstream''s
+    analysis does not hit its "Unknown current CPU" assert. The real gap is CIPD: three DEPS entries
+    pull packages with no linux-riscv64 build and abort gclient sync before anything compiles -
+    buildtools/reclient (infra/rbe/client), third_party/siso/cipd (build/siso) and tools/luci-go
+    (isolate and swarming; only its cas tool is published for riscv64). None is reachable from a
+    local build, so the patch deletes the three entries from the checkout''s DEPS before the sync;
+    reclient has no linux-arm64 build either, which is why upstream''s DEPS already carves arm64 out
+    of that dep. The patch otherwise reuses upstream''s
     existing arm64 recipe (alias the container''s gcc/g++/ar/readelf/nm under the prefixed names
     ANGLE expects, is_clang=false, use_custom_libcxx=false, treat_warnings_as_errors=false),
-    generalised to a toolprefix table, and both new tables are keyed by arch so x86_64/arm64 render
-    byte-identical .gclient and gn args. The x86-only prebuilt host tools the DEPS hooks fetch
+    generalised to a toolprefix table, and the new tables are all keyed by arch so x86_64/arm64
+    render a byte-identical .gclient and byte-identical gn args against an untouched DEPS. The x86-only prebuilt host tools the DEPS hooks fetch
     (clang, llvm_objdump, rust, glslang_validator, flex_bison) are not a blocker: update.py maps
     every Linux host to Linux_x64 with no arch check, and upstream''s green aarch64 job proves those
     binaries are never executed by the libEGL/libGLESv2 targets. Wheel is a single
@@ -2325,7 +2325,22 @@ packages:
     httplib2.socks at module scope (ModuleNotFoundError: No module named ''httplib2'', ~80 s in) -
     fixed in the workflow with pip install httplib2==0.13.1, the version depot_tools'' own
     .vpython3 pins; unpinned resolves to 0.32.0, which no longer ships the httplib2.socks that
-    import needs (new gotcha 441). Round 3 in flight. That round-2 diagnosis was settled off-
+    import needs (new gotcha 441). Round 3 (~7 min): the httplib2 pin worked - gclient fetched
+    depot_tools and ANGLE, evaluated the whole DEPS graph and reached the "cipd ensure" that ends
+    the sync, which then failed to resolve four packages with no linux-riscv64 build:
+    infra/rbe/client, build/siso and the luci isolate and swarming tools. So the custom_deps
+    null-out the patch carried for reclient and siso had never done anything: gclient applies
+    custom_deps while resolving a "git" dep''s URL, whereas a "cipd" entry is copied out of DEPS
+    into a CipdDependency that never consults custom_deps, so a None there is accepted and
+    silently ignored (new gotcha 445, verified by reading gclient.py at the revision the run
+    pinned). Round 4 deletes the three DEPS entries outright before the sync and raises if one is
+    missing, and adds use_siso=false to the gn args - ANGLE''s .gn sets use_siso=true in
+    default_args for a standalone checkout (the earlier siso.gni reading was wrong), and autoninja
+    reads use_siso back out of args.gn, so dropping the siso package without that arg would have
+    swapped one failure for another one layer later. Validated off-target: drop_deps() run against
+    the real pinned DEPS removes exactly those four packages (421 of 426 CIPD packages kept, the
+    fifth being luci cas from the same entry), the rewritten DEPS still parses to 495 deps and 23
+    hooks, and driving main() for all three arches confirms x86_64/arm64 are byte-identical. That round-2 diagnosis was settled off-
     target on x86 in seconds rather than in CI: the failure reproduces exactly under a bare cp312
     venv against the pinned depot_tools tree (fetched as a gitiles archive, no clone), and with
     httplib2 installed every module the sync path touches imports cleanly and a real
@@ -2336,7 +2351,9 @@ packages:
     4.68/six split does not apply (both are 5.35, fine on 3.12), and the Linux hooks that follow
     (clang, llvm_objdump, rust, lastchange, configure_siso) import nothing outside the stdlib and
     depot_tools. Still not rehearsed end to end locally (no docker daemon, 4.5 GB free). Left to
-    watch: those hooks, gn gen with the prefixed GCC toolchain, and whether the statically linked
+    watch: those hooks (all 23 use plain python3, so the vpython class of failure is behind us,
+    and update.py maps every Linux host to Linux_x64 so the x86-only prebuilts still download),
+    gn gen with the prefixed GCC toolchain, and whether the statically linked
     Vulkan-Loader falls back to its C unknown-ext-chain path on riscv64 instead of wanting
     per-arch assembly.'
 - pkg: solders

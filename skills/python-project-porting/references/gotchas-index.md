@@ -412,6 +412,10 @@ The porting gotchas (431 of them) live in [`references/gotchas/`](gotchas/), spl
   `include(third_party)` already ran the matching `add_definitions()`, so the feature is
   compiled in and not linked — check the include line numbers and use the project's own
   early default switch instead.
+- **445** — A `.gclient` `custom_deps: None` drops a *git* dep and is silently ignored for a
+  `cipd` one, so a riscv64-less CIPD package survives into the `cipd ensure` that ends
+  `gclient sync` — delete the entry from the checkout's `DEPS` instead, and add
+  `use_siso=false` to the gn args when siso is one of them.
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
