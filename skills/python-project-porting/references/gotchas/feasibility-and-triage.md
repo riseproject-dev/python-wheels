@@ -111,6 +111,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **442** — A vendored dependency's *build system* can silently omit a capability flag its other
   build system defaults on, and only auditing every dispatch site (not just "does it build")
   proves which one actually shipped (the mediapipe/XNNPACK case).
+- **449** — A prebuilt riscv64 binary an upstream downloads for you can be built for a *vendor*
+  ISA: `file`/`e_machine 243` says it is riscv64, not *which* riscv64 — read `Tag_RISCV_arch`
+  and count CUSTOM-opcode instructions too (the openvino/oneTBB T-Head case).
 
 ---
 
@@ -2647,3 +2650,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       build from Bazel to CMake. On any XNNPACK version bump inside a Bazel-built riscv64 wheel,
       re-grep `build_defs.bzl` for `XNN_ENABLE_RISCV_VECTOR`; if it appears, the ungated dispatch
       blocks go live and `--define=xnn_enable_riscv_vector=false` becomes mandatory, not optional.
+
+449. **A prebuilt riscv64 binary an upstream downloads for you can be built for a *vendor* ISA —
+    `file`/`e_machine 243` tells you it is riscv64, not *which* riscv64 (the openvino/oneTBB
+    case).** Gotcha 418's rule was "`file`/`readelf -h` every `.so` in the sibling wheel"; this is
+    the column that rule is missing. OpenVINO's `cmake/dependencies.cmake` `ov_download_tbb()`
+    fetches `oneapi-tbb-2022.3.0-lin-riscv-release.tgz` from storage.openvinotoolkit.org and
+    `setup.py` bundles it into the wheel exactly as it does the x86_64/aarch64 TBB. Triage
+    downloaded it and recorded "genuine riscv64 oneTBB (ELF e_machine 243)" — true, and not
+    enough. Its `Tag_RISCV_arch` is
+    `rv64i2p0_m2p0_a2p0_f2p0_d2p0_c2p0_**xtheadc**2p0`: a T-Head Xuantie toolchain build.
+    - **Confirm from the instruction stream, not just the attribute.** Standard RISC-V never
+      emits the CUSTOM-0 opcode `0x0B` (nor `0x2B`/`0x5B`/`0x7B`). `libtbb.so.12` holds **906**
+      such instructions in 166 KiB of `.text` and `libtbbmalloc.so.2` **892** in 97 KiB, while
+      the **17 libraries OpenVINO compiled itself in the same wheel have zero across 52 MiB** —
+      the control that makes the count trustworthy. So the vendor instructions are really there;
+      the attribute is not a toolchain default that emitted nothing.
+    - **What it costs: the wheel is T-Head-only, and a green run stops being transferable.**
+      Those blobs execute fine on this repo's runner fleet — which is itself the finding, since
+      it means the fleet is T-Head (C906/C910/C920 class: TH1520, SG2042), and it is why nothing
+      caught this. The same wheel would SIGILL on SiFive U74/P550, JH7110, or plain QEMU
+      `rv64gc`. **CI passing on a T-Head fleet is not evidence that a `manylinux_riscv64` wheel
+      is portable**, and this is a second, independent shipping blocker from gotcha 448's RVV
+      one — fixing the RVV question alone still leaves a vendor-ISA blob in the wheel.
+    - **It also explains neighbouring symptoms.** A fleet that runs `xtheadc` is a T-Head core,
+      hence RVV **0.7.1**, hence gotcha 272's otherwise-odd pairing: HWCAP advertises V and the
+      first RVV-1.0 `vsetvli` is still illegal. Treat "which riscv64 is the runner?" as a fact
+      worth establishing once, from binaries that already run there.
+    - **The check is cheap and needs no riscv64 binutils**: parse the section headers in Python,
+      regex `rv(32|64)[0-9a-z_p]+` out of `.riscv.attributes`, and walk `.text` counting opcodes
+      (skip RVC halfwords — low two bits `!= 0b11`). Do it at triage on every prebuilt the build
+      downloads, not after a 12-hour build has already spent the runner slot.

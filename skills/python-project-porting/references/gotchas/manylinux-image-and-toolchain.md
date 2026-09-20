@@ -77,6 +77,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **447** — A codebase whose upstream CI only ever compiles it with clang breaks under GCC one
   translation unit at a time; look for the fix in a later upstream release, sweep the rest of
   the bug class off-target, and batch discovery with `ninja -k`.
+- **448** — "Genuine upstream riscv64 support" can still mean "requires RVV 1.0 hardware": a
+  12-hour build can go green, produce every wheel, and die two minutes later in the smoke test
+  with exit 132 — and the wheel's own ELF `Tag_RISCV_arch` proves it without another runner slot.
 
 ---
 
@@ -1320,3 +1323,68 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
        `Killed`, no `out of memory`, no `internal compiler error`, no `No space left`, no signal
        — and exactly **one** `FAILED:` edge carrying a compiler diagnostic. One `FAILED` with a
        diagnostic is a bug to fix; a wall looks nothing like it.
+
+448. **"Genuine upstream riscv64 support" can still mean "requires RVV 1.0 hardware" — and the
+    wheel's own ELF attributes prove it without spending a second runner slot (the openvino
+    case; PR #2122, run 35480766550).** The shape is the expensive one: `timeout-minutes: 1440`,
+    the `Build wheels` step **succeeded** after 12h18m, all four wheels (cp312/cp313/cp314/cp314t)
+    were produced and uploaded, and the job then died **2m12s** into `Test wheels` with
+    `##[error]Process completed with exit code 132`. 132 is 128+4, i.e. **SIGILL**, and the line
+    above it names the instruction fault outright: `riscv64-build-and-test.sh: line 32: 41
+    Illegal instruction (core dumped)`. Inside the smoke script the boundary is exact —
+    `print(ov.get_version())` printed `2026.3.1-1-759c5a6ab8c`, and `print(core.available_devices)`
+    never printed — so it died in `ov.Core()`/device enumeration, the moment the CPU plugin is
+    `dlopen`ed and constructed. No resource wall was involved: zero `Killed`/`out of memory`/
+    `No space left`/ICE anywhere, and 12h24m against a 24h budget is not a timeout either.
+    - **The proof is in the artifact, not the runner — and it is a 30-second check.** Parse each
+      `.so`'s `.riscv.attributes` section and read `Tag_RISCV_arch`. Of the 20 libraries in the
+      wheel, exactly one carries vector:
+      `libopenvino_riscv_cpu_plugin.so` →
+      `rv64i2p1_m2p0_a2p1_f2p2_d2p2_c2p0_**v1p0**_zicsr2p0_zifencei2p0_zmmul1p0_zve32f1p0_zve32x1p0_zve64d1p0_zve64f1p0_zve64x1p0_**zvl128b**1p0_zvl32b1p0_zvl64b1p0`,
+      everything else plain `rv64gc`. Confirm it is real content and not an attribute artifact by
+      counting OP-V instructions (32-bit, opcode `0x57`, skipping RVC halfwords): **64,554** in the
+      plugin, **34,526** of them `vsetvl*` — against **exactly zero** across the other 19
+      libraries' 52 MiB of `.text`, which is the control that says the scan has no false
+      positives. The RVV is confined to a contiguous ~10.7 MiB region of the plugin's 20.6 MiB
+      `.text` (44 of 83 256-KiB buckets, all adjacent), i.e. the `riscv64/` kernel/emitter
+      objects in link order — not whole-library `-march`.
+    - **Upstream's gate is a runtime probe, and the probe is what dies.**
+      `nodes/kernels/riscv64/cpu_isa_traits.cpp` has
+      `case gv: return mayiuse(g) && cpu.hasExtension(RISCVExtension::V) && can_compile_rvv100();`,
+      and `can_compile_rvv100()`/`can_compile_zvfh()` deliberately execute the instruction under a
+      SIGILL handler. Both are visible in the binary as the only RVV *outside* the kernel region:
+      two isolated `vsetvli`+`vmv.v.i` pairs at `.text+0x10b92` (`e8, mf2, ta, ma`) and
+      `.text+0x10d7a` (`e64, m1, ta, ma`), each two instructions long with no loop and no memory
+      operand — a shape auto-vectorisation never produces. `mf2` does not exist in RVV 0.7.1 and
+      the `vsetvli` encoding differs between 0.7.1 and 1.0, so on this fleet the probe traps
+      exactly as gotcha 272 describes (HWCAP advertises V; the first RVV-1.0 `vsetvli` is
+      illegal) — and the process **core-dumps instead of the probe returning false**, so the
+      recovery does not hold here.
+    - **Static evidence cannot separate the two candidate proximate causes — say so rather than
+      picking one.** Either the probe's SIGILL recovery fails, or a static initializer inside one
+      of the RVV-compiled translation units runs at `dlopen` with no `mayiuse` in front of it
+      (a guard on the *call sites* does not cover a TU's own `.init_array`). Both land at the same
+      instant in the same log line. Separating them needs a backtrace, not more reading — which
+      is cheap, because the artifact stays downloadable for 90 days: re-run only the test leg
+      against the **existing** wheels (`LD_DEBUG=libs` to see whether the plugin finished its
+      init, or `gdb -batch -ex run -ex bt`) instead of rebuilding for 12 hours.
+    - **Why the triage missed it, and the rule that generalises.** Upstream's `linux_riscv.yml`
+      runs `ov_cpu_func_tests` only under `qemu-riscv64 -cpu rv64,v=true,vext_spec=v1.0`, and
+      `docs/dev/build_riscv64.md`'s hardware list mixes RVV 0.7.1 boards (Lichee Pi 4A) with RVV
+      1.0 ones (BPI-F3, Orange Pi RV2). So "upstream carries a real riscv64 CPU plugin with RVV
+      JIT" is evidence about an emulator with V forced on, not about baseline hardware — and
+      gotcha 279's rule is not zlib-ng-specific: **a QEMU-validated RVV claim is untested for
+      this fleet, whoever makes it.** Price the RVV question at triage, from the artifact of the
+      first build if need be, rather than from the upstream CI's existence.
+    - **There is no off switch, unlike gotchas 279 and 71.** `src/plugins/intel_cpu/CMakeLists.txt`
+      adds `src/{emitters/plugin,emitters/snippets,nodes/kernels,nodes/executors}/riscv64/*` and
+      `XBYAK_RISCV_V=1` whenever `RISCV64`, and `intel_cpu/thirdparty/CMakeLists.txt` sets
+      `XBYAK_RISCV_V ON` plus `DNNL_TARGET_ARCH=RV64` unconditionally. No `option()` or
+      `cmake_dependent_option()` governs any of it, and `-march=rv64gcv` appears nowhere in the
+      build (only in `clang_tidy.cmake`), so there is no `-DWITH_RVV=OFF` to pass — turning RVV
+      off is a real patch against an upstream scalar-fallback path that upstream's own CI never
+      exercises without `v=true`.
+    - **And a working RVV build still could not ship.** A `manylinux_riscv64` wheel whose CPU
+      plugin needs RVV 1.0 SIGILLs for every user on baseline rv64gc — gotcha 139's exact
+      prohibition. That makes "make it build" and "make it shippable" two different questions,
+      and it is what turns this from a bug to fix into a decision to escalate.

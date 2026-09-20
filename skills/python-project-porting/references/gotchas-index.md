@@ -189,6 +189,11 @@ The porting gotchas (431 of them) live in [`references/gotchas/`](gotchas/), spl
   `getauxval(AT_HWCAP)` check) compile out to scalar only by that omission — re-verify on every
   XNNPACK version bump, since fixing it upstream would make the ungated blocks go live (the
   mediapipe case).
+- **449** — A prebuilt riscv64 binary an upstream downloads for you can be built for a *vendor*
+  ISA — `file`/`e_machine 243` says riscv64, not *which* riscv64: openvino's bundled oneTBB is a
+  T-Head Xuantie build (`xtheadc` in `Tag_RISCV_arch`, 906+892 CUSTOM-0 `0x0B` instructions
+  against zero in the 17 libraries built locally), so the wheel runs only on T-Head cores and a
+  green run on a T-Head runner fleet does not prove a `manylinux_riscv64` wheel is portable.
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -499,6 +504,12 @@ The porting gotchas (431 of them) live in [`references/gotchas/`](gotchas/), spl
   rather than inventing one, kill the warning class wholesale with
   `treat_warnings_as_errors=false`, sweep the rest of the bug class out of the arch-specific
   sources off-target, and run `ninja -k` until the class is closed.
+- **448** — "Genuine upstream riscv64 support" can still mean "requires RVV 1.0 hardware": openvino
+  built for 12h18m, produced all four wheels, then died 2m12s into the test step with exit 132
+  (SIGILL) inside `ov.Core()` — its CPU plugin is the only library in the wheel whose
+  `Tag_RISCV_arch` carries `v1p0`, with 64,554 vector instructions against zero in the other 19,
+  and upstream's own riscv64 CI only ever tests under `qemu -cpu rv64,v=true,vext_spec=v1.0`, so
+  read the artifact's ELF attributes rather than trusting the upstream CI's existence.
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
