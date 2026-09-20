@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (380 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (386 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -158,6 +158,12 @@ The porting gotchas (380 of them) live in [`references/gotchas/`](gotchas/), spl
   is a dead stub — count the sources that branch globs, diff the built `.so` against the
   published CUDA one, and call an op instead of trusting a "did the extension load" flag
   (the xformers case).
+- **426** — A `-cpu` sibling can be an *x86_64-only label* rather than a portable CPU variant:
+  where the base package's wheel is already CPU-only on every non-x86 arch, the sibling closes
+  no riscv64 gap, is never cheaper than the base, and inherits the base's park — scan the
+  sibling's whole release history for platform tags, compare the base's per-arch wheel sizes,
+  and re-verify any sibling-family blocker at the revision your target actually pins
+  (the tensorflow-cpu case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -321,6 +327,11 @@ The porting gotchas (380 of them) live in [`references/gotchas/`](gotchas/), spl
   0.22.0-pinned crate fails outright); `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1` clears it
   without turning abi3 on, verified to build and run correctly, but cp314t stays a real
   wall since 0.22.0 predates PEP 703 entirely.
+- **425** — An aya/eBPF crate cannot build its BPF half on the riscv64 runner: `bpf-linker`
+  dlopens LLVM from the Rust toolchain's shared library, which only the x86_64/aarch64
+  dists ship (riscv64 hides it inside `librustc_driver`), and no system LLVM new enough for
+  a current toolchain's bitcode exists for riscv64 — cross-compile the object on an x86_64
+  job (gotcha 4) and patch the build script to embed a staged one.
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
@@ -340,6 +351,16 @@ The porting gotchas (380 of them) live in [`references/gotchas/`](gotchas/), spl
 - **397** — A CMake build that shells out to a bare `python3` for one vendored sub-extension
   silently builds it for the container's default interpreter, not the one the wheel is for
   (the coremltools/kmeans1d case).
+- **421** — `pierotofy/set-swap-space` is a no-op on the riscv64 runners (`/` is overlayfs, so
+  `swapon` fails and the action soft-passes): a heavy link gets 15GB of RAM and nothing behind
+  it.
+- **423** — A depot_tools/gclient checkout (V8/Chromium/Skia) downloads no `dep_type: 'gcs'`
+  dependency and runs no `download_from_google_storage` hook on riscv64 until
+  `VPYTHON_BYPASS` is set — gsutil's vpython venv pins `crcmod==1.7+chromium.4`, which has no
+  riscv64 wheel; the cipd-bootstrap error in the same log is a relative-path red herring.
+- **424** — Audit a chromium-style DEPS for riscv64-less CIPD packages with
+  `cipd describe <pkg>/linux-riscv64` (and `gclient_eval.EvaluateCondition`) before spending a
+  build cycle discovering them one abort at a time.
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
@@ -477,6 +498,9 @@ The porting gotchas (380 of them) live in [`references/gotchas/`](gotchas/), spl
 - **399** — A dependency we already publish can satisfy a dependent's *runtime* link and still
   be unusable as its *build* input: a wheel ships `.so` files, not headers or a CMake package,
   and the upstream recipe's header source can be conda-forge (the cadquery-ocp/VTK case).
+- **422** — A build container you drive yourself needs `PIP_EXTRA_INDEX_URL` on the *build*
+  `podman run`, not only on the test one — otherwise its `pip install -r requirements.txt`
+  source-builds numpy and dies on Pillow (the paddlepaddle case).
 
 ### Build-tool drift & pins — [`gotchas/build-tool-drift-and-pins.md`](gotchas/build-tool-drift-and-pins.md)
 
