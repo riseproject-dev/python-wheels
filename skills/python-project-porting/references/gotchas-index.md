@@ -269,7 +269,9 @@ The porting gotchas (431 of them) live in [`references/gotchas/`](gotchas/), spl
 - **402** — A two-leg abi3 + free-threaded matrix expressed only through `include:` collapses
   into a single job, so the abi3 wheel is never built and nothing fails — make the leg a real
   matrix dimension (the primp/arro3-core case: two already-published packages are quietly
-  shipping only their free-threaded wheel).
+  shipping only their free-threaded wheel). Any include-only leg set does it, not just abi3
+  ones — grain's cp312/cp313/cp314 set collapsed to cp314, and 58 jobs repo-wide still carry
+  the shape.
 - **408** — A `setup.py` that reaches for `wheel.bdist_wheel` behind a `try/except ImportError`
   still gets its abi3 tag under modern setuptools — setuptools ships a `wheel.bdist_wheel`
   shim, so do not add `wheel` to `build-system.requires` to "fix" it.
