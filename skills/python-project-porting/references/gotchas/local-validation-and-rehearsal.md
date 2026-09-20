@@ -30,6 +30,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
 - **410** — Gotcha 188's "lower the optimisation level for the local rehearsal only" can
   silently produce a broken wheel when the project has a C99 `inline` helper with no
   `static` — and the suite still passes, because the pure-Python fallback catches it.
+- **430** — A `-k`/`--ignore` change is verifiable offline with no wheel at all: rebuild the
+  failed run's node ids into a synthetic test tree, then run the YAML-folded
+  `CIBW_TEST_COMMAND` through `sh -c`.
 
 ---
 
@@ -444,3 +447,25 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
       FFmpeg build into a few minutes and changed nothing about the bug under
       investigation — but say so in the PR, because it does mean the *decode* tests were
       left to CI.
+
+430. **A `-k`/`--ignore` change is verifiable offline with no wheel at all: rebuild the
+    failed run's node ids into a synthetic test tree, then run the YAML-folded
+    `CIBW_TEST_COMMAND` through `sh -c` (the torchcodec case).** Dropping a couple of
+    hundred failing tests by name risks two silent mistakes, each costing a full CI cycle:
+    a clause that misses some failures (job still red) and a substring that also matches a
+    test that *passed* (coverage lost quietly, job green). Both are decidable on the host.
+    Scrape `FAILED <nodeid>` out of the failed job's log, generate one throwaway module per
+    test file — a class per class, and for a parametrised test
+    `@pytest.mark.parametrize("p", [pytest.param(0, id="<the exact param string>")])` so
+    the ids match character for character — add a handful of ids you know passed, and run
+    `pytest --collect-only -q -k "<expr>"` in a plain `python:3.x-slim` container: the
+    deselected count must equal the failures in scope, and every known-passing id must
+    still be selected. Then close the loop on the workflow file itself rather than on your
+    draft of the expression: `yaml.safe_load()` it, pull `CIBW_TEST_COMMAND` out of the
+    `cibuildwheel` step's `env`, assert `cmd.count("\n") == 0` (gotcha 93's folding trap)
+    and run `subprocess.run(["sh", "-c", cmd], cwd=<synthetic tree>)` — which is exactly
+    how cibuildwheel invokes it, so this also catches a shell-quoting bug in the `-k`
+    string. One artefact to expect: the log truncates a long parametrised id in its
+    `FAILED` line, so the generated tree grows both a truncated and a full variant of the
+    same test and the "passing test dropped" list fills with truncated twins — compare
+    names, not counts, before believing you have collateral damage.

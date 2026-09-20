@@ -587,6 +587,9 @@ The porting gotchas (387 of them) live in [`references/gotchas/`](gotchas/), spl
 - **350** — A suite's own `try: import X except ImportError: X = None` plus
 - **355** — Gotcha 339 generalizes past `pytest` to any unpinned runtime dependency whose
   own heuristic changed across a major version — pin it for the test venv only.
+- **429** — A media project's suite is written against upstream's *full* FFmpeg; an FFmpeg
+  you configure yourself has no H.264/HEVC/VP9/AV1/MP3 encoder at all, and the failures
+  blame the wrong codec.
 
 ### Test failures, flakes & arch-specific bugs — [`gotchas/test-failures-and-flakes.md`](gotchas/test-failures-and-flakes.md)
 
@@ -687,6 +690,9 @@ The porting gotchas (387 of them) live in [`references/gotchas/`](gotchas/), spl
   arch macros in a scratch copy to exercise its generic architecture path natively — a
   restricted-egress host can still prove compilability without a container (the
   bitsandbytes case).
+- **430** — A `-k`/`--ignore` change is verifiable offline with no wheel at all: rebuild the
+  failed run's node ids into a synthetic test tree, then run the YAML-folded
+  `CIBW_TEST_COMMAND` through `sh -c`.
 
 ### PR, CI, triggers, publishing & maintainer signals — [`gotchas/pr-ci-and-maintainer.md`](gotchas/pr-ci-and-maintainer.md)
 
