@@ -15,37 +15,46 @@ paddlepaddle-3.3.1-cp312-cp312-linux_aarch64.whl: its liblapack.so.3,
 libblas.so.3 and libgfortran.so.3 all report "ELF 64-bit LSB shared
 object, x86-64" next to a genuinely aarch64 libopenblas.so.0.
 
-Resolve the same four sonames out of the build environment instead, which
-is where GFORTRAN_LIB and GNU_RT_LIB_1 have to come from on any
-architecture the tarball does not cover, and fail at configure time
-rather than at wheel-packing time when one is missing. Reference-LAPACK
-is what distributions package as liblapack.so.3, so this keeps shipping
-the same ABI the tarball did.
+Resolve the sonames out of the build environment instead, which is where
+GFORTRAN_LIB has to come from on any architecture the tarball does not
+cover, and fail at configure time rather than at wheel-packing time when
+one is missing. Reference-LAPACK is what distributions package as
+liblapack.so.3, so this keeps shipping the same ABI the tarball did.
 
-Scoped to WITH_RISCV so the x86-64 and macOS builds keep using the
-tarball, but the same fix would repair the aarch64 wheel.
+GNU_RT_LIB_1 is left unset, because libquadmath exists only where
+__float128 is a type distinct from long double: GCC builds none for
+riscv64 (nor for aarch64), and Rocky has no libquadmath package there at
+all. setup.py copied it unconditionally, so make that copy conditional
+the way the neighbouring GNU_RT_LIB_2 one already is -- not gated on any
+architecture flag, since an empty GNU_RT_LIB_1 is the bug on every
+platform GCC ships no libquadmath for.
+
+The cmake half is scoped to WITH_RISCV so the x86-64 and macOS builds
+keep using the tarball, but the same fix would repair the aarch64 wheel.
 
 Upstream-Status: To upstream
 
-Depends on patch 1/5's WITH_RISCV option, so it can only go upstream
-together with it.
+The cmake half depends on patch 1/5's WITH_RISCV option, so it can only
+go upstream together with it; the setup.py half stands alone.
 
 Signed-off-by: RISE Project CI <ci@riseproject.dev>
 ---
  cmake/external/lapack.cmake | 23 +++++++++++++++++++++++
- 1 file changed, 23 insertions(+)
+ setup.py                    | 9 +++++++--
+ 2 files changed, 30 insertions(+), 2 deletions(-)
 
 diff --git a/cmake/external/lapack.cmake b/cmake/external/lapack.cmake
 --- a/cmake/external/lapack.cmake
 +++ b/cmake/external/lapack.cmake
-@@ -20,6 +20,29 @@ set(LAPACK_DOWNLOAD_DIR
+@@ -19,6 +19,29 @@
+     ${PADDLE_SOURCE_DIR}/third_party/lapack/${CMAKE_SYSTEM_NAME})
  set(LAPACK_INSTALL_DIR ${THIRD_PARTY_PATH}/install/lapack)
  set(LAPACK_LIB_DIR ${LAPACK_INSTALL_DIR}/lib)
-
++
 +if(WITH_RISCV)
 +  # paddlepaddledeps.bj.bcebos.com publishes lapack_lnx_v3.10.0.20210628.tar.gz
 +  # as an x86-64 build only, so on any other Linux architecture the block below
-+  # hands setup.py four x86-64 ELFs to copy into paddle/libs/, which
++  # hands setup.py x86-64 ELFs to copy into paddle/libs/, which
 +  # phi/backends/dynload/lapack.cc can then never dlopen.
 +  macro(lapack_system_lib var soname)
 +    execute_process(
@@ -60,13 +69,35 @@ diff --git a/cmake/external/lapack.cmake b/cmake/external/lapack.cmake
 +  lapack_system_lib(LAPACK_LIB liblapack.so.3)
 +  lapack_system_lib(BLAS_LIB libblas.so.3)
 +  lapack_system_lib(GFORTRAN_LIB libgfortran.so.5)
-+  lapack_system_lib(GNU_RT_LIB_1 libquadmath.so.0)
++  # No GNU_RT_LIB_1: riscv64 GCC builds no libquadmath.
 +  add_custom_target(extern_lapack)
 +  return()
 +endif()
-+
+ 
  # Note(zhouwei): lapack need fortran compiler which many machines don't have, so use precompiled library.
  # use lapack tag v3.10.0 on 06/28/2021 https://github.com/Reference-LAPACK/lapack
- if(LINUX)
+diff --git a/setup.py b/setup.py
+--- a/setup.py
++++ b/setup.py
+@@ -1564,12 +1564,17 @@
+         os.path.basename(env_dict.get("LAPACK_LIB")),
+         os.path.basename(env_dict.get("BLAS_LIB")),
+         os.path.basename(env_dict.get("GFORTRAN_LIB")),
+-        os.path.basename(env_dict.get("GNU_RT_LIB_1")),
+     ]
+     shutil.copy(env_dict.get("BLAS_LIB"), libs_path)
+     shutil.copy(env_dict.get("LAPACK_LIB"), libs_path)
+     shutil.copy(env_dict.get("GFORTRAN_LIB"), libs_path)
+-    shutil.copy(env_dict.get("GNU_RT_LIB_1"), libs_path)
++    # libquadmath is built only where __float128 differs from long double, so
++    # there is none to ship on riscv64 or aarch64.
++    if env_dict.get("GNU_RT_LIB_1"):
++        package_data['paddle.libs'] += [
++            os.path.basename(env_dict.get("GNU_RT_LIB_1"))
++        ]
++        shutil.copy(env_dict.get("GNU_RT_LIB_1"), libs_path)
+     if env_dict.get("WITH_MAGMA") == 'ON':
+         package_data['paddle.libs'] += [
+             os.path.basename('MAGMA_LIB'),
 -- 
 2.51.0
