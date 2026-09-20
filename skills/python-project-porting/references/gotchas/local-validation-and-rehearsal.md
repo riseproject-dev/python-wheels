@@ -497,3 +497,18 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
       port already records a hand-written hunk whose context matched byte-for-byte being
       rejected; producing the diff with `difflib` from the pristine and edited files, and
       then pasting it in, removes both failure modes at once.
+    - **A *blank* context line is a line containing one space, and transcribing a diff by
+      hand eats it.** Re-typing a generated diff into stpyv8's patch 0003 silently turned its
+      three empty context lines into truly empty ones; `git apply` then failed with nothing
+      but `error: patch failed: setup.py:236`, which reads like bad context rather than lost
+      whitespace. Assemble the file mechanically instead — write the commit message and the
+      `git diff` output to separate files and concatenate the *bytes* — and audit any patch
+      you did edit with `awk '/^diff --git/{d=1} d && /^$/{print NR}'`, which must print
+      nothing.
+    - **Apply the whole directory the way the workflow does, not patch by patch.** The step
+      is one `git apply patches/<pkg>/<version>/*.patch`, and a later patch's context has to
+      match the tree *after* the earlier ones land, so a single-patch rehearsal can pass
+      where CI fails. Rehearse with the same glob against a pristine scratch checkout, and
+      note that a failed multi-patch `git apply` does not roll the earlier patches back —
+      re-checkout the scratch tree before retrying or the next run fails on already-applied
+      hunks and sends you chasing the wrong file.

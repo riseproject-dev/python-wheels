@@ -494,6 +494,11 @@ The porting gotchas (431 of them) live in [`references/gotchas/`](gotchas/), spl
   (`<implementation tag>-<ABI tag>`), not `cp3XXt-cp3XXt`, so a hand-written per-interpreter
   loop that doubles the `t` exits 127 — derive it as `${TAG%t}-${TAG}`, and confirm any
   `/opt/python` path with a `grep` over the green workflows rather than a CI round.
+- **447** — riscv64 forces a clang-only codebase (V8) onto GCC, and its source incompatibilities
+  surface one translation unit per multi-hour build: take the fix from a later upstream release
+  rather than inventing one, kill the warning class wholesale with
+  `treat_warnings_as_errors=false`, sweep the rest of the bug class out of the arch-specific
+  sources off-target, and run `ninja -k` until the class is closed.
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 

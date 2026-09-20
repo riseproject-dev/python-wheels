@@ -74,6 +74,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **446** — The image's free-threaded interpreter directory is `/opt/python/cp3XX-cp3XXt`, not
   `cp3XXt-cp3XXt`; a hand-written loop that doubles the `t` dies with exit 127, possibly on the
   last line of an hour-long build.
+- **447** — A codebase whose upstream CI only ever compiles it with clang breaks under GCC one
+  translation unit at a time; look for the fix in a later upstream release, sweep the rest of
+  the bug class off-target, and batch discovery with `ninja -k`.
 
 ---
 
@@ -1258,3 +1261,62 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
        interpreter list here is not a build matrix (gotcha 145): one platform wheel is loaded
        on every interpreter we ship for, so a wrong path in the list fails a job that has
        nothing else left to do.
+
+447. **When riscv64 forces a clang-only codebase onto GCC, expect a long tail of source
+     incompatibilities, discovered one translation unit per build — and budget for the fact
+     that each discovery costs a *whole build*.** V8 compiles its RISC-V port with clang and
+     nothing else; a riscv64 host has no prebuilt Chromium clang to run, so stpyv8's port sets
+     `is_clang=false` and gets GCC. The first run to reach the compiler spent **9h17m in ninja,
+     got 1146 of 2117 targets in** — as far as the first translation unit that pulls in
+     `src/codegen/macro-assembler.h` — and stopped on
+     `src/codegen/riscv/macro-assembler-riscv.h:389:13: error: explicit specialization in
+     non-namespace scope 'class v8::internal::MacroAssembler'`. `MacroAssembler::push_helper`
+     ends a variadic recursion with a one-register explicit specialization written *inside* the
+     class body; the standard allows an explicit specialization only at namespace scope, clang
+     takes the in-class one as an extension, GCC refuses it. Nothing about it is riscv64-specific
+     — it is simply the first time that header met another compiler.
+     - **Look for the fix in a later upstream release before writing your own.** Release
+       branches are one `curl` each: `chromium.googlesource.com/…/+/refs/branch-heads/<X.Y>/
+       <path>?format=TEXT` (base64), or `raw.githubusercontent.com/<org>/<repo>/<tag>/<path>`,
+       so bisecting "when was this fixed" costs seconds. V8 13.2–13.7 still carried it and 13.8
+       replaced both specializations with an empty zero-register overload; backporting *that*
+       shape byte for byte beats inventing a fix, and the rewritten pinned header can be
+       diffed against the later release's to prove the backport is exact.
+     - **Separate the two failure classes — only one of them is worth patching.** Warnings are
+       an unbounded tail (V8 is warning-clean under clang only: `config("chromium_code")` adds
+       `-Werror` for any compiler while `config("no_chromium_code")` restricts it to clang,
+       "GCC may emit unsuppressible warnings"), so kill the whole class with the project's own
+       knob — for gn, `treat_warnings_as_errors=false` — instead of one cast per day-long
+       cycle. Hard errors are the only ones that need a source patch. `grep -c Werror` over the
+       failed log tells you which regime you are in.
+     - **Sweep the rest of the bug class off-target, for the price of a `curl`.** Pull just the
+       arch-specific source directories (gitiles serves any directory as
+       `+archive/refs/tags/<tag>/<dir>.tar.gz`) and grep for the construct. Here
+       `grep -rn 'template <>'` over all nine riscv directories found 62 hits but only **two**
+       indented ones — a `template <>` at column 0 is namespace scope and perfectly legal, and
+       only the in-class ones are the bug — which is what makes it defensible to re-enter a
+       ten-hour build after fixing just them.
+     - **Reproduce the diagnostic in ten lines rather than ten hours.** A parse error needs no
+       cross-toolchain and no target: strip the construct to a self-contained file and compile
+       it with the host's `g++` *and* `clang++`. That confirms the divergence is real, that the
+       backported form satisfies both, and — by printing the offsets both forms compute — that
+       the rewrite is semantics-preserving.
+     - **Do not assume a sibling port's blockers are yours.** The mini-racer V8 build hit two
+       further GCC stoppers (`unicode.h`'s `WriteLeadingAscii` specializations, and
+       `third_party/highway` falling back to `HWY_SCALAR` so `json-stringifier.cc` asks for a
+       `FixedTag<T,16>` that does not exist). Both postdate stpyv8's pinned V8: that
+       `unicode.h` has no `WriteLeadingAscii` at all and highway is not referenced anywhere in
+       its `BUILD.gn`. Check the *pinned revision* before porting a sibling's patch — and note
+       the converse, that mini-racer never saw *this* bug because its newer V8 already had the
+       13.8 fix.
+     - **While the class is open, make one build report everything: `ninja -k <n>`.** ninja
+       stops at the first failure by default, so a 20-hour build yields exactly one diagnostic.
+       `-k 1000` costs nothing on a green build (it only changes behaviour after a failure) and
+       converts N sequential day-long discoveries into one. mini-racer's `-k 1000` run collected
+       six failures at once; drop the flag again once the build is green, or a genuine error
+       turns a fast failure into a full-length one.
+     - **Read the log before concluding it is a wall.** This one was not gotcha 421's resource
+       ceiling: the 48h timeout was under a fifth spent, and the whole 168 KB log has no
+       `Killed`, no `out of memory`, no `internal compiler error`, no `No space left`, no signal
+       — and exactly **one** `FAILED:` edge carrying a compiler diagnostic. One `FAILED` with a
+       diagnostic is a bug to fix; a wall looks nothing like it.
