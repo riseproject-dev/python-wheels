@@ -429,6 +429,11 @@ The porting gotchas (431 of them) live in [`references/gotchas/`](gotchas/), spl
   silently ignored for a `cipd` one, so a riscv64-less CIPD package survives into the
   `cipd ensure` that ends `gclient sync` — edit the checkout's `DEPS` instead, and add
   `use_siso=false` to the gn args when siso is one of them.
+- **451** — bazel 7.7.0/7.7.1 cannot be bootstrapped from source on any architecture: they
+  are the first 7.x releases whose `MODULE.bazel` reaches `bazel_features`, which reads the
+  version-less bootstrap binary as newer than bazel 8 and generates a `globals.bzl`
+  re-exporting `macro()`. Bootstrap 7.5.0; an upstream `.bazelversion` is bazelisk's file,
+  not a gate.
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
