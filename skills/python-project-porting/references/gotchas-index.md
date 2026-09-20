@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (425 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (426 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -442,6 +442,10 @@ The porting gotchas (425 of them) live in [`references/gotchas/`](gotchas/), spl
   manylinux's non-PIC `libpython3.XX.a` only moves the failure to the final link after hours,
   the project may already strip libpython from its own non-Windows link lines (making the
   `REQUIRED` vestigial), and the header-only fix rehearses locally on x86_64 in a minute.
+- **435** — `libquadmath` does not exist on riscv64 or aarch64 — GCC builds it only where
+  `__float128` differs from `long double`, so `dnf install libquadmath` fails outright. A project
+  that copies it beside `libgfortran` unconditionally needs that copy made conditional; and never
+  pad a `dnf install` with unconfirmed runtime packages, since one bad name fails the transaction.
 - **433** — OpenBLAS built from source stops at `getarch.c: #error "This arch/CPU is not
   supported by OpenBLAS."` on riscv64 whatever the version: its riscv64 definitions are reached
   only through `TARGET=`, so pass `TARGET=RISCV64_GENERIC` (the rv64gc baseline) as the twin of
