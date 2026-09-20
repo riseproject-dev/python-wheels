@@ -64,6 +64,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
   `/usr/include/ev.h`.
 - **401** — Rocky 10 riscv64 ships OpenBLAS, LAPACK and FFTW but no SuiteSparse, GSL or
   GLPK, and a numeric package's optional-extension set has to be cut along that line.
+- **428** — A project on the *deprecated* `find_package(PythonLibs REQUIRED)` has no
+  `Development.Module` way out of gotcha 374's static-libpython wall — and satisfying it
+  with manylinux's non-PIC `libpython3.XX.a` only moves the failure to the final link.
 
 ---
 
@@ -1129,3 +1132,46 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       `grep -c '^ERROR'` plus `grep -oE 'from target @@[^)]*' | sort -u`: one distinct
       target and one distinct extension name is what tells you a single `--define` fixes
       the whole run, rather than guessing from the first error you happen to see.
+
+428. **A project still on the *deprecated* `find_package(PythonLibs REQUIRED)` has no
+    `Development.Module` escape hatch from gotcha 374's static-libpython wall, and the
+    obvious way to satisfy it is a trap that only fails at the very end of the build (the
+    paddlepaddle case).** manylinux configures every interpreter it ships with
+    `--disable-shared` — `pypa/manylinux`'s `build_scripts/build-cpython.sh`, with no
+    architecture condition — so `/opt/python/cp3XX-cp3XX` carries `Python.h` and a
+    `libpython3.XX.a` but no `libpython3.XX.so`, and the old `FindPythonLibs` module, which
+    never consults `PYTHON_EXECUTABLE` at all, stops configure with `Could NOT find
+    PythonLibs (missing: PYTHON_LIBRARIES PYTHON_INCLUDE_DIRS)`. Two things to establish
+    before touching it:
+    - **Never point `PYTHON_LIBRARY` at the static archive to make the error go away.** It
+      configures, compiles for hours and *then* fails at the final link. CPython's
+      `configure` adds `CFLAGSFORSHARED` (i.e. `-fPIC`) only
+      `if test ! "$LIBRARY" = "$LDLIBRARY"`, which a `--disable-shared` build never
+      satisfies, so `libpython3.XX.a` holds no position-independent code and cannot be
+      linked into a shared object on any architecture. The cycle this wastes is the whole
+      build, not the configure step.
+    - **Check whether the project already refuses to link libpython, which makes the
+      `REQUIRED` vestigial.** Paddle's `cmake/generic.cmake` strips `python` out of every
+      non-Windows target's `target_link_libraries()`, keeps it only as an
+      `add_dependencies()` ordering edge and links `-Wl,-undefined,dynamic_lookup`
+      instead — citing pybind11's own "Building manually" notes — so `PYTHON_LIBRARIES` is
+      read only by the `cc_test()` executables that embed an interpreter (off under
+      `WITH_TESTING=OFF`) and by two dead variables. A `grep -rn '${PYTHON_LIBRARIES}'`
+      across the cmake tree is the whole audit, and it decides whether dropping the library
+      changes any link line at all.
+    The fix is to require only the headers, and to take them from the interpreter being
+    built against rather than from whatever the module finds on the host: pre-seed the
+    `PYTHON_INCLUDE_DIR` cache entry from `sysconfig.get_config_var('INCLUDEPY')`, which
+    keeps pointing at the real installation from inside a virtualenv. Pre-seeding also makes
+    a now-optional `find_package(PythonLibs)` skip its own `find_path()` and still report the
+    right `PYTHONLIBS_VERSION_STRING` out of `patchlevel.h`, so a distro build that does have
+    a shared libpython keeps behaving exactly as before. Guard the imported target too: a
+    `SHARED IMPORTED` target with an empty `IMPORTED_LOCATION` is invalid, so create
+    `add_library(<name> INTERFACE IMPORTED GLOBAL)` when no library was found.
+    **All of this rehearses locally on x86_64 in a minute, with no image pull and no QEMU**,
+    which matters when the real build is a multi-hour riscv64 job: `include()` the patched
+    `.cmake` from a throwaway CMake project, stub the project's own helper modules, and force
+    the manylinux branch with `-DCMAKE_DISABLE_FIND_PACKAGE_PythonLibs=TRUE`; then build a
+    real `.so` that calls a `Py_*` function the way the project builds its extension module,
+    and confirm `nm -D --undefined-only` reports the symbols as `U` and `readelf -d` shows no
+    `libpython` in `DT_NEEDED`.

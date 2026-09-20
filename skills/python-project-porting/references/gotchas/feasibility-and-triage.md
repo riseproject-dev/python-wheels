@@ -94,6 +94,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **419** — Gotcha 411's "is the CPU backend the default?" test can pass and still not yield a
   port: the non-CUDA branch of a torch extension can compile operator *schemas* with no
   implementations, so the build succeeds and the wheel is a dead stub (the xformers case).
+- **426** — A `-cpu` sibling can be an *x86_64-only label* rather than a portable CPU variant:
+  where the base package's wheel is already CPU-only on every non-x86 arch, the sibling name
+  closes no gap and inherits the base's park (the tensorflow-cpu case).
 
 ---
 
@@ -2372,3 +2375,54 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       note reading "1 Linux wheel (abi: py39)" on a torch-extension package is that
       convention, not a pure-Python tell — and it means the port, had it been feasible,
       would have been one wheel rather than a per-interpreter matrix.
+
+426. **A `-cpu` sibling can be an *x86_64-only label*, not a portable CPU variant — if the
+    base package already ships a CPU-only wheel on every non-x86 arch, the sibling name
+    closes no riscv64 gap (the tensorflow-cpu case).** Gotcha 79's `-headless`/`-gpu`/`-lite`
+    sibling is usually a legitimate second port, and gotcha 50's `-binary` sibling is where
+    the wheels actually live. This is the third shape: a sibling that exists **only because
+    one architecture's default wheel is the GPU one**. `tensorflow-cpu` and `tensorflow`
+    2.21.0 are the same tree — `tensorflow/tools/pip_package/utils/tf_wheel.bzl` reads
+    `WHEEL_NAME` out of `@python_version_repo` and its own docstring says "Should be set via
+    `--repo_env=WHEEL_NAME=tensorflow_cpu`" — and their PyPI metadata is identical down to
+    the same 12 `nvidia-*; extra == "and-cuda"` requirements. What differs is only which
+    arch each name is *built* for, and that is the whole triage:
+    - **Scan the sibling's entire release history for platform tags, not just the version in
+      the queue entry.** One pass over `https://pypi.org/pypi/<sibling>/json`'s `releases`
+      counting the trailing tag of every file: `tensorflow-cpu` has published `win_amd64`
+      and `manylinux*_x86_64` **only** — across every release ever, zero aarch64, zero
+      ppc64le, zero other Linux arch, and no sdist. A sibling that has never left x86_64 is
+      a label for "x86_64 without the GPU bits", not a CPU variant.
+    - **Then compare the base package's per-arch wheel *sizes* to find which arches are
+      already CPU-only under the base name.** `tensorflow` 2.21.0 is 545 MB on
+      `manylinux_2_27_x86_64` but 268 MB on `manylinux_2_27_aarch64` — and `tensorflow_cpu`
+      x86_64 is 261 MB. The aarch64 wheel matching the *cpu* wheel's size rather than its own
+      arch's GPU wheel is the proof: on aarch64 upstream ships the CPU-only build under the
+      plain name, because there is no CUDA there to ship. riscv64 is in exactly that
+      position, so the riscv64 deliverable for "CPU-only TensorFlow" is `tensorflow`, and a
+      `manylinux_riscv64` wheel named `tensorflow-cpu` would invent a name upstream uses on
+      exactly one Linux architecture — gotcha 50's divergence-with-no-gap-closed, reached
+      from the sibling side.
+    - **So the `-cpu` sibling is never *cheaper* than the base, and inherits its verdict.**
+      The tempting inference is "the CPU-only variant sidesteps whatever made the full
+      package impractical (no CUDA build to worry about)". It is backwards: on an arch with
+      no CUDA the base package's build *is already* the CPU build, so the sibling saves
+      nothing and is the identical compile under a worse name. If the base entry is
+      `parked`, park the sibling for the base's reason plus the naming one, and say so in
+      both notes — an under-documented base park is what makes an agent re-derive this.
+    - **Don't inherit a sibling-family blocker citation across versions — re-verify it at
+      the revision your target actually pins.** jaxlib (PR #526, parked) died in XLA's
+      `xla/codegen/intrinsic/cpp` `embed_bitcode`, which links every LLVM backend except
+      RISC-V, and TensorFlow vendors the whole XLA tree at `third_party/xla/`, so that reads
+      like a ready-made blocker for TF too. At TF 2.21.0 it is not one: that tag's XLA
+      predates the restructure (the rule is `cc_ir_header` in `cc_to_llvm_ir.bzl`, whose
+      `ir_to_string` tool deps are just `llvm:Object`+`llvm:Support`, no per-arch CodeGen),
+      and `xla/backends/cpu/codegen/BUILD` *does* wire `if_llvm_riscv_available(["@llvm-project//llvm:RISCVCodeGen"])`
+      for the CPU JIT, with `linux_riscv64` and `riscv64_or_cross` defined in
+      `xla/tsl/BUILD`. Citing the sibling's hunk anyway would put a false hard blocker in the
+      queue; the honest note says "scope and naming, *not* Bazel-blocked like jaxlib".
+    - **Before costing a big Bazel build, check whether its wheel is per-interpreter.**
+      `_get_full_wheel_name` formats `cp{v}-cp{v}` from `HERMETIC_PYTHON_VERSION`, so TF is
+      one full build **per** interpreter (cp310–cp313 = 4), with none of the abi3/`py3-none`
+      collapse that let mediapipe serve every interpreter from a single ctypes-loaded `.so`.
+      That multiplier belongs in the estimate before anything else.
