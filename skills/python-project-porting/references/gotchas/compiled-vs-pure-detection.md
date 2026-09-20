@@ -21,6 +21,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
 - **295** — A require-extension knob that reaches the container correctly (gotcha 129's
 - **308** — A maturin shim whose star-import name collides with the compiled submodule's
 - **398** — Reproducing a `py3-none-<platform>` wheel takes an explicit retag — setuptools'
+- **456** — On cp314t our registry can hand a package a *compiled* dependency wheel where
 
 ---
 
@@ -417,3 +418,30 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
       `unzip -l` the published wheel for a lone non-`.cpython-3XX` `.so`, and grep the
       package for the `ctypes`/`cffi` loader that opens it. Retagging a pybind11 payload
       this way ships a wheel that installs on interpreters it cannot load.
+
+456. **On cp314t our registry can hand a package a *compiled* dependency wheel where PyPI
+    hands every other arch the pure-Python one — and if that extension has no `Py_mod_gil`
+    slot, importing it turns the GIL back on for the whole process while the leg stays
+    green (the aioesphomeapi/protobuf case).** Gotcha 127 is the loud version of this: your
+    *own* extension lacks the declaration and an upstream `-W error` suite dies at
+    collection. The quiet version names a **dependency** in the same warning, and a suite
+    that does not use `-W error` just passes: aioesphomeapi's cp314t wheel built, imported
+    and ran 1261 tests with one line in the log —
+    `RuntimeWarning: The global interpreter lock (GIL) has been enabled to load module
+    'google._upb._message', which has not declared that it can run safely without the GIL`.
+    - **Read the module name in the warning before reacting.** Yours is a build bug to fix
+      (gotcha 33/127); a dependency's is a property of that package's wheel, which your
+      workflow cannot fix and should not paper over with `PYTHON_GIL=0`.
+    - **One container command settles who is the odd one out**, on any arch and in a
+      minute: `docker run --rm quay.io/pypa/manylinux_2_28_x86_64 bash -c
+      '/opt/python/cp314-cp314t/bin/pip download -q <dep>==<ver> --no-deps -d /tmp/d; ls /tmp/d'`.
+      protobuf 7.36.2 answers `protobuf-7.36.2-py3-none-any.whl` — upstream publishes upb
+      only for GIL builds, so a free-threaded interpreter silently gets the pure-Python
+      implementation and keeps the GIL off. Our registry's
+      `protobuf-7.36.2-cp314-cp314t-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl`
+      ships upb instead, so on riscv64 the same install re-enables the GIL.
+    - **The consequence is a riscv64-only behaviour difference, not a broken wheel**:
+      everything downstream of that import runs with the GIL on, so the cp314t wheels we
+      publish for *dependents* are free-threaded in name only. Flag it against the
+      dependency's own port (there, declaring free-threading or matching upstream's
+      pure-wheel-on-`cp3XXt` choice is the fix), and keep porting.

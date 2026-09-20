@@ -47,6 +47,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
 - **451** — bazel 7.7.0/7.7.1 cannot bootstrap from source anywhere: their `MODULE.bazel`
   reaches `bazel_features`, which reads the version-less bootstrap binary as newer than
   bazel 8 and emits a `globals.bzl` re-exporting `macro()`. Bootstrap 7.5.0.
+- **456** — Gotcha 15's build-the-C++-once loop amortizes nothing when the build is
+  reconfigured per interpreter: five interpreters, five full builds, one `cancelled` job at
+  `timeout-minutes`. Measure the second iteration, then matrix the interpreters.
 
 ---
 
@@ -850,3 +853,29 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       = ...)` in `WORKSPACE` (gotcha 47), and whether the project is bzlmod at all — LiteRT
       has no `MODULE.bazel` and sets `common --noenable_bzlmod`, so nothing in its build
       ever reads a version gate.
+
+456. **Gotcha 15's "build the C++ once, then loop the interpreters" is an assumption to
+    *measure*, not a property of bazel: a project whose build configuration depends on the
+    interpreter rebuilds its entire C++ world every time round the loop (the tensorstore
+    case).** tensorstore's `setup.py` drives bazel itself and every interpreter reconfigures
+    the build, so five interpreters sharing one `--output_user_root` cost five *full* builds —
+    5h35 each, 28h in total — instead of one build plus four sets of bindings. The single job
+    was killed at `timeout-minutes: 1440` with four finished wheels on disk and the fifth
+    halfway through.
+    - **A job killed by `timeout-minutes` is reported as `cancelled`, not `failed`**, and the
+      job page shows no error beyond `The operation was canceled.` — indistinguishable at a
+      glance from a maintainer cancelling the run (gotcha 296) or a runner going away. Check
+      the step's elapsed time against the job's `timeout-minutes` before assuming a hang:
+      `gh api repos/<repo>/actions/jobs/<id> --jq '.steps[] | [.name, .started_at,
+      .completed_at] | @tsv'`, or read them out of `actions_list`'s `list_workflow_jobs`.
+    - **Measure the loop's second iteration before trusting it.** `pip wheel` swallows the
+      build output, so the only timestamps in the log are pip's own `Created wheel for <pkg>`
+      lines — one per interpreter. If the gap between consecutive ones is roughly the gap
+      before the first, the loop is amortizing nothing.
+    - **Then matrix the interpreters instead of looping them.** Each job starts cold, so
+      nothing is lost that the loop was actually saving; total runner time is unchanged,
+      wall-clock drops by the number of interpreters, and each job fits the 720-minute
+      timeout the other bazel ports use (`build-grain.yml`, `build-array-record.yml`,
+      `build-labmaze.yml` all have this shape). Keep `--local_ram_resources=HOST_RAM*.5`:
+      the legs now run *concurrently* on the shared pool, so a leg assuming the whole host
+      is worse than before.

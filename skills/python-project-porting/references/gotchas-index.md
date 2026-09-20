@@ -446,6 +446,9 @@ The porting gotchas (433 of them) live in [`references/gotchas/`](gotchas/), spl
   version-less bootstrap binary as newer than bazel 8 and generates a `globals.bzl`
   re-exporting `macro()`. Bootstrap 7.5.0; an upstream `.bazelversion` is bazelisk's file,
   not a gate.
+- **456** — A per-interpreter loop in one bazel output base amortizes nothing when the build
+  is reconfigured per interpreter (tensorstore: 5 x 5h35), and the job that overruns
+  `timeout-minutes` is reported as `cancelled`, not `failed`. Matrix the interpreters.
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
@@ -585,6 +588,7 @@ The porting gotchas (433 of them) live in [`references/gotchas/`](gotchas/), spl
 - **295** — A require-extension knob that reaches the container correctly (gotcha 129's
 - **308** — A maturin shim whose star-import name collides with the compiled submodule's
 - **398** — Reproducing a `py3-none-<platform>` wheel takes an explicit retag — setuptools'
+- **456** — On cp314t our registry can hand a package a *compiled* dependency wheel where
 
 ### Dependencies & the registry — [`gotchas/dependencies-and-registry.md`](gotchas/dependencies-and-registry.md)
 
