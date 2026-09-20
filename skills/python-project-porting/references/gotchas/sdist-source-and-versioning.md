@@ -589,3 +589,45 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
     the submodule-cleanup routine in the first place — no patch to the upstream tree
     needed, and `persist-credentials: false`'s only purpose (not leaking the checkout
     token into the built artifact) is moot for plain, unauthenticated `git clone`/`fetch`.
+
+381. **A host-side `git apply` -> commit -> `git tag -f` fix for a `versioneer` dirty tree
+    (gotcha 315's mechanism) can still leave the tree dirty *inside* the cibuildwheel
+    container if the project's own `before-build` hook also modifies a tracked file (the
+    pandas case).** `build-pandas.yml`'s "Patch pandas source" step applies the riscv64
+    patch, commits it under the throwaway `ci` identity and re-tags `v<PANDAS_VERSION>` at
+    `HEAD` -- verified empirically (shallow clone, replicate the three commands, then run
+    `generate_version.py --print`, the exact script pandas's `meson.build` invokes at
+    configure time) that this alone *does* produce a clean, zero-distance version, matching
+    gotcha 315's `git tag -f`-based fix. But pandas's own `[tool.cibuildwheel] before-build`
+    (`scripts/cibw_before_build.sh`) -- which our `CIBW_ENVIRONMENT` override doesn't touch,
+    since that's a separate cibuildwheel option -- runs *inside* the container, after
+    cibuildwheel tars the whole `git describe`-clean working directory in (including
+    `.git`, confirmed by reading `oci_container.py`'s `copy_into`: a plain `tar -c -f - .`
+    with no `.git` exclusion), and appends `LICENSES/*` into the tracked `LICENSE` file --
+    re-dirtying the tree at the exact point (`pandas/meson.build`'s top-level
+    `run_command(['generate_version.py', '--print'])`, which falls back to
+    `versioneer.get_version()` before `_version_meson.py` exists) where the version is
+    actually resolved. Reproduced exactly: running `cibw_before_build.sh` against the
+    already-clean, already-retagged checkout turns `generate_version.py --print`'s output
+    from `3.0.5` back into `3.0.5+0.g<hash>.dirty` -- the same shape CI reported. Each
+    matrix leg (cp311/cp312/cp313/cp314) shows a *different* hash for the *same* pandas
+    version for an unrelated, harmless reason: each is an independent container getting its
+    own host-side commit (from its own job's "Patch pandas source" step) plus its own
+    container-side commit; only the *dirty* suffix was the actual bug.
+    - **Fix: override `CIBW_BEFORE_BUILD` to re-run the project's own before-build command
+      and then commit + re-tag again, inside the same container, right before the build
+      reads the version** -- not by deleting or working around the upstream hook (goal 2:
+      mirror upstream's own CI), and not by moving the host-side patch/commit/retag step,
+      since that step's output is still correct at the point it runs and gets faithfully
+      copied into the container. `CIBW_BEFORE_BUILD` replaces `[tool.cibuildwheel]
+      before-build` wholesale (same env-var-over-pyproject.toml precedence as
+      `CIBW_ENVIRONMENT`), so the override must restate pandas's own command
+      (`PACKAGE_DIR={package} bash {package}/scripts/cibw_before_build.sh`) before chaining
+      `git -C {package} commit -am ... && git -C {package} tag -f v<VERSION>` after it.
+    - **General shape of the trap**: gotcha 315's fix only guarantees a clean tree at the
+      moment the fix step runs. Any later hook that runs in a *different* environment
+      copy (a fresh container, a fresh clone) and touches a tracked file reopens the same
+      dirty-tree problem, even though nothing about the original fix was wrong. Before
+      trusting a commit+retag fix, trace every step between it and whatever actually
+      triggers the version-detection call (here, `pip wheel` -> meson configure), not just
+      the steps visible in the GitHub Actions log.

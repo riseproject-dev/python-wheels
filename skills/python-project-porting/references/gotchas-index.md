@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (371 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -126,6 +126,10 @@ The porting gotchas (370 of them) live in [`references/gotchas/`](gotchas/), spl
   wrong commit — check `git merge-base --is-ancestor <tag> origin/main` before trusting it.
 - **352** — A gitlink with no `.gitmodules` entry breaks `actions/checkout`'s own
   persist-credentials cleanup, not the checkout itself.
+- **381** — A gotcha 315-style commit+retag fix for a `versioneer` dirty tree can still
+  read dirty inside the cibuildwheel container if the project's own `before-build` hook
+  modifies a tracked file after the retag — override `CIBW_BEFORE_BUILD` to redo the
+  commit+retag after it.
 
 ### cibuildwheel mechanics, the matrix & abi3 — [`gotchas/cibuildwheel-matrix-and-abi3.md`](gotchas/cibuildwheel-matrix-and-abi3.md)
 
