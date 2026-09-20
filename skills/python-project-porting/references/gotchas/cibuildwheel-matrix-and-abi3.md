@@ -878,6 +878,21 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
       `primp` 2.0.0/2.0.1 and `arro3-core` 0.8.2/0.8.3 carry only their cp314t wheel,
       and `rigour` 2.5.0 carries only cp314 where 2.4.1 carried five. Fix the workflow
       you are touching; the rest need a sweep of their own.
+    - **`docs/packages/rfc3161-client.yaml` dates the regression in situ**, which is the
+      cheapest way to show a reviewer it is the `version` vector and not the package:
+      1.0.8, built before commit e7b2b20a74 replaced the per-interpreter base vector,
+      carries both `cp39-abi3` and `cp314t` wheels; 1.0.9, built after, carries only
+      `cp314t`. Same workflow file, same crate, one wheel lost to a refactor.
+    - **The 58 are also the natural *templates*, so the bug reproduces into new ports.**
+      An abi3 + free-threaded maturin port has no better starting point than
+      `build-rfc3161-client.yml` / `build-semantic-text-splitter.yml` / `build-primp.yml`,
+      and copying any of them carries the collapse in — kernels-data 0.16.1 did exactly
+      that and its first run was green with one `cp314t` job. Copy the *matrix shape* from
+      a workflow on the safe list instead (`build-datafusion.yml`, `build-grain.yml`,
+      `build-lz4.yml`), and check the shape of whatever you copy: `python3 -c` over the
+      YAML, comparing the `include:` entries' keys against the base matrix's, answers it
+      before the first push. Then count the build jobs in run 1 rather than reading the
+      conclusion — a collapsed matrix never fails.
 
 408. **A `setup.py` that reaches for `wheel.bdist_wheel` behind a `try/except ImportError`
      still gets its abi3 tag under modern setuptools — do not "fix" it by adding `wheel`
