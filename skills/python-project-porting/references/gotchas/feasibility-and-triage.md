@@ -51,6 +51,72 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **376** — A permissive `License:` field on the wrapper package says nothing about whether
   the payload it ships has any source at all — check the binary's own content, not the
   metadata's license family (the tableauhyperapi case).
+- **411** — A GPU-first package is not CUDA-blocked when its own build system makes the CPU
+  backend the *default* — read the backend selector and diff the per-platform wheel sizes
+  before parking it (the bitsandbytes case).
+- **381** — A third-party *vendor release* of a project this repo has already ruled out
+  inherits that verdict — resolve the redistribution to its upstream before triaging anything
+  else (the tokenspeed-triton case).
+- **382** — Several PyPI distributions carved out of *one* build are one unit of work, not
+  one port each — check the allowed `--build-type` values before writing any YAML, and let
+  `requires_dist` (not the most "core-sounding" name) fix the order (the
+  pyside6/-essentials/-addons case).
+- **383** — The *umbrella* distribution of a split family carries no compiled code at all,
+  gets its platform+`abi3` tag from a deliberately fake `Extension`, and its payload is
+  generated stubs for the union of its siblings' modules — so it cannot be cut from a
+  different build than they were (the pyside6 meta-wheel case).
+- **385** — A no-sdist vendor wheel can still have a fully public build recipe — read
+  `dist-info/WHEEL`'s `Generator:` before parking it for "no source anywhere"; a
+  vendor-named generator is usually a *repackager*, which moves the stop to whether the
+  vendor publishes the payload for our arch (the pyqt6-qt6 case).
+- **386** — A GPU-only package can be small, source-open and blob-free and still be
+  unportable: in a JIT kernel library the compiled part is a few-hundred-KB shim, so gotcha
+  41's vendor-payload tell is absent and the wall is what that shim links — `libtorch_cuda.so`,
+  which our CPU-only riscv64 torch can never provide (the humming-kernels case).
+- **387** — A GPU-toolkit-suffixed distribution name (`-cuda12x`, `-rocm-7-0`) is a toolkit
+  selector whose name can come from a *separate* release-tools repo, and a documented
+  stub/no-CUDA build mode is a docs build, not a port (the cupy-cuda12x case).
+- **388** — The queue entry's wheel shape is a snapshot — re-read the *latest* release's tag
+  set first, because upstream can delete the arch-specific payload and erase the gap outright
+  (the tokenspeed-mla case).
+- **392** — With no project URL and a stock `Generator:`, the *conda-forge feedstock* is the
+  cheapest source-availability oracle; and `readelf -S` splits a real compiled extension into
+  engine vs embedded-model-weights in one command (the livekit-local-inference case).
+- **405** — An NVIDIA-owned, profiler-adjacent package can have no CUDA dependency whatsoever
+  — read the extension's header set and `libraries=` list before filing it with the GPU batch
+  (the nvtx case).
+- **407** — An upstream recipe can stop being conda-based between releases, so read it at the
+  *newest* tag before pricing a port or recording a conda blocker (the cadquery-ocp-novtk
+  case).
+- **418** — An upstream wheel for *another* non-x86 architecture is only a precedent for the
+  parts of it that are actually that architecture — `readelf -h` every `.so` in it (the
+  paddlepaddle case).
+- **419** — Gotcha 411's "is the CPU backend the default?" test can pass and still not yield a
+  port: the non-CUDA branch of a torch extension can compile operator *schemas* with no
+  implementations, so the build succeeds and the wheel is a dead stub (the xformers case).
+- **426** — A `-cpu` sibling can be an *x86_64-only label* rather than a portable CPU variant:
+  where the base package's wheel is already CPU-only on every non-x86 arch, the sibling name
+  closes no gap and inherits the base's park (the tensorflow-cpu case).
+- **431** — A distribution that has never shipped an sdist leaves the wheel as the only
+  evidence: `strings -a` the vendored blob and its builder paths (`/.conan/data/…@vendor/prod`)
+  prove a closed vendor with no public source (the livekit-plugins-noise-cancellation case).
+- **436** — A project's whole non-x86 story can be one `uname -m == aarch64` boolean, and an
+  `aarch64` branch is only as portable as the dependency behind it — survey every site of the
+  boolean, then triage the one whose branch works only because that dep ships an ARM SIMD shim
+  (the Open3D case).
+- **438** — A "redistributable `<vendor binary>`" distribution can repack a vendor blob on some
+  OSes and build from source on the one that matters, so decide gotcha 35/157/431 per OS; plus the
+  depot_tools/gn/CIPD riscv64 readiness check and the two CIPD gaps `custom_deps` removes (the
+  comfy-angle/ANGLE case).
+- **442** — A vendored dependency's *build system* can silently omit a capability flag its other
+  build system defaults on, and only auditing every dispatch site (not just "does it build")
+  proves which one actually shipped (the mediapipe/XNNPACK case).
+- **449** — A prebuilt riscv64 binary an upstream downloads for you can be built for a *vendor*
+  ISA: `file`/`e_machine 243` says it is riscv64, not *which* riscv64 — read `Tag_RISCV_arch`
+  and count CUSTOM-opcode instructions too (the openvino/oneTBB T-Head case).
+- **450** — A vendored native payload can be a *GraalVM Native Image* (AOT-compiled Java), which
+  moves the wall from "is there source?" to "does the AOT toolchain target riscv64?" — and an
+  arch enum in the toolchain's own code is not shipping support (the saxonche/SaxonC-HE case).
 
 ---
 
@@ -1623,3 +1689,1071 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     - Parked (`.queue.yml`); no worktree/branch/PR created — diagnosed read-only against
       the real 0.0.26359 wheel contents (`unzip -l`, `file`/`strings` on both native
       binaries) and Tableau's own installation/hardware-requirements documentation.
+
+411. **A GPU-first package is not CUDA-blocked when its own build system makes the CPU
+    backend the *default* — read the backend selector and diff the per-platform wheel
+    sizes before parking it (the bitsandbytes case; see `build-bitsandbytes.yml`).**
+    bitsandbytes reads as the archetypal GPU port: the repo is `.cu` kernels, the
+    classifiers say `Environment :: GPU :: NVIDIA CUDA`, and the Linux wheels are
+    23-43 MB of `libbitsandbytes_cuda1NN.so`. Its `CMakeLists.txt` nevertheless opens
+    with `set(COMPUTE_BACKEND "cpu" CACHE STRING ...)`, and every `BUILD_CUDA`/`BUILD_HIP`/
+    `BUILD_XPU` branch — including `enable_language(CUDA)` and `find_package(CUDAToolkit
+    REQUIRED)` — sits behind an `if` that a plain `cmake .` never enters. So the default
+    build compiles two ordinary C++17 files (`csrc/cpu_ops.cpp`, `csrc/pythonInterface.cpp`)
+    against nothing but OpenMP, and needs no GPU toolkit at build *or* test time.
+    - **The per-platform wheel sizes say which backend is optional, not just that the
+      platforms differ.** Gotcha 81 reads divergent sizes in `pypi.org/pypi/<pkg>/<ver>/json`
+      as "real per-platform content"; the sharper reading is the *small* end. bitsandbytes
+      0.50.2 ships 43 MB (x86_64), 23 MB (aarch64) — and **123 KB** (macOS arm64) and 1 MB
+      (win_arm64). A platform upstream itself builds at three orders of magnitude smaller is
+      upstream shipping the CPU-only backend, which is exactly the wheel riscv64 wants. No
+      `--enable-cpu` flag to discover, no divergence to justify: the port is upstream's own
+      macOS/Windows-ARM recipe pointed at a third platform.
+    - **Check the GPU dependency is not also a *runtime* wall** before committing. Here it
+      is not: `bitsandbytes/cextension.py` `ctypes.CDLL`s whichever `libbitsandbytes_*.so`
+      matches the detected runtime, falling back to a `BNBNativeLibrary` whose `__getattr__`
+      raises only when a CUDA-only entry point is actually *called*, and the test suite's
+      GPU half is gated behind a `requires_cuda` fixture plus `@pytest.mark.slow`, both
+      deselected by upstream's own default `addopts`. Contrast gotcha 40/187's conda wall
+      and the sglang case, where the blocker is a *dependency* (`cuda-python`) with no
+      riscv64 build at all — an optional backend inside one CMake tree is not that.
+
+381. **A third-party *vendor release* of a project this repo has already ruled out inherits
+     that verdict — resolve the redistribution to its upstream before triaging anything else
+     (the tokenspeed-triton case).** Nothing in a queue entry says a distribution is somebody
+     else's rebuild of another project: `tokenspeed-triton`'s PyPI `Author`,
+     `Author-email` and `Home-page` are copied verbatim from upstream triton (Philippe
+     Tillet, `phil@openai.com`, `github.com/triton-lang/triton/`), and `.queue.yml`'s
+     `home`/`repo` inherit them, so it reads as an ordinary triton port. Two metadata tells
+     give it away, both free: the summary suffix — "A language and compiler for custom Deep
+     Learning operations **(vendor release for TokenSpeed)**" — and a version that upstream
+     never released (`3.8.10.post<YYYYMMDD>`, five dated builds, while PyPI `triton`'s newest
+     is `3.8.0` and there is no `3.8.10` tag). Dated `.postN` builds off a release *line*
+     are a vendor-nightly smell in general.
+     - **The renamed namespace *is* the redistribution, and its transform is private.**
+       `top_level.txt` is `tokenspeed_triton`, every path in the wheel is
+       `tokenspeed_triton/…`, and the backend entry points are `[tokenspeed_triton.backends]`;
+       the consumer (`lightseekorg/tokenspeed`, a GPU LLM inference engine) even bans the real
+       name in `python/pyproject.toml` (`"triton" = { msg = "Use tokenspeed_triton instead." }`).
+       This is gotcha 185's rename shape without gotcha 185's escape hatch: pi-heif's
+       `transform_to-pi_heif.py` is checked in upstream and can simply be run, whereas the
+       downstream triton fork here is not public — TokenSpeed's own
+       `.skills/bisect-triton-release.md` instructs its developers to "ask where the downstream
+       triton repo is to inspect downstream changes" — and **zero sdists exist across every
+       version ever published**, so there is no source for the thing PyPI actually ships.
+     - **Check only what the rebuild changed; don't re-derive the upstream verdict.** For
+       triton that verdict is gotcha 41, and the wheel confirms it in one range-request read
+       — `uv run ci_scripts/wheel_contents.py <pkg> --match <wheel-tag>` lists a remote
+       wheel largest-first without downloading it, and `--member <path>` pulls one file
+       (`dist-info/entry_points.txt`, a backend `driver.py`) out of the same wheel:
+       a 179 MB `tokenspeed_triton/_C/libtriton.so` beside
+       `backends/nvidia/bin/{ptxas,ptxas-blackwell,nvdisasm,cuobjdump}` and
+       `backends/nvidia/lib/libdevice.10.bc`, plus an AMD backend of HIP/HSA headers and
+       `*.bc`. The two questions specific to a fork are whether it *added* a backend or a CPU
+       path upstream lacks (it did not — `entry_points.txt` lists exactly `amd` and `nvidia`,
+       matching upstream `setup.py`'s `BackendInstaller.copy(["nvidia", "amd"])`, and each
+       `driver.py` `ctypes.CDLL`s `libcuda.so.1` / `libamdhip64.so`), and whether the vendor
+       toolchain now reaches our arch (it does not — NVIDIA's
+       `redist/redistrib_13.{0,2}.0.json` still lists only `linux-x86_64`, `linux-sbsa`,
+       `windows-x86_64`).
+     - **Re-check a moved build mechanism rather than trusting the older gotcha's file
+       names.** triton's pinned prebuilt LLVM is no longer `cmake/llvm-hash.txt` (404 today)
+       but `cmake/llvm-info.json` read by `python/build_helpers.py`; its `sha256sum` keys are
+       `almalinux`/`ubuntu`/`macos`-`{x64,arm64}` + `windows-x64`, and
+       `llvm-b010a18d-<suffix>-1.tar.gz` on `oaitriton.blob.core.windows.net` answers 200 for
+       `ubuntu-x64`/`almalinux-arm64` and 404 for every riscv64 spelling. Use a *real* hash
+       from that JSON when probing — a made-up one 404s for every arch and proves nothing.
+       `get_llvm_system_suffix()` returns `None` on an unrecognised machine and falls back to
+       a user-supplied LLVM, so a port would first owe a from-source build of that exact
+       revision (libclang-scale, gotcha 338) before hitting the blockers that end it anyway.
+     - Report `parked`, cite the upstream gotcha, and note the family: sibling distributions
+       from the same vendor (`tokenspeed-mla`, `tokenspeed-kernel*`) are the same shape, as
+       are the already-parked `sglang`/`onnxruntime-gpu` entries.
+
+382. **Several PyPI distributions carved out of one build are one unit of work, not one
+    port each — read the allowed `--build-type` values before writing any YAML, and let
+    `requires_dist` fix the order (the pyside6/pyside6-essentials/pyside6-addons case).**
+    The queue holds each split distribution as its own entry, so each arrives looking like
+    an independent port with its own workflow. Settle first whether the distribution you
+    were handed is a *build target* at all. pyside-setup 6.11.2's
+    `build_scripts/config.py:get_allowed_top_level_build_values()` returns exactly four:
+    `all`, `shiboken6`, `shiboken6-generator`, `pyside6`. `pyside6-essentials`,
+    `pyside6-addons` and the `pyside6` meta-wheel are **not** among them — they are carved
+    out *after* the build by the root-level `create_wheels.py`, which walks
+    `build/<env>a/package_for_wheels` once and emits all of
+    `{shiboken6, shiboken6_generator, PySide6_Essentials, PySide6_Addons, PySide6,
+    PySide6_Examples}` from `build_scripts/wheel_files.py`'s per-wheel `ModuleData` lists.
+    So a standalone `build-pyside6-addons.yml` would run the entire multi-hour Qt6
+    bindings build and throw away four of the five wheels it just produced, and a sibling
+    `build-pyside6-essentials.yml` would run the same build again to keep a different one.
+    That is also why `shiboken6` *was* portable on its own (`build-shiboken6.yml`): it has
+    its own `--build-type`. `--module-subset` does not rescue the split either — it only
+    narrows which Qt modules get bindings, it does not change which wheels
+    `create_wheels.py` writes, and the dependent wheel's modules still need the base
+    wheel's typesystems and `libpyside6` to generate and link against.
+    - **Let `requires_dist` fix the dependency order; the "core-sounding" name is often
+      the *last* link, not the first.** `pyside6` looks like the core package and is the
+      one a porter reaches for, but its Linux wheel is 0.57 MB against essentials' 80 MB
+      and addons' 175 MB: it is a meta-wheel requiring `shiboken6` + `PySide6_Essentials`
+      + `PySide6_Addons`. Addons requires `PySide6_Essentials==<ver>`; essentials requires
+      only `shiboken6`. So the real critical path is
+      shiboken6 → essentials → addons → pyside6, and porting "pyside6" first is porting
+      the tip. One check of each `requires_dist` (gotcha 40/187's dependency-tree check,
+      reused for ordering rather than for feasibility) settles the order in a minute and
+      prevents two agents duplicating one build in parallel PRs.
+    - **Diff the dependent wheel's module list against the base's — that is where the new
+      native dependencies hide.** `wheel_files_pyside_essentials()` lists 26 modules, all
+      covered by Rocky 10 riscv64's AppStream (`qt6-qtbase-devel`, `qt6-qtdeclarative-devel`,
+      `qt6-qtsvg-devel`, `qt6-qttools-*`, …). `wheel_files_pyside_addons()` lists 41, and
+      nine of them — `QtWebEngineCore`/`QtWebEngineQuick`/`QtWebEngineWidgets`, `QtPdf`,
+      `QtPdfWidgets`, `QtGraphs`, `QtGraphsWidgets`, `QtHttpServer`,
+      `QtWebView`(+`QtWebViewQuick`) — need `qt6-qtwebengine`, `qt6-qtgraphs`,
+      `qt6-qthttpserver` and `qt6-qtwebview`, none of which Rocky 10 ships in *any* of the
+      image's four enabled repos (baseos/appstream/crb/extras) on *any* arch — not riscv64,
+      not x86_64, not aarch64 (RHEL 10 ships no Qt6 WebEngine at all), and there is no
+      `chromium` and no `gn` package either. QtWebEngine *is* Chromium, so those nine are
+      not a `dnf install` line away; they are a Chromium-for-riscv64 bring-up, gotcha 186's
+      "producing the missing artifact shape yourself is authoring a new build system"
+      scale. Enumerate the repodata directly (`repomd.xml` → `primary.xml.gz` under
+      `dl.rockylinux.org/pub/rocky/10/<repo>/<arch>/os/`) rather than `dnf`-ing inside the
+      image: it is faster than QEMU and, per gotcha 51's EPEL note, an egress proxy that
+      MITMs TLS breaks in-container `dnf` against `mirrors.rockylinux.org` anyway.
+    - **A missing payload file is only a warning, so a reduced wheel is silently
+      producible — make that call deliberately.** `create_wheels.py`'s copy loop prints
+      `Warning: {file} does not exist` (and only when `verbose > 0`) and carries on; it
+      does not fail. Shipping a `pyside6-addons` wheel that keeps the same name and
+      version as upstream's while missing nine of its 41 advertised modules is a product
+      decision about what `pypi.riseproject.dev` promises, not something to let a
+      suppressed warning decide. Record the choice on the queue entry either way.
+    - **Record it as `blocked-on-dependency`, not `parked`, when the blocker is a sibling
+      port rather than absent source.** Contrast `pyqt5-qt5`, parked because no sdist or
+      build recipe exists anywhere across its whole release history. Here the source is
+      fully open (LGPL-3.0/GPL-2.0/GPL-3.0), 32 of the 41 addon modules are already
+      covered by prebuilt Rocky 10 riscv64 `-devel` packages, and the base sibling is
+      simply unported — a real dependency, not a dead end. Point the note at the base
+      entry and leave the WebEngine sub-decision to the combined port. Once that port
+      exists, gotcha 380 covers publishing the several wheels it emits: one
+      `_publish-wheel.yml` call per distribution with disjoint `artifact-pattern`s, since
+      the reusable workflow asserts a single normalized name and version per invocation.
+
+383. **The *umbrella* distribution of a split family carries no compiled code at all, gets
+    its platform+`abi3` tag from a deliberately fake `Extension`, and its payload is
+    generated stubs for the union of its siblings' modules — so it cannot be cut from a
+    different build than they were (the pyside6 meta-wheel case).** Gotcha 382 establishes
+    that a split family is one unit of work and fixes the order from `requires_dist`; this
+    is the umbrella end of that chain, and it is stronger than "do it last". Read the
+    umbrella's file list before assuming it is a thin metadata shim: `pyside6`
+    6.11.2's `manylinux_2_39_aarch64` wheel is 0.57 MB compressed but 67 entries and
+    4.9 MB uncompressed, and holds **zero** `.so` — 59 generated `Qt*.pyi` stubs plus
+    `__init__.py`, `_config.py`, `_git_pyside_version.py`, `py.typed` and `dist-info`.
+    - **A platform tag with no compiled content has a third origin beyond gotcha 27's
+      hand-set `--plat-name` and gotcha 81/145's real payload: a fake extension declared
+      on purpose.** `wheel_artifacts/setup.py.base` passes
+      `ext_modules=[Extension("PySide6/QtCore", [], py_limited_api=True)]` — no sources —
+      next to a `build_ext` `Command` subclass whose `run()` is `pass` and whose
+      `get_source_files()` returns `[]`, and says so in a comment: it exists only "to force
+      setuptools to understand we are using extension modules". With
+      `wheel_artifacts/pyproject.toml.base`'s `[tool.distutils.bdist_wheel] py_limited_api
+      = "cp310"` and `plat_name = PROJECT_TAG`, that is the entire reason the wheel is
+      tagged `cp310-abi3-manylinux_…` instead of `py3-none-any`. Grepping the sdist for
+      `Extension(` would have "confirmed" a compiled package; reading its arguments is what
+      settles it. (The tag needs no `--plat-name` CLI flag either — `create_wheels.py`'s
+      `get_platform_tag()` computes `manylinux_{platform.libc_ver()[1]}_{platform.machine()}`
+      itself, which is what you want, since passing `--plat-name` to `setup.py bdist_wheel`
+      crashes on a native non-macOS Linux build.)
+    - **Do not conclude "arch-independent content, therefore no port needed" (gotcha 27)
+      without checking for an sdist.** watchdog was dismissible because upstream ships no
+      `py3-none-any` wheel *and* publishes an sdist, so riscv64 `pip install` already falls
+      back and builds in seconds. `pyside6` publishes **no sdist on any version** — 6.11.2
+      has exactly five wheels and nothing else — so `pip install pyside6` on riscv64 has
+      nothing to fall back to and genuinely does need this wheel. Stub-only content changes
+      *when* it gets built, not *whether*.
+    - **The umbrella's stub set spans every sibling, which is why it must come out of the
+      same build tree, not merely a later one.** `create_wheels.py`'s
+      `get_simple_manifest("PySide6")` is the single line `prune PySide6`, which with
+      `include_package_data=True` keeps exactly the *top-level* files of
+      `build/<env>a/package_for_wheels/PySide6/` and drops every subdirectory (`Qt/`,
+      `scripts/`, `support/`, …) — hence stubs only. But those 59 stubs cover essentials
+      modules, addons modules *and* the nine WebEngine-family modules from gotcha 382,
+      whose `.so`s live in the other wheels. So if the combined port ships a reduced
+      module set, the umbrella built from that same tree correctly advertises the reduced
+      stub set, while an umbrella built from any *other* run can advertise stubs for
+      modules the published sibling wheels do not contain. Publish the umbrella as an
+      artifact of the one build that produced its siblings.
+    - **Check the in-image SDK's *minor version* against the binding release, not just
+      whether the packages exist.** A family like this pins `==` across its own
+      distributions but is generated against whatever system SDK the image has, and those
+      can be different minors. `dnf repoquery 'qt6*'` inside
+      `quay.io/pypa/manylinux_2_39_riscv64` (Rocky Linux 10.2) reports **6.10.1** for every
+      one of the ~100 `qt6-*` packages in appstream/crb — not 6.11.x — and this repo's own
+      published `shiboken6-6.11.2-6.10.1-cp37-abi3-manylinux_2_39_riscv64.whl` already
+      records it: that `6.10.1` is a wheel *build tag* carrying the Qt version. It is not a
+      hard stop — `sources/pyside6/cmake/PySideSetup.cmake` marks only
+      Core/Gui/Widgets/PrintSupport/Sql/Network/Test/Concurrent `REQUIRED` (all in
+      `qt6-qtbase*`, present), leaves the rest `OPTIONAL_COMPONENTS`, and derives
+      `PYSIDE_QT_VERSION` from the discovered `Qt6Core_VERSION` rather than asserting a
+      minimum, so the configure succeeds and shiboken's typesystem `since=` gating drops
+      the newer API. But it means the wheels would expose a Qt 6.10 API surface under a
+      6.11.2 version number, and that a module introduced in the binding's own minor
+      (`QtCanvasPainter`, new in 6.11 and present in upstream's stub set) has no provider
+      in the image at all. That is a second, independent divergence from upstream stacked
+      on top of the missing-modules one, and it belongs on the queue entry as an explicit
+      decision, not as an unremarked build outcome.
+
+385. **A no-sdist vendor wheel can still have a fully public build recipe — read
+    `dist-info/WHEEL`'s `Generator:` before parking it for "no source anywhere" (the
+    pyqt6-qt6 case).** pyqt5-qt5 was parked on the gotcha-372 signal: generic vendor
+    homepage, zero sdists across the whole release history. pyqt6-qt6 matches that signal
+    exactly — 41 releases, 184 files, **0** sdists, `repo` pointing at a marketing page —
+    and the verdict is still different, because one small file names the tool that built
+    it. `WHEEL` says `Generator: pyqt-qt-wheel`, and `pyqt-qt-wheel` is a console script of
+    the **sibling** distribution `PyQt-builder` (BSD-2-Clause, sdist on PyPI):
+    `pyqtbuild/bundle/qt_wheel.py` plus a per-package payload manifest in
+    `pyqtbuild/bundle/packages/pyqt6.py`. The recipe was public the whole time. Read the
+    `Generator:` line first — it costs one range request
+    (`wheel_contents.py <whl> --member <dist-info>/WHEEL`, gotcha 41) and it decides which
+    question you are actually answering. A stock generator (`bdist_wheel`, `setuptools`,
+    `maturin`, `hatchling`, `skbuild`) tells you nothing; a **vendor-named** one is a lead
+    to chase into that vendor's other PyPI distributions.
+    - **A named generator is often a *repackager*, not a build — which moves the stop from
+      "is there source?" to "does the vendor publish the payload for our arch?"**
+      `qt_wheel()` compiles nothing: it copies files out of `--qt-dir` and writes a
+      `dist-info` from prototypes, which is why every wheel is `py3-none-<platform>` with a
+      load-bearing platform tag (gotcha 35). So the port's real input is not a source tree,
+      it is *the vendor's own prebuilt tree*, and the feasibility check is gotcha 35/41's
+      vendor-artifact-index check aimed **one level up** — at the installer, not at the
+      wheel. `download.qt.io/online/qtsdkrepository/` offers exactly `linux_x64`,
+      `linux_arm64`, `mac_x64`, `windows_x86`, `windows_arm64`, a 1:1 match with the six
+      wheels Riverbank publishes. The wheel matrix is not a packaging choice to be widened;
+      it is the Qt Company's prebuilt-binary matrix, and riscv64 is absent from both.
+    - **Two path-parsing habits pin such a tool to the vendor's own layout — grep for them
+      before assuming you can point it at anything else.** `abstract_package.py` derives the
+      Qt version from `os.path.basename(os.path.dirname(qt_dir))`, and `qt_wheel.py` maps
+      `os.path.basename(qt_dir)` through a closed table (`gcc_64`, `gcc_arm64`, `macos`/
+      `clang_64`/`x86_64`/`arm64`, `msvc*`) to the platform tag, raising
+      `UserException("Qt architecture '<x>' is unsupported")` on anything else. `--qt-dir`
+      must therefore be `<prefix>/6.11.2/gcc_64`, i.e. an official online-installer tree.
+      The encouraging half: `bundle_qt()` branches only on `manylinux*`/`macosx*`/`win*`
+      prefixes, so that arch table is the *only* riscv64 blocker inside the tool — a
+      few-line patch, not a rewrite. The tool is a third-party build dependency, so such a
+      patch belongs wherever the workflow installs it, not in `patches/<pkg>/<version>/`.
+    - **Hardcoded sonames in the manifest rule out substituting a distro build, and
+      `ignore_missing` hides it.** `packages/pyqt6.py` names its non-Qt payload literally —
+      `libicui18n.so.73`/`libicuuc.so.73`/`libicudata.so.73` and
+      `libavcodec.so.61`/`libavformat.so.61`/`libavutil.so.59`/`libswresample.so.5`/
+      `libswscale.so.8` — because they are *the vendor's own* ICU and FFmpeg builds. Point
+      the tool at a distro Qt whose ICU major differs and
+      `bundle_qt(..., ignore_missing=True)` merely warns: you ship a wheel silently missing
+      ICU and FFmpeg that resolves them from the host. Same trap as gotcha 382's suppressed
+      `create_wheels.py` warning — a missing-payload warning must never be allowed to make
+      the product decision.
+    - **Check the in-image distro version too, not just the package names.** Rocky 10.2
+      riscv64 (the `manylinux_2_39_riscv64` base) does ship a broad Qt6 — 76 `qt6-*`
+      packages in AppStream and 28 in CRB, enumerated straight from the repodata per
+      gotchas 369/384 — but at **6.10.1**, not 6.11.2, so it cannot back a wheel carrying
+      upstream's 6.11.2 version (the same minor-version divergence gotcha 383 flags for the
+      pyside6 family), and it has no `qt6-qtpdf`, `qt6-qtwebengine`, `qt6-qtquick3dphysics`
+      or `qt6-qtwebview`, and no `ffmpeg`, `chromium` or `gn`. Of the 96 `libQt6*.so.6` in
+      the aarch64 wheel, `QtPdf`/`QtPdfQuick`/`QtPdfWidgets` come from the qtwebengine repo
+      (PDFium, a Chromium subset), so they are gotcha 382's Chromium-for-riscv64 wall again.
+    - **Park it as *scope*, and say which kind of stop it is.** Qt's sources are public and
+      LGPL-3.0, and distros build Qt 6.10 for riscv64 natively, so nothing here is
+      unportable in principle; producing the input artifact is a from-source Qt 6 SDK
+      bring-up — ~96 shared libraries across ~22 Qt repos plus ICU, FFmpeg and PDFium —
+      i.e. gotcha 186 scale, the same scope stop as pyqt5-qt5 reached by a different route.
+      Recording *which* park this is matters for re-triage later: "no recipe exists" never
+      becomes actionable, while "the recipe exists, its input artifact does not" becomes
+      actionable the moment anyone stands up a Qt-for-riscv64 SDK build.
+
+386. **A GPU-only package can be small, source-open and blob-free and still be unportable —
+     in a JIT kernel library the compiled part is a few-hundred-KB shim, so gotcha 41's
+     "big vendor payload" tell is absent and the wall is what that shim *links*: torch's own
+     CUDA libraries (the humming-kernels case).** Every earlier CUDA verdict here had a loud
+     tell — triton's 140 MB of downloaded `ptxas`/`nvdisasm` (gotcha 41), sglang's
+     `cuda-python` requirement, a closed vendor blob (gotcha 157). A JIT kernel library has
+     none of them: humming-kernels 0.1.13 is a 338 KB `py3-none-manylinux_2_28_{x86_64,aarch64}`
+     wheel of Apache-2.0 source (`github.com/inclusionAI/humming`, tagged per release) whose
+     "kernels" are `.cuh` headers compiled by NVRTC on the user's GPU at first call, so the
+     only native content is three small shims — `humming/_native/<arch>/{libhumming_launcher.so,
+     libcubinpatch.so, nvrtc_compile}`. Nothing about the wheel's size, licence or provenance
+     objects; the port is dead anyway. Four checks, cheapest first, and the third is the one
+     no other gotcha covers:
+     - **Read the package's own arch table before anything else.** A project that ships
+       per-arch precompiled artifacts has a `platform.machine()` map somewhere, and it is a
+       one-line statement of upstream's supported set — here `get_native_arch()` in
+       `humming/utils/jit.py` maps only `x86_64|amd64` and `aarch64|arm64`, so on riscv64 it
+       returns `None`, `build_native()` raises `Unsupported architecture`, and every
+       `get_precompiled_artifact_path()` lookup returns `None` (the pure-Python half then
+       silently has no kernels). Adding `"riscv64"` to that dict is a one-word patch that
+       fixes nothing, which is the tell that the blocker is below it.
+     - **Run gotcha 284's two greps and accept the answer when it comes out the other way.**
+       fastsafetensors passed because it `dlopen`s CUDA and includes no toolkit headers; here
+       `humming/csrc/launcher/{launcher.cpp,tensor.h,tma.h}` `#include <cuda.h>` and
+       `csrc/nvrtc_compile.cpp` `#include <nvrtc.h>`, and `humming/build.py:_find_cuda_include()`
+       hard-fails without `cuda.h` from `nvidia-cuda-runtime-cu12` or `CUDA_HOME`. NVIDIA's
+       redist index answers that for good: `redistrib_13.0.0/13.2.0/13.4.2.json` list only
+       `linux-x86_64`, `linux-sbsa`, `windows-x86_64/arm64` and contain zero `riscv` strings,
+       and `nvidia-cuda-nvrtc`/`nvidia-cuda-runtime-cu12` publish x86_64/aarch64/win wheels
+       only. CUDA-on-RISC-V was announced as a *host CPU* target in July 2025 (RVA23 plus the
+       RISC-V server SoC/platform specs) with no release and no shipped artifact since.
+     - **`libtorch_cuda.so` is its own wall, and our riscv64 torch can never clear it.** This
+       is the new one: a torch-extension build that links the CUDA half of torch —
+       `_torch_library("libtorch_cuda.so")` raising *"is required; build with a CUDA-enabled
+       torch wheel"*, or equivalently a `torch.utils.cpp_extension.CUDAExtension`, or an
+       `#include <c10/cuda/CUDAStream.h>` — is blocked by *our own registry*, independently of
+       the toolkit question. pypi.riseproject.dev serves `torch-2.13.0+cpu`/`2.14.0+cpu` for
+       riscv64 and PyPI serves no riscv64 torch file at all, so no `libtorch_cuda.so` /
+       `libc10_cuda.so` exists for the arch and none can be produced without a CUDA toolkit
+       for it first. Gotcha 249's lesson generalizes: `Requires-Dist: torch` looking portable
+       says nothing about *which* torch libraries the build links. Note this survives even a
+       fully stubbed link line — upstream already generates an empty `libcuda.so` stub with
+       `-Wl,-soname,libcuda.so.1` to link the launcher without a driver present, which proves
+       stubbing is not the missing idea; the torch CUDA libraries are linked as real files.
+     - **Then confirm the wheel could not even be smoke-tested** (gotcha 40's criterion):
+       `import humming` → `humming.ops` → `ops/input.py`'s `import triton` plus
+       `from triton.language.extra.cuda import gdc_wait`, and `import cuda.bindings.driver` in
+       eleven `humming/kernel/*.py` and in `jit/{compiler,runtime}.py`. `triton` (gotcha 41's
+       own project) and `cuda-bindings` both publish manylinux x86_64/aarch64 wheels and **no
+       sdist**, so the install fails before any import runs.
+     Record it `parked` with the unreachable primitive named, as with sglang. Upstream's
+     `.github/workflows/build-wheel.yml` is worth reading for the shape even so: it builds
+     inside `quay.io/pypa/manylinux_2_28_{x86_64,aarch64}` with `torch==2.11.0` plus
+     `nvidia-cuda-{runtime,nvrtc}-cu12` from `download.pytorch.org/whl/cu126`, runs a
+     `tools/build_native.py` that **is not in the sdist**, then hand-retags the wheel with
+     `python -m wheel tags --python-tag py3 --abi-tag none --platform-tag …` — i.e. a
+     `py3-none-<platform>` tag that is neither gotcha 27's cosmetic tag nor gotcha 145's
+     maturin binary, but a per-arch C++ shim retagged by hand (0.1.14+ adds a
+     `_device_info.abi3.so` and becomes honestly `cp310-abi3`, so an `abi: py3` note in the
+     queue goes stale on a package like this).
+
+387. **A GPU-toolkit-suffixed distribution name (`-cuda12x`, `-cuda13x`, `-rocm-7-0`) is a
+    toolkit *selector*, and the name can be injected from a **separate** release-tools
+    repository the source repo never mentions (the cupy-cuda12x case).** Gotcha 79's
+    `-gpu`/`-headless` sibling branches inside one `setup.py`, and gotcha 185's transform
+    script at least lives in the source tree. cupy is a step further out: `cupy/cupy`'s
+    `pyproject.toml` says `name = "cupy"` and nothing in that repo builds a suffixed
+    wheel. The suffixed distributions come from `cupy/cupy-release-tools`, whose
+    `dist_config.py` holds the whole sibling axis as a table —
+    `'12.x' → {'name': 'cupy-cuda12x', 'kind': 'cuda', 'image':
+    'cupy/cupy-release-tools:cuda-runfile-12.9.0-el8-amd64'}`, plus `12.x-aarch64`,
+    `13.x`, `13.x-aarch64`, `rocm-7.0` — and whose `dist.py` calls
+    `rename_project(f'{workdir}/cupy/pyproject.toml', package_name)` to rewrite
+    `project.name` before building. So the playbook's "read upstream's own build/release
+    docs first" has to mean *that* repo: it is where the arch list, the base images and
+    the name mapping actually are. Read the table before anything else — if every `kind`
+    is a proprietary GPU toolkit and there is no CPU entry, the suffix is not a feature
+    flag and there is no CPU-shaped sibling of that distribution (same conclusion as the
+    parked `onnxruntime-gpu`, reached from a different direction).
+    - **Ask the vendor's own redist index for our arch, as gotcha 41 does.** All 24 CUDA
+      12.x manifests (`developer.download.nvidia.com/compute/cuda/redist/redistrib_12.*.json`)
+      list only `linux-x86_64`, `linux-sbsa`, `linux-aarch64`, `linux-ppc64le`,
+      `linux-all` and `windows-x86_64`; 13.x is the same minus ppc64le. The PyPI
+      republications agree (`nvidia-cuda-runtime-cu12`, `nvidia-cublas-cu12`,
+      `nvidia-cuda-nvrtc-cu12`: manylinux x86_64/aarch64 and Windows only). CUDA on
+      RISC-V is an announced future capability for RVA23 server-class platforms with no
+      released nvcc, cuDNN or `libcuda.so.1`.
+    - **Check whether the toolkit is a build requirement or a runtime `dlopen` (gotcha
+      284) — here it is the former.** `install/cupy_builder/_features.py`'s `CUDA_cuda`
+      feature sets `required = True` and configures by *compiling* a probe that reads
+      `CUDA_VERSION` from `cuda.h` (rejecting anything below 12000); its `includes` are
+      `cuda_runtime.h`/`cublas_v2.h`/`cufft.h`/`curand.h`/`cusparse.h`, its link list is
+      `cudart_static`+`cublas`+`cufft`+`curand`+`cusparse`+`cuda`+`nvrtc`, and four `.cu`
+      sources (`cupy_cub.cu`, `cupy_thrust.cu`, `cupy_distributions.cu`,
+      `cupy_cufftXt.cu`) need nvcc. `setup.py` `sys.exit(1)`s when a required feature
+      fails to configure, so there is no partial build.
+    - **The un-suffixed base name is not the escape hatch.** PyPI's `cupy` project ships
+      an sdist and *no wheel on any arch or interpreter* — gotcha 50/126, no riscv64 gap
+      to close — and that sdist builds through the same `required` CUDA feature. Retarget
+      a `-cuda*` queue entry to the base name only if the base actually publishes wheels
+      somewhere.
+    - **Nor is the project's own "no-GPU" build mode.** `CUPY_INSTALL_USE_STUB=1` (auto-set
+      when `READTHEDOCS=True`) defines `CUPY_NO_CUDA`, pins the compile-time
+      `CUPY_CUDA_VERSION` to 0, and compiles against `cupy_backends/stub/*.h`, whose
+      banner reads "This file is a stub header file of cuda for Read the Docs" and whose
+      entry points all `return cudaSuccess` (`cudaDriverGetVersion` writes 0). It builds
+      clean with no toolkit installed and yields a wheel that computes nothing — gotcha
+      41's rejected offline-build escape hatch behind a friendlier switch. A documented
+      stub/no-CUDA flag is evidence about the *docs build*, never about portability.
+    - **A metadata file inside the wheel can state the coupling outright, for one range
+      request.** `ci_scripts/wheel_contents.py <pkg> --member cupy/.data/_wheel.json`
+      returns `{"cuda": "12.x", "packaging": "pip", "nccl": {...}}`, and the same listing
+      shows the wheel bundles *no* CUDA `.so` at all (only cupy's own extensions plus
+      vendored CCCL/jitify/xsf headers) — i.e. the toolkit is a hard external dependency
+      resolved at runtime (`cuda-pathfinder`, the `ctk` extra's
+      `cuda-toolkit[...]==12.*`), not a vendored payload that could be swapped.
+    - **One tree spread over several queue entries is one verdict, not several
+      triages.** `cupy-cuda12x` and `cupy-cuda13x` are separate `.queue.yml` rows for the
+      same source tree differing only in the toolkit major; park each with the same
+      evidence rather than re-deriving it (gotcha 150's sibling check used to save work
+      rather than to sequence it).
+
+388. **The queue entry's wheel shape is a *snapshot* — re-read the latest release's tag set
+     before triaging the queued version, because upstream can delete the arch-specific payload
+     and erase the gap outright (the tokenspeed-mla case).** Gotcha 386 closes with one way a
+     queue note's `abi:` goes stale (upstream stopped mislabelling a compiled wheel); this is
+     the sharper version of the same hazard, where the *platform* half goes away too and the
+     gap disappears with it. Gotchas 27/35/81/145/157 all reason about one *fixed* set of
+     `py3-none-<platform>` wheels and ask what the platform half contains; they tacitly assume
+     the set you were handed is the set upstream still ships. It need not be: `.queue.yml`
+     records the wheel shape at the moment the queue was generated (here `2 Linux wheels
+     upstream (abi: py3)`, true of 0.2.5), and a later release can drop the payload and
+     collapse to a single universal wheel — at which point riscv64 already installs exactly
+     what x86_64 installs and there is nothing left to port, whatever the older version's
+     wheels held. tokenspeed-mla 0.2.0–0.2.8 each publish
+     `py3-none-manylinux_2_28_{x86_64,aarch64}` (~0.75 MB) and **0.2.9 publishes one
+     `py3-none-any` (0.15 MB)**, having deleted `tokenspeed_mla/fmha_binary.py` and the
+     `tokenspeed_mla/objs/*.so` those wheels existed to carry.
+     - **Make the per-version tag table the first read of any triage**, before `pip download`,
+       before `wheel_contents.py`, before the repo checkout:
+       `uv run ci_scripts/queue_triage.py <pkg> --deps` prints latest-vs-queued (flagging a
+       stale entry), each recent release's ABI/platform tags with sizes, whether an sdist
+       exists, and which releases already have a riscv64-installable file. A `riscv64-OK` row
+       on the **latest** version closes the case on its own. Reading only the queued version's
+       files would have sent this port straight into the far more expensive question of whether
+       two NVIDIA Blackwell cubins can be rebuilt.
+     - **Size direction is the tell that a payload was removed, not added.** Gotcha 81 diffs
+       sizes *across platforms at one version* to separate a cosmetic tag from real content;
+       diff them *across versions at one platform* too. A platform wheel that is 5x the new
+       universal wheel means the arch-specific bytes were dropped, so read the newest release's
+       file list rather than inferring from the version the queue names.
+     - **A vanished gap still is not automatically "already works".** Confirm what the
+       universal wheel actually does on riscv64 before reporting: 0.2.9 installs and imports
+       fine in `quay.io/pypa/manylinux_2_39_riscv64`, but `__init__.py` wraps every import in
+       one `try:`/`except ImportError` and substitutes `_unavailable` stubs, so
+       `tokenspeed_mla.tokenspeed_mla_decode()` raises `ImportError: tokenspeed_mla requires
+       PyTorch, CUDA bindings, and NVIDIA CuTe DSL runtime dependencies`. That is gotcha
+       183's importable-but-unusable shape — and it is a property of the package upstream
+       publishes for *every* architecture, so it is not a riscv64 gap and not ours to close.
+     - **Watch for a `py3-none-any` *facade* in the dependency check.** `nvidia-cutlass-dsl`
+       resolves on riscv64 (its own wheel is `py3-none-any`, ~15 KB) and is nonetheless a hard
+       blocker: it is a metapackage whose `requires_dist` pins
+       `nvidia-cutlass-dsl-libs-{base,cu12}==<ver>`, which publish
+       `cp310–cp314(t)-manylinux_2_28_{x86_64,aarch64}` only, no sdist, ~88 MB of CUDA payload.
+       Follow any `py3-none-any` dependency one level down before calling it available —
+       `pip download <dep> --no-deps` says yes where a full resolve says `ResolutionImpossible`.
+
+392. **When PyPI records no project URL and `Generator:` is stock, the *conda-forge feedstock*
+    is the cheapest source-availability oracle — and `readelf -S` tells you in one command
+    whether a real compiled extension is code or embedded model weights (the
+    livekit-local-inference case).** Gotcha 385 says to read `dist-info/WHEEL`'s `Generator:`
+    before parking anything for "no source anywhere", because a vendor-named generator is a
+    lead. `livekit-local-inference` 0.2.7 says `Generator: setuptools (84.0.0)` — a stock
+    one, which by 385's own rule tells you nothing — and PyPI's JSON has
+    `project_urls: null`, `home_page: null`, no author and no description, so there is no
+    link to follow either. The next cheap read is conda-forge:
+    - **A GitHub code search for the *distribution name* finds the feedstock**, and its
+      recipe is written by someone who already answered "where does this build from?".
+      `conda-forge/livekit-local-inference-feedstock`'s `recipe/recipe.yaml` opens with the
+      verdict in as many words — *"This package is closed-source and ships only binary wheels
+      on PyPI (no sdist)"* — and proves it structurally: its `source:` is not a tarball but a
+      nest of `if: target_platform == ...` / `if: match(python, "3.X.*")` blocks each naming a
+      `files.pythonhosted.org` **wheel** URL, one per (platform, interpreter). A feedstock
+      whose source is the PyPI wheels is a *repackager* (gotcha 385's second bullet, arrived
+      at from the other side), so it adds no platform upstream doesn't already ship and
+      riscv64 has nothing to repackage. `recipe.yaml`'s `about:` also fills the blanks PyPI
+      left — `repository:`, `documentation:`, `homepage:` — which is how the queue entry's
+      empty `home`/`repo` get answered at all. Two `curl`s of
+      `raw.githubusercontent.com/conda-forge/<pkg>-feedstock/main/recipe/recipe.yaml`
+      (or `meta.yaml`) settle it; `conda-forge/feedstock-outputs`'s
+      `outputs/<a>/<b>/<c>/<pkg>.json` confirms a feedstock exists before you guess its name.
+      Distinct from gotchas 40/42, which ask whether a *dependency*'s conda channel serves our
+      subdir — this uses the recipe as evidence about **source**, not about availability.
+    - **`readelf -S -W` separates "compiled code" from "a blob with a `.so` extension"
+      faster than `strings`.** The wheel is a genuine `cp312-cp312-manylinux_2_27_x86_64`
+      extension — gotcha 27/35/81's `py3-none-<platform>` tells are all absent, and gotcha
+      41's vendored `bin/`/`lib*.so` neighbours are absent too: 14 entries, one of which is
+      `livekit/local_inference/_native.cpython-312-x86_64-linux-gnu.so` at 35.0 MB of a
+      35.1 MB wheel. The section table is the tell: `.text` is `0x444ad` (**~280 KB**) while
+      `.rodata` is `0x21168f8` (**~34.8 MB**), i.e. 99.2% of the file is constant data baked
+      into the binary — the proprietary model weights, not an inference runtime. Corroborated
+      without downloading more: `DT_NEEDED` lists only `libstdc++/libm/libgcc_s/libpthread/
+      libc`, so nothing like ONNX Runtime is linked; the `.comment` is
+      `GCC: (GNU) 14.2.1 20250110 (Red Hat 14.2.1-11)` and `strings` shows pybind11 v12
+      internals, so ~280 KB of hand-written C++ is the whole engine; and the shipped
+      `_native.pyi` says so outright (*"Eagerly init the EOT model singleton (~108 MB)"*).
+      Per-platform wheel sizes within ~45 KB of each other across five platforms say the same
+      thing from the outside (gotcha 81's cross-platform size diff, inverted: near-identical
+      sizes mean the *weights* dominate and the code is noise).
+    - **A compound `License:` with a `LicenseRef-` term is the metadata echo of that split,
+      and it is gotcha 372's second lock.** `License: Apache-2.0 AND LicenseRef-LiveKit-Model`
+      plus *two* files under `dist-info/licenses/` (`LICENSE`, `MODEL_LICENSE`) and both
+      `License :: OSI Approved :: Apache Software License` **and** `License :: Other/
+      Proprietary License` classifiers: the permissive half covers the thin wrapper, the
+      bespoke half covers the 34.8 MB that matters. The LIVEKIT MODEL LICENSE AGREEMENT bars
+      using the models "on a standalone basis or with any frameworks other than LiveKit
+      Agents" and bars making them available to third parties except under that agreement, so
+      even lifting the weights out of an existing `.so` into a self-built riscv64 wheel is
+      foreclosed. Same double lock as hdbcli (gotcha 372), reached from a *permissive-looking*
+      top-level license rather than a uniformly proprietary one — the inverse of gotcha 376,
+      where the permissive field was real and the source was still absent.
+    - **An open-source org's flagship repo can be the closed-source package's *consumer*,
+      never its source.** LiveKit has 79 public repos and the obvious search hits are all in
+      `livekit/agents` — but every one is an `import`: `livekit-agents/livekit/agents/
+      inference/vad.py`, `inference/eot/transports.py` and `ipc/_preload.py` do
+      `from livekit.local_inference import VAD/EOT`, and `livekit-agents/pyproject.toml`
+      lists `livekit-local-inference>=0.2.7` in `dependencies`. No repo in the org contains
+      the extension's sources, and none is named for it. "The org is open source", a sibling
+      port from the same org (livekit-blingfire, built from `livekit/agents`), and even a
+      dependency edge from an open-source package are all *not* evidence that a given
+      distribution has source — check `requires_dist` direction before assuming a monorepo
+      hit is the upstream. Note the consequence for the queue: a closed-source leaf can
+      block an otherwise-pure-Python parent, since `livekit-agents` core cannot be installed
+      on riscv64 at all while this dependency has no wheel.
+    - **Confirm zero sdist across the *whole* release history, not the queued version**
+      (gotcha 372): 120 files across 0.2.2–0.2.7, every one a `bdist_wheel`, tags limited to
+      `macosx_10_9/10_13/10_15_x86_64`, `macosx_11_0_arm64`,
+      `manylinux_2_27/2_28_{x86_64,aarch64}` and `win_amd64` for cp310–cp314. Parked; no
+      worktree/branch/PR — there is no build input to stage a workflow around.
+393. **The *bindings* half of a "bindings wheel + vendored-SDK wheel" pair looks unblocked
+     from its sdist and is not: the pin that blocks it is written by the vendor's release
+     step, not by the sources, and the real coupling is a `RUNPATH` into the sibling wheel's
+     install directory (the pyqt6 case).** Gotcha 385 parked `pyqt6-qt6`, the SDK half, for
+     scope. `pyqt6`, the bindings half, fails every signal that usually marks a blocked
+     package: it publishes a real GPL-3.0 sdist on every release, the sdist holds actual
+     C++/`.sip` sources for 35 binding sets, and it builds with two public, pure-Python
+     tools (`sip`, `PyQt-builder`). Its sdist `PKG-INFO` declares exactly one dependency —
+     `Requires-Dist: PyQt6-sip (>=13.11, <14)`, which this registry already serves. The
+     published wheel's `METADATA` declares two: that one (relaxed to `>=13.8`) **and**
+     `PyQt6-Qt6 (>=6.11.0, <6.12.0)`. Nothing in the project or in PyQt-builder writes the
+     second line — the only `Requires-Dist` in `pyqtbuild` is `bundle/qt_wheel.py`, which
+     writes it *into* the Qt wheel, and `bundle/bundle.py`, which *deletes* it from the
+     bindings wheel when `pyqt-bundle` bundles Qt inside. It is added by the vendor's own
+     release pipeline. So **the sdist's metadata is not the wheel's metadata**: read the
+     published wheel's `METADATA` (one range request, gotcha 41) and settle the pin with the
+     resolver rather than by eye —
+     `uv run ci_scripts/check_riscv64_deps.py --python 312 -- 'PyQt6-Qt6>=6.11.0,<6.12.0'`
+     answers `UNRESOLVABLE ... (from versions: none)`.
+     - **One `readelf -d` on one extension module proves the coupling.**
+       `wheel_contents.py <pkg> --match <linux wheel> --member PyQt6/QtCore.abi3.so` then
+       `readelf -d`: `NEEDED libQt6Core.so.6` next to `RUNPATH $ORIGIN/Qt6/lib` — and the
+       wheel ships no `Qt6/lib` at all (893 entries, 40.6 MB uncompressed: `.abi3.so`s,
+       `.pyi` stubs and one `Qt6/qsci/api` file). That directory is filled by the *sibling*
+       wheel at install time. A wheel that resolves its shared libraries out of another
+       distribution's install path is structurally incomplete on its own, whatever its own
+       sources build.
+     - **Building against the distro SDK instead is a real option, and the sibling's
+       *dlopened* payload is what defeats it.** Everything upstream about such a build is
+       permissive: `project.py` rejects only `qt_version >> 16 != 6` (no minimum minor),
+       PyQt-builder derives the sip tag from the *discovered* `qt_version_tag`
+       (`bindings.py`), and sipbuild's `update_buildable_bindings()` *silently deletes* any
+       bindings whose config test fails, so a build against Rocky 10 riscv64's Qt 6.10.1
+       (`qmake6` is in `qt6-qtbase-devel`; 28 module `-devel` packages in AppStream)
+       configures and produces a reduced, Qt-6.10-API wheel under a 6.11.0 version number
+       (gotcha 383's divergence, with gotcha 382's "a warning must not make the product
+       decision" on top). auditwheel then bundles the Qt libraries the extensions *link*.
+       It cannot bundle what Qt `dlopen`s — the platform plugins (`platforms/libqxcb.so`,
+       `libqoffscreen.so`), the imageformat and sqldriver plugins, the QML module tree — and
+       the bundled distro `libQt6Core` keeps its compiled-in `/usr/lib64/qt6/plugins` prefix,
+       so the wheel imports cleanly and then dies at the first `QApplication` with "no Qt
+       platform plugin could be initialized". **When the sibling wheel supplies plugins, QML
+       and data as well as libraries, auditwheel's linked-library bundling is not a
+       substitute for it** — reproducing that payload *is* the sibling's port.
+     - **For a vendor pair `<pkg>` + `<pkg>-<sdk>`, triage the SDK entry first; it decides
+       both.** `pyqt5`/`pyqt5-qt5`, `pyqt6`/`pyqt6-qt6` and the pyside6 family are the same
+       shape three times over. Mark the bindings half `blocked-on-dependency` pointing at the
+       SDK entry (gotcha 382's rule: the blocker is a sibling port, not absent source), keep
+       the two entries' notes pointed at each other, and do not re-run the SDK investigation
+       on the bindings entry — record only what is new on the *consumer* side (the wheel-vs-
+       sdist metadata split, the `RUNPATH`, the resolver output).
+
+405. **An NVIDIA-owned, profiler-adjacent package can have no CUDA dependency whatsoever —
+     read the extension's own header set and `libraries=` list before filing it with the GPU
+     batch (the nvtx case; see `build-nvtx.yml`).** Gotcha 284 covers CUDA symbols that turn
+     out to be `dlopen`ed at runtime; this is the step before it, where there are no CUDA
+     symbols at all and only the vendor's name suggests otherwise. The PyPI `nvtx`
+     distribution is the `python/` subdirectory of `NVIDIA/NVTX`: five Cython modules over a
+     header-only C annotation API. `setup.py` declares a single
+     `Extension('*', sources=['src/nvtx/_lib/*.pyx'], include_dirs=[<repo>/c/include])` with
+     no `libraries=` at all, and the only `cdef extern from` headers across its `.pxd` files
+     are `nvtx3/nvToolsExt{,Counters,Payload}.h`, `nvtx3/nvToolsExtSemantics*.h` and
+     `nvtxw3/nvtxw3*.h` — no `cuda.h`, no `cuda_runtime.h`, nothing to link. The GPU is the
+     *consumer*, not a dependency: annotations are inert until an external profiler injects a
+     library through `NVTX_INJECTION64_PATH`, and `nvtx.enabled()` is literally
+     `not os.getenv("NVTX_DISABLE")` with no hardware probe anywhere.
+     - **Two checks settle it, both cheaper than a CI cycle**: `grep -rn 'libraries=' setup.py`
+       plus `grep -rn 'cdef extern from\|#include' <extension sources>` (an instrumentation
+       SDK's own headers only), and then `auditwheel show` on a locally built wheel — one that
+       references nothing but `libc.so.6` has no GPU runtime to find.
+     - **The cost of getting this wrong is not one entry.** An annotation SDK shows up in the
+       `Requires-Dist` of GPU-ecosystem distributions (vllm's CUDA wheels among them), so
+       parking it on "NVIDIA ⇒ GPU-only" converts one bad triage into a fake blocker for every
+       consumer that is itself portable.
+     - **What actually distinguishes the parked set** (`onnxruntime-gpu`, `cupy-cuda12x`/
+       `-cuda13x`, `jax-cuda*-plugin`, `numba-cuda`) is that those need the toolkit's own
+       headers and libraries — or nvcc — *at build time* (gotcha 387). A vendor's profiling,
+       tracing or annotation library typically needs neither, and belongs in the ordinary
+       Cython/C-extension lane.
+
+407. **An upstream recipe can stop being conda-based between releases, so read it at the
+    *newest* tag before pricing a port or recording a conda blocker (the
+    cadquery-ocp-novtk case).** Gotcha 388 says the queue entry's wheel *shape* is a
+    snapshot; the recipe's *build environment* is one too. `CadQuery/ocp-build-system` at
+    `v7.9.3.1.1` — the version the queue entry named — builds the OCCT SDK for Linux
+    inside a micromamba environment (`environment.yml`'s python plus `micromamba install
+    fontconfig freetype freeimage`), which is gotcha 40's wall: conda-forge has
+    `linux-riscv64` freetype and fontconfig but **no** freeimage. At `v8.0.1.0.0`,
+    released since that entry was written, the same repo's Linux path is `dnf` system
+    libraries plus `astral-sh/setup-uv`, and conda survives only on macOS/Windows — so
+    the riscv64 port needs no conda at all and is an ordinary CMake build.
+    - **`https://api.anaconda.org/package/conda-forge/<name>` is the per-package form of
+      gotcha 42's subdir count** — one small JSON per dependency,
+      `{f["attrs"]["subdir"] for f in d["files"]}`, with no 100 MB `repodata.json`
+      download, which is what makes "which of these conda deps is missing for riscv64" a
+      one-minute question.
+    - **micromamba itself is never the blocker.**
+      `https://micro.mamba.pm/api/micromamba/linux-riscv64/latest` serves a real riscv64
+      ELF (8.3 MB), so a conda-based recipe fails on *package* coverage only.
+    - **Diff the recipe, not just the version string** (`git log --oneline v<old>..v<new>
+      -- .github/` on the recipe repo). The same diff decides which component versions
+      you build: upstream's workflow `env:` block carries `WHEEL`, `OCP` and `OCCT`, so
+      read them out of the tag the job checks out instead of hardcoding them, and assert
+      that `WHEEL` equals the version in `docs/packages/<pkg>.yaml` so a bump that moves
+      them fails loudly.
+
+418. **An upstream wheel for *another* non-x86 architecture is only a precedent for the
+    parts of it that are actually that architecture — `readelf -h` every `.so` in it (the
+    paddlepaddle case).** Gotcha 186 warns that a vendor publishing one *artifact shape*
+    says nothing about another; this is the sharper version, where the vendor publishes
+    the right shape for the wrong ISA and ships it anyway. Paddle's CMake knows four
+    non-x86 architectures (`WITH_ARM`/`WITH_SW`/`WITH_MIPS`/`WITH_LOONGARCH`), each
+    turning off Xbyak, MKL and AVX, and upstream publishes `linux_aarch64` wheels off the
+    first — which reads as "the non-x86 CPU path is maintained, mirror it". It mostly is.
+    But `cmake/external/lapack.cmake` takes **one prebuilt tarball for the whole of
+    Linux** (`lapack_lnx_v3.10.0.20210628.tar.gz`, x86-64 only — the comment beside it
+    says "lapack need fortran compiler which many machines don't have"), and `setup.py`
+    copies `LAPACK_LIB`/`BLAS_LIB`/`GFORTRAN_LIB`/`GNU_RT_LIB_1` into `paddle/libs/`
+    unconditionally. So the released
+    `paddlepaddle-3.3.1-cp312-cp312-linux_aarch64.whl` carries x86-64
+    `liblapack.so.3`, `libblas.so.3`, `libgfortran.so.3` and `libquadmath.so.0` beside a
+    genuinely aarch64 `libopenblas.so.0`.
+    - **The check is two commands and needs no build.** Download the sibling-arch wheel,
+      then `unzip -q -j <whl> '<pkg>/libs/*' -d x && file x/*` (or `readelf -h`) — a
+      mismatched `Machine:` line names every payload whose build step is
+      architecture-blind. Do it before writing the workflow: it is the difference between
+      "mirror upstream" and "mirror upstream and fix what it got wrong", and it is the
+      only way to find these, because nothing links against them (Paddle `dlopen`s
+      LAPACK through `phi/backends/dynload/lapack.cc`, so the build is green and the
+      failure is a runtime `paddle.linalg` error).
+    - **A prebuilt-for-one-arch dependency is not automatically gotcha 35's wall** — but
+      *building* the missing artifact is the second answer, not the first. Ask what the
+      payload actually is: here it is Reference-LAPACK, which gotcha 401's Rocky 10
+      riscv64 `lapack`/`blas` packages already provide as the very `liblapack.so.3` and
+      `libblas.so.3` the `dlopen` asks for, so one `dnf install` plus four
+      `${CMAKE_C_COMPILER} -print-file-name=<soname>` lookups replaces the whole tarball
+      branch. Adding a 30-line `ExternalProject_Add` for Reference-LAPACK v3.10.0 instead
+      cost a CI round to a `cmake` configure failure whose diagnostic gotcha 434's stamp
+      logs had swallowed — and it puts a Fortran build on a 4-core riscv64 runner for a
+      library nothing links against. Whichever you pick, gate it on the new arch flag so
+      x86-64 and macOS keep the tarball, resolve the sonames with a `FATAL_ERROR` so a
+      missing one fails in the first configure minute rather than at wheel-packing time,
+      and say in the patch that the fix would repair the sibling arch too.
+
+419. **Gotcha 411's "is the CPU backend the default?" test can pass and still not yield a
+    port: a torch extension's non-CUDA branch can compile *operator schemas with no
+    implementations*, so the build succeeds in seconds against a CPU-only torch and the
+    wheel it produces is a dead stub (the xformers case).** bitsandbytes (gotcha 411) was
+    rescued by reading its backend selector; xformers' selector reads the same way and ends
+    somewhere else. `setup.py:get_extensions()` sets `extension = CppExtension` and only
+    promotes it to `CUDAExtension` (adding `source_cuda`) inside
+    `if (torch.cuda.is_available() and CUDA_HOME is not None and torch.version.cuda is not
+    None) or FORCE_CUDA=1 or TORCH_CUDA_ARCH_LIST != ""`, with the HIP branch behind
+    `torch.version.hip` — so with our `torch-2.14.0+cpu` and no toolkit the CPU path is
+    what runs, needs no GPU host, and `pip wheel . --no-deps --no-build-isolation` finishes
+    in seconds. Everything after that is the trap.
+    - **Count and read the sources the non-CUDA branch globs — don't stop at "it built".**
+      The CPU branch's `sources` is `xformers/csrc/**/*.cpp` minus the HIP directory: at
+      0.0.35 that is exactly two files, 44 lines total, and every line is an `m.def("op(...)
+      -> ...")` inside `STABLE_TORCH_LIBRARY_FRAGMENT` — `attention.cpp`'s entire body is
+      additionally wrapped in `#if defined(USE_ROCM)`, so it contributes nothing at all.
+      Every `m.impl` lives in a `.cu` (or HIP `.cpp`) that only the GPU branches compile. A
+      schema with no implementation registers fine and then raises `NotImplementedError:
+      Could not run '<ns>::<op>' with arguments from the 'CPU' backend` on the first call.
+    - **When upstream publishes no CPU wheel to size-diff against, build one and diff the
+      `.so`.** Gotcha 411's cheapest signal was upstream's own 123 KB macOS wheel next to a
+      43 MB Linux one. Here upstream ships no CPU artifact anywhere, so produce it:
+      the CPU-built `xformers/_C.so` is 233 KB with **five** dynamic symbols, none of them
+      an operator (`nm -D --defined-only`), against the published CUDA wheel's 11.6 MB
+      `_C.so`. Two orders of magnitude *and* an empty symbol table is not "a smaller
+      backend", it is "no backend".
+    - **`_has_cpp_library is True` proves only that the `.so` loaded.** xformers'
+      `_cpp_lib.py` catches a failed `torch.ops.load_library` and degrades with a warning,
+      so a package-level "did the extension load" flag reads healthy on a wheel whose every
+      op is missing. Install the wheel and *call* something: `memory_efficient_attention`
+      answers `No operator found ... device=cpu (supported: {'cuda'})`, and one grep
+      (`grep -rn SUPPORTED_DEVICES <pkg>/ops/`) shows every op class in the dispatch list
+      declaring `{"cuda"}` — i.e. no patch to the build reaches the Python layer either.
+    - **Check upstream's wheel matrix for a CPU job before calling the CPU path
+      "upstream's own recipe".** `.github/workflows/wheels.yml`'s target determinator emits
+      only `toolkit_type` `cuda` (cu126/cu128/cu130) and `rocm` (7.1); there is no CPU
+      entry, and `upload_pip` filters `*torch2.10.0+cu128*`. bitsandbytes' CPU wheel exists
+      upstream and merely lacked a third platform; a CPU-only xformers wheel is an artifact
+      upstream ships nowhere — gotcha 24's divergence test, reached from the opposite
+      direction.
+    - **Verdict: `parked` under gotcha 183's rule** (installable and importable, primary
+      function unreachable rather than degraded), not `not-feasible` — the build genuinely
+      works, which is exactly why the note has to say what the built wheel *contains*.
+    - **Free bonus for triage notes: a `py39-none-<platform>` tag on a torch extension is
+      real compiled content.** It is neither gotcha 27's cosmetic `--plat-name` nor gotcha
+      145's maturin binary: `bdist_wheel.get_tag()` hand-returns `("py39", "none",
+      plat_tag)` because the `.so` talks only to torch's stable ABI
+      (`STABLE_TORCH_LIBRARY_FRAGMENT`, `get_export_symbols()` returning `[]`, no
+      `PyInit_*`), so one wheel covers every CPython 3.9+ including free-threaded. A queue
+      note reading "1 Linux wheel (abi: py39)" on a torch-extension package is that
+      convention, not a pure-Python tell — and it means the port, had it been feasible,
+      would have been one wheel rather than a per-interpreter matrix.
+
+426. **A `-cpu` sibling can be an *x86_64-only label*, not a portable CPU variant — if the
+    base package already ships a CPU-only wheel on every non-x86 arch, the sibling name
+    closes no riscv64 gap (the tensorflow-cpu case).** Gotcha 79's `-headless`/`-gpu`/`-lite`
+    sibling is usually a legitimate second port, and gotcha 50's `-binary` sibling is where
+    the wheels actually live. This is the third shape: a sibling that exists **only because
+    one architecture's default wheel is the GPU one**. `tensorflow-cpu` and `tensorflow`
+    2.21.0 are the same tree — `tensorflow/tools/pip_package/utils/tf_wheel.bzl` reads
+    `WHEEL_NAME` out of `@python_version_repo` and its own docstring says "Should be set via
+    `--repo_env=WHEEL_NAME=tensorflow_cpu`" — and their PyPI metadata is identical down to
+    the same 12 `nvidia-*; extra == "and-cuda"` requirements. What differs is only which
+    arch each name is *built* for, and that is the whole triage:
+    - **Scan the sibling's entire release history for platform tags, not just the version in
+      the queue entry.** One pass over `https://pypi.org/pypi/<sibling>/json`'s `releases`
+      counting the trailing tag of every file: `tensorflow-cpu` has published `win_amd64`
+      and `manylinux*_x86_64` **only** — across every release ever, zero aarch64, zero
+      ppc64le, zero other Linux arch, and no sdist. A sibling that has never left x86_64 is
+      a label for "x86_64 without the GPU bits", not a CPU variant.
+    - **Then compare the base package's per-arch wheel *sizes* to find which arches are
+      already CPU-only under the base name.** `tensorflow` 2.21.0 is 545 MB on
+      `manylinux_2_27_x86_64` but 268 MB on `manylinux_2_27_aarch64` — and `tensorflow_cpu`
+      x86_64 is 261 MB. The aarch64 wheel matching the *cpu* wheel's size rather than its own
+      arch's GPU wheel is the proof: on aarch64 upstream ships the CPU-only build under the
+      plain name, because there is no CUDA there to ship. riscv64 is in exactly that
+      position, so the riscv64 deliverable for "CPU-only TensorFlow" is `tensorflow`, and a
+      `manylinux_riscv64` wheel named `tensorflow-cpu` would invent a name upstream uses on
+      exactly one Linux architecture — gotcha 50's divergence-with-no-gap-closed, reached
+      from the sibling side.
+    - **So the `-cpu` sibling is never *cheaper* than the base, and inherits its verdict.**
+      The tempting inference is "the CPU-only variant sidesteps whatever made the full
+      package impractical (no CUDA build to worry about)". It is backwards: on an arch with
+      no CUDA the base package's build *is already* the CPU build, so the sibling saves
+      nothing and is the identical compile under a worse name. If the base entry is
+      `parked`, park the sibling for the base's reason plus the naming one, and say so in
+      both notes — an under-documented base park is what makes an agent re-derive this.
+    - **Don't inherit a sibling-family blocker citation across versions — re-verify it at
+      the revision your target actually pins.** jaxlib (PR #526, parked) died in XLA's
+      `xla/codegen/intrinsic/cpp` `embed_bitcode`, which links every LLVM backend except
+      RISC-V, and TensorFlow vendors the whole XLA tree at `third_party/xla/`, so that reads
+      like a ready-made blocker for TF too. At TF 2.21.0 it is not one: that tag's XLA
+      predates the restructure (the rule is `cc_ir_header` in `cc_to_llvm_ir.bzl`, whose
+      `ir_to_string` tool deps are just `llvm:Object`+`llvm:Support`, no per-arch CodeGen),
+      and `xla/backends/cpu/codegen/BUILD` *does* wire `if_llvm_riscv_available(["@llvm-project//llvm:RISCVCodeGen"])`
+      for the CPU JIT, with `linux_riscv64` and `riscv64_or_cross` defined in
+      `xla/tsl/BUILD`. Citing the sibling's hunk anyway would put a false hard blocker in the
+      queue; the honest note says "scope and naming, *not* Bazel-blocked like jaxlib".
+    - **Before costing a big Bazel build, check whether its wheel is per-interpreter.**
+      `_get_full_wheel_name` formats `cp{v}-cp{v}` from `HERMETIC_PYTHON_VERSION`, so TF is
+      one full build **per** interpreter (cp310–cp313 = 4), with none of the abi3/`py3-none`
+      collapse that let mediapipe serve every interpreter from a single ctypes-loaded `.so`.
+      That multiplier belongs in the estimate before anything else.
+
+431. **A distribution that has never shipped an sdist leaves the wheel as the only evidence —
+    read the vendored blob's build provenance out of its own debug strings (the
+    livekit-plugins-noise-cancellation case).** Gotchas 35 and 157 both triage a
+    `py3-none-<platform>` vendored-binary wheel the same way: find the *fetch* in the sdist's
+    build script (`scripts/build_driver.py`, `scripts/download_cli.py`), then ask the vendor's
+    artifact index whether riscv64 exists. That method presupposes an sdist. Some
+    distributions ship **none, at any version**: livekit-plugins-noise-cancellation has 13
+    releases, five platform wheels each (`macosx_10_9_x86_64`, `macosx_11_0_arm64`,
+    `manylinux_2_28_{x86_64,aarch64}`, `win_amd64`) and **zero** sdists — so there is no
+    `setup.py`, no download script and no hardcoded platform table to grep. Upstream's
+    monorepo doesn't help either: `livekit/agents/livekit-plugins/` holds ~80 plugin
+    directories and *no* noise-cancellation among them (the near-miss is a differently-named
+    `livekit-plugins-krisp`), a global code search for the payload filename returns only other
+    people's committed `site-packages` copies, and no `Cargo.toml` on GitHub defines the crate.
+    - **Count sdists across *every* release before concluding anything about source.** One
+      read settles it — `curl -s https://pypi.org/pypi/<pkg>/json`, then count
+      `packagetype == 'sdist'` over all of `d['releases']`, not just the target version.
+      "No sdist at this version" is common and recoverable (build one from the checkout);
+      "no sdist ever published, and no upstream directory" means there is no checkout to
+      build one *from*, which is a different and much harder finding.
+    - **`strings -a` the payload — a vendor's builder paths are its provenance.** Grep the
+      blob for builder/package-manager roots: here
+      `/var/lib/jenkins/.conan/data/<pkg>/<ver>/<user>/<channel>/…` named nine closed Conan
+      packages on a private remote (`krisp-core/2.0.41`, `krisp-inference-engine/2.2.23`,
+      `krisp-nc-processor/4.0.9`, `krisp-dsp`, `krisp-blas`, `krisp-mlops`, `krisp-common`,
+      `krisp-audio-stream`, plus `fftw/3.3.10_7@krisp/stable`), every one in a `krisp/prod`
+      channel. A vendor-private Conan/Jenkins path is gotcha 157's closed-source-vendor
+      finding reached **without** any vendor docs, installer script or release manifest —
+      and it is final: there is no public source to build for riscv64 at any version.
+      Generalize the grep, not the string: `/\.conan/data/`, `/\.hunter/`,
+      `/vcpkg/buildtrees/`, `/home/jenkins/`, `/builds/<org>/` all leak the same thing.
+    - **Don't let open-source crates in the same output talk you out of it.** That identical
+      `strings` run also lists `cargo/registry/src/index.crates.io-*/{ureq,rustls,ring,
+      serde_json,flate2,…}`, which makes the blob look like an ordinary Rust build someone
+      could retarget. Read what those crates *do*: an `ureq`+`rustls`+`serde_json` set is the
+      licence-check HTTP client wrapped **around** the closed DSP core, not the DSP. The
+      proportions say the same — 4 KB of Python, a 39 MB `.so`, and vendor-private paths
+      dominating its grep hits.
+    - **Price the non-code payload too.** ~64 MB of the 73 MB wheel is three opaque `.kef`
+      model files with no recognizable magic bytes, and the metadata reads
+      `License: SEE LICENSE IN https://livekit.io/legal/terms-of-service` — a proprietary ToS,
+      not an OSS licence. Even a hypothetical riscv64 rebuild of the wrapper would still have
+      to redistribute models we have no licence to republish, so the licensing answer blocks
+      it independently of the missing source.
+    - **Verdict `parked` on two independent grounds, and name the dependency one as well.**
+      Closed at the vendor layer (gotcha 157) *and* function-gated — the README requires
+      LiveKit Cloud, so the primary function is unreachable in gotcha 183's sense, not merely
+      degraded. Record the second-order blocker in the same note: the mandatory
+      `livekit>=0.21.3` runtime dep is itself `py3-none-<platform>` over those same five
+      platforms with no riscv64 wheel, so nothing downstream of this plugin resolves on
+      riscv64 today either.
+
+436. **A big CMake project's whole non-x86 story can be one `uname -m == aarch64` boolean, and
+    an `aarch64` branch is only as portable as the dependency behind it — survey every site of
+    that boolean, then triage the one whose branch exists solely because *that dep* has an ARM
+    SIMD shim (the Open3D case).** Open3D 0.19.0 is a 753-TU / 250 kLoC CMake C++ tree that
+    upstream already builds for a non-x86 Linux arch, with a dedicated slim config
+    (`docker/Dockerfile.openblas`: `BUILD_SHARED_LIBS=OFF`, CUDA/PyTorch/TensorFlow/SYCL all
+    OFF) exercised by `.github/workflows/ubuntu-openblas.yml` on a GCE `t2a-standard-4`. That
+    reads as a ready-made riscv64 precedent and is not one: every arch fallback in the tree is
+    gated on `LINUX_AARCH64`, set in `CMakeLists.txt` by `execute_process(COMMAND uname -m)`
+    matching the literal string `aarch64`, so riscv64 takes the `else()` branch written for
+    x86_64 everywhere.
+    - **`grep -rn <ARCH_BOOL> CMakeLists.txt 3rdparty/` *is* the survey, and it is the
+      authoritative list of what upstream itself considers arch-conditional.** Here six sites,
+      five of which name a prebuilt **x86_64-only** archive riscv64 would try to download:
+      MKL static (`USE_BLAS=OFF` → `mkl_static-2024.1.0-linux_x86_64.tar.xz`), Filament
+      (`BUILD_FILAMENT_FROM_SOURCE=OFF` → `filament-v1.9.19-linux-20.04.tgz`), WebRTC
+      (`BUILD_WEBRTC=ON` → `webrtc_<rev>_cxx-abi-1.tar.gz`), the ISPC compiler
+      (`BUILD_ISPC_MODULE=ON`) and prebuilt VTK 9.1 (`BUILD_VTK_FROM_SOURCE=OFF`). All five
+      have a from-source route the aarch64 branch already takes, so they are configuration
+      work, not blockers — the point of the survey is that the set is finite and enumerated
+      before any container is started. A dep that self-gates on its own (`WITH_IPP` drops out
+      via `IPP_SUPPORTED_HW AMD64 x86_64 x64`) needs nothing at all.
+    - **The sixth site is the verdict: an `elseif(<ARCH_BOOL>)` that only turns the x86 ISAs
+      off works because the dependency has an ARM-specific SIMD backend, and nothing more.**
+      `3rdparty/embree/embree.cmake`'s aarch64 branch passes
+      `-DEMBREE_ISA_{SSE2,SSE42,AVX,AVX2,AVX512}=OFF` and lets Embree pick NEON. Copy that
+      branch for a third arch and gotcha 366 lands unchanged — and it is unavoidable here,
+      because unlike the other five Embree has **no** `BUILD_*`/`WITH_*`/`USE_*` off switch:
+      it is appended to `Open3D_3RDPARTY_PRIVATE_TARGETS_FROM_CUSTOM` unconditionally and
+      `cpp/open3d/t/geometry/CMakeLists.txt` compiles `RaycastingScene.cpp` in *both* the SYCL
+      and non-SYCL branch, for a class (`o3d.t.geometry.RaycastingScene`) that is documented
+      public Python API. So there is no honest reduced wheel, and gotcha 41's
+      "escape-hatch build with the payload missing" is the only alternative.
+    - **Reproduce a third arch's configure failure on an x86 host in seconds, before booking a
+      riscv64 runner.** Whatever the `aarch64` branch passes is by construction also what a
+      non-x86/non-ARM arch would pass, and on an x86 host the dep's ARM boolean is OFF exactly
+      as it is on riscv64 — so `cmake <embree-4.3.3-src>
+      -DEMBREE_ISA_{SSE2,SSE42,AVX,AVX2,AVX512}=OFF -DEMBREE_TASKING_SYSTEM=INTERNAL` prints
+      `CMake Error at CMakeLists.txt:636 (MESSAGE): You have to enable at least one ISA!` on
+      any laptop. That costs one download and settles the "just add riscv64 to the arch
+      boolean" patch idea, which is always the first thing you will want to try.
+    - **Check the *compiler* gate on the source-build fallbacks too, not just the arch gate.**
+      The Filament fallback the aarch64 branch relies on hard-errors for any non-Clang
+      toolchain (`message(FATAL_ERROR "Detected C compiler ${CMAKE_C_COMPILER_ID} is
+      unsupported")`, `MIN_CLANG_VERSION 6.0`) and the pinned revision is a 2021-era
+      `isl-org/filament` fork, so "build it from source like aarch64 does" carries a second
+      prerequisite our GCC-based manylinux images do not meet. `BUILD_GUI=OFF` sidesteps it at
+      the cost of `open3d.visualization.{gui,rendering,draw}` — worth knowing, but it does not
+      reach the Embree blocker, so it changes nothing about the verdict.
+    - **Price it anyway, so the park note can say "and it would also have been expensive".**
+      The openblas config builds OpenBLAS + VTK 9.1 + Filament + Embree + assimp/curl/
+      boringssl/TBB/qhull from source and then 753 Open3D TUs, per interpreter (cp38–cp312 =
+      5 full builds; the wheel is `cp3X-cp3X`, no abi3 collapse), for a ~450 MB payload each —
+      against PR #2104 (mediapipe) at 5h23m plus 2h24m–3h21m of queue wait per job on the same
+      shared pool. Independently disproportionate, which is worth one sentence but is *not*
+      the reason: state the hard blocker first and the cost second, so an unpark attempt does
+      not start by trying to make it cheaper.
+438. **A "redistributable `<vendor binary>`" package can be a blob repack on *some* OSes and a
+    genuine from-source build on the one that matters — decide gotcha 35/157/431 per OS, not per
+    distribution (the comfy-angle/ANGLE case).** Every surface reading says vendored blob:
+    summary "Redistributable ANGLE libraries", nine releases with **zero** sdists, every wheel
+    `py3-none-<platform>`, and a payload of two prebuilt-looking `.so` files beside an
+    `electron-LICENSE` and a 19 MB `LICENSES.chromium.html`. `scripts/download.js` plus
+    `scripts/electron-version.txt` then confirm a vendor fetch — but only for Windows and macOS.
+    The same repo also carries `scripts/build_linux.py`, `scripts/angle-revision.txt` and
+    `scripts/depot-tools-revision.txt`, and builds the **Linux** libraries from that pinned ANGLE
+    revision with depot_tools/gn/ninja. The only wheel a riscv64 port needs is the one built from
+    source, so the park reasoning never applies.
+    - **Enumerate the build scripts, not just the download script.** A `download.js`/`fetch_*.py`
+      sitting next to a `build_<os>.py` means the vendor path is per-OS. One `README` read settles
+      which is which ("Windows and macOS libraries are extracted from Electron releases. Linux
+      libraries are built from the corresponding ANGLE revision"), and upstream's release workflow
+      confirms it — a `download` job feeding artifacts to a separate `build-linux` job that runs
+      inside a `manylinux` container is the shape to look for. Gotcha 385's "read `WHEEL`'s
+      `Generator:`" does not catch this, because both halves are packaged by the same setuptools
+      run.
+    - **"No sdist ever" stops meaning much once the git tag builds.** Gotcha 431 treats a
+      zero-sdist history as near-fatal because there is nothing to build from; here the checkout
+      *is* the build input (the build-from-checkout shape), so the finding downgrades to "derive
+      the version from the tag", nothing more.
+    - **The depot_tools/gn/CIPD stack is already riscv64-capable, and you can prove it in minutes
+      without a checkout.** `curl -s -o /dev/null -w '%{http_code}'
+      "https://chrome-infra-packages.appspot.com/dl/<pkg>/<platform>/+/latest"` answers 302 when a
+      CIPD package exists and 404 when it does not — calibrate with a bogus `linux-notarch` first,
+      which must 404. For `linux-riscv64` these exist: the cipd client (`infra/tools/cipd`),
+      `infra/3pp/tools/cpython3`, `infra/3pp/tools/ninja`, `gn/gn` and `infra/tools/luci/*`.
+      depot_tools' own `detect_host_arch.py` maps `riscv*` to `riscv64`, so gclient does not reject
+      the host. On the build side, `build/toolchain/linux/BUILD.gn` defines
+      `gcc_toolchain("riscv64")` with `toolprefix = "riscv64-linux-gnu"`, `BUILDCONFIG.gn` selects
+      `//build/toolchain/linux:$target_cpu` as soon as `is_clang=false`, and
+      `config/compiler/BUILD.gn` carries riscv64 cflags.
+    - **Two CIPD packages are the whole gap, and `custom_deps` removes them.** `build/siso` has no
+      `linux-riscv64` build and `infra/rbe/client` (reclient) has neither `linux-riscv64` **nor**
+      `linux-arm64` — which is why upstream's `DEPS` already carries a
+      `not (host_os == "linux" and host_cpu == "arm64")` carve-out on reclient, the precedent to
+      cite. Both are unused for a standalone checkout (`use_remoteexec` is false, and
+      `use_siso_default` in `build/toolchain/siso.gni` is false unless `build_with_chromium`, so
+      `autoninja` dispatches ninja), so null them in the generated `.gclient` —
+      `'third_party/siso/cipd': None` — the same mechanism such scripts already use to drop
+      SwiftShader/VK-GL-CTS/catapult. A missing CIPD package aborts `gclient sync` before anything
+      compiles, so this is worth settling before booking a runner.
+    - **The x86-only DEPS *hooks* are noise, not blockers.** `tools/clang/scripts/update.py` maps
+      every Linux host to a flat `'linux': 'Linux_x64'` with no arch check, so it downloads an
+      unusable x86-64 clang and succeeds; the prebuilt `glslang_validator` and `flex_bison` hooks
+      are the same. A green upstream **aarch64** job is the proof that none of those binaries is
+      executed by a narrow target set — reuse that argument instead of auditing each hook.
+    - **Price the enabled targets, not the project's reputation.** "ANGLE" reads as
+      Chromium-scale, but the gn args decide: `libEGL`+`libGLESv2` only, one backend, with tests,
+      SwiftShader, dawn, the GL and WGPU backends, the validation layers and frame capture all
+      off. Read the arg list before invoking proportionality (gotcha 41), and reuse the *existing*
+      non-x86 branch verbatim — aliasing the container's `gcc/g++/ar/readelf/nm` under the
+      `<toolprefix>-` names the GCC toolchain expects, with `is_clang=false`,
+      `use_custom_libcxx=false` and `treat_warnings_as_errors=false` — so the patch is a
+      toolprefix table entry rather than a new code path.
+    - **Building what upstream downloads changes the licence payload.** Electron's
+      `electron-LICENSE` and the `LICENSES.chromium.html` that Electron's build generates describe
+      an artifact this wheel no longer contains, so shipping them would be wrong. Stage the
+      licences of the tree actually built instead — the project's own `LICENSE` plus an aggregate
+      of the `third_party` `LICENSE`/`LICENCE`/`COPYING` files — and collect it by directory so it
+      over-reports rather than omit something statically linked.
+
+442. **A vendored dependency's build system can silently omit a capability flag its *other* build
+    system defaults on, and only auditing every dispatch site proves which one actually shipped
+    (the mediapipe case).** mediapipe vendors XNNPACK, whose riscv64 RVV (vector) microkernels are
+    gated behind a preprocessor macro, `XNN_ENABLE_RISCV_VECTOR`. XNNPACK's **CMake** build defines
+    it (`XNNPACK_ENABLE_RISCV_VECTOR` option, default ON); XNNPACK's **Bazel** build — the one
+    mediapipe actually uses — never defines it at all, in any `.bzl`/`BUILD.bazel` file. An
+    undefined macro in `#if`/`#elif` evaluates to 0, so every RVV dispatch block compiles out to
+    its scalar `#else` branch. That matters because roughly half of those dispatch blocks
+    (68 of 128 in `src/configs/`, audited exhaustively) have **no runtime `getauxval(AT_HWCAP)`
+    check** before selecting an RVV kernel — they assume the macro means what CMake's default
+    would mean. On a `manylinux_riscv64` wheel, which must not crash on V-less hardware, those
+    ungated blocks going live would SIGILL — and QEMU cannot catch this in rehearsal, since it
+    reports the V bit set regardless of what real hardware has.
+    - **"The build passed" and "the fp16 build passed" are different claims.** Gotcha 420's
+      `--define=xnn_enable_riscv_fp16_vector=false` fixed a *different*, narrower macro (the
+      fp16-vector family, which failed at the assembler for an unrelated ISA-string reason). It
+      does not touch `XNN_ENABLE_RISCV_VECTOR`, and fixing one does not tell you the state of the
+      other — check each capability macro independently by grepping the actual build files for
+      where the wheel's *build system* defines it, not by pattern-matching on the vendor's most
+      publicized default.
+    - **The safety here is an omission, not a guarantee — re-verify on every version bump.**
+      Two changes would silently turn this into a shipping SIGILL bug: XNNPACK's Bazel build
+      catching up to `build_defs.bzl`'s own pattern (every sibling `XNN_ENABLE_*` macro is already
+      emitted there) and adding the missing definition, or mediapipe/TFLite switching XNNPACK's
+      build from Bazel to CMake. On any XNNPACK version bump inside a Bazel-built riscv64 wheel,
+      re-grep `build_defs.bzl` for `XNN_ENABLE_RISCV_VECTOR`; if it appears, the ungated dispatch
+      blocks go live and `--define=xnn_enable_riscv_vector=false` becomes mandatory, not optional.
+
+449. **A prebuilt riscv64 binary an upstream downloads for you can be built for a *vendor* ISA —
+    `file`/`e_machine 243` tells you it is riscv64, not *which* riscv64 (the openvino/oneTBB
+    case).** Gotcha 418's rule was "`file`/`readelf -h` every `.so` in the sibling wheel"; this is
+    the column that rule is missing. OpenVINO's `cmake/dependencies.cmake` `ov_download_tbb()`
+    fetches `oneapi-tbb-2022.3.0-lin-riscv-release.tgz` from storage.openvinotoolkit.org and
+    `setup.py` bundles it into the wheel exactly as it does the x86_64/aarch64 TBB. Triage
+    downloaded it and recorded "genuine riscv64 oneTBB (ELF e_machine 243)" — true, and not
+    enough. Its `Tag_RISCV_arch` is
+    `rv64i2p0_m2p0_a2p0_f2p0_d2p0_c2p0_**xtheadc**2p0`: a T-Head Xuantie toolchain build.
+    - **Confirm from the instruction stream, not just the attribute.** Standard RISC-V never
+      emits the CUSTOM-0 opcode `0x0B` (nor `0x2B`/`0x5B`/`0x7B`). `libtbb.so.12` holds **906**
+      such instructions in 166 KiB of `.text` and `libtbbmalloc.so.2` **892** in 97 KiB, while
+      the **17 libraries OpenVINO compiled itself in the same wheel have zero across 52 MiB** —
+      the control that makes the count trustworthy. So the vendor instructions are really there;
+      the attribute is not a toolchain default that emitted nothing.
+    - **What it costs: the wheel is T-Head-only, and a green run stops being transferable.**
+      Those blobs execute fine on this repo's runner fleet — which is itself the finding, since
+      it means the fleet is T-Head (C906/C910/C920 class: TH1520, SG2042), and it is why nothing
+      caught this. The same wheel would SIGILL on SiFive U74/P550, JH7110, or plain QEMU
+      `rv64gc`. **CI passing on a T-Head fleet is not evidence that a `manylinux_riscv64` wheel
+      is portable**, and this is a second, independent shipping blocker from gotcha 448's RVV
+      one — fixing the RVV question alone still leaves a vendor-ISA blob in the wheel.
+    - **It also explains neighbouring symptoms.** A fleet that runs `xtheadc` is a T-Head core,
+      hence RVV **0.7.1**, hence gotcha 272's otherwise-odd pairing: HWCAP advertises V and the
+      first RVV-1.0 `vsetvli` is still illegal. Treat "which riscv64 is the runner?" as a fact
+      worth establishing once, from binaries that already run there.
+    - **The check is cheap and needs no riscv64 binutils**: parse the section headers in Python,
+      regex `rv(32|64)[0-9a-z_p]+` out of `.riscv.attributes`, and walk `.text` counting opcodes
+      (skip RVC halfwords — low two bits `!= 0b11`). Do it at triage on every prebuilt the build
+      downloads, not after a 12-hour build has already spent the runner slot.
+
+450. **A vendored native payload can be a *GraalVM Native Image*, which moves the wall from
+    "is there source?" to "does the AOT toolchain target riscv64?" (the saxonche/SaxonC-HE
+    case).** Gotchas 35/157/431 triage a vendored blob by hunting for its source or its
+    vendor's artifact index; gotcha 376 adds "a permissive `License:` says nothing about the
+    payload". saxonche is the shape those miss, because it is neither closed-source nor
+    portable: it is MPL-2.0 Java, published, that only exists as a native library because
+    Saxonica AOT-compiles it with GraalVM Native Image — and Native Image itself is what has no
+    riscv64.
+    - **The tell is three `strings` hits in the big `.so`, and it takes seconds.**
+      saxonche 13.0.0 ships 35 wheels, all genuinely `cpXY-cpXY` (so gotcha 27's ABI-tag rule
+      waves it through) and ~41 MB each, and has **never published an sdist** on any of its 14
+      releases, so per gotcha 431 the wheel is the only evidence. `unzip -l` sorted by size
+      splits it cleanly: a 7.8 MB `saxonche.cpython-312-<arch>-linux-gnu.so` (a real Cython
+      extension, built from the `saxonc/saxonc.cpp` the wheel also ships), a 617 KB
+      `saxonche.libs/libsaxonc-he-*.so.13.0.0` (the C++ API glue) — and
+      `saxonche.libs/libsaxonc-core-he-*.so.13.0.0` at **109 MB, 87% of the wheel**.
+      `strings -a` that one and it says `GraalVM CE 25.0.1+8.1 (serial gc)`,
+      `com/oracle/svm/core/…` and `.svm_heap`: it is the whole SaxonJ engine AOT-compiled, not
+      hand-written C++. Upstream's release notes confirm it in as many words ("SaxonC 13 is
+      built from SaxonJ 13 using GraalVM Native Image (version 25.0.1)"). Add
+      `GraalVM`/`svm_heap`/`com.oracle.svm` to the `strings` vocabulary beside gotcha 431's
+      `/.conan/data/…` builder paths.
+    - **`readelf -d` decides whether the missing payload is fatal or merely degrading.** Here
+      the extension carries `RPATH $ORIGIN/saxonche.libs` and a hard
+      `NEEDED libsaxonc-core-he-*.so.13.0.0`, so with no core there is no `import` at all —
+      stricter than gotcha 157's claude-agent-sdk, whose sdist still imports and only fails per
+      call. Do this before reasoning about runtime behaviour; a `NEEDED` edge ends the enquiry
+      that a `dlopen` would only start.
+    - **Published source can still be no build.** The Saxon-HE GitHub *releases* do carry
+      SaxonC-HE source zips (`SaxonCHE-source-12-9-0.zip`, 242 KB, 91 files: the C/C++ glue
+      under `src/main/c/`, the `net.sf.saxon.option.cpp` Java bridge under `src/main/java/`,
+      and the Cython `python/saxonc/saxonc.pyx`) — and **zero build files**: no
+      Makefile/CMakeLists/pom.xml/setup.py and no native-image configuration at all (no
+      reflect-config, no `native-image.properties`). Its own README calls it "the source files
+      used to build SaxonC-HE", which is not the same claim. Worse for the version actually
+      queued: the `SaxonHE13-0` release carries only `SaxonHE13-0J.zip` and `saxon13-0source.zip`
+      (both SaxonJ), and `downloads.saxonica.com/SaxonC/HE/13/SaxonCHE-source-13-0-0.zip` is a
+      404. `unzip -l <src>.zip | grep -icE 'makefile|cmake|pom\.xml|setup\.py|\.json'` returning
+      0 is the check — run it before concluding a source drop gives you a from-source path.
+    - **Then ask the AOT toolchain's artifact index — three HEAD requests, nothing downloaded.**
+      `download.oracle.com/graalvm/25/latest/graalvm-jdk-25_linux-{x64,aarch64}_bin.tar.gz` → 200,
+      `linux-riscv64` → **404**; GraalVM CE
+      (`graalvm-community-jdk-25.0.1_linux-{x64,aarch64}_bin.tar.gz`) → 200, `linux-riscv64` →
+      **404**; and Mandrel, Red Hat's native-image-only distribution
+      (`mandrel-java25-linux-{amd64,aarch64}-25.0.1.0-Final.tar.gz`) → 200, `riscv64` → **404**.
+      Native Image's distribution list belongs in the collection beside `nodejs.org/dist`,
+      NVIDIA's redist index, conda `repodata.json` and npm `optionalDependencies`. The vendor's
+      own table says the same thing one layer up: `downloads.saxonica.com/SaxonC/HE/13/` answers
+      200 for `SaxonCHE-linux-x86_64-13-0-0.zip` and `SaxonCHE-linux-arm64-13-0-0.zip`, 404 for
+      every riscv64 spelling.
+    - **An arch enum inside the toolchain is not shipping support for that arch.** This one is a
+      genuine trap: `Platform.LINUX_RISCV64` has been a Native Image leaf platform since 22.2,
+      and `oracle/graal` master really does carry `ELFMachine.RISCV64` with a full
+      `ELFRISCV64Relocation` table — searching for "GraalVM riscv64" turns up a 2023 GraalVM blog
+      post announcing it works. Read *how*: riscv64 is reached through the **LLVM backend**, not
+      the Graal compiler, and that backend's own doc says it "is not included by default as part
+      of Native Image" — you build GraalVM from source with
+      `mx --dynamicimports /substratevm build` and pass `--tool:llvm-backend`, and the riscv64
+      port behind the post was a GraalVM **dev build**. So the enum proves a research port
+      landed, not that any shipped `native-image` can emit a riscv64 image. Generalize it:
+      when an arch appears in a build tool's *source* but in none of its *releases*, the
+      releases are the fact.
+    - **Verdict: park, and say which layer is missing.** Per gotcha 183, everything the package
+      exists for routes through the Native Image core, so this is unreachable, not degraded.
+      Doing it ourselves would mean bootstrapping a riscv64 GraalVM from source with an unshipped
+      experimental backend *and then* reinventing a native-image recipe (entry points, reflection
+      config, resource config) upstream has never published, for a version whose SaxonC source is
+      not published either — the opposite of goal 2's "mirror upstream's own CI, narrowed to
+      riscv64". Note also that `saxonche`/`saxoncpe`/`saxoncee` are one engine behind three
+      licence tiers, so the verdict carries to all three at once (and PE/EE have no published
+      source at all) — gotcha 382's "one build, several distributions" arithmetic applied to a
+      park rather than to a port.

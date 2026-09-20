@@ -1,0 +1,423 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Mirrors the Linux half of CadQuery/ocp-build-system's build-ocp.yml - its
+# build-occt-sdk, build-ocp-source, build-ocp and test-ocp composite actions -
+# narrowed to the novtk variant on riscv64. The actions themselves cannot be
+# reused: they drive JS actions (setup-uv, cache) inside the manylinux
+# container, which ships no Node.
+name: Build cadquery-ocp-novtk wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cadquery-ocp-novtk.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cadquery-ocp-novtk.yml'
+      - 'docs/packages/cadquery-ocp-novtk.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cadquery-ocp-novtk.yml'
+      - 'docs/packages/cadquery-ocp-novtk.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  RAPIDJSON_REV: 24b5e7a8b27f42fa16b96fc70aade9106cf7102f
+  FMT_VERSION: 11.2.0
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cadquery-ocp-novtk
+      version: ${{ inputs.version }}
+
+  occt:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build OCCT SDK ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440  # 24h: OCCT is 5,600 ninja steps on 4 cores, as in build-vtk.yml
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      OCP_NOVTK_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout ocp-build-system v${{ matrix.version }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: CadQuery/ocp-build-system
+          ref: v${{ env.OCP_NOVTK_VERSION }}
+          persist-credentials: false
+
+      # Which OCCT, OCP source and pybind11 a wheel version is built from is upstream's
+      # own decision, so read it off the recipe rather than restating it here.
+      - name: Read the upstream component versions
+        id: versions
+        run: |
+          eval "$(sed -n 's/^  \(OCCT\|OCP\|PYBIND11\|WHEEL\): *\(.*\)$/\1=\2/p' .github/workflows/build-ocp.yml)"
+          [ "$WHEEL" = "$OCP_NOVTK_VERSION" ]
+          printf 'occt=%s\nocct-tag=V%s\n' "$OCCT" "$(echo "$OCCT" | tr . _)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout OCCT ${{ steps.versions.outputs.occt-tag }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Open-Cascade-SAS/OCCT
+          ref: ${{ steps.versions.outputs.occt-tag }}
+          path: OCCT
+          persist-credentials: false
+
+      # Same OOM guard build-vtk.yml needs on these 4-core runners.
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 10
+
+      - name: Build the OCCT SDK
+        run: |
+          mkdir -p deps
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e OCCT_VERSION="${{ steps.versions.outputs.occt }}" \
+            -e RAPIDJSON_REV \
+            -e FMT_VERSION \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False \
+            ninja-build patch freetype-devel fontconfig-devel \
+            libX11-devel libXi-devel libXmu-devel libXcursor-devel \
+            mesa-libGL-devel mesa-libEGL-devel mesa-libGLU-devel freeglut-devel
+
+          # riscv64 has no rapidjson, fmt or freeimage package, and upstream vendors a
+          # rapidjson master revision anyway (1.1.0 does not compile with GCC 14).
+          curl -fsSL "https://github.com/Tencent/rapidjson/archive/${RAPIDJSON_REV}.tar.gz" | tar xz -C /tmp
+          rm -rf /usr/include/rapidjson
+          cp -r "/tmp/rapidjson-${RAPIDJSON_REV}/include/rapidjson" /usr/include/
+
+          # OCP's CMakeLists does find_package(fmt REQUIRED), so the SDK carries the
+          # CMake package too, not just the headers it uses under FMT_HEADER_ONLY.
+          curl -fsSL "https://github.com/fmtlib/fmt/archive/refs/tags/${FMT_VERSION}.tar.gz" | tar xz -C /tmp
+          cmake -S "/tmp/fmt-${FMT_VERSION}" -B /tmp/fmt-build -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/work/deps \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DFMT_TEST=OFF \
+            -DFMT_DOC=OFF
+          cmake --build /tmp/fmt-build --target install --parallel "$(nproc)"
+
+          cd /work/OCCT
+          patch --posix -p1 < "/work/patches/occt-${OCCT_VERSION}/switch-vtk-freetype-cmake-order.patch"
+
+          cmake -S . -B build -GNinja \
+            -DCMAKE_C_COMPILER="$(command -v gcc)" \
+            -DCMAKE_CXX_COMPILER="$(command -v g++)" \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_INSTALL_PREFIX=/work/deps \
+            -DUSE_VTK=OFF \
+            -DUSE_TBB=OFF \
+            -DUSE_FREEIMAGE=OFF \
+            -DUSE_FREETYPE=ON \
+            -DUSE_RAPIDJSON=ON \
+            -DUSE_FFMPEG=OFF \
+            -DBUILD_CPP_STANDARD=C++17 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_RELEASE_DISABLE_EXCEPTIONS=OFF \
+            -DBUILD_MODULE_Draw=OFF \
+            -DBUILD_OPT_PROFILE=Production
+          cmake --build build --parallel "$(nproc)"
+          cmake --build build --target install --parallel "$(nproc)"
+
+          mkdir -p /work/deps/licenses
+          cp LICENSE_LGPL_21.txt OCCT_LGPL_EXCEPTION.txt /work/deps/licenses/
+          SCRIPT
+
+      - name: Pack the OCCT SDK
+        run: tar -C deps -czf occt-sdk.tar.gz .
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cadquery-ocp-novtk-${{ env.OCP_NOVTK_VERSION }}-occt-sdk
+          path: occt-sdk.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, occt]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cadquery-ocp-novtk ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 2880  # 48h: 647 pybind11 translation units at -j2, as in build-vtk.yml
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # cp314t is left out: upstream pins pybind11 2.13 and the generated module never
+        # declares free-threaded support, so such a wheel would only re-enable the GIL.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      OCP_NOVTK_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout ocp-build-system v${{ matrix.version }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: CadQuery/ocp-build-system
+          ref: v${{ env.OCP_NOVTK_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Patch ocp-build-system
+        run: git apply python-wheels/patches/cadquery-ocp-novtk/${{ env.OCP_NOVTK_VERSION }}/00*.patch
+
+      - name: Read the upstream component versions
+        id: versions
+        run: |
+          eval "$(sed -n 's/^  \(OCCT\|OCP\|PYBIND11\|WHEEL\|SOURCE_URL\): *\(.*\)$/\1=\2/p' .github/workflows/build-ocp.yml)"
+          [ "$WHEEL" = "$OCP_NOVTK_VERSION" ]
+          printf 'ocp=%s\npybind11=%s\nsource-url=%s\n' "$OCP" "$PYBIND11" "$SOURCE_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Download the OCCT SDK
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: cadquery-ocp-novtk-${{ env.OCP_NOVTK_VERSION }}-occt-sdk
+
+      - name: Unpack the OCCT SDK
+        run: |
+          mkdir -p deps
+          tar -C deps -xzf occt-sdk.tar.gz
+
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 10
+
+      - name: Build wheel
+        run: |
+          mkdir -p wheelhouse
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            -e WHEEL_VERSION="${{ env.OCP_NOVTK_VERSION }}" \
+            -e OCP_SOURCE="${{ steps.versions.outputs.source-url }}/${{ steps.versions.outputs.ocp }}/OCP_src_stubs_Linux.zip" \
+            -e PYBIND11_VERSION="${{ steps.versions.outputs.pybind11 }}" \
+            -e RAPIDJSON_REV \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          python_exe="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin/python"
+
+          dnf install -y --setopt=install_weak_deps=False \
+            ninja-build unzip freetype-devel fontconfig-devel \
+            libX11-devel libXi-devel libXmu-devel libXcursor-devel \
+            mesa-libGL-devel mesa-libEGL-devel mesa-libGLU-devel freeglut-devel
+
+          curl -fsSL "https://github.com/Tencent/rapidjson/archive/${RAPIDJSON_REV}.tar.gz" | tar xz -C /tmp
+          rm -rf /usr/include/rapidjson
+          cp -r "/tmp/rapidjson-${RAPIDJSON_REV}/include/rapidjson" /usr/include/
+
+          "${python_exe}" -m venv /tmp/venv
+          . /tmp/venv/bin/activate
+          pip install -U pip "pybind11==${PYBIND11_VERSION}.*" setuptools wheel build auditwheel patchelf
+
+          cd /work
+          curl -fL -o OCP_src_stubs_Linux.zip "${OCP_SOURCE}"
+          unzip -q OCP_src_stubs_Linux.zip -d OCP_src
+          rm OCP_src_stubs_Linux.zip
+          mkdir OCP
+          mv OCP_src OCP/OCP
+
+          cd OCP/OCP
+          sed -i '/find_package( VTK/,/)/d' CMakeLists.txt
+          # The VTK::, pybind11:: and fmt:: targets share one line, so drop the targets only.
+          sed -i 's/VTK::[A-Za-z0-9_]*//g' CMakeLists.txt
+          sed -i '/message(STATUS "VTK .* found")/d' CMakeLists.txt
+          # manylinux ships no shared libpython, which the implied Development.Embed needs.
+          sed -i 's/COMPONENTS Interpreter Development)/COMPONENTS Interpreter Development.Module)/' CMakeLists.txt
+          rm IVtk*
+          sed -i '/register_IVtk/d' OCP.cpp
+          sed -i -e '/#include <IVtk_[A-Za-z_]*\.hxx>/d' \
+                 -e '/register_template_NCollection_[A-Za-z]*<IVtk_/d' ./*.cpp
+
+          cd /work/OCP
+          cmake -B build -S OCP -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="$(command -v gcc)" \
+            -DCMAKE_CXX_COMPILER="$(command -v g++)" \
+            -DCMAKE_PREFIX_PATH=/work/deps \
+            -DPython_EXECUTABLE="$(command -v python)" \
+            -Dpybind11_DIR="$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')" \
+            -DCMAKE_CXX_STANDARD=17 \
+            -DCMAKE_CXX_FLAGS="-isystem $(python -c 'import sysconfig; print(sysconfig.get_paths()["include"])') -DFMT_HEADER_ONLY -fvisibility=hidden -w" \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=TRUE
+          # Upstream hits the OOM killer with one job per core on its own 4-core Linux
+          # runners and settles on cpus-2 for the slower of them.
+          ninja -C build -j "$(( $(nproc) > 2 ? $(nproc) - 2 : 1 ))"
+
+          export LD_LIBRARY_PATH=/work/deps/lib:/work/deps/lib64
+
+          cd /work/pypi
+          sed -i "s/0\.0\.0\.0/${WHEEL_VERSION}/g" pyproject.toml
+          sed -i 's/"cadquery-ocp"/"cadquery-ocp-novtk"/g' pyproject.toml
+          sed -i 's/sources"/sources (no VTK support)"/g' pyproject.toml
+          sed -i 's/cadquery-ocp /cadquery-ocp-novtk /g' README.md
+          awk '/Python wrapper for OCCT/{print; print "Note: VTK is not supported with cadquery-ocp-novtk."; next}1' README.md > _tmp
+          mv _tmp README.md
+          cp /work/OCP/build/OCP.*.so .
+
+          # The wheel ships the OCCT runtime and whatever else auditwheel vendors out of
+          # the image, so collect the licence of every library in that closure.
+          curl -fsSLo LICENSE https://raw.githubusercontent.com/CadQuery/OCP/refs/heads/master/LICENSE
+          for file in /work/deps/licenses/*; do cp "${file}" "LICENSE.OCCT-$(basename "${file}")"; done
+          mapfile -t libs < <(ldd OCP.*.so /work/deps/lib*/libTK*.so | tr ' ' '\n' | grep '^/' | sort -u)
+          mapfile -t pkgs < <(rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null \
+            | grep -E '^[A-Za-z0-9._+-]+$' | sort -u | grep -vE '^(glibc|libgcc|libstdc\+\+|gcc)$')
+          # The image installs with tsflags=nodocs, which drops a %doc licence file.
+          dnf reinstall -y --setopt=tsflags= "${pkgs[@]}" || true
+          for pkg in "${pkgs[@]}"; do
+            files=$(rpm -qL "${pkg}" || true)
+            if [ -n "${files}" ]; then
+              for file in ${files}; do cp "${file}" "LICENSE.${pkg}-$(basename "${file}")"; done
+            else
+              rpm -q --qf '%{NAME} %{VERSION}: %{LICENSE}\n' "${pkg}" >> LICENSE.third-party.txt
+            fi
+          done
+
+          python ocp-tree.py
+          mv ./*.so OCP
+          strip OCP/*.so
+          python -m build -w -n
+
+          # The extension travels as package data, so the wheel setuptools writes is
+          # tagged py3-none-any and has to be retagged for the interpreter it was built
+          # against; Root-Is-Purelib decides lib vs lib64 on Fedora/Debian.
+          python -m wheel tags --remove \
+            --platform-tag manylinux_2_39_riscv64 \
+            --abi-tag "${PYTHON_TAG}" \
+            --python-tag "${PYTHON_TAG}" \
+            dist/*.whl
+          mkdir work
+          cd work
+          python -m wheel unpack ../dist/cadquery_ocp_novtk*.whl
+          sed -i 's/Root-Is-Purelib: true/Root-Is-Purelib: false/' \
+            cadquery_ocp_novtk-"${WHEEL_VERSION}"/cadquery_ocp_novtk-"${WHEEL_VERSION}".dist-info/WHEEL
+          python -m wheel pack cadquery_ocp_novtk-"${WHEEL_VERSION}"
+          mv ./*.whl ../dist/
+          cd ..
+
+          python -m auditwheel show dist/*.whl
+          python -m auditwheel repair --plat manylinux_2_39_riscv64 --wheel-dir /work/wheelhouse dist/*.whl
+
+          cd /work/wheelhouse
+          python -m wheel unpack cadquery_ocp_novtk*.whl
+          rm cadquery_ocp_novtk*.whl
+          patchelf --add-rpath '$ORIGIN/../cadquery_ocp_novtk.libs' \
+            cadquery_ocp_novtk-"${WHEEL_VERSION}"/cadquery_ocp_novtk.libs/*
+          python -m wheel pack cadquery_ocp_novtk-"${WHEEL_VERSION}"
+          rm -rf cadquery_ocp_novtk-"${WHEEL_VERSION}"
+          SCRIPT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cadquery-ocp-novtk-${{ env.OCP_NOVTK_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+      # Upstream tests the wheel with build123d's suite, which needs lib3mf; that
+      # publishes prebuilt x86_64/macOS/Windows wheels only, so exercise the kernel
+      # through OCP itself instead.
+      - name: Test wheel
+        run: |
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          "/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin/python" -m venv /tmp/venv
+          . /tmp/venv/bin/activate
+          pip install -U pip
+          pip install /work/wheelhouse/*.whl
+          pip list
+
+          python -c "import OCP; print('OCP', OCP.__version__)"
+          python - <<'PY'
+          from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
+          from OCP.BRepGProp import BRepGProp
+          from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+          from OCP.GProp import GProp_GProps
+          from OCP.TopAbs import TopAbs_ShapeEnum
+          from OCP.TopExp import TopExp_Explorer
+          from OCP.gp import gp_Pnt
+
+
+          def volume(shape):
+              props = GProp_GProps()
+              BRepGProp.VolumeProperties_s(shape, props)
+              return props.Mass()
+
+
+          box = BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape()
+          assert abs(volume(box) - 6.0) < 1e-9, volume(box)
+
+          faces = 0
+          explorer = TopExp_Explorer(box, TopAbs_ShapeEnum.TopAbs_FACE)
+          while explorer.More():
+              faces += 1
+              explorer.Next()
+          assert faces == 6, faces
+
+          fused = BRepAlgoAPI_Fuse(
+              BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 1.0, 1.0, 1.0).Shape(),
+              BRepPrimAPI_MakeBox(gp_Pnt(0.5, 0.0, 0.0), 1.0, 1.0, 1.0).Shape(),
+          ).Shape()
+          assert abs(volume(fused) - 1.5) < 1e-9, volume(fused)
+          PY
+          SCRIPT
+
+  publish:
+    name: Publish cadquery-ocp-novtk ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: cadquery-ocp-novtk-${{ matrix.version }}-*-manylinux_riscv64

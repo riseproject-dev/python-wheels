@@ -51,11 +51,24 @@ jobs:
       CCHARDET_VERSION: ${{ matrix.version }}
 
     steps:
+      # Upstream tagged releases bare up to 2.1.7 and v-prefixed from 2.2.0 on.
+      - name: Resolve the cChardet tag
+        id: tag
+        run: |
+          for ref in "v$CCHARDET_VERSION" "$CCHARDET_VERSION"; do
+            if git ls-remote --exit-code --tags https://github.com/PyYoshi/cChardet "refs/tags/$ref" >/dev/null; then
+              echo "name=$ref" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "::error::PyYoshi/cChardet has no tag for $CCHARDET_VERSION"
+          exit 1
+
       - name: Checkout cChardet ${{ env.CCHARDET_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: PyYoshi/cChardet
-          ref: ${{ env.CCHARDET_VERSION }}
+          ref: ${{ steps.tag.outputs.name }}
           submodules: recursive
           persist-credentials: false
 
@@ -106,86 +119,68 @@ jobs:
           name: cchardet-${{ env.CCHARDET_VERSION }}-sdist
           path: dist/
 
-      - name: Extract sdist and stage the wheel smoke tests
-        # Upstream's own suite (src/tests/test.py) uses nose, dead on modern
-        # Python; this reproduces its checks with plain pytest assertions
-        # against the same bundled testdata/samples.
+      - name: Extract sdist and stage the wheel smoke test
+        # Upstream's own cibuildwheel config (test-command/test-sources in
+        # pyproject.toml) runs tools/wheel_smoke.py, but MANIFEST.in doesn't
+        # ship tools/ in the sdist, so this reproduces that same script here.
         run: |
           mkdir pkg
           tar xzf dist/*.tar.gz --strip-components=1 -C pkg
           cat > pkg/riscv64_test_cchardet.py <<'EOF'
-          import glob
+          import json
           import os
+          import subprocess
+          import sys
+          import sysconfig
+          import tempfile
+          from pathlib import Path
 
           import cchardet
 
-          TESTDATA_DIR = "pkg/src/tests/testdata"
-          SAMPLES_DIR = "pkg/src/tests/samples"
 
-          SKIP_LIST = [
-              TESTDATA_DIR + "/ja/utf-16le.txt",
-              TESTDATA_DIR + "/ja/utf-16be.txt",
-              TESTDATA_DIR + "/es/iso-8859-15.txt",
-              TESTDATA_DIR + "/da/iso-8859-1.txt",
-              TESTDATA_DIR + "/he/iso-8859-8.txt",
-          ]
-          SKIP_LIST_DECODE = SKIP_LIST + [
-              TESTDATA_DIR + "/vi/viscii.txt",
-              TESTDATA_DIR + "/zh/euc-tw.txt",
-          ]
+          def main() -> None:
+              # Upstream only added this assertion in tools/wheel_smoke.py starting at
+              # v2.3.0; v2.2.0's _cchardet extension doesn't declare free-threading
+              # support, so CPython 3.14t legitimately re-enables the GIL on import.
+              version = tuple(int(p) for p in os.environ["CCHARDET_VERSION"].split("."))
+              if sysconfig.get_config_var("Py_GIL_DISABLED") and version >= (2, 3, 0):
+                  assert not getattr(sys, "_is_gil_enabled")()
 
+              package_dir = Path(cchardet.__file__).parent
+              assert (package_dir / "py.typed").is_file()
+              assert (package_dir / "_cchardet.pyi").is_file()
 
-          def test_ascii():
-              assert cchardet.detect(b"abcdefghijklmnopqrstuvwxyz")["encoding"].lower() == "ascii"
+              expected = cchardet.detect(b"plain ASCII")
+              assert expected["encoding"] == "ASCII"
+              assert cchardet.detect(bytearray(b"plain ASCII")) == expected
+              assert cchardet.detect(memoryview(b"plain ASCII"), max_bytes=32) == expected
 
+              french = ("Français, où êtes-vous ? Voilà l'été.").encode(
+                  "windows-1252"
+              )
+              candidates = cchardet.detect_all(french)
+              assert candidates
+              assert candidates[0] == cchardet.detect(french)
+              assert candidates[0]["language"] == "fr"
 
-          def test_detect():
-              testfiles = glob.glob(TESTDATA_DIR + "/*/*.txt")
-              assert testfiles
-              for testfile in testfiles:
-                  if testfile in SKIP_LIST:
-                      continue
-                  expected = os.path.splitext(os.path.basename(testfile))[0]
-                  with open(testfile, "rb") as f:
-                      result = cchardet.detect(f.read())
-                  assert result["encoding"] is not None, testfile
-                  assert result["encoding"].lower() == expected.lower(), (testfile, result)
-
-
-          def test_detector():
               detector = cchardet.UniversalDetector()
-              with open(SAMPLES_DIR + "/wikipediaJa_One_Thousand_and_One_Nights_SJIS.txt", "rb") as f:
-                  for line in f:
-                      detector.feed(line)
-                      if detector.done:
-                          break
+              detector.feed(french[:10])
+              detector.feed(french[10:])
               detector.close()
-              assert detector.result["encoding"].lower() == "shift_jis"
+              assert detector.result == candidates[0]
+
+              with tempfile.TemporaryDirectory() as directory:
+                  sample = Path(directory) / "sample.txt"
+                  sample.write_bytes(french)
+                  output = subprocess.check_output(
+                      [sys.executable, "-m", "cchardet", "--json", str(sample)],
+                      text=True,
+                  )
+                  assert json.loads(output)["language"] == "fr"
 
 
-          def test_github_issue_20():
-              msg = b"\x8f"
-              cchardet.detect(msg)
-              detector = cchardet.UniversalDetector()
-              detector.feed(msg)
-              detector.close()
-
-
-          def test_decode():
-              for testfile in glob.glob(TESTDATA_DIR + "/*/*.txt"):
-                  if testfile in SKIP_LIST_DECODE:
-                      continue
-                  with open(testfile, "rb") as f:
-                      msg = f.read()
-                  msg.decode(cchardet.detect(msg)["encoding"])
-
-
-          def test_utf8_with_bom():
-              assert cchardet.detect(b"\xef\xbb\xbf")["encoding"].lower() == "utf-8-sig"
-
-
-          def test_null_bytes():
-              assert cchardet.detect(b"ABC\x00\x80\x81")["encoding"] is None
+          if __name__ == "__main__":
+              main()
           EOF
 
       - name: Build and test wheels
@@ -196,10 +191,12 @@ jobs:
           only: ${{ matrix.python }}-manylinux_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_TEST_REQUIRES: pytest
           # CIBW_TEST_SOURCES is relative to the cwd, not package-dir, hence "pkg/".
-          CIBW_TEST_SOURCES: pkg/riscv64_test_cchardet.py pkg/src/tests/testdata pkg/src/tests/samples
-          CIBW_TEST_COMMAND: python -m pytest pkg/riscv64_test_cchardet.py -v
+          CIBW_TEST_SOURCES: pkg/riscv64_test_cchardet.py
+          CIBW_TEST_COMMAND: python pkg/riscv64_test_cchardet.py
+          # A job-level `env:` never reaches the Linux container (gotcha 129), so the
+          # test script's os.environ["CCHARDET_VERSION"] read needs it via CIBW_ENVIRONMENT.
+          CIBW_ENVIRONMENT: CCHARDET_VERSION=${{ env.CCHARDET_VERSION }}
 
       - name: Verify the wheel ships the compiled extension
         run: |
@@ -229,5 +226,7 @@ jobs:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
     with:
       artifact-pattern: cchardet-${{ matrix.version }}-*-manylinux_riscv64

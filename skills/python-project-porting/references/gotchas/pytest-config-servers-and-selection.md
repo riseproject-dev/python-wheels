@@ -32,6 +32,11 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
   `@pytest.mark.skipif(not X)` guard turns an omitted `CIBW_TEST_REQUIRES` entry into a
 - **355** — Gotcha 339 generalizes past `pytest` to any unpinned runtime dependency whose
   own heuristic changed across a major version — pin it for the test venv only.
+- **429** — A media project's suite is written against upstream's *full* FFmpeg; an FFmpeg
+  you configure yourself has no H.264/HEVC/VP9/AV1/MP3 encoder at all, and the failures
+  blame the wrong codec.
+- **439** — A Bazel project runs one process per `py_test` target — one `pytest --pyargs` over
+  the whole package invents failures; run each file as its own absltest script.
 
 ---
 
@@ -644,3 +649,79 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
     (gotcha 52) produced before trusting a pass count: a test-requires list assembled by
     reading `pyproject.toml`'s declared dependencies under-counts whenever the suite
     itself imports something optional that the accelerator's own tests exercise.
+
+429. **A media project's suite is written against upstream's *full* FFmpeg; an FFmpeg you
+    configure yourself has no H.264/HEVC/VP9/AV1/MP3 *encoder* at all, and the failures
+    blame the wrong codec (the torchcodec case).** The natural "just build FFmpeg in the
+    container" line — `./configure --disable-static --enable-shared --enable-pic
+    --disable-doc` — enables three external libraries: iconv, libxcb, zlib. Every video
+    encoder anyone actually uses, and the MP3 one, lives in an external library
+    (`libx264`, `libx265`, `libvpx`, `libaom`/`libsvtav1`, `libmp3lame`), and FFmpeg's
+    native AV1 *decoder* only works through a hardware accelerator
+    (`libavcodec/av1dec.c`: "Your platform doesn't suppport hardware accelerated AV1
+    decoding"), so such a build decodes nearly everything and encodes almost nothing.
+    Two of those libraries (`libx264`, `libx265`) require `--enable-gpl`, which a wheel
+    that links FFmpeg must not be built against, so an upstream encoder test surface is
+    **unreachable, not broken** — settle that once rather than iterating on CI. Nothing in
+    the output says "no H.264 encoder": FFmpeg silently falls back to the container
+    format's default codec, so the failures read `Specified pixel format yuv444p is not
+    supported by the mpeg4 encoder`, `avcodec_open2 failed: Invalid argument` (mpeg4
+    rejecting `crf`/`preset`/`profile`), `Video codec av1 not found`, `Codec not found`
+    for MP3 audio, and `ffmpeg ... returned non-zero exit status 8` wherever the suite
+    shells out to the CLI built beside the libraries — all of which read like a riscv64
+    port bug, and all 4 interpreter legs fail on the identical set (see gotcha 33 on
+    identical-across-legs meaning environment, not build). Upstream never sees it because
+    its test job does `conda install ffmpeg -c conda-forge`, whose default build is the
+    GPL one. Prove the gap in a minute on any arch without compiling: run the same
+    `./configure`, read its `External libraries:` block, and
+    `grep -E '^#define CONFIG_[A-Z0-9_]*(H264|HEVC|VP9|AV1|MP3)[A-Z0-9_]*_ENCODER 1$'
+    config.h` (empty). Deselect **by codec token wherever the parametrisation carries
+    one** — `-k "not ((test_audio_against_cli or test_multiple_audio_formats) and mp3)"`
+    keeps those tests' WAV and FLAC parametrisations, so the audio encoder, the image
+    encoder and every decoder stay covered instead of a whole module disappearing behind
+    `--ignore`. Reserve `--ignore` for a module that cannot work at all (a `smoke_test.py`
+    that H.264-encodes every fixture it then decodes). And say in the PR that the wheel
+    bundles no FFmpeg, so the codecs the *user's* distro FFmpeg provides are unaffected by
+    any of this — only the container's own test coverage is.
+
+439. **A Bazel project runs one *process per `py_test` target*, so collecting the wheel's
+    shipped `*_test.py` files into a single `pytest` invocation invents failures upstream
+    never sees — run each file as its own absltest script instead, and read the `py_test`
+    rules for the `env`/`args` bazel was supplying (the grain case; see
+    `build-grain.yml`).** Gotcha 6 says mirror upstream's testing; for a Bazel project that
+    instruction is about the *process model*, not just the command. grain ships 54
+    `*_test.py` files in its wheel and its OSS `build_whl.sh` offers
+    `pytest --pyargs grain` as the non-Bazel path, but upstream's own CI calls that template
+    with `run_tests_with_bazel: true`, so the pytest path is untested and breaks three
+    separate ways at once:
+    - **Cross-file state pollution.** `data_loader_test.py` passes **120/120** run on its
+      own and then most of those same 120 fail inside `pytest --pyargs grain`, because every
+      file shares one interpreter (grain's tests leak shared-memory segments and
+      multiprocessing state; the run also hangs outright around 4%). This is the failure
+      that reads most like a riscv64 bug and is not one — the one-line check is to re-run
+      the offending file alone before believing anything else.
+    - **`env`/`args` the `py_test` rules supply, which nothing else does.** Three targets
+      pass `args = ["--test_srcdir=grain/_src/python"]` (`data_loader_test`,
+      `data_sources_test`, `tfrecord_dataset_test`) and without it their testdata lookups
+      error; `profiler_test.py` is instantiated **twice**, as
+      `profiler_test_no_framework` and `profiler_test_with_jax`, differing only by
+      `env = {"EXPECTED_FRAMEWORK": ...}`; and `.bazelrc`'s
+      `test --action_env PYTHON_VERSION=` is what makes `py_version_test` pass. Grep the
+      BUILD files for `args = [` and `env = {` and supply exactly those — **not** globally:
+      `autotune_test.py` uses plain `unittest.main()` and dies on
+      `unrecognized arguments: --test_srcdir`, so pass each flag only to the targets that
+      declare it.
+    - **pytest's own instrumentation.** `traceback_util_test.py` is 4 failures under pytest
+      and **18 OK** as a script, because the tests assert on `__tracebackhide__`/traceback
+      filtering that pytest itself rewrites.
+    Two more things to check before settling the file list. **The set of declared `py_test`
+    targets can be smaller than the set of `*_test.py` files the wheel ships** — grain
+    declares 48 srcs against 54 shipped, and the six undeclared ones are where the dead
+    code is (`multiprocessing_test.py` patches `multiprocessing._endoscope_shm_name`, which
+    exists only inside Google, and its `__main__` calls an undefined `grain_absltest`), so
+    diff the two sets and treat a file upstream never runs as a file you need not run
+    either. And **a test can require a dependency it never imports**: `batch_test.py` has
+    no module-level `import jax`, so an import-based taint scan clears it, yet 11 of its
+    cases do `sys.modules["jax"]` and its `py_test` declares
+    `"@pypi//jax:pkg",  # buildcleaner: keep` — grep `sys.modules[` and the BUILD `deps` as
+    well as the imports.

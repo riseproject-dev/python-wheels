@@ -1,0 +1,157 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/AntonKueltz/fastecdsa/blob/v3.0.1/.github/workflows/publish-to-prod.yaml
+name: Build fastecdsa wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/fastecdsa.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fastecdsa.yml'
+      - 'docs/packages/fastecdsa.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fastecdsa.yml'
+      - 'docs/packages/fastecdsa.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: fastecdsa
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build fastecdsa ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # No cp314t: both extensions use single-phase init, so importing them
+        # re-enables the GIL, and upstream ships no free-threaded wheel.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      FASTECDSA_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout fastecdsa v${{ env.FASTECDSA_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: AntonKueltz/fastecdsa
+          ref: v${{ env.FASTECDSA_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # auditwheel vendors the image's libgmp, whose licences upstream's wheels do not carry.
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf -y install gmp-devel &&
+            for f in /usr/share/licenses/gmp/COPYING*; do cp "$f" "{project}/LICENSE.gmp.$(basename "$f")"; done
+          CIBW_ENVIRONMENT_LINUX: CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib"
+          # pyproject.toml is deliberately left unstaged: its addopts demand pytest-cov
+          # and its pythonpath would import the checkout instead of the wheel.
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: python -m pytest tests
+
+      - name: Check the extensions and licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = {n.split("/")[-1].split(".", 1)[0] for n in names if n.endswith(".so")}
+          assert {"curvemath", "_ecdsa"} <= sos, sos
+          assert any(n.startswith("fastecdsa.libs/libgmp") for n in names), names
+          lic = {n.split("/")[-1] for n in names if ".dist-info/licenses/" in n and not n.endswith("/")}
+          assert lic == {
+              "LICENSE",
+              "LICENSE.gmp.COPYING",
+              "LICENSE.gmp.COPYING.LESSERv3",
+              "LICENSE.gmp.COPYINGv2",
+              "LICENSE.gmp.COPYINGv3",
+          }, lic
+          print(sorted(sos), sorted(lic))
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fastecdsa-${{ env.FASTECDSA_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Collect GPL sources for fastecdsa ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      FASTECDSA_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc gmp
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fastecdsa-${{ env.FASTECDSA_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish fastecdsa ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: fastecdsa-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: fastecdsa-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc and the GMP library bundled in the wheel

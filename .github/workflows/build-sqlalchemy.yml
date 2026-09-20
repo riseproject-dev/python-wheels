@@ -19,11 +19,13 @@ on:
     paths:
       - '.github/workflows/build-sqlalchemy.yml'
       - 'docs/packages/sqlalchemy.yaml'
+      - 'patches/sqlalchemy/**'
   push:
     branches: [main]
     paths:
       - '.github/workflows/build-sqlalchemy.yml'
       - 'docs/packages/sqlalchemy.yaml'
+      - 'patches/sqlalchemy/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -69,12 +71,24 @@ jobs:
           ref: ${{ steps.tag.outputs.ref }}
           persist-credentials: false
 
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
       - name: Install Python
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
         with:
           python-version: '3.12'
           activate-environment: true
           enable-cache: false
+
+      # ConcurrentAutomapTest.test_concurrent_automaps_w_configure is a real
+      # thread-stress race in the test itself, not a riscv64 build defect; see
+      # patches/sqlalchemy/${{ env.SQLALCHEMY_VERSION }} (CLAUDE.md gotcha 38).
+      - name: Patch SQLAlchemy source
+        run: git apply python-wheels/patches/sqlalchemy/${{ env.SQLALCHEMY_VERSION }}/*.patch
 
       - name: Build sdist
         id: sdist
@@ -155,5 +169,7 @@ jobs:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
     with:
       artifact-pattern: sqlalchemy-${{ matrix.version }}-*-manylinux_riscv64

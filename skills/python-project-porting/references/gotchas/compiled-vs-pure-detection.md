@@ -20,6 +20,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
 - **292** — Gotcha 81's "diff the wheel `size` field" test can pass on a real per-arch binary
 - **295** — A require-extension knob that reaches the container correctly (gotcha 129's
 - **308** — A maturin shim whose star-import name collides with the compiled submodule's
+- **398** — Reproducing a `py3-none-<platform>` wheel takes an explicit retag — setuptools'
 
 ---
 
@@ -391,3 +392,28 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
       9/56's standing advice) — `murmurhash2/__init__.py` +
       `murmurhash2/murmurhash2.abi3.so` next to each other names both the shim and the
       real extension before a single CI cycle is spent on the wrong probe.
+
+398. **Reproducing a `py3-none-<platform>` wheel takes an explicit retag — setuptools'
+    `bdist_wheel` ignores `--python-tag` the moment `ext_modules` is non-empty (the
+    mediapipe case; see `build-mediapipe.yml`).** Gotchas 81/145/292 settle how to *read*
+    such a tag; this is the other half, producing one. mediapipe declares a single
+    `BazelExtension('//mediapipe/tasks/c:libmediapipe.so')` purely so `build_ext` shells
+    out to bazel, and the artifact it copies in is a ctypes-loaded C-API library —
+    `mediapipe/tasks/python/core/mediapipe_c_bindings.py` does
+    `ctypes.CDLL(resources.files('mediapipe.tasks.c') / 'libmediapipe.so')`, and no
+    `PyInit_*` exists anywhere (gotcha 33's shape) — so every wheel upstream publishes is
+    `py3-none-<platform>`. A plain `setup.py bdist_wheel` nonetheless emits
+    `cp312-cp312-linux_<arch>`: `bdist_wheel.get_tag()` only honours `--python-tag` while
+    `root_is_pure` holds, and any `ext_modules` entry clears it. Restore upstream's tag in
+    one command, **after** `auditwheel repair` (auditwheel picks its policy off the ABI
+    tag, so retagging first confuses it):
+    `python -m wheel tags --python-tag py3 --abi-tag none --remove wheelhouse/*.whl`,
+    which rewrites `WHEEL`, re-signs `RECORD` and renames the file in place.
+    - **The payoff is the matrix, and for a heavy C++ port it is the whole budget**: one
+      interpreter-agnostic artifact serves every interpreter, so the workflow builds the
+      C++ world once and carries no `python:` matrix at all — one multi-hour job instead
+      of four.
+    - **Prove the interpreter-independence rather than inferring it from upstream's tag.**
+      `unzip -l` the published wheel for a lone non-`.cpython-3XX` `.so`, and grep the
+      package for the `ctypes`/`cffi` loader that opens it. Retagging a pybind11 payload
+      this way ships a wheel that installs on interpreters it cannot load.
