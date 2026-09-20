@@ -42,8 +42,11 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
   `httplib2==0.13.1` on the ambient interpreter or the sync dies on `import httplib2`.
 - **443** — An upstream CMake arch block that `set(... CACHE ... FORCE)`s features OFF can
   run *after* `include(third_party)`, making the FORCE dead for that configure.
-- **445** — gclient ignores a `custom_deps` `None` for a `cipd` dep: delete the DEPS entry
-  instead, and add `use_siso=false` when the dropped package is siso.
+- **445** — gclient ignores a `custom_deps` `None` for a `cipd` dep: edit the DEPS entry
+  instead (424's audit finds them), and add `use_siso=false` when the dropped one is siso.
+- **451** — bazel 7.7.0/7.7.1 cannot bootstrap from source anywhere: their `MODULE.bazel`
+  reaches `bazel_features`, which reads the version-less bootstrap binary as newer than
+  bazel 8 and emits a `globals.bzl` re-exporting `macro()`. Bootstrap 7.5.0.
 
 ---
 
@@ -258,13 +261,16 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
 133. **bazel 7.x pins the same rules_python/rules_java across the whole minor series, so
     gotcha 47's bootstrap script is version-portable — and it belongs in its own cached
     job.** bazel 7.7.1's `MODULE.bazel` pins `rules_python` 0.33.2 and `rules_java`
-    7.6.5, byte-identical to 7.5.0's, so the riscv64 bootstrap recipe carries over by
-    changing one env var. Confirm with
+    7.6.5, byte-identical to 7.5.0's, so the *rules* half of the riscv64 bootstrap recipe
+    carries over by changing one env var. Confirm with
     `curl -sL https://raw.githubusercontent.com/bazelbuild/bazel/<ver>/MODULE.bazel | grep rules_` —
     cheaper than downloading the 250 MB dist archive. Put the bootstrap in a separate job
     keyed on the bazel version with `actions/cache` + `upload-artifact`: a warm cache
     turns a fresh bootstrap into a ~40 s restore, so every later iteration on the real
     build starts immediately instead of rebuilding bazel.
+    - **The same two `grep rules_` lines are not enough to clear a version, though** —
+      grep the *whole* `MODULE.bazel` diff. 7.7.0 and 7.7.1 keep those pins and still
+      cannot bootstrap at all, for an unrelated dependency bump; see gotcha 451.
 
 136. **Upstream builds its wheels in a vcpkg image: replace the image, keep the workflow
     (the pyogrio case; see `ci/pyogrio/manylinux_riscv64-gdal.Dockerfile`).** A project
@@ -762,10 +768,12 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       declares `Sleef_sinf1_u35purec` and never `Sleef_sinf1_u35`. Worth reporting upstream
       to SLEEF, but not something a wheel port should carry a patch for.
 
-445. **A `.gclient` `custom_deps` entry set to `None` removes a *git* dep and is silently
-    ignored for a `cipd` one, so the standard "null it out" trick does not keep a
-    riscv64-less CIPD package out of a depot_tools checkout — you have to delete the entry
-    from the checkout's `DEPS`.** In `gclient.py`, `_postprocess_deps` copies the DEPS dict
+445. **The companion to gotcha 424: once you know which CIPD packages have no riscv64
+    build, a `.gclient` `custom_deps` entry set to `None` is *not* how you get rid of them.
+    That removes a `git` dep and is silently ignored for a `cipd` one, so the package
+    survives into the sync anyway — edit the checkout's `DEPS`, either by appending
+    `and host_cpu != "riscv64"` to the entry's condition (424) or by deleting the entry
+    outright.** In `gclient.py`, `_postprocess_deps` copies the DEPS dict
     verbatim and only ever *adds* custom_deps whose value is truthy; the removal path for a
     git dep is `Dependency._OverrideUrl`, which asks `get_custom_deps` for the URL and skips
     the dep when it comes back `None`. `_deps_to_objects` builds a `CipdDependency`
@@ -774,7 +782,11 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
     sync proceeds normally for several minutes, and the package still turns up in the
     `cipd ensure` that ends the sync: `failed to resolve <pkg>/linux-riscv64 (line N): no
     such package`, one line per unresolvable package, then a bare `CalledProcessError`.
-    - **Delete the DEPS entries instead, before the sync, and raise if one is not found.**
+    - **Run 424's `cipd describe` audit first.** It costs two commands from an x86 host and
+      names the whole set, which is the difference between one fix and one CI round per
+      package. For a standalone ANGLE checkout the answer is the same list 424 already
+      records for V8 — `infra/rbe/client`, siso, and the luci `isolate`/`swarming` tools.
+    - **Rewrite the DEPS entries before the sync, and raise if one is not found.**
       The driver script already has the checkout on disk before it writes `.gclient`, so a
       `re.subn(rf"\n  '{re.escape(path)}': \{{\n.*?\n  \}},\n", "\n", text, flags=re.DOTALL)`
       per path is enough for Chromium-family DEPS formatting. Assert the count is exactly 1:
@@ -803,3 +815,38 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       the real DEPS, `exec` the result to confirm it still parses and count the deps and
       hooks, and diff the rendered `.gclient` and gn args for the untouched architectures to
       prove the port changed nothing for them.
+
+451. **bazel 7.7.0 and 7.7.1 cannot be bootstrapped from source on any architecture: they
+    are the first 7.x releases whose `MODULE.bazel` reaches `bazel_features`, and
+    `bazel_features` reads the version-less bootstrap binary as "newer than bazel 8" (the
+    ai-edge-litert case).** Gotcha 47's recipe dies in `//src:bazel_nojdk` analysis with
+    ```
+    ERROR: .../bazel_features~~version_extension~bazel_features_globals/globals.bzl:4:13:
+      name 'macro' is not defined
+    ERROR: error loading package 'third_party/grpc/bazel'
+    ```
+    The chain is short and entirely off-target checkable:
+    - 7.7.0 bumps `apple_support` 1.8.1 → 1.23.1 (7.5.0 through 7.6.1 all stay on 1.8.1),
+      and apple_support gained `bazel_dep(name = "bazel_features", ...)` in between — so
+      `bazel_features` enters bazel's own module graph for the first time. One line settles
+      it for any candidate version:
+      `curl -sL https://raw.githubusercontent.com/bazelbuild/bazel/<ver>/MODULE.bazel | grep apple_support`.
+    - `bazel_features`' `private/globals_repo.bzl` emits one `<name> = <name>,` line per
+      entry of `private/globals.bzl` whose minimum version is `<= native.bazel_version`,
+      and `private/parse.bzl` maps an **empty** version string to `999999.999999.999999`
+      ("a dev version, greater than anything"). The scratch bazel that
+      `scripts/bootstrap/compile.sh` builds first carries no embedded version label, so
+      every global qualifies — including `"macro": "8.0.0"` — and the 7.x binary evaluating
+      that file has no `macro` builtin. Line 4 of the generated file is always the `macro`
+      line, which is the quickest way to recognise the failure.
+    - **This is not a riscv64 problem** and not fixable with another `--override_module`
+      layer worth carrying: the failure is bazel bootstrapping bazel, so it reproduces on
+      x86_64. **Bootstrap 7.5.0**, what every bazel port in this repo already uses and what
+      the shared `bazel-7.5.0-manylinux_riscv64` cache (gotcha 440) is already warm for.
+    - **An upstream `.bazelversion` of 7.7.0 is usually not a constraint**, because we
+      install the bootstrapped binary directly instead of going through bazelisk, and
+      `.bazelversion` is bazelisk's file. Before overriding it, check the two things that
+      *are* enforced: a `versions.check(minimum_bazel_version = ..., maximum_bazel_version
+      = ...)` in `WORKSPACE` (gotcha 47), and whether the project is bzlmod at all — LiteRT
+      has no `MODULE.bazel` and sets `common --noenable_bzlmod`, so nothing in its build
+      ever reads a version gate.

@@ -189,6 +189,17 @@ The porting gotchas (431 of them) live in [`references/gotchas/`](gotchas/), spl
   `getauxval(AT_HWCAP)` check) compile out to scalar only by that omission — re-verify on every
   XNNPACK version bump, since fixing it upstream would make the ungated blocks go live (the
   mediapipe case).
+- **449** — A prebuilt riscv64 binary an upstream downloads for you can be built for a *vendor*
+  ISA — `file`/`e_machine 243` says riscv64, not *which* riscv64: openvino's bundled oneTBB is a
+  T-Head Xuantie build (`xtheadc` in `Tag_RISCV_arch`, 906+892 CUSTOM-0 `0x0B` instructions
+  against zero in the 17 libraries built locally), so the wheel runs only on T-Head cores and a
+  green run on a T-Head runner fleet does not prove a `manylinux_riscv64` wheel is portable.
+- **450** — A vendored native payload can be a *GraalVM Native Image* (`GraalVM CE …`,
+  `com.oracle.svm`, `.svm_heap` in `strings`), which moves the wall from "is there source?" to
+  "does the AOT toolchain target riscv64?": Native Image ships no riscv64 build from Oracle,
+  GraalVM CE or Mandrel, and `Platform.LINUX_RISCV64`/`ELFMachine.RISCV64` existing in graal's
+  source is a research LLVM-backend port, not shipping support — plus a published source drop
+  with zero build files is not a from-source path (the saxonche/SaxonC-HE case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -269,7 +280,9 @@ The porting gotchas (431 of them) live in [`references/gotchas/`](gotchas/), spl
 - **402** — A two-leg abi3 + free-threaded matrix expressed only through `include:` collapses
   into a single job, so the abi3 wheel is never built and nothing fails — make the leg a real
   matrix dimension (the primp/arro3-core case: two already-published packages are quietly
-  shipping only their free-threaded wheel).
+  shipping only their free-threaded wheel). Any include-only leg set does it, not just abi3
+  ones — grain's cp312/cp313/cp314 set collapsed to cp314, and 58 jobs repo-wide still carry
+  the shape.
 - **408** — A `setup.py` that reaches for `wheel.bdist_wheel` behind a `try/except ImportError`
   still gets its abi3 tag under modern setuptools — setuptools ships a `wheel.bdist_wheel`
   shim, so do not add `wheel` to `build-system.requires` to "fix" it.
@@ -412,10 +425,15 @@ The porting gotchas (431 of them) live in [`references/gotchas/`](gotchas/), spl
   `include(third_party)` already ran the matching `add_definitions()`, so the feature is
   compiled in and not linked — check the include line numbers and use the project's own
   early default switch instead.
-- **445** — A `.gclient` `custom_deps: None` drops a *git* dep and is silently ignored for a
-  `cipd` one, so a riscv64-less CIPD package survives into the `cipd ensure` that ends
-  `gclient sync` — delete the entry from the checkout's `DEPS` instead, and add
+- **445** — Companion to 424: a `.gclient` `custom_deps: None` drops a *git* dep and is
+  silently ignored for a `cipd` one, so a riscv64-less CIPD package survives into the
+  `cipd ensure` that ends `gclient sync` — edit the checkout's `DEPS` instead, and add
   `use_siso=false` to the gn args when siso is one of them.
+- **451** — bazel 7.7.0/7.7.1 cannot be bootstrapped from source on any architecture: they
+  are the first 7.x releases whose `MODULE.bazel` reaches `bazel_features`, which reads the
+  version-less bootstrap binary as newer than bazel 8 and generates a `globals.bzl`
+  re-exporting `macro()`. Bootstrap 7.5.0; an upstream `.bazelversion` is bazelisk's file,
+  not a gate.
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
@@ -488,6 +506,21 @@ The porting gotchas (431 of them) live in [`references/gotchas/`](gotchas/), spl
   only through `TARGET=`, so pass `TARGET=RISCV64_GENERIC` (the rv64gc baseline) as the twin of
   the `TARGET=ARMV8` the project already has — and first ask whether gotcha 401's Rocky
   `openblas` package would do.
+- **446** — The image's free-threaded interpreter directory is `/opt/python/cp3XX-cp3XXt`
+  (`<implementation tag>-<ABI tag>`), not `cp3XXt-cp3XXt`, so a hand-written per-interpreter
+  loop that doubles the `t` exits 127 — derive it as `${TAG%t}-${TAG}`, and confirm any
+  `/opt/python` path with a `grep` over the green workflows rather than a CI round.
+- **447** — riscv64 forces a clang-only codebase (V8) onto GCC, and its source incompatibilities
+  surface one translation unit per multi-hour build: take the fix from a later upstream release
+  rather than inventing one, kill the warning class wholesale with
+  `treat_warnings_as_errors=false`, sweep the rest of the bug class out of the arch-specific
+  sources off-target, and run `ninja -k` until the class is closed.
+- **448** — "Genuine upstream riscv64 support" can still mean "requires RVV 1.0 hardware": openvino
+  built for 12h18m, produced all four wheels, then died 2m12s into the test step with exit 132
+  (SIGILL) inside `ov.Core()` — its CPU plugin is the only library in the wheel whose
+  `Tag_RISCV_arch` carries `v1p0`, with 64,554 vector instructions against zero in the other 19,
+  and upstream's own riscv64 CI only ever tests under `qemu -cpu rv64,v=true,vext_spec=v1.0`, so
+  read the artifact's ELF attributes rather than trusting the upstream CI's existence.
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 

@@ -71,6 +71,15 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **428** — A project on the *deprecated* `find_package(PythonLibs REQUIRED)` has no
   `Development.Module` way out of gotcha 374's static-libpython wall — and satisfying it
   with manylinux's non-PIC `libpython3.XX.a` only moves the failure to the final link.
+- **446** — The image's free-threaded interpreter directory is `/opt/python/cp3XX-cp3XXt`, not
+  `cp3XXt-cp3XXt`; a hand-written loop that doubles the `t` dies with exit 127, possibly on the
+  last line of an hour-long build.
+- **447** — A codebase whose upstream CI only ever compiles it with clang breaks under GCC one
+  translation unit at a time; look for the fix in a later upstream release, sweep the rest of
+  the bug class off-target, and batch discovery with `ninja -k`.
+- **448** — "Genuine upstream riscv64 support" can still mean "requires RVV 1.0 hardware": a
+  12-hour build can go green, produce every wheel, and die two minutes later in the smoke test
+  with exit 132 — and the wheel's own ELF `Tag_RISCV_arch` proves it without another runner slot.
 
 ---
 
@@ -1229,3 +1238,153 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       whole transaction on one unmatched argument, so a speculative package name is a build
       failure, not insurance. Install what the build needs and let the dependency solver
       pull the runtimes.
+
+446. **The manylinux image's free-threaded interpreter directory is
+     `/opt/python/cp3XX-cp3XXt`, not `/opt/python/cp3XXt-cp3XXt` — the directory is
+     `<implementation tag>-<ABI tag>`, and only the ABI tag carries the `t`.** A hand-written
+     per-interpreter loop that appends the free-threaded tag to itself (`cp314t-cp314t`) names
+     a path that does not exist, `"$pybin/bin/pip"` is "No such file or directory", and `set -e`
+     ends the step with **exit 127**. This is a one-line typo with an expensive failure mode:
+     in comfy-angle's round 4 (run 35496806279) it landed on the *last* line of the container
+     script, after a 64-minute ANGLE compile had already produced the wheel and the smoke test
+     had passed on cp312/cp313/cp314 — the log's final error says nothing about the build that
+     worked, so read *upwards* from an exit 127 before concluding the port regressed.
+     - **Derive the directory, don't write it out.** The rule is `${TAG%t}-${TAG}`, which
+       `build-onnxruntime.yml`, `build-labmaze.yml` and `build-vtk.yml` all encode as
+       `case "$PYTHON_TAG" in *t) python_dir="/opt/python/${PYTHON_TAG%t}-${PYTHON_TAG}/bin" ;;
+       *) python_dir="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin" ;; esac`. A literal list is
+       fine only if every free-threaded entry is spelled `cp3XX-cp3XXt` (as
+       `build-mujoco.yml`'s matrix and `build-cryptography.yml`'s do).
+     - **Verify a `/opt/python` path off-target instead of in CI.** No container is needed:
+       `grep -rn 'opt/python' .github/workflows/` shows how every green workflow on the same
+       `MANYLINUX_RISCV64_IMAGE` spells it, and `docs/packages/<pkg>.yaml` listing a published
+       `…-cp314-cp314t-manylinux_2_39_riscv64.whl` (mujoco has two) is proof that that exact
+       directory exists on that exact image. That pair of greps is seconds against an hour.
+     - **A `py3-none` wheel still wants the free-threaded leg in the smoke test.** The
+       interpreter list here is not a build matrix (gotcha 145): one platform wheel is loaded
+       on every interpreter we ship for, so a wrong path in the list fails a job that has
+       nothing else left to do.
+
+447. **When riscv64 forces a clang-only codebase onto GCC, expect a long tail of source
+     incompatibilities, discovered one translation unit per build — and budget for the fact
+     that each discovery costs a *whole build*.** V8 compiles its RISC-V port with clang and
+     nothing else; a riscv64 host has no prebuilt Chromium clang to run, so stpyv8's port sets
+     `is_clang=false` and gets GCC. The first run to reach the compiler spent **9h17m in ninja,
+     got 1146 of 2117 targets in** — as far as the first translation unit that pulls in
+     `src/codegen/macro-assembler.h` — and stopped on
+     `src/codegen/riscv/macro-assembler-riscv.h:389:13: error: explicit specialization in
+     non-namespace scope 'class v8::internal::MacroAssembler'`. `MacroAssembler::push_helper`
+     ends a variadic recursion with a one-register explicit specialization written *inside* the
+     class body; the standard allows an explicit specialization only at namespace scope, clang
+     takes the in-class one as an extension, GCC refuses it. Nothing about it is riscv64-specific
+     — it is simply the first time that header met another compiler.
+     - **Look for the fix in a later upstream release before writing your own.** Release
+       branches are one `curl` each: `chromium.googlesource.com/…/+/refs/branch-heads/<X.Y>/
+       <path>?format=TEXT` (base64), or `raw.githubusercontent.com/<org>/<repo>/<tag>/<path>`,
+       so bisecting "when was this fixed" costs seconds. V8 13.2–13.7 still carried it and 13.8
+       replaced both specializations with an empty zero-register overload; backporting *that*
+       shape byte for byte beats inventing a fix, and the rewritten pinned header can be
+       diffed against the later release's to prove the backport is exact.
+     - **Separate the two failure classes — only one of them is worth patching.** Warnings are
+       an unbounded tail (V8 is warning-clean under clang only: `config("chromium_code")` adds
+       `-Werror` for any compiler while `config("no_chromium_code")` restricts it to clang,
+       "GCC may emit unsuppressible warnings"), so kill the whole class with the project's own
+       knob — for gn, `treat_warnings_as_errors=false` — instead of one cast per day-long
+       cycle. Hard errors are the only ones that need a source patch. `grep -c Werror` over the
+       failed log tells you which regime you are in.
+     - **Sweep the rest of the bug class off-target, for the price of a `curl`.** Pull just the
+       arch-specific source directories (gitiles serves any directory as
+       `+archive/refs/tags/<tag>/<dir>.tar.gz`) and grep for the construct. Here
+       `grep -rn 'template <>'` over all nine riscv directories found 62 hits but only **two**
+       indented ones — a `template <>` at column 0 is namespace scope and perfectly legal, and
+       only the in-class ones are the bug — which is what makes it defensible to re-enter a
+       ten-hour build after fixing just them.
+     - **Reproduce the diagnostic in ten lines rather than ten hours.** A parse error needs no
+       cross-toolchain and no target: strip the construct to a self-contained file and compile
+       it with the host's `g++` *and* `clang++`. That confirms the divergence is real, that the
+       backported form satisfies both, and — by printing the offsets both forms compute — that
+       the rewrite is semantics-preserving.
+     - **Do not assume a sibling port's blockers are yours.** The mini-racer V8 build hit two
+       further GCC stoppers (`unicode.h`'s `WriteLeadingAscii` specializations, and
+       `third_party/highway` falling back to `HWY_SCALAR` so `json-stringifier.cc` asks for a
+       `FixedTag<T,16>` that does not exist). Both postdate stpyv8's pinned V8: that
+       `unicode.h` has no `WriteLeadingAscii` at all and highway is not referenced anywhere in
+       its `BUILD.gn`. Check the *pinned revision* before porting a sibling's patch — and note
+       the converse, that mini-racer never saw *this* bug because its newer V8 already had the
+       13.8 fix.
+     - **While the class is open, make one build report everything: `ninja -k <n>`.** ninja
+       stops at the first failure by default, so a 20-hour build yields exactly one diagnostic.
+       `-k 1000` costs nothing on a green build (it only changes behaviour after a failure) and
+       converts N sequential day-long discoveries into one. mini-racer's `-k 1000` run collected
+       six failures at once; drop the flag again once the build is green, or a genuine error
+       turns a fast failure into a full-length one.
+     - **Read the log before concluding it is a wall.** This one was not gotcha 421's resource
+       ceiling: the 48h timeout was under a fifth spent, and the whole 168 KB log has no
+       `Killed`, no `out of memory`, no `internal compiler error`, no `No space left`, no signal
+       — and exactly **one** `FAILED:` edge carrying a compiler diagnostic. One `FAILED` with a
+       diagnostic is a bug to fix; a wall looks nothing like it.
+
+448. **"Genuine upstream riscv64 support" can still mean "requires RVV 1.0 hardware" — and the
+    wheel's own ELF attributes prove it without spending a second runner slot (the openvino
+    case; PR #2122, run 35480766550).** The shape is the expensive one: `timeout-minutes: 1440`,
+    the `Build wheels` step **succeeded** after 12h18m, all four wheels (cp312/cp313/cp314/cp314t)
+    were produced and uploaded, and the job then died **2m12s** into `Test wheels` with
+    `##[error]Process completed with exit code 132`. 132 is 128+4, i.e. **SIGILL**, and the line
+    above it names the instruction fault outright: `riscv64-build-and-test.sh: line 32: 41
+    Illegal instruction (core dumped)`. Inside the smoke script the boundary is exact —
+    `print(ov.get_version())` printed `2026.3.1-1-759c5a6ab8c`, and `print(core.available_devices)`
+    never printed — so it died in `ov.Core()`/device enumeration, the moment the CPU plugin is
+    `dlopen`ed and constructed. No resource wall was involved: zero `Killed`/`out of memory`/
+    `No space left`/ICE anywhere, and 12h24m against a 24h budget is not a timeout either.
+    - **The proof is in the artifact, not the runner — and it is a 30-second check.** Parse each
+      `.so`'s `.riscv.attributes` section and read `Tag_RISCV_arch`. Of the 20 libraries in the
+      wheel, exactly one carries vector:
+      `libopenvino_riscv_cpu_plugin.so` →
+      `rv64i2p1_m2p0_a2p1_f2p2_d2p2_c2p0_**v1p0**_zicsr2p0_zifencei2p0_zmmul1p0_zve32f1p0_zve32x1p0_zve64d1p0_zve64f1p0_zve64x1p0_**zvl128b**1p0_zvl32b1p0_zvl64b1p0`,
+      everything else plain `rv64gc`. Confirm it is real content and not an attribute artifact by
+      counting OP-V instructions (32-bit, opcode `0x57`, skipping RVC halfwords): **64,554** in the
+      plugin, **34,526** of them `vsetvl*` — against **exactly zero** across the other 19
+      libraries' 52 MiB of `.text`, which is the control that says the scan has no false
+      positives. The RVV is confined to a contiguous ~10.7 MiB region of the plugin's 20.6 MiB
+      `.text` (44 of 83 256-KiB buckets, all adjacent), i.e. the `riscv64/` kernel/emitter
+      objects in link order — not whole-library `-march`.
+    - **Upstream's gate is a runtime probe, and the probe is what dies.**
+      `nodes/kernels/riscv64/cpu_isa_traits.cpp` has
+      `case gv: return mayiuse(g) && cpu.hasExtension(RISCVExtension::V) && can_compile_rvv100();`,
+      and `can_compile_rvv100()`/`can_compile_zvfh()` deliberately execute the instruction under a
+      SIGILL handler. Both are visible in the binary as the only RVV *outside* the kernel region:
+      two isolated `vsetvli`+`vmv.v.i` pairs at `.text+0x10b92` (`e8, mf2, ta, ma`) and
+      `.text+0x10d7a` (`e64, m1, ta, ma`), each two instructions long with no loop and no memory
+      operand — a shape auto-vectorisation never produces. `mf2` does not exist in RVV 0.7.1 and
+      the `vsetvli` encoding differs between 0.7.1 and 1.0, so on this fleet the probe traps
+      exactly as gotcha 272 describes (HWCAP advertises V; the first RVV-1.0 `vsetvli` is
+      illegal) — and the process **core-dumps instead of the probe returning false**, so the
+      recovery does not hold here.
+    - **Static evidence cannot separate the two candidate proximate causes — say so rather than
+      picking one.** Either the probe's SIGILL recovery fails, or a static initializer inside one
+      of the RVV-compiled translation units runs at `dlopen` with no `mayiuse` in front of it
+      (a guard on the *call sites* does not cover a TU's own `.init_array`). Both land at the same
+      instant in the same log line. Separating them needs a backtrace, not more reading — which
+      is cheap, because the artifact stays downloadable for 90 days: re-run only the test leg
+      against the **existing** wheels (`LD_DEBUG=libs` to see whether the plugin finished its
+      init, or `gdb -batch -ex run -ex bt`) instead of rebuilding for 12 hours.
+    - **Why the triage missed it, and the rule that generalises.** Upstream's `linux_riscv.yml`
+      runs `ov_cpu_func_tests` only under `qemu-riscv64 -cpu rv64,v=true,vext_spec=v1.0`, and
+      `docs/dev/build_riscv64.md`'s hardware list mixes RVV 0.7.1 boards (Lichee Pi 4A) with RVV
+      1.0 ones (BPI-F3, Orange Pi RV2). So "upstream carries a real riscv64 CPU plugin with RVV
+      JIT" is evidence about an emulator with V forced on, not about baseline hardware — and
+      gotcha 279's rule is not zlib-ng-specific: **a QEMU-validated RVV claim is untested for
+      this fleet, whoever makes it.** Price the RVV question at triage, from the artifact of the
+      first build if need be, rather than from the upstream CI's existence.
+    - **There is no off switch, unlike gotchas 279 and 71.** `src/plugins/intel_cpu/CMakeLists.txt`
+      adds `src/{emitters/plugin,emitters/snippets,nodes/kernels,nodes/executors}/riscv64/*` and
+      `XBYAK_RISCV_V=1` whenever `RISCV64`, and `intel_cpu/thirdparty/CMakeLists.txt` sets
+      `XBYAK_RISCV_V ON` plus `DNNL_TARGET_ARCH=RV64` unconditionally. No `option()` or
+      `cmake_dependent_option()` governs any of it, and `-march=rv64gcv` appears nowhere in the
+      build (only in `clang_tidy.cmake`), so there is no `-DWITH_RVV=OFF` to pass — turning RVV
+      off is a real patch against an upstream scalar-fallback path that upstream's own CI never
+      exercises without `v=true`.
+    - **And a working RVV build still could not ship.** A `manylinux_riscv64` wheel whose CPU
+      plugin needs RVV 1.0 SIGILLs for every user on baseline rv64gc — gotcha 139's exact
+      prohibition. That makes "make it build" and "make it shippable" two different questions,
+      and it is what turns this from a bug to fix into a decision to escalate.
