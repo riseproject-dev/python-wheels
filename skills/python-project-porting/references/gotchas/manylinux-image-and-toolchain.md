@@ -71,6 +71,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **428** — A project on the *deprecated* `find_package(PythonLibs REQUIRED)` has no
   `Development.Module` way out of gotcha 374's static-libpython wall — and satisfying it
   with manylinux's non-PIC `libpython3.XX.a` only moves the failure to the final link.
+- **446** — The image's free-threaded interpreter directory is `/opt/python/cp3XX-cp3XXt`, not
+  `cp3XXt-cp3XXt`; a hand-written loop that doubles the `t` dies with exit 127, possibly on the
+  last line of an hour-long build.
 
 ---
 
@@ -1229,3 +1232,29 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       whole transaction on one unmatched argument, so a speculative package name is a build
       failure, not insurance. Install what the build needs and let the dependency solver
       pull the runtimes.
+
+446. **The manylinux image's free-threaded interpreter directory is
+     `/opt/python/cp3XX-cp3XXt`, not `/opt/python/cp3XXt-cp3XXt` — the directory is
+     `<implementation tag>-<ABI tag>`, and only the ABI tag carries the `t`.** A hand-written
+     per-interpreter loop that appends the free-threaded tag to itself (`cp314t-cp314t`) names
+     a path that does not exist, `"$pybin/bin/pip"` is "No such file or directory", and `set -e`
+     ends the step with **exit 127**. This is a one-line typo with an expensive failure mode:
+     in comfy-angle's round 4 (run 35496806279) it landed on the *last* line of the container
+     script, after a 64-minute ANGLE compile had already produced the wheel and the smoke test
+     had passed on cp312/cp313/cp314 — the log's final error says nothing about the build that
+     worked, so read *upwards* from an exit 127 before concluding the port regressed.
+     - **Derive the directory, don't write it out.** The rule is `${TAG%t}-${TAG}`, which
+       `build-onnxruntime.yml`, `build-labmaze.yml` and `build-vtk.yml` all encode as
+       `case "$PYTHON_TAG" in *t) python_dir="/opt/python/${PYTHON_TAG%t}-${PYTHON_TAG}/bin" ;;
+       *) python_dir="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin" ;; esac`. A literal list is
+       fine only if every free-threaded entry is spelled `cp3XX-cp3XXt` (as
+       `build-mujoco.yml`'s matrix and `build-cryptography.yml`'s do).
+     - **Verify a `/opt/python` path off-target instead of in CI.** No container is needed:
+       `grep -rn 'opt/python' .github/workflows/` shows how every green workflow on the same
+       `MANYLINUX_RISCV64_IMAGE` spells it, and `docs/packages/<pkg>.yaml` listing a published
+       `…-cp314-cp314t-manylinux_2_39_riscv64.whl` (mujoco has two) is proof that that exact
+       directory exists on that exact image. That pair of greps is seconds against an hour.
+     - **A `py3-none` wheel still wants the free-threaded leg in the smoke test.** The
+       interpreter list here is not a build matrix (gotcha 145): one platform wheel is loaded
+       on every interpreter we ship for, so a wrong path in the list fails a job that has
+       nothing else left to do.

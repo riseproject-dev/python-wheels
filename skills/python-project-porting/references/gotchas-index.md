@@ -488,6 +488,10 @@ The porting gotchas (431 of them) live in [`references/gotchas/`](gotchas/), spl
   only through `TARGET=`, so pass `TARGET=RISCV64_GENERIC` (the rv64gc baseline) as the twin of
   the `TARGET=ARMV8` the project already has — and first ask whether gotcha 401's Rocky
   `openblas` package would do.
+- **446** — The image's free-threaded interpreter directory is `/opt/python/cp3XX-cp3XXt`
+  (`<implementation tag>-<ABI tag>`), not `cp3XXt-cp3XXt`, so a hand-written per-interpreter
+  loop that doubles the `t` exits 127 — derive it as `${TAG%t}-${TAG}`, and confirm any
+  `/opt/python` path with a `grep` over the green workflows rather than a CI round.
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 

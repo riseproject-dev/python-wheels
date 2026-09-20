@@ -2317,7 +2317,7 @@ packages:
     a gclient sync plus a full ANGLE build does not fit. Validation was static - patch applies with
     patch --dry-run --fuzz=0, py_compile of both patched scripts, a unit test of the new
     stage_licenses() against a synthetic checkout (including non-UTF8 licence bytes), bash -n of the
-    container script and compile() of both heredocs, and pending_versions.py resolving 0.1.1. PR #2123 open; three CI rounds so far, every one inside gclient sync before anything compiled.
+    container script and compile() of both heredocs, and pending_versions.py resolving 0.1.1. PR #2123 open; four CI rounds so far - the first three never got out of gclient sync, the fourth built everything.
     Round 1 (~2 min): vpython3 could not build its venv, since infra/python/wheels publishes no
     linux-riscv64 crcmod/lxml (gotcha 423) - fixed by setting VPYTHON_BYPASS for riscv64 hosts in
     build_linux.py. Round 2 (~4 min): the bypass worked and moved the wall one layer down - with
@@ -2352,12 +2352,26 @@ packages:
     third_party/depot_tools at the same revision the driver clones, so gotcha 427''s gsutil
     4.68/six split does not apply (both are 5.35, fine on 3.12), and the Linux hooks that follow
     (clang, llvm_objdump, rust, lastchange, configure_siso) import nothing outside the stdlib and
-    depot_tools. Still not rehearsed end to end locally (no docker daemon, 4.5 GB free). Left to
-    watch: those hooks (all 23 use plain python3, so the vpython class of failure is behind us,
-    and update.py maps every Linux host to Linux_x64 so the x86-only prebuilts still download),
-    gn gen with the prefixed GCC toolchain, and whether the statically linked
-    Vulkan-Loader falls back to its C unknown-ext-chain path on riscv64 instead of wanting
-    per-arch assembly.'
+    depot_tools. Still not rehearsed end to end locally (no docker daemon, 4.5 GB free). Round 4
+    (~64 min) closed every open question at once: gclient sync completed, all 23 hooks ran, gn gen
+    with the prefixed GCC toolchain worked, and ninja built all 493 targets - including
+    third_party/vulkan-loader/src/libvulkan.a, so the statically linked Vulkan-Loader does take its
+    portable C unknown-ext-chain path on riscv64 and needs no per-arch assembly. Both of gotcha
+    438''s watch items are therefore closed. libEGL.so and libGLESv2.so linked, scripts/build.py
+    produced the 3.4 MB comfy_angle-0.1.1-py3-none-manylinux_2_39_riscv64.whl with all four
+    expected members, and the smoke test loaded both libraries and printed the real EGL client
+    extension string (EGL_ANGLE_platform_angle_vulkan among them) on cp312, cp313 and cp314; the
+    gpl_sources job passed in parallel. The job then failed on the very last line of the container
+    script with exit 127, purely because the smoke-test loop spelled the free-threaded interpreter
+    /opt/python/cp314t-cp314t while manylinux names that directory cp314-cp314t, so pip was not
+    there and set -e took the step down after the whole build had already succeeded (new gotcha
+    446; the only compile diagnostics in the log are warnings, none of them riscv64-specific).
+    Round 5 changes that one path and nothing else. The fix needed no CI to validate:
+    build-mujoco.yml drives the same manylinux_2_39_riscv64 image with /opt/python/cp314-cp314t and
+    docs/packages/mujoco.yaml lists published cp314-cp314t riscv64 wheels, while
+    build-onnxruntime.yml, build-labmaze.yml and build-vtk.yml all derive the directory as
+    ${TAG%t}-${TAG}. Barring a free-threading-specific surprise from loading a py3-none ctypes
+    wrapper, round 5 should be green and publishable.'
 - pkg: solders
   version: 0.29.0
   home: https://github.com/kevinheavey/solders
