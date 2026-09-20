@@ -176,6 +176,13 @@ The porting gotchas (428 of them) live in [`references/gotchas/`](gotchas/), spl
   `aarch64` branch works only because the dep itself ships an ARM SIMD shim — a mandatory dep
   with no off switch and no scalar path (gotcha 366) is the verdict, and the same branch's
   configure failure reproduces on any x86 host (the Open3D case).
+- **438** — A "redistributable `<vendor binary>`" distribution can repack a vendor blob on some OSes
+  and build genuinely from source on the one a port needs, so apply gotcha 35/157/431 per OS by
+  reading the build scripts rather than the download script; includes the minutes-long check that
+  depot_tools/gn/CIPD already support riscv64 (302-vs-404 probes against chrome-infra-packages,
+  `detect_host_arch.py`, `gcc_toolchain("riscv64")`) and the only two CIPD packages missing for
+  `linux-riscv64` — siso and reclient — which `.gclient` `custom_deps` nulls out (the
+  comfy-angle/ANGLE case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
