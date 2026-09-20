@@ -194,6 +194,12 @@ The porting gotchas (431 of them) live in [`references/gotchas/`](gotchas/), spl
   T-Head Xuantie build (`xtheadc` in `Tag_RISCV_arch`, 906+892 CUSTOM-0 `0x0B` instructions
   against zero in the 17 libraries built locally), so the wheel runs only on T-Head cores and a
   green run on a T-Head runner fleet does not prove a `manylinux_riscv64` wheel is portable.
+- **450** — A vendored native payload can be a *GraalVM Native Image* (`GraalVM CE …`,
+  `com.oracle.svm`, `.svm_heap` in `strings`), which moves the wall from "is there source?" to
+  "does the AOT toolchain target riscv64?": Native Image ships no riscv64 build from Oracle,
+  GraalVM CE or Mandrel, and `Platform.LINUX_RISCV64`/`ELFMachine.RISCV64` existing in graal's
+  source is a research LLVM-backend port, not shipping support — plus a published source drop
+  with zero build files is not a from-source path (the saxonche/SaxonC-HE case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

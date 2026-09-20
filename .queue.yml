@@ -2439,9 +2439,61 @@ packages:
   version: 13.0.0
   home: https://www.saxonica.com/saxon-c/index.xml
   repo: https://www.saxonica.com/saxon-c/index.xml
-  status: queued
+  status: parked
   pr: null
-  notes: '14 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp39); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Not feasible: the 87% of the wheel that matters is a GraalVM Native Image, and
+    GraalVM Native Image ships no riscv64 build from anyone (new gotcha 450,
+    feasibility-and-triage.md; same vendored-payload family as gotcha 35/157/183/376/431).
+    Verified against the real artifacts, not inferred. saxonche 13.0.0 publishes 35 wheels,
+    all genuinely cpXY-cpXY (a real compiled extension, so gotcha 27 does not apply) and has
+    never shipped an sdist on any of its 14 releases, so per gotcha 431 the wheel is the only
+    evidence: downloading and unzipping
+    saxonche-13.0.0-cp312-cp312-manylinux_2_24_aarch64.whl (41.7 MB) gives three native
+    artifacts -- saxonche.cpython-312-aarch64-linux-gnu.so (7.8 MB, a genuine Cython
+    extension built from the saxonc/saxonc.cpp the wheel also ships),
+    saxonche.libs/libsaxonc-he-*.so.13.0.0 (617 KB, the C++ API glue) and
+    saxonche.libs/libsaxonc-core-he-*.so.13.0.0 at 109 MB (87% of the wheel). `strings -a` on
+    that last one reports ''GraalVM CE 25.0.1+8.1 (serial gc)'', com/oracle/svm/core/... and a
+    .svm_heap section: it is the entire SaxonJ Java engine AOT-compiled by GraalVM Native
+    Image, which is exactly what Saxonica''s own release notes say (''SaxonC 13 is built from
+    SaxonJ 13 using GraalVM Native Image (version 25.0.1)''). `readelf -d` shows the Cython
+    extension carries RPATH $ORIGIN/saxonche.libs and a hard NEEDED on
+    libsaxonc-core-he-*.so.13.0.0 -- not a dlopen -- so with no riscv64 core there is no
+    importable wheel at all, stricter than gotcha 157''s claude-agent-sdk (whose sdist at
+    least imports). Licence/source are NOT the blocker here, which is why this is not simply
+    the tableauhyperapi/gotcha 376 shape: SaxonC-HE is MPL-2.0 and Saxonica does publish
+    SaxonC-HE source on the Saxon-HE GitHub releases -- but the zip that exists
+    (SaxonCHE-source-12-9-0.zip, 242 KB, 91 files: the C/C++ glue under src/main/c/, the
+    net.sf.saxon.option.cpp Java bridge under src/main/java/, the Cython python/saxonc/
+    saxonc.pyx) contains zero build files (no Makefile/CMakeLists/pom.xml/setup.py, no
+    native-image configuration of any kind) and its own README calls it ''the source files
+    used to build SaxonC-HE'', not a build; and for the queued version there is no such drop
+    at all -- the SaxonHE13-0 release carries only SaxonHE13-0J.zip and saxon13-0source.zip
+    (both SaxonJ), and downloads.saxonica.com/SaxonC/HE/13/SaxonCHE-source-13-0-0.zip is 404.
+    The toolchain is the wall, confirmed on three independent distributions of GraalVM Native
+    Image: download.oracle.com/graalvm/25/latest/graalvm-jdk-25_linux-{x64,aarch64}_bin.tar.gz
+    -> 200 but linux-riscv64 -> 404; GraalVM CE jdk-25.0.1 (the exact version this wheel was
+    built with) publishes graalvm-community-jdk-25.0.1_linux-{x64,aarch64}_bin.tar.gz but no
+    linux-riscv64 -> 404; Mandrel (Red Hat''s native-image-only distribution)
+    mandrel-java25-linux-{amd64,aarch64}-25.0.1.0-Final.tar.gz -> 200, riscv64 -> 404. Saxonica''s
+    own artifact table agrees one layer up: downloads.saxonica.com/SaxonC/HE/13/ serves
+    SaxonCHE-linux-x86_64-13-0-0.zip and SaxonCHE-linux-arm64-13-0-0.zip (200) and 404s every
+    riscv64 spelling. The one thing that looks like a green light was checked and is not one:
+    Platform.LINUX_RISCV64 has been a Native Image leaf platform since 22.2 and oracle/graal
+    master does carry ELFMachine.RISCV64 with a full ELFRISCV64Relocation table (verified by
+    reading both files), but riscv64 is reached only through the LLVM backend, whose own doc
+    states it ''is not included by default as part of Native Image'' (you build GraalVM from
+    source with `mx --dynamicimports /substratevm build` and pass --tool:llvm-backend), and
+    the riscv64 port behind the 2023 GraalVM blog post was a GraalVM dev build. So porting
+    this would mean bootstrapping a riscv64 GraalVM from source with an unshipped experimental
+    backend and then reinventing a native-image build recipe (entry points, reflection and
+    resource config) Saxonica has never published, for a version whose SaxonC source is not
+    published either -- the opposite of goal 2 (mirror upstream''s own CI, narrowed to
+    riscv64). Revisit if GraalVM/Mandrel ever ship a riscv64 native-image distribution AND
+    Saxonica publishes a SaxonC build. Note saxonche/saxoncpe/saxoncee are one engine behind
+    three licence tiers, so the same verdict applies to the saxoncee and saxoncpe queue
+    entries (PE/EE additionally have no published source and need a paid licence key). No
+    worktree/branch/PR created -- this was settled before any code was written.'
 - pkg: tableauhyperapi
   version: 0.0.26359
   home: https://tableau.github.io/hyper-db

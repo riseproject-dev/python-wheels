@@ -114,6 +114,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **449** — A prebuilt riscv64 binary an upstream downloads for you can be built for a *vendor*
   ISA: `file`/`e_machine 243` says it is riscv64, not *which* riscv64 — read `Tag_RISCV_arch`
   and count CUSTOM-opcode instructions too (the openvino/oneTBB T-Head case).
+- **450** — A vendored native payload can be a *GraalVM Native Image* (AOT-compiled Java), which
+  moves the wall from "is there source?" to "does the AOT toolchain target riscv64?" — and an
+  arch enum in the toolchain's own code is not shipping support (the saxonche/SaxonC-HE case).
 
 ---
 
@@ -2681,3 +2684,76 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       regex `rv(32|64)[0-9a-z_p]+` out of `.riscv.attributes`, and walk `.text` counting opcodes
       (skip RVC halfwords — low two bits `!= 0b11`). Do it at triage on every prebuilt the build
       downloads, not after a 12-hour build has already spent the runner slot.
+
+450. **A vendored native payload can be a *GraalVM Native Image*, which moves the wall from
+    "is there source?" to "does the AOT toolchain target riscv64?" (the saxonche/SaxonC-HE
+    case).** Gotchas 35/157/431 triage a vendored blob by hunting for its source or its
+    vendor's artifact index; gotcha 376 adds "a permissive `License:` says nothing about the
+    payload". saxonche is the shape those miss, because it is neither closed-source nor
+    portable: it is MPL-2.0 Java, published, that only exists as a native library because
+    Saxonica AOT-compiles it with GraalVM Native Image — and Native Image itself is what has no
+    riscv64.
+    - **The tell is three `strings` hits in the big `.so`, and it takes seconds.**
+      saxonche 13.0.0 ships 35 wheels, all genuinely `cpXY-cpXY` (so gotcha 27's ABI-tag rule
+      waves it through) and ~41 MB each, and has **never published an sdist** on any of its 14
+      releases, so per gotcha 431 the wheel is the only evidence. `unzip -l` sorted by size
+      splits it cleanly: a 7.8 MB `saxonche.cpython-312-<arch>-linux-gnu.so` (a real Cython
+      extension, built from the `saxonc/saxonc.cpp` the wheel also ships), a 617 KB
+      `saxonche.libs/libsaxonc-he-*.so.13.0.0` (the C++ API glue) — and
+      `saxonche.libs/libsaxonc-core-he-*.so.13.0.0` at **109 MB, 87% of the wheel**.
+      `strings -a` that one and it says `GraalVM CE 25.0.1+8.1 (serial gc)`,
+      `com/oracle/svm/core/…` and `.svm_heap`: it is the whole SaxonJ engine AOT-compiled, not
+      hand-written C++. Upstream's release notes confirm it in as many words ("SaxonC 13 is
+      built from SaxonJ 13 using GraalVM Native Image (version 25.0.1)"). Add
+      `GraalVM`/`svm_heap`/`com.oracle.svm` to the `strings` vocabulary beside gotcha 431's
+      `/.conan/data/…` builder paths.
+    - **`readelf -d` decides whether the missing payload is fatal or merely degrading.** Here
+      the extension carries `RPATH $ORIGIN/saxonche.libs` and a hard
+      `NEEDED libsaxonc-core-he-*.so.13.0.0`, so with no core there is no `import` at all —
+      stricter than gotcha 157's claude-agent-sdk, whose sdist still imports and only fails per
+      call. Do this before reasoning about runtime behaviour; a `NEEDED` edge ends the enquiry
+      that a `dlopen` would only start.
+    - **Published source can still be no build.** The Saxon-HE GitHub *releases* do carry
+      SaxonC-HE source zips (`SaxonCHE-source-12-9-0.zip`, 242 KB, 91 files: the C/C++ glue
+      under `src/main/c/`, the `net.sf.saxon.option.cpp` Java bridge under `src/main/java/`,
+      and the Cython `python/saxonc/saxonc.pyx`) — and **zero build files**: no
+      Makefile/CMakeLists/pom.xml/setup.py and no native-image configuration at all (no
+      reflect-config, no `native-image.properties`). Its own README calls it "the source files
+      used to build SaxonC-HE", which is not the same claim. Worse for the version actually
+      queued: the `SaxonHE13-0` release carries only `SaxonHE13-0J.zip` and `saxon13-0source.zip`
+      (both SaxonJ), and `downloads.saxonica.com/SaxonC/HE/13/SaxonCHE-source-13-0-0.zip` is a
+      404. `unzip -l <src>.zip | grep -icE 'makefile|cmake|pom\.xml|setup\.py|\.json'` returning
+      0 is the check — run it before concluding a source drop gives you a from-source path.
+    - **Then ask the AOT toolchain's artifact index — three HEAD requests, nothing downloaded.**
+      `download.oracle.com/graalvm/25/latest/graalvm-jdk-25_linux-{x64,aarch64}_bin.tar.gz` → 200,
+      `linux-riscv64` → **404**; GraalVM CE
+      (`graalvm-community-jdk-25.0.1_linux-{x64,aarch64}_bin.tar.gz`) → 200, `linux-riscv64` →
+      **404**; and Mandrel, Red Hat's native-image-only distribution
+      (`mandrel-java25-linux-{amd64,aarch64}-25.0.1.0-Final.tar.gz`) → 200, `riscv64` → **404**.
+      Native Image's distribution list belongs in the collection beside `nodejs.org/dist`,
+      NVIDIA's redist index, conda `repodata.json` and npm `optionalDependencies`. The vendor's
+      own table says the same thing one layer up: `downloads.saxonica.com/SaxonC/HE/13/` answers
+      200 for `SaxonCHE-linux-x86_64-13-0-0.zip` and `SaxonCHE-linux-arm64-13-0-0.zip`, 404 for
+      every riscv64 spelling.
+    - **An arch enum inside the toolchain is not shipping support for that arch.** This one is a
+      genuine trap: `Platform.LINUX_RISCV64` has been a Native Image leaf platform since 22.2,
+      and `oracle/graal` master really does carry `ELFMachine.RISCV64` with a full
+      `ELFRISCV64Relocation` table — searching for "GraalVM riscv64" turns up a 2023 GraalVM blog
+      post announcing it works. Read *how*: riscv64 is reached through the **LLVM backend**, not
+      the Graal compiler, and that backend's own doc says it "is not included by default as part
+      of Native Image" — you build GraalVM from source with
+      `mx --dynamicimports /substratevm build` and pass `--tool:llvm-backend`, and the riscv64
+      port behind the post was a GraalVM **dev build**. So the enum proves a research port
+      landed, not that any shipped `native-image` can emit a riscv64 image. Generalize it:
+      when an arch appears in a build tool's *source* but in none of its *releases*, the
+      releases are the fact.
+    - **Verdict: park, and say which layer is missing.** Per gotcha 183, everything the package
+      exists for routes through the Native Image core, so this is unreachable, not degraded.
+      Doing it ourselves would mean bootstrapping a riscv64 GraalVM from source with an unshipped
+      experimental backend *and then* reinventing a native-image recipe (entry points, reflection
+      config, resource config) upstream has never published, for a version whose SaxonC source is
+      not published either — the opposite of goal 2's "mirror upstream's own CI, narrowed to
+      riscv64". Note also that `saxonche`/`saxoncpe`/`saxoncee` are one engine behind three
+      licence tiers, so the verdict carries to all three at once (and PE/EE have no published
+      source at all) — gotcha 382's "one build, several distributions" arithmetic applied to a
+      park rather than to a port.
