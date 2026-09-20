@@ -2317,13 +2317,19 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       only way to find these, because nothing links against them (Paddle `dlopen`s
       LAPACK through `phi/backends/dynload/lapack.cc`, so the build is green and the
       failure is a runtime `paddle.linalg` error).
-    - **A prebuilt-for-one-arch dependency is not automatically gotcha 35's wall.** Ask
-      what it would take to *produce* the missing artifact. Here it is Reference-LAPACK
-      v3.10.0 — the same release the tarball packages — built by its own CMake against
-      the manylinux image's `gfortran`, i.e. a 30-line `ExternalProject_Add`, not gotcha
-      186's "authoring a new build system". Gate the source build on the new arch flag so
-      x86-64 and macOS keep the tarball, and say in the patch that the fix would repair
-      the sibling arch too.
+    - **A prebuilt-for-one-arch dependency is not automatically gotcha 35's wall** — but
+      *building* the missing artifact is the second answer, not the first. Ask what the
+      payload actually is: here it is Reference-LAPACK, which gotcha 401's Rocky 10
+      riscv64 `lapack`/`blas` packages already provide as the very `liblapack.so.3` and
+      `libblas.so.3` the `dlopen` asks for, so one `dnf install` plus four
+      `${CMAKE_C_COMPILER} -print-file-name=<soname>` lookups replaces the whole tarball
+      branch. Adding a 30-line `ExternalProject_Add` for Reference-LAPACK v3.10.0 instead
+      cost a CI round to a `cmake` configure failure whose diagnostic gotcha 434's stamp
+      logs had swallowed — and it puts a Fortran build on a 4-core riscv64 runner for a
+      library nothing links against. Whichever you pick, gate it on the new arch flag so
+      x86-64 and macOS keep the tarball, resolve the sonames with a `FATAL_ERROR` so a
+      missing one fails in the first configure minute rather than at wheel-packing time,
+      and say in the patch that the fix would repair the sibling arch too.
 
 419. **Gotcha 411's "is the CPU backend the default?" test can pass and still not yield a
     port: a torch extension's non-CUDA branch can compile *operator schemas with no

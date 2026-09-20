@@ -64,6 +64,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
   `/usr/include/ev.h`.
 - **401** — Rocky 10 riscv64 ships OpenBLAS, LAPACK and FFTW but no SuiteSparse, GSL or
   GLPK, and a numeric package's optional-extension set has to be cut along that line.
+- **433** — OpenBLAS built from source needs an explicit `TARGET=RISCV64_GENERIC`; its
+  `getarch` has no riscv64 autodetection to fall back on, and the `ZVL*` targets bake RVV in.
 - **428** — A project on the *deprecated* `find_package(PythonLibs REQUIRED)` has no
   `Development.Module` way out of gotcha 374's static-libpython wall — and satisfying it
   with manylinux's non-PIC `libpython3.XX.a` only moves the failure to the final link.
@@ -1175,3 +1177,28 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
     real `.so` that calls a `Py_*` function the way the project builds its extension module,
     and confirm `nm -D --undefined-only` reports the symbols as `U` and `readelf -d` shows no
     `libpython` in `DT_NEEDED`.
+
+433. **A project that vendors and builds its own OpenBLAS must be told
+    `TARGET=RISCV64_GENERIC`: OpenBLAS cannot detect a riscv64 host, so a plain `make`
+    stops at `getarch.c: error: #error "This arch/CPU is not supported by OpenBLAS."`
+    however new the checkout is.** `getarch.c` reaches its riscv64 definitions only through
+    `-DFORCE_RISCV64_*`, which `Makefile.system` derives from `TARGET=` (`GETARCH_FLAGS :=
+    -DFORCE_$(TARGET)`); the `#ifdef __riscv` / `cpuid_riscv64.c` autodetect branch that
+    other architectures have arrived far later than the pins most projects carry. Projects
+    already answer this for aarch64 and nothing else — Paddle's
+    `cmake/external/openblas.cmake` has `if(WITH_ARM) set(ARM_ARGS TARGET=ARMV8) endif()`
+    and passes `${ARM_ARGS}` to its `BUILD_COMMAND` — so the patch is the three-line
+    riscv64 twin of a block that is already there, which is also the argument for taking it
+    upstream.
+    - **Pick `RISCV64_GENERIC`, not a vector target.** Its `TARGET_FLAGS` are `-march=rv64imafdc
+      -mabi=lp64d`, i.e. the rv64gc baseline a published wheel has to run on, while
+      `RISCV64_ZVL128B`/`RISCV64_ZVL256B` compile `-march=rv64imafdcv` and would put RVV
+      instructions into a `libopenblas.a` that gets statically linked into the extension —
+      gotcha 139's RVV wall, but discovered by a user's SIGILL instead of by CI.
+    - **Only the build step needs it.** `getarch` writes the choice into `Makefile.conf`,
+      so the `make install` step reads it back; mirror upstream's arm block rather than
+      threading `TARGET=` through every invocation.
+    - **First ask whether the project needs to build OpenBLAS at all.** Gotcha 401's Rocky
+      10 riscv64 `openblas`/`lapack`/`blas` packages are one `dnf install` away and are
+      what every other BLAS consumer in this repo links against; a from-source OpenBLAS is
+      worth it only when the project statically links it or patches it.

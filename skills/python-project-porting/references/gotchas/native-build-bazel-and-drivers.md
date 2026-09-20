@@ -29,6 +29,11 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
   before spending a build cycle finding them one at a time.
 - **427** — Under `VPYTHON_BYPASS` the checkout's own *DEPS-pinned* depot_tools breaks next:
   its gsutil 4.68 vendors a six that cannot import on python ≥ 3.12.
+- **432** — A vendored submodule whose version the project's CMake "fixes up" with `git
+  checkout <tag>` stays on its stale recorded commit in CI, because `actions/checkout`
+  clones submodules without tags.
+- **434** — `EXTERNAL_PROJECT_LOG_ARGS` (or any `LOG_CONFIGURE 1`) hides the only useful
+  line of a third_party failure in a stamp log — print the stamp logs on failure.
 
 ---
 
@@ -546,3 +551,58 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       --skip_remoteexec_cfg_fetch` and `configure_siso` each only template one cfg file —
       copy those two scripts out of `buildtools`/`build` (plus
       `reclient_cfgs/reproxy_cfg_templates/`) and run them with the arguments DEPS passes.
+
+432. **A monorepo that vendors its C++ dependencies as git submodules *and* has CMake
+    "fix up" their versions with `git checkout <tag>` builds the stale recorded commit in
+    CI, because `actions/checkout` clones submodules without tags — and the only sign is a
+    one-line warning hundreds of lines before the real error (the paddlepaddle case).**
+    Paddle's `cmake/external/openblas.cmake` runs `git describe --abbrev=6 --always --tags`
+    in `third_party/openblas`, compares it to `CBLAS_TAG` (`v0.3.28` on Linux) and, on a
+    mismatch, runs `git checkout ${CBLAS_TAG}` — with `execute_process` and **no
+    `RESULT_VARIABLE`**, so nothing checks that it worked. In a CI checkout it cannot:
+    `submodules: true` fetches the pinned commit and no tags, so `describe` returns a bare
+    abbreviated hash and the checkout fails with `error: pathspec 'v0.3.28' did not match
+    any file(s) known to git`. Configure then completes normally against whatever commit
+    the monorepo actually recorded — for Paddle v3.3.1 that is `5f36f18`, a 0.3.7-era
+    OpenBLAS whose `getarch.c` has no riscv64 target at all, so 33 minutes later the build
+    dies at `getarch.c: error: #error "This arch/CPU is not supported by OpenBLAS."`
+    against a version that has supported riscv64 for years.
+    - **Read the configure output for `checkout`/`pathspec`/`describe` noise before
+      reading the compiler error.** `error: pathspec '<tag>' did not match` and a
+      `version is not <hash>, checkout to <tag>` warning are the same event, and they name
+      the dependency whose source tree is not what the version numbers in the build log
+      claim. Grepping the job log for `did not match any file` costs nothing and is worth
+      doing on *every* submodule-vendoring project, since upstream never notices: on
+      x86-64 the stale tree still autodetects the host and builds.
+    - **Fix it in the workflow, not the patch: move the submodule to the tag the project's
+      own CMake asks for.** One shallow tag fetch in the submodule (`git fetch --depth 1
+      origin tag <tag>` then `git checkout <tag>`, under `working-directory:`) makes
+      `describe` agree with `CBLAS_TAG`, so upstream's own version logic goes quiet
+      instead of being patched out. Do not `git fetch --tags` — that pulls every tag's
+      tree. The alternative, deleting the submodule directory so the project's
+      `file(GLOB)`-guarded `git clone -b <tag>` branch runs instead, costs a full clone of
+      the dependency inside the configure step.
+    - **Check the *recorded* submodule commit against the version the build advertises.**
+      The checkout step prints `Submodule path 'third_party/<dep>': checked out '<sha>'`;
+      resolve that sha upstream before believing any tag name in the CMake. A file's line
+      count is enough to tell two releases apart — the `#error` in the failing
+      `getarch.c` was at line 1193 where v0.3.28 has it at 1853.
+
+434. **Any `ExternalProject_Add` under a project-wide log-to-file setting (`LOG_CONFIGURE
+    1`, Paddle's `EXTERNAL_PROJECT_LOG_ARGS`) reports a failed dependency as `Command
+    failed: 1` and nothing else — add an `if: failure()` step that prints the stamp logs,
+    or the round costs you the diagnosis as well as the build.** The job log gives the full
+    `cmake` command line and the path of the log it *would* have told you about
+    (`<build>/third_party/<dep>/src/<dep>-stamp/<dep>-configure-*.log`), which is on the
+    runner's disk and gone when the job ends. The steps that are logged to file are exactly
+    the cheap ones (configure, install) — `LOG_BUILD 0` means the compiler errors you can
+    already see are the ones that were never hidden.
+    - **The dump is one step, and it applies to every dependency at once**, because the
+      stamp-log layout is fixed: `tail -n 40 -v <build>/third_party/*/src/*-stamp/*-*-*.log
+      || true`, guarded by `if: failure()`. Put it straight after the build step; a
+      container build that bind-mounts the source tree leaves the logs on the host, so the
+      step needs no container of its own.
+    - **Do not spend a round proving which of several candidate causes it was.** A
+      dependency you can take from the image (gotcha 401's Rocky packages) instead of
+      building removes the failure class rather than diagnosing it, and one fewer
+      `ExternalProject` is a real saving on a 4-core riscv64 runner.

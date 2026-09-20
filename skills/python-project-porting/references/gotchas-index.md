@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (387 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (425 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -371,6 +371,14 @@ The porting gotchas (387 of them) live in [`references/gotchas/`](gotchas/), spl
   checkout holds two gsutils: the one its DEPS pins (4.68, vendoring six 1.12) cannot import on
   python ≥ 3.12, so its `download_from_google_storage` hooks fail — reproducible on x86 in
   seconds, fixed by conditioning those test-data hooks off.
+- **432** — A monorepo that vendors C++ deps as submodules and has its CMake "fix up" their
+  versions with `git checkout <tag>` builds the stale recorded commit in CI: `actions/checkout`
+  clones submodules without tags, so the checkout fails (`error: pathspec '<tag>' did not
+  match`) and is never checked — move the submodule to the tag from the workflow.
+- **434** — Under `EXTERNAL_PROJECT_LOG_ARGS`/`LOG_CONFIGURE 1` a failed `ExternalProject`
+  prints only `Command failed: 1`, with the real diagnostic in a stamp log that dies with the
+  runner — add an `if: failure()` step that tails
+  `build/third_party/*/src/*-stamp/*-*-*.log`.
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
@@ -434,6 +442,11 @@ The porting gotchas (387 of them) live in [`references/gotchas/`](gotchas/), spl
   manylinux's non-PIC `libpython3.XX.a` only moves the failure to the final link after hours,
   the project may already strip libpython from its own non-Windows link lines (making the
   `REQUIRED` vestigial), and the header-only fix rehearses locally on x86_64 in a minute.
+- **433** — OpenBLAS built from source stops at `getarch.c: #error "This arch/CPU is not
+  supported by OpenBLAS."` on riscv64 whatever the version: its riscv64 definitions are reached
+  only through `TARGET=`, so pass `TARGET=RISCV64_GENERIC` (the rv64gc baseline) as the twin of
+  the `TARGET=ARMV8` the project already has — and first ask whether gotcha 401's Rocky
+  `openblas` package would do.
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
