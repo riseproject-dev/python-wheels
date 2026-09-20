@@ -19,6 +19,16 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
 - **202** — A monorepo's "regenerate deps from Bazel" helper may already tolerate a missing
 - **219** — GDAL's cmake build produces no `gdal-config` script — a second consumer of the
 - **233** — A package can have no Python build backend at all — the wheel comes from an
+- **397** — A CMake build that shells out to a bare `python3` for one vendored sub-extension
+  silently builds it for the container's default interpreter, not the one the wheel is for.
+- **421** — `pierotofy/set-swap-space` is a no-op on the riscv64 runners — a heavy link gets
+  the runner's 15GB of RAM and nothing behind it.
+- **423** — A depot_tools/gclient checkout downloads no GCS dependency on riscv64 until
+  `VPYTHON_BYPASS` is set (gsutil's vpython venv pins a crcmod wheel that has no riscv64 build).
+- **424** — Audit a chromium-style DEPS for riscv64-less CIPD packages with `cipd describe`
+  before spending a build cycle finding them one at a time.
+- **427** — Under `VPYTHON_BYPASS` the checkout's own *DEPS-pinned* depot_tools breaks next:
+  its gsutil 4.68 vendors a six that cannot import on python ≥ 3.12.
 
 ---
 
@@ -386,3 +396,153 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       sibling wheels and `entry_points.txt` shims for other targets; only
       `write_base_packages` (the base `pip` wheel) matters here, so the heredoc
       reproduces that function alone and ignores the rest of the tool.
+
+397. **A CMake build that shells out to a bare `python3` for one vendored sub-extension
+    silently builds it for the container's default interpreter, not the one the wheel is
+    for (the coremltools/kmeans1d case).** Driving the container yourself means every
+    per-interpreter loop iteration passes the interpreter explicitly — `-DPYTHON_EXECUTABLE`,
+    `$PYBIN/python3`, a venv — and that covers the targets CMake compiles itself. It does not
+    cover an `execute_process(COMMAND python3 setup.py build_ext --inplace WORKING_DIRECTORY
+    ${DEPS}/kmeans1d)` buried in the same `CMakeLists.txt`: that resolves `python3` from
+    `PATH` at *configure* time, so a `-DPYTHON_EXECUTABLE=/opt/python/cp312-cp312/bin/python3`
+    build happily ships `_core.cpython-311-<arch>-linux-gnu.so` inside a cp312 wheel. It is
+    invisible in a green build and a green import — the module is only imported by the
+    palettization code path, so the whole suite can pass — and `unzip -l <whl> | grep '\.so'`
+    is what catches it.
+    - **Upstream never sees it** because its own build script activates a conda env first,
+      making `python3` and `PYTHON_EXECUTABLE` the same binary. Reproducing that is one line
+      in the build script — `export PATH="$PYBIN:$PATH"` before `cmake` — and is strictly
+      safer than auditing every `execute_process` for the hardcoded name.
+    - **Grep for the bare interpreter name, not for `PYTHON_EXECUTABLE`.** `grep -rn
+      'COMMAND python' CMakeLists.txt cmake/` finds both this and the `python -m lib2to3`
+      style post-processing steps that protobuf codegen rules commonly carry; the ones that
+      use `${PYTHON_EXECUTABLE}` are already correct, and the ones that do not are the list
+      the PATH export exists to cover.
+
+421. **`pierotofy/set-swap-space` is a no-op on the riscv64 runners — a heavy link gets
+    the runner's 15GB of RAM and nothing behind it.** The step goes green in under a
+    second either way: the action creates and `mkswap`s `/swapfile`, then swallows
+    `swapon: /swapfile: swapon failed: Invalid argument` behind its own
+    `WARNING: swapon failed ... Continuing without swap.` line. The cause is one line
+    above it in the log — `Creating swapfile at /swapfile on filesystem type: overlay`
+    — and a swap file has to live on a block-backed filesystem, so no size, no
+    allocation method and no `swap-size-gb` value fixes it. Two different runners in the
+    fleet (a failed paddlepaddle build and a *green* deltalake one) report it
+    identically, so treat it as the whole fleet.
+    - **Copying the step from `build-vtk.yml` does not buy the headroom its comment
+      claims.** Ten workflows carry it today and every one of them is really building
+      inside `free -h`'s 15Gi. Size the link to that instead: shared libraries rather
+      than one monolithic `.so` (Paddle's `WITH_SHARED_PHI`/`WITH_SHARED_IR`, VTK's
+      per-module objects), and expect to cap the parallel job count if the tail of the
+      build is what OOMs.
+    - **Read a soft-failing action once instead of trusting its conclusion.** A
+      `##[end-action ... outcome=success` sitting next to a `WARNING:` in the same step
+      is the shape; `swapon --show` in the action's own "after" report printing `0B` is
+      the proof.
+
+423. **A depot_tools/gclient checkout (V8, Chromium, Skia, ANGLE) cannot download a
+    single GCS dependency on riscv64 until `VPYTHON_BYPASS` is set.** `gclient sync`
+    dies minutes in, on whichever `dep_type: 'gcs'` entry it reaches first (for V8 that
+    is `third_party/llvm-build/Release+Asserts`), with the resolver error nested inside
+    a gclient traceback:
+    ```
+    Exception: 1: [E...] Creating virtual environment at: .../vpython-root.0/store/uv_venv-...
+      × No solution found when resolving dependencies:
+      ╰─▶ Because crcmod==1.7+chromium.4 has no wheels with a matching
+          platform tag (e.g., `manylinux_2_39_riscv64`) ...
+    ```
+    Every gcs dep *and* every `download_from_google_storage.py` hook (V8's
+    `wasm_spec_tests`, `wasm_js`, `bazel`, `gcmole`, ...) is run as
+    `vpython3 gsutil.py`, and `depot_tools/gsutil.vpython.toml` pins
+    `crcmod==1.7+chromium.4`, which chromium's wheel mirror builds for
+    x86_64/aarch64/arm/mac/windows only. It is the *venv* that is unbuildable, not the
+    tool.
+    - **The fix is depot_tools' own escape hatch**, as a job-level env var:
+      `VPYTHON_BYPASS: manually managed python not supported by chrome operations`
+      (the literal string `vpython3` compares against — anything else is ignored).
+      `vpython3` then execs `python3` from `PATH`, and gsutil uses crcmod only as an
+      optional hash accelerator, so the download just works. It also makes the DEPS
+      `vpython3_common` hook (`vpython3 -vpython-tool install`), which would resolve the
+      same riscv64-less wheel set, exit 0 — the bypass short-circuits any
+      `-vpython-tool*` argument.
+    - **Nothing else in depot_tools is missing for riscv64**, so do not conclude the
+      approach is dead: `cipd_client_version.digests` carries a `linux-riscv64` line, and
+      `infra/3pp/tools/cpython3/linux-riscv64` (the hermetic python) and
+      `infra/tools/luci/vpython3/linux-riscv64` both exist. A
+      `Platform linux-riscv64 is not supported by the CIPD client bootstrap` line in the
+      same log is a **red herring from a relative invocation**: `cipd` derives
+      `DEPOT_TOOLS_DIR` from `$0`, so `depot_tools/gclient --version` leaves it looking
+      for `depot_tools/cipd_client_version.digests` after it has cd'd into depot_tools.
+      Invoke these entry points through an absolute path (`"${PWD}/depot_tools/gclient"`).
+    - **Rehearse it for the price of a clone**, no source checkout and no build: in
+      `quay.io/pypa/manylinux_2_39_riscv64` under qemu-riscv64, clone depot_tools and run
+      gclient's own gcs code path against the one object that failed —
+      `python3 -c "import download_from_google_storage as d;
+      print(d.Gsutil(d.GSUTIL_DEFAULT_PATH).check_call('cp', '<gs://url>', '/tmp/o'))"`
+      is literally what `gclient.py`'s `DownloadGoogleStorage` calls. It reproduces the
+      resolver error bare and returns 0 under the bypass.
+
+424. **Audit a chromium-style DEPS for riscv64-less CIPD packages with `cipd describe`
+    before you spend a build cycle discovering them one at a time.** gclient aborts on
+    the first unavailable package, so a checkout with three missing ones costs three
+    cycles — and for a project like V8 each cycle is the whole fetch+sync. Two commands
+    settle it from an x86 host, because the CIPD *registry* is arch-independent:
+    `depot_tools/cipd describe <pkg>/linux-riscv64 -version <the pin from DEPS>` and
+    `depot_tools/cipd ls <pkg-prefix>` for the list of platforms that do exist. For V8
+    13.1.201.22: `gn/gn/linux-riscv64` and `infra/3pp/tools/ninja/linux-riscv64` are
+    published, while `infra/rbe/client` (reclient), `infra/build/siso` and
+    `infra/tools/luci/{isolate,swarming}` are not.
+    - **Enumerate the candidates mechanically rather than by eye**, with depot_tools'
+      own evaluator: for every `cipd`/`gcs` block in DEPS,
+      `gclient_eval.EvaluateCondition(cond, {"host_os": "linux", "host_cpu": "riscv64",
+      "build_with_chromium": False, ...})` says whether riscv64 will try to fetch it.
+      That is also the check that proves a DEPS patch does what it claims: the same
+      evaluation after the edit must leave gn and ninja `True` and the unpublished ones
+      `False`.
+    - **You cannot fix this by lying about `host_cpu`**, because the conditions gating
+      the packages that *are* published have the same shape
+      (`host_cpu != "s390" and host_os != "zos" and ...`) as the ones that are not —
+      excluding riscv64 wholesale would drop gn and ninja too. Append
+      `and host_cpu != "riscv64"` to the conditions of the missing packages only, and
+      keep them in one list so the next version bump has one place to re-verify.
+
+427. **`VPYTHON_BYPASS` decides *which interpreter* gsutil gets, and a chromium-style
+    checkout carries two gsutils of different ages — the one its DEPS pins is the one that
+    breaks on python ≥ 3.12.** Gotcha 423's bypass is what makes gsutil runnable on riscv64
+    at all, but it also replaces vpython's hermetic 3.8 with whatever `python3` is on PATH
+    (in `manylinux_2_39_riscv64` that is 3.12). V8's DEPS pins its own
+    `third_party/depot_tools`, whose `gsutil.py` bootstraps **gsutil 4.68**, which vendors
+    **six 1.12**, whose `_SixMetaPathImporter` only implements the legacy `find_module()`
+    that CPython **removed in 3.12** — so every hook shelling out to
+    `third_party/depot_tools/download_from_google_storage.py` dies half an hour into the
+    sync, long past the gotcha 423/424 walls:
+    ```
+    File ".../external_bin/gsutil/gsutil_4.68/gsutil/gslib/__main__.py", line 36
+        from six.moves import configparser
+    ModuleNotFoundError: No module named 'six.moves'
+    ```
+    - **Nothing about this needs riscv64 to reproduce** — it is purely the interpreter, so
+      settle it on the x86 host in seconds instead of in CI:
+      `curl -sO https://storage.googleapis.com/pub/gsutil_4.68.zip && unzip -q gsutil_4.68.zip`,
+      then `python3.11 gsutil/gsutil version` prints `4.68` while `python3.12 gsutil/gsutil
+      version` raises the CI traceback verbatim.
+    - **The first-class `dep_type: 'gcs'` deps are unaffected**, which is exactly why the
+      sync now gets as far as the hooks: those run through the gsutil of the *outer*
+      depot_tools clone driving the sync (5.35, six 1.17). Read the gsutil version out of the
+      traceback path, not out of your own clone. That the deps came down is also how you
+      learn the container's `python3` is 3.12 — gsutil 5.35 dies on 3.13 in its vendored
+      `cryptography`, so a newer container python moves this wall rather than removing it.
+    - **Condition the offending hooks off; do not chase interpreters.** With V8
+      13.1.201.22's default DEPS vars only `wasm_spec_tests` and `wasm_js` reach gsutil, and
+      both only unpack test suites a `v8_monolith` build never reads. Inject
+      `'condition': 'host_cpu != "riscv64"'` into those two hook dicts from the same
+      post-checkout DEPS edit that carries gotcha 424's CIPD conditions, and prove it the
+      same way — `gclient_eval.Parse` then `EvaluateCondition` over `local_scope["hooks"]`
+      must drop exactly those two for `host_cpu: riscv64` and change nothing for x64.
+    - **Audit the hooks that run *after* the failing one in the same pass**, since they own
+      the next unattended half hour, and rehearse them locally for free: V8's `lastchange`
+      is pure git, `vpython3_common` exits 0 because depot_tools' `vpython3` wrapper returns
+      0 for any `-vpython-tool*` argument under the bypass, and `configure_reclient_cfgs
+      --skip_remoteexec_cfg_fetch` and `configure_siso` each only template one cfg file —
+      copy those two scripts out of `buildtools`/`build` (plus
+      `reclient_cfgs/reproxy_cfg_templates/`) and run them with the arguments DEPS passes.

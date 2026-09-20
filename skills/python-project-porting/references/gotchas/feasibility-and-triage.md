@@ -51,6 +51,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **376** — A permissive `License:` field on the wrapper package says nothing about whether
   the payload it ships has any source at all — check the binary's own content, not the
   metadata's license family (the tableauhyperapi case).
+- **411** — A GPU-first package is not CUDA-blocked when its own build system makes the CPU
+  backend the *default* — read the backend selector and diff the per-platform wheel sizes
+  before parking it (the bitsandbytes case).
 - **381** — A third-party *vendor release* of a project this repo has already ruled out
   inherits that verdict — resolve the redistribution to its upstream before triaging anything
   else (the tokenspeed-triton case).
@@ -79,6 +82,21 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **392** — With no project URL and a stock `Generator:`, the *conda-forge feedstock* is the
   cheapest source-availability oracle; and `readelf -S` splits a real compiled extension into
   engine vs embedded-model-weights in one command (the livekit-local-inference case).
+- **405** — An NVIDIA-owned, profiler-adjacent package can have no CUDA dependency whatsoever
+  — read the extension's header set and `libraries=` list before filing it with the GPU batch
+  (the nvtx case).
+- **407** — An upstream recipe can stop being conda-based between releases, so read it at the
+  *newest* tag before pricing a port or recording a conda blocker (the cadquery-ocp-novtk
+  case).
+- **418** — An upstream wheel for *another* non-x86 architecture is only a precedent for the
+  parts of it that are actually that architecture — `readelf -h` every `.so` in it (the
+  paddlepaddle case).
+- **419** — Gotcha 411's "is the CPU backend the default?" test can pass and still not yield a
+  port: the non-CUDA branch of a torch extension can compile operator *schemas* with no
+  implementations, so the build succeeds and the wheel is a dead stub (the xformers case).
+- **426** — A `-cpu` sibling can be an *x86_64-only label* rather than a portable CPU variant:
+  where the base package's wheel is already CPU-only on every non-x86 arch, the sibling name
+  closes no gap and inherits the base's park (the tensorflow-cpu case).
 
 ---
 
@@ -1652,6 +1670,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       the real 0.0.26359 wheel contents (`unzip -l`, `file`/`strings` on both native
       binaries) and Tableau's own installation/hardware-requirements documentation.
 
+411. **A GPU-first package is not CUDA-blocked when its own build system makes the CPU
+    backend the *default* — read the backend selector and diff the per-platform wheel
+    sizes before parking it (the bitsandbytes case; see `build-bitsandbytes.yml`).**
+    bitsandbytes reads as the archetypal GPU port: the repo is `.cu` kernels, the
+    classifiers say `Environment :: GPU :: NVIDIA CUDA`, and the Linux wheels are
+    23-43 MB of `libbitsandbytes_cuda1NN.so`. Its `CMakeLists.txt` nevertheless opens
+    with `set(COMPUTE_BACKEND "cpu" CACHE STRING ...)`, and every `BUILD_CUDA`/`BUILD_HIP`/
+    `BUILD_XPU` branch — including `enable_language(CUDA)` and `find_package(CUDAToolkit
+    REQUIRED)` — sits behind an `if` that a plain `cmake .` never enters. So the default
+    build compiles two ordinary C++17 files (`csrc/cpu_ops.cpp`, `csrc/pythonInterface.cpp`)
+    against nothing but OpenMP, and needs no GPU toolkit at build *or* test time.
+    - **The per-platform wheel sizes say which backend is optional, not just that the
+      platforms differ.** Gotcha 81 reads divergent sizes in `pypi.org/pypi/<pkg>/<ver>/json`
+      as "real per-platform content"; the sharper reading is the *small* end. bitsandbytes
+      0.50.2 ships 43 MB (x86_64), 23 MB (aarch64) — and **123 KB** (macOS arm64) and 1 MB
+      (win_arm64). A platform upstream itself builds at three orders of magnitude smaller is
+      upstream shipping the CPU-only backend, which is exactly the wheel riscv64 wants. No
+      `--enable-cpu` flag to discover, no divergence to justify: the port is upstream's own
+      macOS/Windows-ARM recipe pointed at a third platform.
+    - **Check the GPU dependency is not also a *runtime* wall** before committing. Here it
+      is not: `bitsandbytes/cextension.py` `ctypes.CDLL`s whichever `libbitsandbytes_*.so`
+      matches the detected runtime, falling back to a `BNBNativeLibrary` whose `__getattr__`
+      raises only when a CUDA-only entry point is actually *called*, and the test suite's
+      GPU half is gated behind a `requires_cuda` fixture plus `@pytest.mark.slow`, both
+      deselected by upstream's own default `addopts`. Contrast gotcha 40/187's conda wall
+      and the sglang case, where the blocker is a *dependency* (`cuda-python`) with no
+      riscv64 build at all — an optional backend inside one CMake tree is not that.
+
 381. **A third-party *vendor release* of a project this repo has already ruled out inherits
      that verdict — resolve the redistribution to its upstream before triaging anything else
      (the tokenspeed-triton case).** Nothing in a queue entry says a distribution is somebody
@@ -2189,3 +2235,194 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
        the two entries' notes pointed at each other, and do not re-run the SDK investigation
        on the bindings entry — record only what is new on the *consumer* side (the wheel-vs-
        sdist metadata split, the `RUNPATH`, the resolver output).
+
+405. **An NVIDIA-owned, profiler-adjacent package can have no CUDA dependency whatsoever —
+     read the extension's own header set and `libraries=` list before filing it with the GPU
+     batch (the nvtx case; see `build-nvtx.yml`).** Gotcha 284 covers CUDA symbols that turn
+     out to be `dlopen`ed at runtime; this is the step before it, where there are no CUDA
+     symbols at all and only the vendor's name suggests otherwise. The PyPI `nvtx`
+     distribution is the `python/` subdirectory of `NVIDIA/NVTX`: five Cython modules over a
+     header-only C annotation API. `setup.py` declares a single
+     `Extension('*', sources=['src/nvtx/_lib/*.pyx'], include_dirs=[<repo>/c/include])` with
+     no `libraries=` at all, and the only `cdef extern from` headers across its `.pxd` files
+     are `nvtx3/nvToolsExt{,Counters,Payload}.h`, `nvtx3/nvToolsExtSemantics*.h` and
+     `nvtxw3/nvtxw3*.h` — no `cuda.h`, no `cuda_runtime.h`, nothing to link. The GPU is the
+     *consumer*, not a dependency: annotations are inert until an external profiler injects a
+     library through `NVTX_INJECTION64_PATH`, and `nvtx.enabled()` is literally
+     `not os.getenv("NVTX_DISABLE")` with no hardware probe anywhere.
+     - **Two checks settle it, both cheaper than a CI cycle**: `grep -rn 'libraries=' setup.py`
+       plus `grep -rn 'cdef extern from\|#include' <extension sources>` (an instrumentation
+       SDK's own headers only), and then `auditwheel show` on a locally built wheel — one that
+       references nothing but `libc.so.6` has no GPU runtime to find.
+     - **The cost of getting this wrong is not one entry.** An annotation SDK shows up in the
+       `Requires-Dist` of GPU-ecosystem distributions (vllm's CUDA wheels among them), so
+       parking it on "NVIDIA ⇒ GPU-only" converts one bad triage into a fake blocker for every
+       consumer that is itself portable.
+     - **What actually distinguishes the parked set** (`onnxruntime-gpu`, `cupy-cuda12x`/
+       `-cuda13x`, `jax-cuda*-plugin`, `numba-cuda`) is that those need the toolkit's own
+       headers and libraries — or nvcc — *at build time* (gotcha 387). A vendor's profiling,
+       tracing or annotation library typically needs neither, and belongs in the ordinary
+       Cython/C-extension lane.
+
+407. **An upstream recipe can stop being conda-based between releases, so read it at the
+    *newest* tag before pricing a port or recording a conda blocker (the
+    cadquery-ocp-novtk case).** Gotcha 388 says the queue entry's wheel *shape* is a
+    snapshot; the recipe's *build environment* is one too. `CadQuery/ocp-build-system` at
+    `v7.9.3.1.1` — the version the queue entry named — builds the OCCT SDK for Linux
+    inside a micromamba environment (`environment.yml`'s python plus `micromamba install
+    fontconfig freetype freeimage`), which is gotcha 40's wall: conda-forge has
+    `linux-riscv64` freetype and fontconfig but **no** freeimage. At `v8.0.1.0.0`,
+    released since that entry was written, the same repo's Linux path is `dnf` system
+    libraries plus `astral-sh/setup-uv`, and conda survives only on macOS/Windows — so
+    the riscv64 port needs no conda at all and is an ordinary CMake build.
+    - **`https://api.anaconda.org/package/conda-forge/<name>` is the per-package form of
+      gotcha 42's subdir count** — one small JSON per dependency,
+      `{f["attrs"]["subdir"] for f in d["files"]}`, with no 100 MB `repodata.json`
+      download, which is what makes "which of these conda deps is missing for riscv64" a
+      one-minute question.
+    - **micromamba itself is never the blocker.**
+      `https://micro.mamba.pm/api/micromamba/linux-riscv64/latest` serves a real riscv64
+      ELF (8.3 MB), so a conda-based recipe fails on *package* coverage only.
+    - **Diff the recipe, not just the version string** (`git log --oneline v<old>..v<new>
+      -- .github/` on the recipe repo). The same diff decides which component versions
+      you build: upstream's workflow `env:` block carries `WHEEL`, `OCP` and `OCCT`, so
+      read them out of the tag the job checks out instead of hardcoding them, and assert
+      that `WHEEL` equals the version in `docs/packages/<pkg>.yaml` so a bump that moves
+      them fails loudly.
+
+418. **An upstream wheel for *another* non-x86 architecture is only a precedent for the
+    parts of it that are actually that architecture — `readelf -h` every `.so` in it (the
+    paddlepaddle case).** Gotcha 186 warns that a vendor publishing one *artifact shape*
+    says nothing about another; this is the sharper version, where the vendor publishes
+    the right shape for the wrong ISA and ships it anyway. Paddle's CMake knows four
+    non-x86 architectures (`WITH_ARM`/`WITH_SW`/`WITH_MIPS`/`WITH_LOONGARCH`), each
+    turning off Xbyak, MKL and AVX, and upstream publishes `linux_aarch64` wheels off the
+    first — which reads as "the non-x86 CPU path is maintained, mirror it". It mostly is.
+    But `cmake/external/lapack.cmake` takes **one prebuilt tarball for the whole of
+    Linux** (`lapack_lnx_v3.10.0.20210628.tar.gz`, x86-64 only — the comment beside it
+    says "lapack need fortran compiler which many machines don't have"), and `setup.py`
+    copies `LAPACK_LIB`/`BLAS_LIB`/`GFORTRAN_LIB`/`GNU_RT_LIB_1` into `paddle/libs/`
+    unconditionally. So the released
+    `paddlepaddle-3.3.1-cp312-cp312-linux_aarch64.whl` carries x86-64
+    `liblapack.so.3`, `libblas.so.3`, `libgfortran.so.3` and `libquadmath.so.0` beside a
+    genuinely aarch64 `libopenblas.so.0`.
+    - **The check is two commands and needs no build.** Download the sibling-arch wheel,
+      then `unzip -q -j <whl> '<pkg>/libs/*' -d x && file x/*` (or `readelf -h`) — a
+      mismatched `Machine:` line names every payload whose build step is
+      architecture-blind. Do it before writing the workflow: it is the difference between
+      "mirror upstream" and "mirror upstream and fix what it got wrong", and it is the
+      only way to find these, because nothing links against them (Paddle `dlopen`s
+      LAPACK through `phi/backends/dynload/lapack.cc`, so the build is green and the
+      failure is a runtime `paddle.linalg` error).
+    - **A prebuilt-for-one-arch dependency is not automatically gotcha 35's wall.** Ask
+      what it would take to *produce* the missing artifact. Here it is Reference-LAPACK
+      v3.10.0 — the same release the tarball packages — built by its own CMake against
+      the manylinux image's `gfortran`, i.e. a 30-line `ExternalProject_Add`, not gotcha
+      186's "authoring a new build system". Gate the source build on the new arch flag so
+      x86-64 and macOS keep the tarball, and say in the patch that the fix would repair
+      the sibling arch too.
+
+419. **Gotcha 411's "is the CPU backend the default?" test can pass and still not yield a
+    port: a torch extension's non-CUDA branch can compile *operator schemas with no
+    implementations*, so the build succeeds in seconds against a CPU-only torch and the
+    wheel it produces is a dead stub (the xformers case).** bitsandbytes (gotcha 411) was
+    rescued by reading its backend selector; xformers' selector reads the same way and ends
+    somewhere else. `setup.py:get_extensions()` sets `extension = CppExtension` and only
+    promotes it to `CUDAExtension` (adding `source_cuda`) inside
+    `if (torch.cuda.is_available() and CUDA_HOME is not None and torch.version.cuda is not
+    None) or FORCE_CUDA=1 or TORCH_CUDA_ARCH_LIST != ""`, with the HIP branch behind
+    `torch.version.hip` — so with our `torch-2.14.0+cpu` and no toolkit the CPU path is
+    what runs, needs no GPU host, and `pip wheel . --no-deps --no-build-isolation` finishes
+    in seconds. Everything after that is the trap.
+    - **Count and read the sources the non-CUDA branch globs — don't stop at "it built".**
+      The CPU branch's `sources` is `xformers/csrc/**/*.cpp` minus the HIP directory: at
+      0.0.35 that is exactly two files, 44 lines total, and every line is an `m.def("op(...)
+      -> ...")` inside `STABLE_TORCH_LIBRARY_FRAGMENT` — `attention.cpp`'s entire body is
+      additionally wrapped in `#if defined(USE_ROCM)`, so it contributes nothing at all.
+      Every `m.impl` lives in a `.cu` (or HIP `.cpp`) that only the GPU branches compile. A
+      schema with no implementation registers fine and then raises `NotImplementedError:
+      Could not run '<ns>::<op>' with arguments from the 'CPU' backend` on the first call.
+    - **When upstream publishes no CPU wheel to size-diff against, build one and diff the
+      `.so`.** Gotcha 411's cheapest signal was upstream's own 123 KB macOS wheel next to a
+      43 MB Linux one. Here upstream ships no CPU artifact anywhere, so produce it:
+      the CPU-built `xformers/_C.so` is 233 KB with **five** dynamic symbols, none of them
+      an operator (`nm -D --defined-only`), against the published CUDA wheel's 11.6 MB
+      `_C.so`. Two orders of magnitude *and* an empty symbol table is not "a smaller
+      backend", it is "no backend".
+    - **`_has_cpp_library is True` proves only that the `.so` loaded.** xformers'
+      `_cpp_lib.py` catches a failed `torch.ops.load_library` and degrades with a warning,
+      so a package-level "did the extension load" flag reads healthy on a wheel whose every
+      op is missing. Install the wheel and *call* something: `memory_efficient_attention`
+      answers `No operator found ... device=cpu (supported: {'cuda'})`, and one grep
+      (`grep -rn SUPPORTED_DEVICES <pkg>/ops/`) shows every op class in the dispatch list
+      declaring `{"cuda"}` — i.e. no patch to the build reaches the Python layer either.
+    - **Check upstream's wheel matrix for a CPU job before calling the CPU path
+      "upstream's own recipe".** `.github/workflows/wheels.yml`'s target determinator emits
+      only `toolkit_type` `cuda` (cu126/cu128/cu130) and `rocm` (7.1); there is no CPU
+      entry, and `upload_pip` filters `*torch2.10.0+cu128*`. bitsandbytes' CPU wheel exists
+      upstream and merely lacked a third platform; a CPU-only xformers wheel is an artifact
+      upstream ships nowhere — gotcha 24's divergence test, reached from the opposite
+      direction.
+    - **Verdict: `parked` under gotcha 183's rule** (installable and importable, primary
+      function unreachable rather than degraded), not `not-feasible` — the build genuinely
+      works, which is exactly why the note has to say what the built wheel *contains*.
+    - **Free bonus for triage notes: a `py39-none-<platform>` tag on a torch extension is
+      real compiled content.** It is neither gotcha 27's cosmetic `--plat-name` nor gotcha
+      145's maturin binary: `bdist_wheel.get_tag()` hand-returns `("py39", "none",
+      plat_tag)` because the `.so` talks only to torch's stable ABI
+      (`STABLE_TORCH_LIBRARY_FRAGMENT`, `get_export_symbols()` returning `[]`, no
+      `PyInit_*`), so one wheel covers every CPython 3.9+ including free-threaded. A queue
+      note reading "1 Linux wheel (abi: py39)" on a torch-extension package is that
+      convention, not a pure-Python tell — and it means the port, had it been feasible,
+      would have been one wheel rather than a per-interpreter matrix.
+
+426. **A `-cpu` sibling can be an *x86_64-only label*, not a portable CPU variant — if the
+    base package already ships a CPU-only wheel on every non-x86 arch, the sibling name
+    closes no riscv64 gap (the tensorflow-cpu case).** Gotcha 79's `-headless`/`-gpu`/`-lite`
+    sibling is usually a legitimate second port, and gotcha 50's `-binary` sibling is where
+    the wheels actually live. This is the third shape: a sibling that exists **only because
+    one architecture's default wheel is the GPU one**. `tensorflow-cpu` and `tensorflow`
+    2.21.0 are the same tree — `tensorflow/tools/pip_package/utils/tf_wheel.bzl` reads
+    `WHEEL_NAME` out of `@python_version_repo` and its own docstring says "Should be set via
+    `--repo_env=WHEEL_NAME=tensorflow_cpu`" — and their PyPI metadata is identical down to
+    the same 12 `nvidia-*; extra == "and-cuda"` requirements. What differs is only which
+    arch each name is *built* for, and that is the whole triage:
+    - **Scan the sibling's entire release history for platform tags, not just the version in
+      the queue entry.** One pass over `https://pypi.org/pypi/<sibling>/json`'s `releases`
+      counting the trailing tag of every file: `tensorflow-cpu` has published `win_amd64`
+      and `manylinux*_x86_64` **only** — across every release ever, zero aarch64, zero
+      ppc64le, zero other Linux arch, and no sdist. A sibling that has never left x86_64 is
+      a label for "x86_64 without the GPU bits", not a CPU variant.
+    - **Then compare the base package's per-arch wheel *sizes* to find which arches are
+      already CPU-only under the base name.** `tensorflow` 2.21.0 is 545 MB on
+      `manylinux_2_27_x86_64` but 268 MB on `manylinux_2_27_aarch64` — and `tensorflow_cpu`
+      x86_64 is 261 MB. The aarch64 wheel matching the *cpu* wheel's size rather than its own
+      arch's GPU wheel is the proof: on aarch64 upstream ships the CPU-only build under the
+      plain name, because there is no CUDA there to ship. riscv64 is in exactly that
+      position, so the riscv64 deliverable for "CPU-only TensorFlow" is `tensorflow`, and a
+      `manylinux_riscv64` wheel named `tensorflow-cpu` would invent a name upstream uses on
+      exactly one Linux architecture — gotcha 50's divergence-with-no-gap-closed, reached
+      from the sibling side.
+    - **So the `-cpu` sibling is never *cheaper* than the base, and inherits its verdict.**
+      The tempting inference is "the CPU-only variant sidesteps whatever made the full
+      package impractical (no CUDA build to worry about)". It is backwards: on an arch with
+      no CUDA the base package's build *is already* the CPU build, so the sibling saves
+      nothing and is the identical compile under a worse name. If the base entry is
+      `parked`, park the sibling for the base's reason plus the naming one, and say so in
+      both notes — an under-documented base park is what makes an agent re-derive this.
+    - **Don't inherit a sibling-family blocker citation across versions — re-verify it at
+      the revision your target actually pins.** jaxlib (PR #526, parked) died in XLA's
+      `xla/codegen/intrinsic/cpp` `embed_bitcode`, which links every LLVM backend except
+      RISC-V, and TensorFlow vendors the whole XLA tree at `third_party/xla/`, so that reads
+      like a ready-made blocker for TF too. At TF 2.21.0 it is not one: that tag's XLA
+      predates the restructure (the rule is `cc_ir_header` in `cc_to_llvm_ir.bzl`, whose
+      `ir_to_string` tool deps are just `llvm:Object`+`llvm:Support`, no per-arch CodeGen),
+      and `xla/backends/cpu/codegen/BUILD` *does* wire `if_llvm_riscv_available(["@llvm-project//llvm:RISCVCodeGen"])`
+      for the CPU JIT, with `linux_riscv64` and `riscv64_or_cross` defined in
+      `xla/tsl/BUILD`. Citing the sibling's hunk anyway would put a false hard blocker in the
+      queue; the honest note says "scope and naming, *not* Bazel-blocked like jaxlib".
+    - **Before costing a big Bazel build, check whether its wheel is per-interpreter.**
+      `_get_full_wheel_name` formats `cp{v}-cp{v}` from `HERMETIC_PYTHON_VERSION`, so TF is
+      one full build **per** interpreter (cp310–cp313 = 4), with none of the abi3/`py3-none`
+      collapse that let mediapipe serve every interpreter from a single ctypes-loaded `.so`.
+      That multiplier belongs in the estimate before anything else.

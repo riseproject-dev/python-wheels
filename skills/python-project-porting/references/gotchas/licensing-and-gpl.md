@@ -27,6 +27,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
 - **309** — A wrapper's own permissive licence (LGPL, MIT, ...) does not launder a vendored
 - **320** — gotcha 123's PEP 639 default license glob is not implemented by meson-python —
 - **349** — The legacy `[project.license]` table form (`{file = "..."}`) not only suppresses
+- **409** — The `gpl_sources` trigger can come from the *musllinux* leg alone: auditwheel's
+  musllinux policy does not allowlist the GCC runtime.
 
 ---
 
@@ -591,3 +593,33 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
       `{"", "license.txt"}`. cibuildwheel's Linux build produces that directory entry;
       a local macOS/`--no-build-isolation` build did not, so this only surfaced in CI.
       Filter with `and not n.endswith("/")` before comparing the set.
+
+409. **The `gpl_sources` trigger can come from the *musllinux* leg alone: auditwheel's
+     musllinux policy does not allowlist the GCC runtime, so any C++ extension's musl wheel
+     vendors `libstdc++`/`libgcc_s` even when its manylinux sibling vendors nothing from the
+     image (the leidenalg case).** Gotcha 66 frames `libgomp` as "the standard GPL-sources
+     trigger" and tells you to grep the vendored-lib dir of the artifact you already have —
+     but a `libc: [manylinux, musllinux]` matrix produces *two* wheels with different
+     vendored sets, and checking only the manylinux one answers "nothing from the image, no
+     job needed" while the musl wheel ships the GCC runtime. manylinux's policy allowlists
+     `libstdc++.so.6` and `libgcc_s.so.1`, musllinux's does not, so for a C++ project the
+     asymmetry is structural, not incidental:
+     ```
+     leidenalg.libs/libigraph-*.so.4.0.0  liblibleidenalg-*.so.0.11.1              # manylinux
+     leidenalg.libs/libgcc_s-*.so.1  libstdc++-*.so.6.0.33  libigraph-*  lib…      # musllinux
+     ```
+     GPLv3-with-GCC-Runtime-Library-Exception still carries the source obligation for the
+     runtime itself (gotcha 66), so the wheel pair needs the `packages: gcc` job.
+     - **Check every libc leg's wheel, not one of them**, and do it on the real artifacts:
+       `unzip -l <whl> | grep '\.libs/'` per libc. The published
+       `igraph-1.0.0-cp39-abi3-musllinux_1_2_riscv64.whl` is the in-repo precedent — it
+       vendors `libgcc_s`, `libgomp`, `libstdc++`, `liblzma` and `libxml2` — and
+       `build-igraph.yml`'s `gpl_sources` job is the shape to copy.
+     - **The job still points `collect-gpl-sources` at the *manylinux* image**, because the
+       action is dnf-based and the musl image is Alpine; that is what the igraph port
+       shipped, and the `gpl-sources-description: gcc` input is what `_publish-wheel.yml`
+       renders next to the release.
+     - **Not every C++ musl wheel vendors it** — a project that links the C++ runtime
+       statically, or whose extension needs no out-of-line C++ symbols, comes back with an
+       empty `.libs/` (the published `ruckig-0.19.4-cp312-cp312-musllinux_1_2_riscv64.whl`
+       does). So this is a per-wheel check, not an inference from "the project is C++".

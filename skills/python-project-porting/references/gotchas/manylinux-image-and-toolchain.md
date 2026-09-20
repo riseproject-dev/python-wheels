@@ -28,6 +28,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **271** — `AVIF_CODEC_AOM_DECODE=OFF` and `-DCONFIG_AV1_HIGHBITDEPTH=0` are a normal
 - **272** — A riscv64 project's own `getauxval(AT_HWCAP)` runtime dispatch can still
 - **289** — A CMake `ExternalProject_Add` patch step can shell out to `wget`, which the
+- **420** — Gotcha 139's binutils-too-old trap recurs inside a Bazel dependency's microkernel
+  library, where the fix is that dependency's own feature `--define` rather than an `-march`
+  probe — and `--keep_going` hides it behind five hours of unrelated progress.
   manylinux image doesn't ship (only `curl`) — and a parallel `make -j` build hides it.
 - **294** — An upstream CMakeLists' own `-fPIC` allowlist can name only `x86_64`/`aarch64`,
   leaving riscv64 to link non-PIC objects into a shared library.
@@ -59,6 +62,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **390** — libev is one of the `-devel` packages that *is* in Rocky 10's riscv64 repos, so an
   upstream `yum install -y libev libev-devel` needs no replacement — but its header is
   `/usr/include/ev.h`.
+- **401** — Rocky 10 riscv64 ships OpenBLAS, LAPACK and FFTW but no SuiteSparse, GSL or
+  GLPK, and a numeric package's optional-extension set has to be cut along that line.
 
 ---
 
@@ -1054,3 +1059,73 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       tarball's `LICENSE`, which is the text a vendored-licence patch should carry. libev
       is dual `BSD-2-Clause OR GPL-2.0-or-later`, so taking the BSD option means shipping
       the notice and *no* `gpl_sources` job.
+
+401. **Rocky 10 riscv64 ships OpenBLAS, LAPACK and FFTW but no SuiteSparse, GSL or GLPK —
+    for a numeric package whose extensions are one-per-library, that split *is* the
+    feature set, so settle it before writing any YAML (the cvxopt case).** Same shape as
+    gotcha 337's lexbor/re2/uchardet gap, on the numeric side of the catalogue:
+    `openblas`/`openblas-devel` (crb — and its `libopenblas.so.0` exports the LAPACK entry
+    points too, so `-lopenblas` covers both `CVXOPT_BLAS_LIB` and `CVXOPT_LAPACK_LIB`),
+    `lapack`/`lapack-devel` (crb), `flexiblas*` and the whole `fftw*` family (appstream)
+    are all present, while `suitesparse`, `gsl` and `glpk` are in none of
+    baseos/appstream/crb — and there is no `epel-release` for riscv64 to fall back on,
+    which is where a RHEL-family upstream normally gets GLPK (gotcha 51). A package like
+    cvxopt, which compiles a separate extension per optional library behind
+    `CVXOPT_BUILD_<LIB>` flags, therefore keeps upstream's `fftw` module and drops
+    `glpk`/`gsl`/`dsdp`, while its *mandatory* umfpack/cholmod/amd extensions have to come
+    from a from-source SuiteSparse (gotcha 400) rather than being droppable at all.
+    - **Check it without paying for QEMU `dnf`**: `dnf repoquery` inside the riscv64 image
+      is minutes per call under emulation (and `dnf provides` re-downloads filelists), so
+      pull the three repos' primary metadata over plain HTTPS instead (gotcha 369) and
+      grep the name list once.
+    - **The musl half of the same image pair is the *opposite* — Alpine 3.22 riscv64 has
+      all of them.** `apk search -x` inside `quay.io/pypa/musllinux_1_2_riscv64` finds
+      `openblas-dev`, `fftw-dev`, `lapack-dev` **and** `suitesparse-dev` (7.8.2),
+      `gsl-dev`, `glpk-dev`, so upstream's own `apk add` line needs no edit at all and the
+      musl wheel could carry more extensions than the glibc one. Two things still argue
+      against just enabling it: the per-libc feature asymmetry that creates within one
+      version, and the fact that **Alpine ships no `/usr/share/licenses` at all** — so
+      gotcha 137's "copy the licence the package installed" has no source on musl and
+      every bundled library's text would have to come from somewhere else.
+    - **A metapackage's licence text is not under its own name.** `fftw`'s COPYING is
+      installed by the subpackage auditwheel actually vendors —
+      `/usr/share/licenses/fftw-libs-double/COPYING`, not `/usr/share/licenses/fftw/` — so
+      a `cp` written from the `dnf install` name fails the whole `before-all`. `ls
+      /usr/share/licenses/` in the image once and copy from what is really there
+      (openblas does use the plain `/usr/share/licenses/openblas/LICENSE`).
+
+420. **Gotcha 139's binutils-too-old trap recurs inside a Bazel dependency's microkernel
+    library, where the fix is that dependency's own feature `--define` rather than an
+    `-march` probe — and `--keep_going` hides it behind five hours of unrelated progress
+    (the mediapipe/XNNPACK `zvfh` case).** XNNPACK builds its `rvvfp16arith` microkernels
+    with `-march=rv64gc_zvfh`. `manylinux_2_39_riscv64` is Rocky 10 with **binutils 2.41**,
+    `zvfh` landed in **2.42**, and as in gotcha 139 `as` rejects the *whole* ISA string, so
+    every one of that target's ~71 translation units dies with ``unknown prefixed ISA
+    extension `zvfh'`` naming an ISA string nobody wrote. GCC (14.3.1) accepts the flag, so
+    it reads like a compiler bug. Applies to any port that compiles TFLite/LiteRT/XNNPACK
+    from source, not just mediapipe.
+    - **Use the dependency's feature flag, not gotcha 139's `-march` probe.** A probe is the
+      right tool for a project whose *own* CMake picks the flags; here the flags come from a
+      pinned third-party Bazel repo you don't patch. XNNPACK exposes
+      `--define=xnn_enable_riscv_fp16_vector=false`, which drops the arch from
+      `xnnpack_archs()` **and** sets `XNN_ENABLE_RISCV_FP16_VECTOR=0` so the dispatch code
+      stops referencing the kernels. Proof it is a supported configuration and not a hack:
+      XNNPACK's own `riscv_fp16_vector_enabled` alias already selects the disabled branch
+      for `//build_config:android`.
+    - **Disable only the fp16 family.** `-march=rv64gcv` (XNNPACK's plain `rvv` arch)
+      assembles fine on 2.41 — only the `zvfh`/`zvfhmin` names are too new. Reaching for
+      `--define=xnn_enable_riscv_vector=false` too would give up all RVV for no reason.
+      Confirm which extension is actually rejected with gotcha 139's 30-second probe before
+      choosing the flag; here `rv64gc` and `rv64gcv` pass while `rv64gc_zvfh` and
+      `rv64gc_zvfhmin` fail.
+    - **`--keep_going` makes a single-cause failure look like a timeout.** The failing
+      target's errors scroll past thousands of actions before the end, Bazel then builds
+      everything else for hours, and the summary says only `Target //... failed to build` /
+      `Build did NOT complete successfully`. A 5h23m job that ends that way is *not*
+      evidence of the job timeout this kind of port is expected to strain — read
+      `INFO: Elapsed time` and the absence of a cancellation instead.
+    - **Grep the `build.log` artifact, not the job-log tail.** The tail holds only progress
+      lines and compiler *warnings*. Pull the `if: failure()` build-log artifact and
+      `grep -c '^ERROR'` plus `grep -oE 'from target @@[^)]*' | sort -u`: one distinct
+      target and one distinct extension name is what tells you a single `--define` fixes
+      the whole run, rather than guessing from the first error you happen to see.
