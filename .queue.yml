@@ -2667,9 +2667,64 @@ packages:
   version: 13.0.3
   home: https://www.gurobi.com
   repo: https://www.gurobi.com
-  status: queued
+  status: parked
   pr: null
-  notes: '12 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Not feasible: gurobipy is Gurobi Optimization LLC''s proprietary solver engine, so there is
+    no source to build from, no riscv64 build from the vendor at any layer, and the EULA the
+    wheel ships independently bars us from redistributing one even if there were (new gotcha
+    453, feasibility-and-triage.md; same closed-payload family as gotchas 372/376/431/450).
+    Verified against the real artifacts, not inferred. PyPI 13.0.3 publishes 24 files, all
+    wheels (12 Linux: cp310-cp314 + cp314t, manylinux_2_17_x86_64 and manylinux_2_26_aarch64),
+    and the project has never shipped an sdist on any of its 28 releases, so per gotcha 431 the
+    wheel is the only evidence; home and repo are both the marketing page https://www.gurobi.com
+    and the metadata says License: Proprietary (gotcha 372''s hdbcli tell, exactly). WHAT IS IN
+    THE WHEEL: downloading and unzipping gurobipy-13.0.3-cp312-cp312-manylinux2014_x86_64.whl
+    (15.0 MB) gives 11 genuine Cython extensions (_core, _model, _matrixapi, _lowlevel, ...)
+    plus one payload, gurobipy/.libs/libgurobi130.so at 49.6 MB = 88% of the unpacked wheel; the
+    aarch64 twin (87.2 MB) is the same file list with that payload at 168.5 MB. No .pyx/.c/.h
+    anywhere in either, so even the binding layer ships no source. readelf -d on
+    gurobipy/_core.cpython-312-*.so shows NEEDED libgurobi130.so plus RPATH $ORIGIN/.libs -- a
+    hard link, not a dlopen -- and gurobipy/__init__.py imports ._batch/._core/._matrixapi at
+    import time, so with no riscv64 engine there is no importable wheel at all (the
+    saxonche/gotcha 450 shape, stricter than gotcha 157''s claude-agent-sdk, whose sdist at
+    least imports). WHY A VENDOR REBUILD IS NOT A RECOMPILE (the new gotcha): strings -a names
+    the 49.6 vs 168.5 MB gap -- the x86_64 engine statically links Intel MKL
+    (mkl_avx_d_opt_gemm_ker, ''Intel(R) Math Kernel Library Version'', ''Intel MKL FATAL ERROR:
+    This system does not meet the minimum requirements''), the aarch64 engine links Arm
+    Performance Libraries (ARMPL_NEOVERSE_N1, ARMPL_KUNPENG_920, ARMPL_APPLE_M1), and
+    LICENSE.txt says the same thing without tooling by carrying a ''SIMPLIFIED END USER LICENSE
+    AGREEMENT FOR FREE OF CHARGE ARM REDISTRIBUTABLES'' section. Each architecture is its own
+    port onto a closed, arch-specific BLAS that its own vendor publishes for that arch only;
+    neither MKL nor ArmPL exists for riscv64, and neither engine contains a single riscv/rv64
+    string (0 hits in 712k). Both are built on a closed vendor Jenkins
+    (/home/jenkins/workspace/gurobi-thirdparty-
+    updates-v130/gurobi/thirdparty/lib/{linux64,armlinux64}/openssl-3.5.7/..., GCC 8.5.0 on RHEL
+    8), gotcha 431''s builder-path tell. THREE INDEPENDENT VENDOR PLATFORM TABLES, all
+    riscv64-negative: the Supported Platforms table for Gurobi 13.0 in docs.gurobi.com lists
+    exactly win64, linux64 (x86-64), macos_universal2 and armlinux64 (arm64), no RISC-V
+    anywhere; packages.gurobi.com/13.0/gurobi13.0.3_linux64.tar.gz, _armlinux64.tar.gz and the
+    macOS pkg all answer 206 to a 2-byte range request while gurobi13.0.3_riscvlinux64.tar.gz,
+    _riscv64.tar.gz and _linux_riscv64.tar.gz all 404; and Gurobi''s own conda channel has
+    124/88/ 122/124 packages in linux-64/linux-aarch64/osx-64/win-64 against 0 in linux-riscv64,
+    which still returns 200 with a synthesised empty index (gotcha 42 -- count the packages, do
+    not trust the status). NO COMMUNITY/OSS EDITION: Gurobi''s own open-source-packages article
+    lists gurobipy-pandas, gurobi-machinelearning, gurobi-optimods, gurobi-modelanalyzer and
+    gurobi-logtools under Apache-2.0 and states that the calls those make into ''the proprietary
+    Gurobi library'' remain a support matter; neither gurobipy nor the Optimizer engine is among
+    them. THE LICENCE CLOSES A SECOND, INDEPENDENT DOOR: dist-info/licenses/LICENSE.txt is
+    Gurobi''s Evaluation EULA, whose 2.1 grants only a ''limited, non-exclusive, non-
+    transferrable, non-sublicensable, revocable license ... solely in a non-production
+    environment'' and whose 2.2 states ''You will not use, copy, modify, or distribute the
+    Product'' -- so publishing any gurobipy wheel on pypi.riseproject.dev would not be permitted
+    even if a riscv64 engine existed. And there is no swap-in escape hatch of the gotcha 35
+    kind: the wheel ships gurobipy/.libs/gurobi.lic (TYPE=PIP, VERSION=13,
+    EXPIRATION=2027-11-29, KEY=...) and the engine carries the whole enforcement path (''Invalid
+    PIP license'', ''HostID mismatch (licensed to %x, hostid is %x)'', ''Model too large for
+    size-limited license; visit https://gurobi.com/unrestricted''), so any substitute payload
+    would have to be one the vendor signed. Revisit only if Gurobi itself ships a riscv64
+    Optimizer (a gurobi<ver>_riscvlinux64-style tarball on packages.gurobi.com, or a riscv64
+    wheel on PyPI) AND grants redistribution; nothing in a build-gurobipy.yml can close either
+    gap. No worktree/branch/PR created -- this was settled before any YAML was written.'
 - pkg: xrootd
   version: 6.1.1
   home: https://xrootd.org

@@ -121,6 +121,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   driver-probe module that has no CUDA linkage of its own — so the first `readelf -d` is
   misleading, and a documented CUDA-free build flag upstream never ships rescues nothing
   (the pynvvideocodec case).
+- **453** — A closed commercial engine is not one build recompiled per arch: each arch statically
+  links a *different* proprietary math kernel, and the x86_64↔aarch64 wheel-size gap names which
+  one — so "the vendor would just have to rebuild" is wrong (the gurobipy case).
 
 ---
 
@@ -2817,3 +2820,56 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       else so `link_av_component` fails with "Required FFmpeg library avformat not found". That
       one is fixable (the wheel even ships the ffmpeg source tarball for LGPL compliance) — which
       is exactly why it must not be reported as the blocker.
+453. **A closed commercial engine is not one build recompiled per architecture — each arch
+    statically links a *different* proprietary math kernel, and the x86_64↔aarch64 wheel-size
+    gap names which one (the gurobipy case).** gurobipy 13.0.3 reproduces gotcha 372's hdbcli
+    double lock exactly — `home`/`repo` both `https://www.gurobi.com`, `License: Proprietary`,
+    zero sdists across all 28 releases ever published (so per gotcha 431 the wheel is the only
+    evidence), and a bundled `dist-info/licenses/LICENSE.txt` whose §2.1/§2.2 grant is
+    "non-transferrable, non-sublicensable" and states "You will not use, copy, modify, or
+    distribute the Product", which forecloses rehosting a rebuilt wheel on
+    `pypi.riseproject.dev` independently of whether one could be built. The reusable finding is
+    the *third* lock, and it is two commands deep:
+    - **Diff the platform wheels' sizes, then `strings` the gap.** The same cp312 wheel is
+      15.0 MB for `manylinux_2_17_x86_64` and 87.2 MB for `manylinux_2_26_aarch64`; unzipped,
+      `gurobipy/.libs/libgurobi130.so` is 49.6 MB vs 168.5 MB. `strings -a` identifies the
+      delta: the x86_64 engine has Intel MKL linked in (`mkl_avx_d_opt_gemm_ker`,
+      `Intel(R) Math Kernel Library Version`, `Intel MKL FATAL ERROR: This system does not meet
+      the minimum requirements…`), the aarch64 one Arm Performance Libraries
+      (`ARMPL_NEOVERSE_N1`, `ARMPL_KUNPENG_920`, `ARMPL_APPLE_M1`). Neither engine contains a
+      single `riscv`/`rv64` string (0 hits in 712k). Gotcha 81 uses the size diff across
+      platform wheels to prove there *is* per-platform content; here the same one-JSON-read
+      diff tells you *what* the vendor would have to replace, and the answer — a
+      hand-optimised closed BLAS for our arch, from Intel or Arm, which neither ships — is
+      why a vendor port is not a recompile.
+    - **The shipped LICENSE file enumerates the vendored toolkits for free.** Gurobi's
+      `LICENSE.txt` carries a "SIMPLIFIED END USER LICENSE AGREEMENT FOR FREE OF CHARGE ARM
+      REDISTRIBUTABLES" section beside the Apache/BSD notices — reading the third-party
+      sections of a proprietary wheel's own licence text names its bundled vendor components
+      before any `strings` run, the mirror image of gotcha 376's HYPER_API_OSS_disclosure read.
+    - **A commercial vendor has the same two independent platform tables as an open one**
+      (gotcha 35/157's artifact-index move, gotcha 42's count-don't-trust-the-status):
+      `packages.gurobi.com/13.0/gurobi13.0.3_{linux64,armlinux64}.tar.gz` and the macOS pkg
+      answer `206` to a 2-byte range request while every riscv64 spelling 404s; and the
+      vendor's own conda channel has 124/88/122/124 packages in
+      `linux-64`/`linux-aarch64`/`osx-64`/`win-64` against **0** in `linux-riscv64`, which
+      still returns `200` with a synthesised empty index. Upstream's docs agree in prose —
+      the Supported Platforms table lists exactly `win64`, `linux64`, `macos_universal2`,
+      `armlinux64`.
+    - **A licence-key-gated payload has no swap-in escape hatch.** Gotcha 35's playwright
+      could in principle have been fed an unofficial Node build; here the wheel ships
+      `gurobipy/.libs/gurobi.lic` (`TYPE=PIP`, `EXPIRATION=`, `KEY=`) and the engine carries
+      the whole enforcement path (`Invalid PIP license`, `HostID mismatch (licensed to %x…)`,
+      `Model too large for size-limited license`), so any substitute binary would have to be
+      one the vendor signed. And the payload is hard-linked, not dlopened:
+      `readelf -d gurobipy/_core.cpython-312-*.so` shows `NEEDED libgurobi130.so` plus
+      `RPATH $ORIGIN/.libs`, and `gurobipy/__init__.py` imports `._core`/`._batch`/`._matrixapi`
+      at import time — the saxonche/gotcha 450 shape (no engine ⇒ no importable wheel at all),
+      stricter than gotcha 157's claude-agent-sdk, which at least imports.
+    - **"Is there a community edition?" is answered by the vendor's own OSS page, not by
+      searching for a source repo.** Gurobi publishes gurobipy-pandas, gurobi-machinelearning,
+      gurobi-optimods, gurobi-modelanalyzer and gurobi-logtools under Apache-2.0 and states in
+      the same article that the calls those make into "the proprietary Gurobi library" are a
+      support matter — wrappers around the engine, never the engine or `gurobipy` itself. One
+      read, and it also tells you which sibling distributions on the queue *are* ordinary
+      pure-Python ports.

@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (432 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (433 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -206,6 +206,12 @@ The porting gotchas (432 of them) live in [`references/gotchas/`](gotchas/), spl
   `readelf -d` shows no CUDA at all — and a documented CUDA-free build flag (`DEMUX_ONLY`)
   that upstream never ships, whose product still would not import and is not what the package
   does, rescues nothing; plus the unauthenticated NGC source-zip API (the pynvvideocodec case).
+- **453** — A closed commercial engine is not one build recompiled per arch: gurobipy's 49.6 MB
+  x86_64 `libgurobi130.so` links Intel MKL and its 168.5 MB aarch64 twin links Arm Performance
+  Libraries, so the wheel-size diff names the closed BLAS a vendor port would need for riscv64
+  (there is none) — plus a vendor's package server and conda channel are the same two platform
+  tables as an open project's, and a `.lic` key check in the payload kills gotcha 35's
+  swap-in-another-build escape hatch (the gurobipy case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
