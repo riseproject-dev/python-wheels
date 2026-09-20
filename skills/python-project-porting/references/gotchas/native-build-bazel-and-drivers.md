@@ -34,6 +34,12 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
   clones submodules without tags.
 - **434** — `EXTERNAL_PROJECT_LOG_ARGS` (or any `LOG_CONFIGURE 1`) hides the only useful
   line of a third_party failure in a stamp log — print the stamp logs on failure.
+- **437** — The same `git checkout <tag>` inside an `ExternalProject_Add` `PATCH_COMMAND`
+  aborts the build outright — fetch the missing tag, and sweep every dependency at once.
+- **440** — The version-only bazel cache key is shared repo-wide, so a new workflow's
+  bootstrap step never runs and a copied bootstrap's broken `${VAR}` stays latent.
+- **441** — `VPYTHON_BYPASS` also strips `gclient.py` of *its own* vpython venv: install
+  `httplib2==0.13.1` on the ambient interpreter or the sync dies on `import httplib2`.
 
 ---
 
@@ -606,3 +612,105 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       dependency you can take from the image (gotcha 401's Rocky packages) instead of
       building removes the failure class rather than diagnosing it, and one fewer
       `ExternalProject` is a real saving on a 4-core riscv64 runner.
+
+437. **When gotcha 432's `git checkout <tag>` sits in an `ExternalProject_Add`
+    `PATCH_COMMAND` instead of an unchecked `execute_process`, the tagless submodule clone
+    does not build the stale tree quietly — it aborts the whole build, and there is one of
+    these per dependency, so enumerate them all in one round instead of paying a CI cycle
+    each.** Paddle's `gloo.cmake` sets `PATCH_COMMAND git checkout -- . && git checkout
+    ${GLOO_TAG}`, so run 5 of the paddlepaddle port died 40 minutes in, at 6% with the
+    project's own C++ tree still untouched, on `Performing patch step for 'extern_gloo'` /
+    `error: pathspec 'v0.0.3' did not match any file(s) known to git`. Same cause as 432,
+    opposite symptom: fatal and named, rather than silent and diagnosed hours later.
+    - **Check whether the recorded commit already *is* the tag before moving anything.**
+      `git ls-tree <tag> third_party/<dep>` in a `--filter=blob:none --no-checkout --depth 1`
+      clone of the monorepo gives the gitlink, and `git ls-remote <dep-url> refs/tags/<tag>
+      refs/tags/<tag>^{}` gives the tag's commit — for gloo both were `8b6b61d`, and for
+      protobuf the gitlink `f0dc78d` was `refs/tags/v21.12^{}`. When they match, the tree is
+      already right and only the *ref* is missing: `git fetch --depth 1 origin tag <tag>` in
+      the submodule is the whole fix, with no checkout of your own and no tree change.
+      Prefer that fetch over `git tag <tag>` pointing at HEAD — the fetch stays correct, and
+      keeps failing loudly, if a later version bump moves the gitlink off the tag.
+    - **Sweep every `cmake/external/*.cmake` for the pattern in one pass, then split the
+      hits by whether the tag is a name or a commit.** `grep -rn 'checkout'
+      cmake/external/` plus the `set(<DEP>_TAG ...)` lines is enough: a `*_TAG` that is a
+      SHA is safe, because the recorded commit is the one `actions/checkout` fetched, while a
+      tag or branch *name* is a live failure unless its `if()` is false in your
+      configuration. For Paddle v3.3.1 on riscv64 that left exactly two live (gloo,
+      protobuf — the second being an unconditional `cd <src> && git checkout v21.12` in
+      `build_protobuf()`, which `find_package` only skips if the image ships that exact
+      version), against tag-name checkouts already gated off by `GCC < 9` (pybind11),
+      `APPLE` (pocketfft), `WITH_TESTING OR WITH_DISTRIBUTE` (gtest), CUDA (cub, cccl, the
+      `paddle/fluid/fp8` cutlass switch), `WITH_OPENVINO`, and the parameter-server tree
+      (rocksdb).
+    - **Rehearse it off-target in seconds: the CI state is reproducible exactly.** `git init`,
+      `git remote add origin <url>`, `git fetch --depth 1 origin <recorded-sha>`, `git
+      checkout FETCH_HEAD` is what `git submodule update --init` leaves behind; the tag
+      checkout then fails with the identical `pathspec` line, the tag fetch fixes it, and
+      `git rev-parse HEAD` proves the commit did not move. No riscv64 runner needed.
+
+440. **Gotcha 133's version-keyed bazel cache is shared by *every* workflow in this repo, so
+    a new workflow's bootstrap step never executes — and a bootstrap script with a broken
+    variable reference can sit latent and green for months (the array-record case).** The
+    cache key gotcha 133 recommends is `bazel-${BAZEL_VERSION}-manylinux_riscv64`, with
+    nothing package-specific in it. That is the point — a warm cache turns a fresh bootstrap
+    into a ~40 s restore — but it also means the `if: steps.cache.outputs.cache-hit != 'true'`
+    step in a brand-new workflow is **skipped on its very first run**, so copying a
+    bootstrap job never proves that copy works. `build-array-record.yml` demonstrates the
+    consequence: its bootstrap `docker run` passes `-e RULES_PYTHON_VERSION` but the script
+    inside interpolates `${PROJECT_RULES_PYTHON_VERSION}`, a variable exported only in that
+    workflow's *build* job. Under the script's own `set -eux` (the `-u`) that download would
+    abort immediately — it has simply never run, because `bazel-7.5.0-manylinux_riscv64` was
+    already populated by ray/labmaze.
+    - **So diff a copied bootstrap against a workflow whose cache was cold**, not against
+      the nearest neighbour: `build-ray.yml` and `build-labmaze.yml` both use
+      `${RULES_PYTHON_VERSION}` consistently and are the ones to copy.
+    - **The mechanical check needs no CI**: for every `${VAR}` the heredoc expands, confirm
+      the same `docker run` names it in a `-e` flag. The heredoc is quoted (`<<'SCRIPT'`), so
+      nothing is substituted by the outer shell and a typo cannot be caught at YAML level —
+      only the container's `set -u` sees it, and only when the step actually runs.
+    - **Corollary for triage**: "the bazel job was green" is not evidence the bootstrap
+      works. Check whether the step reported a cache hit before crediting it, and if you need
+      to exercise a bootstrap deliberately, bump `BAZEL_VERSION` or change the key.
+
+441. **Gotcha 423's `VPYTHON_BYPASS` does not only change which interpreter gsutil gets — it
+    takes `gclient.py`'s *own* vpython venv away too, so depot_tools' third-party imports
+    must be present on the ambient interpreter, and `httplib2` is the one that stops the sync
+    before it fetches anything.** `depot_tools/gclient` ends in `exec vpython3
+    "$base_dir/gclient.py"`, which the bypass turns into plain `python3 gclient.py`;
+    `gclient.py` imports `gclient_scm`, which imports `gerrit_util`, which does `import
+    httplib2` and `import httplib2.socks` at module scope. A manylinux `/opt/python/cp3xx-cp3xx`
+    has neither, so `gclient sync` dies ~80 s in with a bare
+    `ModuleNotFoundError: No module named 'httplib2'` plus a `CalledProcessError` from
+    whatever driver script ran it — nothing in the log mentions vpython, and the traceback
+    looks like a broken checkout rather than a missing venv.
+    - **Fix it in the workflow, pinned: `pip install -q httplib2==0.13.1`** (the version
+      depot_tools' own `.vpython3` pins) on the interpreter that is first on `PATH`, before
+      the driver script runs. **Unpinned is not a fix**: `pip install httplib2` resolves to
+      0.32.0, and `httplib2.socks` ships up to 0.22.0 and is gone from 0.30.0 on, so the
+      second import fails exactly like the first. The wheel is `py3-none-any`, so this needs
+      no registry index and no riscv64 wheel — it is not the CIPD wheel problem again.
+    - **Do not pre-install the rest of `.vpython3` while you are there.** The `lxml` and
+      `crcmod` whose missing `linux-riscv64` builds forced the bypass are reached only by
+      PRESUBMIT and as an optional gsutil hash accelerator. Prove the set instead of guessing:
+      unpack the pinned depot_tools from gitiles (`+archive/<rev>.tar.gz` — no clone, 1.2MB),
+      make a bare venv on the *container's* python version, install httplib2, and import every
+      module the sync path touches (`gclient`, `gclient_scm`, `gclient_eval`, `gerrit_util`,
+      `git_cache`, `download_from_google_storage`, `gsutil`, `metrics`, `autoninja`, `siso`,
+      `ninja`, …). All clean in seconds on x86; only httplib2 was ever missing.
+    - **Rehearse the gsutil hooks with a *bare* ambient python, not the host's.** Pointed at a
+      host `python3` that carries a system `cryptography`, `download_from_google_storage.py`
+      dies inside gsutil's vendored google-auth (`pyo3_runtime.PanicException: Python API call
+      failed`) — a host artifact that does not happen in the image. Put a directory holding a
+      `python3` symlink to the bare venv first on `PATH`, and the real hook downloads its
+      object and exits 0 with only httplib2 installed.
+    - **Check whether the checkout pins the same depot_tools revision the driver clones before
+      assuming gotcha 427.** comfy-angle 0.1.1's ANGLE revision pins `third_party/depot_tools`
+      at exactly the sha in `scripts/depot-tools-revision.txt`, so both gsutils are 5.35 (six
+      1.17, fine on 3.12) and the two-gsutils split never arises — `grep` the DEPS for the
+      revision instead of inferring it from the project's age.
+    - **Only vpython-dispatched scripts are affected.** `depot_tools/gn` and `autoninja` run
+      through `python-bin/python3`, the hermetic CIPD cpython, and every hook a standalone
+      ANGLE sync runs on Linux (`clang`, `llvm_objdump`, `rust`, `lastchange`,
+      `configure_siso`) imports nothing outside the stdlib and depot_tools itself — so
+      httplib2 is the whole bill, not the first of many.

@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (427 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (431 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -176,6 +176,19 @@ The porting gotchas (427 of them) live in [`references/gotchas/`](gotchas/), spl
   `aarch64` branch works only because the dep itself ships an ARM SIMD shim — a mandatory dep
   with no off switch and no scalar path (gotcha 366) is the verdict, and the same branch's
   configure failure reproduces on any x86 host (the Open3D case).
+- **438** — A "redistributable `<vendor binary>`" distribution can repack a vendor blob on some OSes
+  and build genuinely from source on the one a port needs, so apply gotcha 35/157/431 per OS by
+  reading the build scripts rather than the download script; includes the minutes-long check that
+  depot_tools/gn/CIPD already support riscv64 (302-vs-404 probes against chrome-infra-packages,
+  `detect_host_arch.py`, `gcc_toolchain("riscv64")`) and the only two CIPD packages missing for
+  `linux-riscv64` — siso and reclient — which `.gclient` `custom_deps` nulls out (the
+  comfy-angle/ANGLE case).
+- **442** — A vendored dependency's build system can silently omit a capability flag its other
+  build system defaults on: XNNPACK's Bazel build never defines `XNN_ENABLE_RISCV_VECTOR` where
+  its CMake build defaults it ON, so half its riscv64 RVV dispatch sites (no runtime
+  `getauxval(AT_HWCAP)` check) compile out to scalar only by that omission — re-verify on every
+  XNNPACK version bump, since fixing it upstream would make the ungated blocks go live (the
+  mediapipe case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -385,6 +398,16 @@ The porting gotchas (427 of them) live in [`references/gotchas/`](gotchas/), spl
   prints only `Command failed: 1`, with the real diagnostic in a stamp log that dies with the
   runner — add an `if: failure()` step that tails
   `build/third_party/*/src/*-stamp/*-*-*.log`.
+- **437** — The same `git checkout <tag>` in an `ExternalProject_Add` `PATCH_COMMAND` aborts
+  the build instead of building the stale tree quietly; check the gitlink against the tag
+  (usually equal, so only the ref is missing — `git fetch --depth 1 origin tag <tag>`), and
+  sweep every `cmake/external/*.cmake` at once, splitting `*_TAG` names from SHAs.
+- **440** — Gotcha 133's version-only bazel cache key is shared repo-wide, so a new
+  workflow's bootstrap step is skipped on its first run and a broken variable reference in a
+  copied bootstrap stays latent — check every `${VAR}` against the `docker run -e` list.
+- **441** — `VPYTHON_BYPASS` (gotcha 423) also takes `gclient.py`'s own vpython venv away, so
+  depot_tools' imports must be on the ambient interpreter: `pip install httplib2==0.13.1`
+  (unpinned drops the `httplib2.socks` gerrit_util needs), and nothing else is missing.
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
@@ -619,6 +642,9 @@ The porting gotchas (427 of them) live in [`references/gotchas/`](gotchas/), spl
 - **429** — A media project's suite is written against upstream's *full* FFmpeg; an FFmpeg
   you configure yourself has no H.264/HEVC/VP9/AV1/MP3 encoder at all, and the failures
   blame the wrong codec.
+- **439** — A Bazel project runs one process per `py_test` target, so one `pytest --pyargs`
+  over the whole package invents failures: run each file as its own absltest script, and take
+  the `env`/`args` from the `py_test` rules (per-target, not globally).
 
 ### Test failures, flakes & arch-specific bugs — [`gotchas/test-failures-and-flakes.md`](gotchas/test-failures-and-flakes.md)
 
