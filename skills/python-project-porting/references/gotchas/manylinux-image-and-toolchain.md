@@ -66,6 +66,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
   GLPK, and a numeric package's optional-extension set has to be cut along that line.
 - **433** — OpenBLAS built from source needs an explicit `TARGET=RISCV64_GENERIC`; its
   `getarch` has no riscv64 autodetection to fall back on, and the `ZVL*` targets bake RVV in.
+- **435** — There is no `libquadmath` on riscv64 (or aarch64) at all — not a missing package,
+  a library GCC does not build for those targets.
 - **428** — A project on the *deprecated* `find_package(PythonLibs REQUIRED)` has no
   `Development.Module` way out of gotcha 374's static-libpython wall — and satisfying it
   with manylinux's non-PIC `libpython3.XX.a` only moves the failure to the final link.
@@ -1202,3 +1204,28 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       10 riscv64 `openblas`/`lapack`/`blas` packages are one `dnf install` away and are
       what every other BLAS consumer in this repo links against; a from-source OpenBLAS is
       worth it only when the project statically links it or patches it.
+
+435. **`libquadmath` does not exist on riscv64 — GCC does not build it for that target, so
+    `dnf install libquadmath` fails with `Unable to find a match` and no
+    `libquadmath.so.0` is anywhere on the image.** It is not a gap in the distro's riscv64
+    coverage like gotcha 401's SuiteSparse; libquadmath only exists where `__float128` is a
+    type distinct from `long double`, which is true on x86-64 and not on riscv64 or aarch64.
+    Any project that pairs `libgfortran` with `libquadmath` as "the GCC Fortran runtime" and
+    copies both unconditionally is therefore broken on both architectures — Paddle's
+    `setup.py` does exactly this with `GFORTRAN_LIB` and `GNU_RT_LIB_1`, and its released
+    aarch64 wheel only gets away with it by shipping the x86-64 `libquadmath.so.0` out of
+    gotcha 418's tarball.
+    - **The fix is to make the copy conditional, not to substitute another library.** Such a
+      project usually already has the pattern somewhere nearby — Paddle guards its
+      `GNU_RT_LIB_2` (Windows/macOS `libgcc_s`) copy on the variable being set, so guarding
+      `GNU_RT_LIB_1` the same way is the change upstream would make, and it needs no
+      architecture flag. Do not point the variable at `libgcc_s.so.1` or at the same path as
+      `libgfortran` to keep an unconditional copy happy: the first ships a library nothing
+      asked for, the second ships the same file twice.
+    - **Do not "harden" a `dnf install` by adding runtime packages you have not confirmed.**
+      This cost a whole round: the list `lapack blas libgfortran libquadmath` was written to
+      pre-empt a missing dependency, and the two additions were the only things wrong with
+      it — `libgfortran` was already installed, and `libquadmath` cannot be. `dnf` fails the
+      whole transaction on one unmatched argument, so a speculative package name is a build
+      failure, not insurance. Install what the build needs and let the dependency solver
+      pull the runtimes.

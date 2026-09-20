@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (425 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (427 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -170,6 +170,12 @@ The porting gotchas (425 of them) live in [`references/gotchas/`](gotchas/), spl
   `/home/jenkins/`, `/vcpkg/buildtrees/`) prove a closed vendor with no riscv64 source, and
   open-source crates in the same output are only the shim around it
   (the livekit-plugins-noise-cancellation case).
+- **436** — A big CMake project's whole non-x86 story can be a single `uname -m == aarch64`
+  boolean, so a third arch silently takes the x86_64 path: `grep` every site of that boolean to
+  enumerate the prebuilt-x86_64 downloads (all fixable), then triage the one site whose
+  `aarch64` branch works only because the dep itself ships an ARM SIMD shim — a mandatory dep
+  with no off switch and no scalar path (gotcha 366) is the verdict, and the same branch's
+  configure failure reproduces on any x86 host (the Open3D case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -442,6 +448,10 @@ The porting gotchas (425 of them) live in [`references/gotchas/`](gotchas/), spl
   manylinux's non-PIC `libpython3.XX.a` only moves the failure to the final link after hours,
   the project may already strip libpython from its own non-Windows link lines (making the
   `REQUIRED` vestigial), and the header-only fix rehearses locally on x86_64 in a minute.
+- **435** — `libquadmath` does not exist on riscv64 or aarch64 — GCC builds it only where
+  `__float128` differs from `long double`, so `dnf install libquadmath` fails outright. A project
+  that copies it beside `libgfortran` unconditionally needs that copy made conditional; and never
+  pad a `dnf install` with unconfirmed runtime packages, since one bad name fails the transaction.
 - **433** — OpenBLAS built from source stops at `getarch.c: #error "This arch/CPU is not
   supported by OpenBLAS."` on riscv64 whatever the version: its riscv64 definitions are reached
   only through `TARGET=`, so pass `TARGET=RISCV64_GENERIC` (the rv64gc baseline) as the twin of

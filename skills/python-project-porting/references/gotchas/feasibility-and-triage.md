@@ -100,6 +100,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **431** — A distribution that has never shipped an sdist leaves the wheel as the only
   evidence: `strings -a` the vendored blob and its builder paths (`/.conan/data/…@vendor/prod`)
   prove a closed vendor with no public source (the livekit-plugins-noise-cancellation case).
+- **436** — A project's whole non-x86 story can be one `uname -m == aarch64` boolean, and an
+  `aarch64` branch is only as portable as the dependency behind it — survey every site of the
+  boolean, then triage the one whose branch works only because that dep ships an ARM SIMD shim
+  (the Open3D case).
 
 ---
 
@@ -2487,3 +2491,61 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       `livekit>=0.21.3` runtime dep is itself `py3-none-<platform>` over those same five
       platforms with no riscv64 wheel, so nothing downstream of this plugin resolves on
       riscv64 today either.
+
+436. **A big CMake project's whole non-x86 story can be one `uname -m == aarch64` boolean, and
+    an `aarch64` branch is only as portable as the dependency behind it — survey every site of
+    that boolean, then triage the one whose branch exists solely because *that dep* has an ARM
+    SIMD shim (the Open3D case).** Open3D 0.19.0 is a 753-TU / 250 kLoC CMake C++ tree that
+    upstream already builds for a non-x86 Linux arch, with a dedicated slim config
+    (`docker/Dockerfile.openblas`: `BUILD_SHARED_LIBS=OFF`, CUDA/PyTorch/TensorFlow/SYCL all
+    OFF) exercised by `.github/workflows/ubuntu-openblas.yml` on a GCE `t2a-standard-4`. That
+    reads as a ready-made riscv64 precedent and is not one: every arch fallback in the tree is
+    gated on `LINUX_AARCH64`, set in `CMakeLists.txt` by `execute_process(COMMAND uname -m)`
+    matching the literal string `aarch64`, so riscv64 takes the `else()` branch written for
+    x86_64 everywhere.
+    - **`grep -rn <ARCH_BOOL> CMakeLists.txt 3rdparty/` *is* the survey, and it is the
+      authoritative list of what upstream itself considers arch-conditional.** Here six sites,
+      five of which name a prebuilt **x86_64-only** archive riscv64 would try to download:
+      MKL static (`USE_BLAS=OFF` → `mkl_static-2024.1.0-linux_x86_64.tar.xz`), Filament
+      (`BUILD_FILAMENT_FROM_SOURCE=OFF` → `filament-v1.9.19-linux-20.04.tgz`), WebRTC
+      (`BUILD_WEBRTC=ON` → `webrtc_<rev>_cxx-abi-1.tar.gz`), the ISPC compiler
+      (`BUILD_ISPC_MODULE=ON`) and prebuilt VTK 9.1 (`BUILD_VTK_FROM_SOURCE=OFF`). All five
+      have a from-source route the aarch64 branch already takes, so they are configuration
+      work, not blockers — the point of the survey is that the set is finite and enumerated
+      before any container is started. A dep that self-gates on its own (`WITH_IPP` drops out
+      via `IPP_SUPPORTED_HW AMD64 x86_64 x64`) needs nothing at all.
+    - **The sixth site is the verdict: an `elseif(<ARCH_BOOL>)` that only turns the x86 ISAs
+      off works because the dependency has an ARM-specific SIMD backend, and nothing more.**
+      `3rdparty/embree/embree.cmake`'s aarch64 branch passes
+      `-DEMBREE_ISA_{SSE2,SSE42,AVX,AVX2,AVX512}=OFF` and lets Embree pick NEON. Copy that
+      branch for a third arch and gotcha 366 lands unchanged — and it is unavoidable here,
+      because unlike the other five Embree has **no** `BUILD_*`/`WITH_*`/`USE_*` off switch:
+      it is appended to `Open3D_3RDPARTY_PRIVATE_TARGETS_FROM_CUSTOM` unconditionally and
+      `cpp/open3d/t/geometry/CMakeLists.txt` compiles `RaycastingScene.cpp` in *both* the SYCL
+      and non-SYCL branch, for a class (`o3d.t.geometry.RaycastingScene`) that is documented
+      public Python API. So there is no honest reduced wheel, and gotcha 41's
+      "escape-hatch build with the payload missing" is the only alternative.
+    - **Reproduce a third arch's configure failure on an x86 host in seconds, before booking a
+      riscv64 runner.** Whatever the `aarch64` branch passes is by construction also what a
+      non-x86/non-ARM arch would pass, and on an x86 host the dep's ARM boolean is OFF exactly
+      as it is on riscv64 — so `cmake <embree-4.3.3-src>
+      -DEMBREE_ISA_{SSE2,SSE42,AVX,AVX2,AVX512}=OFF -DEMBREE_TASKING_SYSTEM=INTERNAL` prints
+      `CMake Error at CMakeLists.txt:636 (MESSAGE): You have to enable at least one ISA!` on
+      any laptop. That costs one download and settles the "just add riscv64 to the arch
+      boolean" patch idea, which is always the first thing you will want to try.
+    - **Check the *compiler* gate on the source-build fallbacks too, not just the arch gate.**
+      The Filament fallback the aarch64 branch relies on hard-errors for any non-Clang
+      toolchain (`message(FATAL_ERROR "Detected C compiler ${CMAKE_C_COMPILER_ID} is
+      unsupported")`, `MIN_CLANG_VERSION 6.0`) and the pinned revision is a 2021-era
+      `isl-org/filament` fork, so "build it from source like aarch64 does" carries a second
+      prerequisite our GCC-based manylinux images do not meet. `BUILD_GUI=OFF` sidesteps it at
+      the cost of `open3d.visualization.{gui,rendering,draw}` — worth knowing, but it does not
+      reach the Embree blocker, so it changes nothing about the verdict.
+    - **Price it anyway, so the park note can say "and it would also have been expensive".**
+      The openblas config builds OpenBLAS + VTK 9.1 + Filament + Embree + assimp/curl/
+      boringssl/TBB/qhull from source and then 753 Open3D TUs, per interpreter (cp38–cp312 =
+      5 full builds; the wheel is `cp3X-cp3X`, no abi3 collapse), for a ~450 MB payload each —
+      against PR #2104 (mediapipe) at 5h23m plus 2h24m–3h21m of queue wait per job on the same
+      shared pool. Independently disproportionate, which is worth one sentence but is *not*
+      the reason: state the hard blocker first and the cost second, so an unpark attempt does
+      not start by trying to make it cheaper.
