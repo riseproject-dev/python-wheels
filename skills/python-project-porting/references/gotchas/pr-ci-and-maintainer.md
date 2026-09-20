@@ -21,6 +21,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
 - **380** — A project that splits every release into two independently-named PyPI
 - **370** — `.queue.yml` lives on `main` in a checkout shared by every concurrently
 - **413** — `git -C <dir> apply <glob>` hands git the *literal* glob — the shell expands
+- **458** — A failed job with no log at all and its steps still `in_progress` is a dead
 
 ---
 
@@ -407,3 +408,41 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
       (136 of this repo's 188 patched packages already do). Without it a follow-up
       commit that only edits a patch produces no run at all, which looks exactly like
       gotcha 89 and wastes a cycle on the wrong hypothesis.
+
+458. **A failed job with *no* log at all and its steps still `in_progress` is a dead
+    runner, not a failed build — and the check-run *annotations* endpoint still holds the
+    dying process's message (the mini-racer V8 case).** The shape is unmistakable once you
+    know it: `conclusion: failure`, every step from the one that was executing onwards left
+    at `status: in_progress`/`pending`, and `GET /repos/<repo>/actions/jobs/<id>/logs`
+    answering `404 BlobNotFound`. Logs are only uploaded when a job *terminates*, so their
+    absence is itself the evidence — and it is not gotcha 62's volume drop, which leaves the
+    steps properly `completed`. Two API calls separate them: a **sibling job in the same
+    run** returns `200` for its log (so retention and permissions are fine), and the failed
+    job's steps are unfinished (so it never got to upload).
+    - **The one surviving artefact is the annotation, and the job id *is* the check-run
+      id**: `GET /repos/<repo>/check-runs/<job id>/annotations`. It survives when the log
+      does. Here it carried `Fatal glibc error: pthread_mutex_lock.c:130
+      (___pthread_mutex_lock): assertion failed: mutex->__data.__owner == 0` — with
+      `path: .github` and `start_line: 0`, i.e. a *job-level* annotation written as the
+      runner died, not a compiler diagnostic from a step.
+    - **Correlate across packages before blaming your build.** Sweep every failed job in the
+      last week or two for the same shape and read its annotations — jobs with unfinished
+      steps are a tiny set, so this is cheap:
+      ```python
+      cand = [j for j in jobs if j["conclusion"] == "failure"
+              and any(s["status"] in ("in_progress", "pending", "queued") for s in j["steps"])]
+      ```
+      Three of 749 failed jobs over eight days had it, on three different runners and three
+      unrelated packages: mini-racer (3h20m into a V8 compile), tensor-grep (11 minutes) and
+      litellm — dead **7 seconds** after the job started. A 7-second death cannot be memory,
+      disk or anything a build did, which retires the "the expensive build exhausted the
+      runner" hypothesis (gotcha 421) in one comparison rather than one 27-hour rebuild.
+    - **Then re-run, do not debug.** `POST /repos/<repo>/actions/runs/<id>/rerun-failed-jobs`
+      replays only the dead job against the same merge ref, as a second attempt on the same
+      run. That matters most on exactly the ports where this hurts: no push means no
+      `pull_request: paths` restart (gotcha 80), no new commit on a PR whose other checks
+      are already green, and the existing `timeout-minutes` ceiling is preserved.
+    - **This is the missing half of gotcha 447's "read the log before concluding it is a
+      wall".** When there is no log to read, the annotation plus the unfinished steps are
+      the substitute — and reaching for a source fix, a parallelism cap or a parked entry
+      without checking them costs a full build cycle to disprove.

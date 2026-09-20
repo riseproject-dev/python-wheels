@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (434 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (435 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -840,3 +840,7 @@ The porting gotchas (434 of them) live in [`references/gotchas/`](gotchas/), spl
 - **413** — `git -C <dir> apply <glob>` hands git the literal glob (the shell expands it
   in the step's cwd, which `-C` does not change) — use `working-directory:` so shell and
   git share one base; an x86_64 rehearsal cannot catch a runner-layout bug.
+- **458** — A failed job with no log at all (`404 BlobNotFound`) and its steps still
+  `in_progress` is a dead runner, not a failed build; the check-run annotations endpoint
+  still holds the dying process's message. Correlate the shape across packages, then
+  `rerun-failed-jobs` rather than pushing a fix.
