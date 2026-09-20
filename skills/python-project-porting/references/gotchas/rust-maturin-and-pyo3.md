@@ -71,6 +71,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
   a `pip`-installed plugin (e.g. `protoc-gen-mypy`) for cp313+ is invisible to a PATH-based
   `which`/`shutil.which()` lookup even from that same interpreter; resolve its scripts
   directory via `sysconfig.get_path("scripts")` instead.
+- **425** — An aya/eBPF crate cannot build its BPF half on the riscv64 runner at all:
+  `bpf-linker` reaches LLVM through the *Rust toolchain's* shared library, which only the
+  x86_64 and aarch64 dists ship — cross-compile the object on an x86_64 job instead.
 
 ---
 
@@ -1137,3 +1140,52 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       --release` / `maturin build` with `PYO3_PYTHON` pointed at it) settles which
       behavior — no ceiling, a hard error, or a flag-gated one — the pinned version
       exhibits.
+
+425. **An aya/eBPF crate cannot build its BPF half on the riscv64 runner at all:
+    `bpf-linker` reaches LLVM through the *Rust toolchain's* shared library, and only the
+    x86_64 and aarch64 dists ship one.** `aya-build` runs `rustup run nightly cargo build
+    --target bpfel-unknown-none`, rustc invokes `bpf-linker` as that target's linker, and
+    bpf-linker's default features (`rust-llvm-21` in 0.9.15) pull in
+    `aya-rustc-llvm-proxy`, which dlopens the first file whose stem starts with `libLLVM`
+    in an `LD_LIBRARY_PATH` entry, then in each `PATH` entry's sibling `lib/`. On riscv64
+    nothing matches, so its `panic!("unable to find LLVM shared lib")` fires inside an
+    `extern "C"` fn and aborts — SIGABRT, "thread caused non-unwinding panic", a
+    `could not compile <pkg>-ebpf` and a failed build script ~40 min into the job. The
+    x86_64 rehearsal cannot reproduce it: that host has the shared libLLVM riscv64 lacks.
+    - **Settle it against the dist, in one command**:
+      `curl -sS https://static.rust-lang.org/dist/<date>/rustc-nightly-<host>.tar.xz | tar -tJ | grep libLLVM`
+      lists `libLLVM-<major>-rust-*.so` for x86_64 and nothing for
+      riscv64gc-unknown-linux-gnu, whose `librustc_driver-*.so` has LLVM linked in
+      statically with the C API hidden (`readelf -sDW` finds only
+      `LLVMRustStringWriteImpl`), so there is nothing to point `LD_LIBRARY_PATH` at.
+    - **Building bpf-linker against a *system* LLVM (`--no-default-features --features
+      llvm-NN`) only helps when the distro's LLVM is at least the toolchain's.** Rocky
+      10.2 (the manylinux_2_39_riscv64 base) has LLVM 21.1.8 in AppStream and it does
+      build — `llvm-devel` plus `libxml2-devel`, `llvm-config --shared-mode` = shared — but
+      an LLVM 21 bpf-linker rejects a newer toolchain's bitcode with `ERROR llvm: Invalid
+      record`. Pair the two with `rustc +<tc> --version --verbose` (prints `LLVM version:`)
+      against `llvm-config --version`; the Rust↔LLVM boundaries are 1.87→20, 1.91→21,
+      1.95→22. When the project's own `rust-version` MSRV is at or past the release that
+      bumped LLVM (mitmproxy_rs 0.12.11 declares 1.95, exactly the LLVM 22 release), no
+      pairing exists at all. Nothing else fills the gap either: apt.llvm.org publishes no
+      riscv64, and aya-rs's prebuilt LLVM and bpf-linker release artifacts have no
+      riscv64-glibc build (only hash-tagged `riscv64gc-unknown-linux-musl` LLVM images).
+    - **What works: cross-compile the BPF object on `ubuntu-latest` and embed it in the
+      native build** (gotcha 4's pattern, as the generated-parser jobs use). The output is
+      architecture-independent BPF bytecode whose only arch input is
+      `--cfg bpf_target_arch="<arch>"`, which aya-build derives from the *host* crate's
+      target — so the x86_64 job must pass aya-build's full flag set explicitly
+      (`CARGO_ENCODED_RUSTFLAGS` = that cfg for the wheel's arch, `-Cdebuginfo=2`,
+      `-Clink-arg=--btf`, `\x1f`-separated), upload the binary, and the riscv64 job
+      download it and patch the wrapper crate's `build.rs` to copy a staged object into
+      `$OUT_DIR` (named exactly as the `include_bytes_aligned!` in the consumer expects)
+      instead of calling `aya_build::build_ebpf`. Expect a **second** gate: the ebpf
+      crate's own `build.rs` does `which("bpf-linker").expect(...)` purely as a
+      rebuild-trigger hack, and it must be relaxed in the same patch or the build still
+      dies on the missing binary. The riscv64 container then needs neither a nightly
+      toolchain nor bpf-linker, which also takes the `cargo install bpf-linker` build out
+      of the job.
+    - **A QEMU rehearsal only covers any of this if it reaches the link step.** The eBPF
+      cross-compile is the last thing the build script does, so a rehearsal that is still
+      compiling host crates when it is cut short (empty `dist/`) has proven nothing about
+      the half that fails — check for the artifact, not for the absence of errors.
