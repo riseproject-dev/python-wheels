@@ -3,7 +3,7 @@ From: Ludovic Henry <git@ludovic.dev>
 Date: Sat, 19 Sep 2026 21:10:00 +0200
 Subject: [PATCH] setup: make the V8 checkout work on a riscv64 host
 
-checkout_v8() cannot complete on riscv64 for three independent reasons,
+checkout_v8() cannot complete on riscv64 for four independent reasons,
 all of them in the gclient half of the recipe rather than in V8 itself:
 
 * Three of V8's CIPD packages have no linux-riscv64 build: buildtools/
@@ -21,6 +21,23 @@ all of them in the gclient half of the recipe rather than in V8 itself:
   out of the checked-out DEPS instead, after the release tag is checked
   out and before the sync that reads it.
 
+* Two DEPS hooks download prebuilt test suites through the gsutil that
+  V8's own DEPS-pinned depot_tools bootstraps, which is gsutil 4.68, and
+  that gsutil vendors six 1.12 -- whose meta path importer only
+  implements the find_module() API CPython removed in 3.12. Its
+  gsutil.vpython3 spec asks for python 3.8, so it never meets a 3.12
+  interpreter on a bot; but riscv64 needs VPYTHON_BYPASS to run gsutil at
+  all (the vpython venv pins a crcmod wheel chromium builds for no
+  riscv64 platform tag), and the bypass hands gsutil the container
+  python, where every download_from_google_storage.py hook then dies on
+  "ModuleNotFoundError: No module named 'six.moves'". Only wasm_spec_tests
+  and wasm_js are reached with V8's default variables, and both only
+  unpack test suites that building v8_monolith never reads, so condition
+  them off rather than reshuffle which interpreter gsutil gets. gclient's
+  own dep_type: 'gcs' deps are not affected: they go through the gsutil
+  of the depot_tools checkout driving the sync, new enough to vendor a
+  six that still imports.
+
 * That DEPS edit, and the V8_GIT_TAG checkout it follows, only survive
   the sync if the v8 solution is unmanaged: depot_tools' fetch config
   for V8 declares no "managed" key, so gclient defaults it to true and
@@ -36,11 +53,11 @@ Upstream-Status: To upstream [not yet submitted to cloudflare/stpyv8]
 
 Signed-off-by: Ludovic Henry <git@ludovic.dev>
 ---
- setup.py | 71 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++--
- 1 file changed, 69 insertions(+), 2 deletions(-)
+ setup.py | 102 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 100 insertions(+), 2 deletions(-)
 
 diff --git a/setup.py b/setup.py
-index fb80c38..94509b4 100644
+index fb80c38..e887710 100644
 --- a/setup.py
 +++ b/setup.py
 @@ -1,6 +1,7 @@
@@ -60,7 +77,7 @@ index fb80c38..94509b4 100644
  
  def exec_cmd(cmdline, *args, **kwargs):
      msg = kwargs.get("msg")
-@@ -75,6 +78,60 @@ def install_depot():
+@@ -75,6 +78,90 @@ def install_depot():
              exit(1)
  
  
@@ -118,10 +135,40 @@ index fb80c38..94509b4 100644
 +        fd.write(text)
 +
 +
++def skip_gsutil_hooks():
++    # The gsutil that V8's DEPS-pinned depot_tools bootstraps is 4.68, and it
++    # vendors six 1.12, whose meta path importer only implements find_module(),
++    # which CPython removed in 3.12. Its own gsutil.vpython3 spec asks for
++    # python 3.8, so on a bot it never meets a 3.12 interpreter -- but the
++    # VPYTHON_BYPASS that gets gsutil running on riscv64 at all (its vpython
++    # venv pins a crcmod wheel chromium does not build for this platform) makes
++    # vpython3 run it on the container python, and every hook that shells out to
++    # download_from_google_storage.py then dies on "No module named
++    # 'six.moves'". Of those hooks only wasm_spec_tests and wasm_js are reached
++    # with V8's default variables, and both only unpack test suites that
++    # building v8_monolith never reads, so skip them rather than second-guess
++    # which interpreter gsutil gets. (gclient's own dep_type: 'gcs' downloads
++    # are unaffected: those run through the newer gsutil of the depot_tools
++    # checkout that drives the sync, which vendors a six that still imports.)
++    deps_file = os.path.join(V8_HOME, "DEPS")
++
++    with open(deps_file, encoding="utf-8", mode="r") as fd:
++        text = fd.read()
++
++    for hook in ("wasm_spec_tests", "wasm_js"):
++        anchor = f"'name': '{hook}',\n    'pattern': '.',\n"
++        text = text.replace(
++            anchor, f"{anchor}    'condition': 'host_cpu != \"riscv64\"',\n", 1
++        )
++
++    with open(deps_file, encoding="utf-8", mode="w") as fd:
++        fd.write(text)
++
++
  def checkout_v8():
      install_depot()
  
-@@ -87,7 +144,10 @@ def checkout_v8():
+@@ -87,7 +174,10 @@ def checkout_v8():
              msg="Fetching Google V8 code",
          )
  
@@ -133,13 +180,14 @@ index fb80c38..94509b4 100644
              exit(1)
  
      success, _, __ = exec_cmd(
-@@ -106,11 +166,18 @@ def checkout_v8():
+@@ -106,11 +196,19 @@ def checkout_v8():
      if not success:
          exit(1)
  
 +    if RISCV64:
 +        unmanage_v8_solution()
 +        skip_unavailable_cipd_packages()
++        skip_gsutil_hooks()
 +
      success, _, __ = exec_cmd(
          os.path.join(DEPOT_HOME, "gclient"),
