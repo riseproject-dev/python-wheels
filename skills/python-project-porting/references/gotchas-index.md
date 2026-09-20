@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (431 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (432 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -200,6 +200,12 @@ The porting gotchas (431 of them) live in [`references/gotchas/`](gotchas/), spl
   GraalVM CE or Mandrel, and `Platform.LINUX_RISCV64`/`ELFMachine.RISCV64` existing in graal's
   source is a research LLVM-backend port, not shipping support — plus a published source drop
   with zero build files is not a from-source path (the saxonche/SaxonC-HE case).
+- **452** — A GPU-only package can enforce the GPU from its *pure-Python* `__init__.py`: an
+  import-time probe module that `dlopen`s `libnvidia-encode.so.1` and selects which of two
+  prebuilt extensions to load from the driver's reported version, while the probe's own
+  `readelf -d` shows no CUDA at all — and a documented CUDA-free build flag (`DEMUX_ONLY`)
+  that upstream never ships, whose product still would not import and is not what the package
+  does, rescues nothing; plus the unauthenticated NGC source-zip API (the pynvvideocodec case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
