@@ -536,6 +536,10 @@ The porting gotchas (433 of them) live in [`references/gotchas/`](gotchas/), spl
 - **454** — The image's LLVM is a whole toolchain *minus Clang's static libraries*: `llvm-static`
   installs 304 `libLLVM*.a`, `clang-devel` installs none, so a project that links Clang statically
   has to build LLVM+Clang from source (the warp-lang case).
+- **455** — Rocky 10's zlib is `zlib-ng-compat`, whose CMake package config names a `libz.a` only
+  the `-static` subpackage installs, so a *lowercase* `find_package(zlib)` hard-errors on the
+  riscv64 image; `-DCMAKE_DISABLE_FIND_PACKAGE_zlib=ON` routes the project back to its own
+  `find_library` fallback (the pulsar-client case).
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 

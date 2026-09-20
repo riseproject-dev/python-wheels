@@ -84,6 +84,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
   `llvm-static` installs 304 `libLLVM*.a`, `clang-devel` installs none, so a project that
   links Clang statically must build LLVM+Clang from source; plus the cmake/ninja and
   `_GLIBCXX_USE_CXX11_ABI` facts that go with it.
+- **455** — Rocky 10's zlib is `zlib-ng-compat` and its CMake config names a `libz.a` it never
+  installs, so a *lowercase* `find_package(zlib)` aborts the configure — `QUIET` or not.
 
 ---
 
@@ -1420,3 +1422,26 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       recipe pins them (warp's `tools/llvm/ci/build-linux.sh` pipx-installs `cmake==3.31.6` and
       `ninja==1.11.1.4`), take the same pin from our registry, which serves `cmake 3.31.6` and
       `ninja 1.11.1.3` for riscv64, and put it ahead of `/usr/local/bin` on `PATH`.
+
+455. **Rocky 10's zlib is `zlib-ng-compat`, and its CMake package config points at a `libz.a`
+    only the separate `-static` subpackage installs — so a *lowercase* `find_package(zlib)`
+    aborts the configure on the riscv64 image, `QUIET` or not (the pulsar-client case; see
+    `build-pulsar-client.yml`).** This is not a "package not found" that the project's own
+    fallback branch can absorb: `/usr/lib64/cmake/ZLIB/ZLIB.cmake` declares an imported
+    `ZLIB::zlibstatic` target and CMake stops with `The imported target "ZLIB::zlibstatic"
+    references the file "/usr/lib64/libz.a" but this file does not exist`, raised from inside
+    `zlib-config.cmake`, which `QUIET` does not suppress.
+    - **The lowercase spelling is what routes it into CONFIG mode.** Module mode looks for
+      `Findzlib.cmake` and CMake ships `FindZLIB.cmake` — a different filename on a
+      case-sensitive filesystem — so `find_package(zlib)` skips the module that would have
+      found `libz.so` and lands on zlib-ng's config package instead. `find_package(ZLIB)` on
+      the same image is fine, so this only bites projects that wrote the name in lowercase —
+      pulsar-client-cpp's `LegacyFindPackages.cmake` does, right beside a `find_package(curl
+      QUIET)` that is harmless only because Rocky's `libcurl-devel` ships no
+      `curl-config.cmake` to find.
+    - **Fix with `-DCMAKE_DISABLE_FIND_PACKAGE_zlib=ON`, spelled in the package's own case**,
+      which sends the project down the `find_path`/`find_library` fallback it already keeps for
+      platforms where "CMake might not find curl and zlib". Installing `zlib-ng-compat-static`
+      also clears it, at the cost of a static archive that must not end up in the wheel.
+    - Reproduces identically on `rockylinux/rockylinux:10` x86_64, so a two-minute configure
+      settles it instead of a riscv64 cycle.
