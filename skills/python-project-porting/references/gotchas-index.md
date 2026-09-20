@@ -164,6 +164,12 @@ The porting gotchas (387 of them) live in [`references/gotchas/`](gotchas/), spl
   sibling's whole release history for platform tags, compare the base's per-arch wheel sizes,
   and re-verify any sibling-family blocker at the revision your target actually pins
   (the tensorflow-cpu case).
+- **431** — When a distribution has **never** published an sdist, gotcha 35/157's "grep the
+  build script for the fetch" has nothing to grep: count sdists across every release, then
+  `strings -a` the vendored blob — private builder paths (`/.conan/data/…@vendor/prod`,
+  `/home/jenkins/`, `/vcpkg/buildtrees/`) prove a closed vendor with no riscv64 source, and
+  open-source crates in the same output are only the shim around it
+  (the livekit-plugins-noise-cancellation case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
