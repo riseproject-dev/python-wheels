@@ -590,7 +590,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
     needed, and `persist-credentials: false`'s only purpose (not leaking the checkout
     token into the built artifact) is moot for plain, unauthenticated `git clone`/`fetch`.
 
-381. **A host-side `git apply` -> commit -> `git tag -f` fix for a `versioneer` dirty tree
+382. **A host-side `git apply` -> commit -> `git tag -f` fix for a `versioneer` dirty tree
     (gotcha 315's mechanism) can still leave the tree dirty *inside* the cibuildwheel
     container if the project's own `before-build` hook also modifies a tracked file (the
     pandas case).** `build-pandas.yml`'s "Patch pandas source" step applies the riscv64

@@ -126,7 +126,7 @@ The porting gotchas (371 of them) live in [`references/gotchas/`](gotchas/), spl
   wrong commit — check `git merge-base --is-ancestor <tag> origin/main` before trusting it.
 - **352** — A gitlink with no `.gitmodules` entry breaks `actions/checkout`'s own
   persist-credentials cleanup, not the checkout itself.
-- **381** — A gotcha 315-style commit+retag fix for a `versioneer` dirty tree can still
+- **382** — A gotcha 315-style commit+retag fix for a `versioneer` dirty tree can still
   read dirty inside the cibuildwheel container if the project's own `before-build` hook
   modifies a tracked file after the retag — override `CIBW_BEFORE_BUILD` to redo the
   commit+retag after it.
