@@ -1,0 +1,214 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/openvinotoolkit/openvino/blob/2026.3.1/.github/workflows/manylinux_2_28.yml
+# (the recipe behind the published PyPI wheels) with the riscv64 cmake options of
+# https://github.com/openvinotoolkit/openvino/blob/2026.3.1/.github/workflows/linux_riscv.yml
+name: Build openvino wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/openvino.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-openvino.yml'
+      - 'docs/packages/openvino.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-openvino.yml'
+      - 'docs/packages/openvino.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # Upstream's AzureCR build image isn't public; manylinux is the closest equivalent.
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: openvino
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build openvino ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440  # 24h
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      OPENVINO_VERSION: ${{ matrix.version }}
+      # Upstream builds the runtime once, then loops the interpreters over src/bindings/python.
+      PYTHON_TAGS: cp312 cp313 cp314 cp314t
+
+    steps:
+      - name: Checkout openvino ${{ matrix.version }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: openvinotoolkit/openvino
+          ref: ${{ env.OPENVINO_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Write container script
+        run: |
+          mkdir -p build install
+          cat > riscv64-build-and-test.sh <<'EOF'
+          #!/bin/bash
+          set -e -x
+
+          # Vendored snappy and xbyak_riscv predate CMake 4's floor; upstream calls /usr/bin/cmake too.
+          # Retried: a mirrorlist hiccup here otherwise throws away a multi-hour runner slot.
+          for i in 1 2 3; do dnf install -y cmake && break || sleep 30; done
+
+          # gcc-14 bug, as in upstream's manylinux job: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=107532
+          export CXXFLAGS="-Wno-dangling-reference"
+
+          case "$1" in
+            build|test) ;;
+            *) echo "usage: $0 <build|test>" >&2; exit 1 ;;
+          esac
+
+          if [ "$1" = build ]; then
+            /usr/bin/cmake \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DENABLE_INTEL_GPU=OFF \
+              -DENABLE_INTEL_NPU=OFF \
+              -DENABLE_SAMPLES=OFF \
+              -DENABLE_NCC_STYLE=OFF \
+              -DENABLE_PYTHON=OFF \
+              -DENABLE_JS=OFF \
+              -DENABLE_OV_JAX_FRONTEND=OFF \
+              -DENABLE_STRICT_DEPENDENCIES=OFF \
+              -S /openvino \
+              -B /build
+            /usr/bin/cmake --build /build --parallel "$(nproc)"
+          fi
+
+          for python_tag in ${PYTHON_TAGS}; do
+            case "${python_tag}" in
+              *t) python_impl="${python_tag%t}" ;;
+              *) python_impl="${python_tag}" ;;
+            esac
+            python_exe="/opt/python/${python_impl}-${python_tag}/bin/python"
+
+            if [ "$1" = build ]; then
+              "${python_exe}" -m pip install -r /openvino/src/bindings/python/wheel/requirements-dev.txt
+
+              gil_option=()
+              if [ "${python_tag}" != "${python_impl}" ]; then
+                gil_option=(-DENABLE_GIL_PYTHON_API=OFF)
+              fi
+
+              /usr/bin/cmake \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DPython3_EXECUTABLE="${python_exe}" \
+                -DOpenVINODeveloperPackage_DIR=/build \
+                -DENABLE_PYTHON=ON \
+                -DENABLE_WHEEL=ON \
+                "${gil_option[@]}" \
+                -S /openvino/src/bindings/python \
+                -B "/build/python_${python_tag}"
+              /usr/bin/cmake --build "/build/python_${python_tag}" --parallel "$(nproc)"
+              /usr/bin/cmake --install "/build/python_${python_tag}" --prefix /install --component python_wheels
+            else
+              wheel=(/install/wheels/openvino-*-"${python_impl}"-"${python_tag}"-*.whl)
+              "${python_exe}" -m pip install "${wheel[0]}" pytest pillow
+
+              # Run from /tmp so the checkout's src/bindings/python tree cannot shadow the wheel.
+              cd /tmp
+              "${python_exe}" -c '
+          import numpy as np
+          import openvino as ov
+          from openvino import opset14 as ops
+
+          print(ov.get_version())
+          assert ov._pyopenvino.__file__.endswith(".so"), ov._pyopenvino.__file__
+
+          core = ov.Core()
+          print(core.available_devices)
+          assert "CPU" in core.available_devices
+
+          param = ops.parameter([1, 4], ov.Type.f32)
+          model = ov.Model(ops.relu(param), [param], "relu")
+          compiled = core.compile_model(model, "CPU")
+          result = compiled(np.array([[-2.0, -1.0, 0.0, 3.0]], dtype=np.float32))[0]
+          assert np.array_equal(result, [[0.0, 0.0, 0.0, 3.0]]), result'
+
+              tests=/openvino/src/bindings/python/tests
+              "${python_exe}" -m pytest -v \
+                "${tests}/test_runtime" \
+                "${tests}/test_graph" \
+                "${tests}/test_transformations" \
+                -m 'not template_extension'
+            fi
+          done
+          EOF
+
+      - name: Build wheels
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "${PWD}":/openvino \
+            -v "${PWD}/build":/build \
+            -v "${PWD}/install":/install \
+            --workdir /openvino \
+            -e PYTHON_TAGS="${PYTHON_TAGS}" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            --pull=newer \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /openvino/riscv64-build-and-test.sh build
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: openvino-${{ env.OPENVINO_VERSION }}-wheels-manylinux_riscv64
+          path: install/wheels/*.whl
+          if-no-files-found: error
+
+      - name: Test wheels
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "${PWD}":/openvino \
+            -v "${PWD}/install":/install \
+            --workdir /openvino \
+            -e PYTHON_TAGS="${PYTHON_TAGS}" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /openvino/riscv64-build-and-test.sh test
+
+  publish:
+    name: Publish openvino ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: openvino-${{ matrix.version }}-*-manylinux_riscv64
