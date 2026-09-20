@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (386 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (387 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -423,6 +423,11 @@ The porting gotchas (386 of them) live in [`references/gotchas/`](gotchas/), spl
   library (XNNPACK's `zvfh` kernels), where the fix is that dependency's own feature
   `--define` rather than an `-march` probe — and `--keep_going` hides a single-cause failure
   behind five hours of unrelated progress, making it look like a timeout.
+- **428** — A project still on the deprecated `find_package(PythonLibs REQUIRED)` has no
+  `Development.Module` way out of gotcha 374's static-libpython wall: satisfying it with
+  manylinux's non-PIC `libpython3.XX.a` only moves the failure to the final link after hours,
+  the project may already strip libpython from its own non-Windows link lines (making the
+  `REQUIRED` vestigial), and the header-only fix rehearses locally on x86_64 in a minute.
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
