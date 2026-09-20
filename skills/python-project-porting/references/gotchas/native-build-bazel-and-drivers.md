@@ -42,6 +42,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
   `httplib2==0.13.1` on the ambient interpreter or the sync dies on `import httplib2`.
 - **443** — An upstream CMake arch block that `set(... CACHE ... FORCE)`s features OFF can
   run *after* `include(third_party)`, making the FORCE dead for that configure.
+- **445** — gclient ignores a `custom_deps` `None` for a `cipd` dep: edit the DEPS entry
+  instead (424's audit finds them), and add `use_siso=false` when the dropped one is siso.
 
 ---
 
@@ -759,3 +761,51 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       emitting *unsuffixed* scalar declarations. The generated riscv64 `sleef.h` therefore
       declares `Sleef_sinf1_u35purec` and never `Sleef_sinf1_u35`. Worth reporting upstream
       to SLEEF, but not something a wheel port should carry a patch for.
+
+445. **The companion to gotcha 424: once you know which CIPD packages have no riscv64
+    build, a `.gclient` `custom_deps` entry set to `None` is *not* how you get rid of them.
+    That removes a `git` dep and is silently ignored for a `cipd` one, so the package
+    survives into the sync anyway — edit the checkout's `DEPS`, either by appending
+    `and host_cpu != "riscv64"` to the entry's condition (424) or by deleting the entry
+    outright.** In `gclient.py`, `_postprocess_deps` copies the DEPS dict
+    verbatim and only ever *adds* custom_deps whose value is truthy; the removal path for a
+    git dep is `Dependency._OverrideUrl`, which asks `get_custom_deps` for the URL and skips
+    the dep when it comes back `None`. `_deps_to_objects` builds a `CipdDependency`
+    straight from the DEPS entry and passes it only `custom_vars` — nothing in that path
+    consults `custom_deps`, and nothing warns. The null looks right in the `.gclient`, the
+    sync proceeds normally for several minutes, and the package still turns up in the
+    `cipd ensure` that ends the sync: `failed to resolve <pkg>/linux-riscv64 (line N): no
+    such package`, one line per unresolvable package, then a bare `CalledProcessError`.
+    - **Run 424's `cipd describe` audit first.** It costs two commands from an x86 host and
+      names the whole set, which is the difference between one fix and one CI round per
+      package. For a standalone ANGLE checkout the answer is the same list 424 already
+      records for V8 — `infra/rbe/client`, siso, and the luci `isolate`/`swarming` tools.
+    - **Rewrite the DEPS entries before the sync, and raise if one is not found.**
+      The driver script already has the checkout on disk before it writes `.gclient`, so a
+      `re.subn(rf"\n  '{re.escape(path)}': \{{\n.*?\n  \}},\n", "\n", text, flags=re.DOTALL)`
+      per path is enough for Chromium-family DEPS formatting. Assert the count is exactly 1:
+      a future revision that reformats DEPS must fail loudly rather than quietly restore the
+      dep you thought you had dropped.
+    - **`cipd ensure` reports *every* unresolvable package at once**, because gclient batches
+      all cipd deps in the tree into a single ensure file for the root. That list is the
+      complete set — fix them in one round instead of expecting another wall per package.
+    - **Read the ensure-file failure by dep entry, not by package.** ANGLE's `tools/luci-go`
+      names three packages and only `isolate` and `swarming` lack a riscv64 build, but they
+      share one entry, so dropping the entry also drops `cas`. Fine when the whole entry is
+      test-distribution tooling; check before assuming.
+    - **Dropping siso means saying so in the GN args, or you just move the failure later.**
+      `//build/toolchain/siso.gni` defaults `use_siso` to false for a non-Chromium checkout,
+      but a project's own `.gn` can override that in `default_args` — ANGLE's sets
+      `use_siso = true` — and `autoninja` chooses siso or ninja by reading `use_siso` back out
+      of `args.gn`. Add `use_siso=false` to the args wherever you remove the siso package.
+      It does reach autoninja despite the args being passed as one space-separated
+      `--args=` string: gn runs `gn format` over that string in `Setup::SaveArgsToFile`, so
+      `args.gn` lands one `key = value` per line, which is the only shape depot_tools'
+      `gn_helper.args` regex matches. Leave `use_remoteexec` unset and `use_reclient` stays
+      false on its own (`use_reclient = use_remoteexec && !use_siso`), so nothing wants the
+      reclient package either.
+    - **All of this is checkable off-target in seconds.** Fetch the pinned `DEPS` and
+      `gclient.py` from gitiles (`?format=TEXT`, base64 — no clone), run the rewrite against
+      the real DEPS, `exec` the result to confirm it still parses and count the deps and
+      hooks, and diff the rendered `.gclient` and gn args for the untouched architectures to
+      prove the port changed nothing for them.
