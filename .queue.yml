@@ -2667,9 +2667,64 @@ packages:
   version: 13.0.3
   home: https://www.gurobi.com
   repo: https://www.gurobi.com
-  status: queued
+  status: parked
   pr: null
-  notes: '12 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Not feasible: gurobipy is Gurobi Optimization LLC''s proprietary solver engine, so there is
+    no source to build from, no riscv64 build from the vendor at any layer, and the EULA the
+    wheel ships independently bars us from redistributing one even if there were (new gotcha
+    453, feasibility-and-triage.md; same closed-payload family as gotchas 372/376/431/450).
+    Verified against the real artifacts, not inferred. PyPI 13.0.3 publishes 24 files, all
+    wheels (12 Linux: cp310-cp314 + cp314t, manylinux_2_17_x86_64 and manylinux_2_26_aarch64),
+    and the project has never shipped an sdist on any of its 28 releases, so per gotcha 431 the
+    wheel is the only evidence; home and repo are both the marketing page https://www.gurobi.com
+    and the metadata says License: Proprietary (gotcha 372''s hdbcli tell, exactly). WHAT IS IN
+    THE WHEEL: downloading and unzipping gurobipy-13.0.3-cp312-cp312-manylinux2014_x86_64.whl
+    (15.0 MB) gives 11 genuine Cython extensions (_core, _model, _matrixapi, _lowlevel, ...)
+    plus one payload, gurobipy/.libs/libgurobi130.so at 49.6 MB = 88% of the unpacked wheel; the
+    aarch64 twin (87.2 MB) is the same file list with that payload at 168.5 MB. No .pyx/.c/.h
+    anywhere in either, so even the binding layer ships no source. readelf -d on
+    gurobipy/_core.cpython-312-*.so shows NEEDED libgurobi130.so plus RPATH $ORIGIN/.libs -- a
+    hard link, not a dlopen -- and gurobipy/__init__.py imports ._batch/._core/._matrixapi at
+    import time, so with no riscv64 engine there is no importable wheel at all (the
+    saxonche/gotcha 450 shape, stricter than gotcha 157''s claude-agent-sdk, whose sdist at
+    least imports). WHY A VENDOR REBUILD IS NOT A RECOMPILE (the new gotcha): strings -a names
+    the 49.6 vs 168.5 MB gap -- the x86_64 engine statically links Intel MKL
+    (mkl_avx_d_opt_gemm_ker, ''Intel(R) Math Kernel Library Version'', ''Intel MKL FATAL ERROR:
+    This system does not meet the minimum requirements''), the aarch64 engine links Arm
+    Performance Libraries (ARMPL_NEOVERSE_N1, ARMPL_KUNPENG_920, ARMPL_APPLE_M1), and
+    LICENSE.txt says the same thing without tooling by carrying a ''SIMPLIFIED END USER LICENSE
+    AGREEMENT FOR FREE OF CHARGE ARM REDISTRIBUTABLES'' section. Each architecture is its own
+    port onto a closed, arch-specific BLAS that its own vendor publishes for that arch only;
+    neither MKL nor ArmPL exists for riscv64, and neither engine contains a single riscv/rv64
+    string (0 hits in 712k). Both are built on a closed vendor Jenkins
+    (/home/jenkins/workspace/gurobi-thirdparty-
+    updates-v130/gurobi/thirdparty/lib/{linux64,armlinux64}/openssl-3.5.7/..., GCC 8.5.0 on RHEL
+    8), gotcha 431''s builder-path tell. THREE INDEPENDENT VENDOR PLATFORM TABLES, all
+    riscv64-negative: the Supported Platforms table for Gurobi 13.0 in docs.gurobi.com lists
+    exactly win64, linux64 (x86-64), macos_universal2 and armlinux64 (arm64), no RISC-V
+    anywhere; packages.gurobi.com/13.0/gurobi13.0.3_linux64.tar.gz, _armlinux64.tar.gz and the
+    macOS pkg all answer 206 to a 2-byte range request while gurobi13.0.3_riscvlinux64.tar.gz,
+    _riscv64.tar.gz and _linux_riscv64.tar.gz all 404; and Gurobi''s own conda channel has
+    124/88/ 122/124 packages in linux-64/linux-aarch64/osx-64/win-64 against 0 in linux-riscv64,
+    which still returns 200 with a synthesised empty index (gotcha 42 -- count the packages, do
+    not trust the status). NO COMMUNITY/OSS EDITION: Gurobi''s own open-source-packages article
+    lists gurobipy-pandas, gurobi-machinelearning, gurobi-optimods, gurobi-modelanalyzer and
+    gurobi-logtools under Apache-2.0 and states that the calls those make into ''the proprietary
+    Gurobi library'' remain a support matter; neither gurobipy nor the Optimizer engine is among
+    them. THE LICENCE CLOSES A SECOND, INDEPENDENT DOOR: dist-info/licenses/LICENSE.txt is
+    Gurobi''s Evaluation EULA, whose 2.1 grants only a ''limited, non-exclusive, non-
+    transferrable, non-sublicensable, revocable license ... solely in a non-production
+    environment'' and whose 2.2 states ''You will not use, copy, modify, or distribute the
+    Product'' -- so publishing any gurobipy wheel on pypi.riseproject.dev would not be permitted
+    even if a riscv64 engine existed. And there is no swap-in escape hatch of the gotcha 35
+    kind: the wheel ships gurobipy/.libs/gurobi.lic (TYPE=PIP, VERSION=13,
+    EXPIRATION=2027-11-29, KEY=...) and the engine carries the whole enforcement path (''Invalid
+    PIP license'', ''HostID mismatch (licensed to %x, hostid is %x)'', ''Model too large for
+    size-limited license; visit https://gurobi.com/unrestricted''), so any substitute payload
+    would have to be one the vendor signed. Revisit only if Gurobi itself ships a riscv64
+    Optimizer (a gurobi<ver>_riscvlinux64-style tarball on packages.gurobi.com, or a riscv64
+    wheel on PyPI) AND grants redistribution; nothing in a build-gurobipy.yml can close either
+    gap. No worktree/branch/PR created -- this was settled before any YAML was written.'
 - pkg: xrootd
   version: 6.1.1
   home: https://xrootd.org
@@ -2695,16 +2750,51 @@ packages:
   version: 0.4.1
   home: https://developer.nvidia.com/nccl
   repo: https://github.com/NVIDIA/nccl
-  status: queued
+  status: parked
   pr: null
-  notes: '12 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Parked after read-only triage; no worktree/branch/PR created. nccl4py is NVIDIA''s
+    first-party Python binding for NCCL and its source is public (NVIDIA/nccl, bindings/nccl4py,
+    Apache-2.0), so this is not a no-source park like pyqt5-qt5/saxonche -- it is a hard
+    NVIDIA-GPU requirement, the same class as the parked sglang, cuda-tile and onnxruntime-gpu
+    entries (gotchas 386/387; gotcha 284''s "runtime dlopen or build-time headers?" test comes
+    out on the headers side). Three independent walls, each verified rather than assumed:
+    (1) BUILD. bindings/nccl4py/setup.py''s BuildExt.build_extensions() calls _cuda_include_dir(),
+    which raises PlatformError("CUDA_HOME is not set") and then requires $CUDA_HOME/include to
+    exist; the four Cython extensions (nccl.bindings.{nccl,cynccl,_internal.nccl,_internal.utils})
+    compile against CUDA toolkit headers. Upstream''s own README says it outright: "Installing a
+    published wheel does not require CUDA_HOME or a local CUDA Toolkit. Compiling nccl4py from
+    source does." NVIDIA ships no riscv64 toolkit -- redistrib_13.3.0/13.2.0 list exactly
+    linux-x86_64, linux-sbsa, windows-x86_64 (12.9.0 adds linux-aarch64/linux-all), zero riscv
+    strings -- matching the triton (gotcha 41), cupy-cuda12x and cuda-tile findings.
+    (2) INSTALL. The unconditional, non-extra dependencies are cuda-core~=1.0 and
+    cuda-pathfinder>=1.5.4; cuda-core 1.2.0 publishes only manylinux_2_28_{x86_64,aarch64} and
+    win_amd64 wheels and NO sdist, so `pip install nccl4py` cannot resolve on riscv64 at all
+    (gotcha 40). The trap is that the CUDA-named requirements (cuda-bindings, nvidia-nccl-cu12/cu13,
+    nvidia-cutlass-dsl) sit behind the [cu12]/[cu13] extras while the actual blocker is in the
+    base dependency list.
+    (3) RUNTIME. Unzipped nccl4py-0.4.1-cp312-cp312-manylinux_2_28_x86_64.whl: 50 files, 11.4 MB
+    uncompressed, and no vendored vendor blob at all (contrast gotchas 41/157) -- it is Cython
+    bindings plus pure Python. nccl/bindings/_internal/nccl.*.so dlopens libcuda.so.1 (the NVIDIA
+    driver, which has no riscv64 build anywhere), libnccl.so.2 is supplied by nvidia-nccl-cu12/cu13
+    (py3-none-manylinux_2_18_{x86_64,aarch64} only), nccl/core/cuda.py does an unconditional
+    `from cuda.core import Device, Stream` at import time, and nccl/core/device/cute/_bindings.py
+    resolves libnccl_device.bc via cuda.pathfinder. There is no CPU-only mode to fall back to:
+    NCCL exists to move data between NVIDIA GPUs over NVLink/NVSwitch/PCIe P2P/IB, and its own
+    build is nvcc device code (makefiles/common.mk: NVCC ?= $(CUDA_HOME)/bin/nvcc, NVCC_GENCODE
+    -gencode arch=compute_60..120), so "build libnccl from source for riscv64 first" is not an
+    escape hatch either.
+    Latest release re-checked per gotcha 388: 0.5.0 ships the same 12 Linux wheels for
+    x86_64/aarch64 only (cp310-cp314 plus cp314t), so the gap is unchanged. No new gotcha added --
+    the shape is fully covered by 386 (GPU-only, blob-free, source-open, still unportable), 387
+    (ask NVIDIA''s redist index for our arch) and 284 (build-time CUDA headers vs runtime dlopen).
+    Not a candidate to revisit unless/until NVIDIA ships a CUDA toolkit and driver for riscv64.'
 - pkg: pynvvideocodec
-  version: 2.2.2
+  version: 2.2.3
   home: https://docs.nvidia.com/video-technologies/pynvvideocodec/index.html
   repo: https://catalog.ngc.nvidia.com/orgs/nvidia/resources/pynvvideocodec
-  status: queued
+  status: parked
   pr: null
-  notes: '10 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Not feasible: NVIDIA-GPU-hardware-only at every layer (the NVENC/NVDEC video engines plus CUDA), same disposition as the parked onnxruntime-gpu / cupy-cuda12x / cuda-tile / humming-kernels entries; folded as gotcha 452 (feasibility-and-triage.md). Version bumped 2.2.2 -> 2.2.3 per gotcha 388: 2.2.3 is the current release and has the identical shape (19 wheels, cp310-cp314, manylinux_2_28/2_34 x86_64+aarch64 and win_amd64/win_arm64, NO sdist on any version ever, zero requires_dist), so both are blocked the same way. The queue premise was checked and is partly wrong, which is worth recording: pynvvideocodec IS an ordinary PyPI project (pip install pynvvideocodec is the documented path; no NGC API key is involved anywhere), and the NGC resource is a SEPARATE, fully public source-code zip -- api.ngc.nvidia.com/v2/resources/nvidia/pynvvideocodec reports isPublic: true / canGuestDownload: true, .../versions/v2.2.3/files names PyNvVideoCodec_2.2.3.zip and .../versions/v2.2.3/files/PyNvVideoCodec_2.2.3.zip fetched it anonymously (the .../versions/<v>/zip form 404s). So NGC gating is not a blocker here, and every finding below is read off the real source tree and the real cp312 manylinux_2_28_x86_64 wheel rather than inferred. (1) Import is unconditionally gated on the proprietary NVIDIA driver. PyNvVideoCodec/__init__.py (byte-identical between the NGC source and the shipped wheel) calls _get_driver_version() at module top level; that constructs VersionCheck.DriverWrapper, whose C++ (src/NvEncVersionCheck/VersionCheck/NvEncVersionCheck.cpp:64) does dlopen("libnvidia-encode.so.1", RTLD_LAZY) and throws when it is absent. There is no lazy path and no fallback -- the enclosing except clause re-raises -- so import PyNvVideoCodec cannot succeed without an NVIDIA driver (stricter than gotcha 284 and than gotcha 183/playwright, which at least imports). The NVENC version the driver reports then selects which of two prebuilt extensions to load: >= 13*16 -> _130, >= 12*16+1 -> _121, otherwise RuntimeError("Driver version is too old"). Note the trap: VersionCheck.cpython-312-x86_64-linux-gnu.so has NO CUDA linkage of its own (DT_NEEDED is only libstdc++/libm/libgcc_s/libc), so a first readelf points the wrong way -- the gate lives in pure Python plus one dlopen string. A second arch tell sits in the same file: _get_module_path() enumerates exactly two Linux spellings, aarch64 and an else-branch that assumes x86_64, so on riscv64 it would hunt for a ...-x86_64-linux-gnu.so (same shape as gotcha 386 humming get_native_arch()). (2) The real extensions are CUDA-linked. readelf -d PyNvVideoCodec_130.cpython-312-x86_64-linux-gnu.so gives DT_NEEDED libcuda.so.1 plus a vendored libcudart-c64a25f3.so.12.3.101; its undefined symbols are the CUDA Driver API (cuInit, cuCtxCreate_v2, cuMemAlloc_v2, cuMemcpy2DAsync_v2, cuStreamCreate, cuEventRecord, ...) plus cudaLaunchKernel@libcudart.so.12 and cudaMemcpyToSymbol@libcudart.so.12; readelf -S shows .nv_fatbin and .nvFatBinSegment, i.e. compiled device code; and the module dlopens libnvcuvid.so.1 for the whole NVDEC cuvid* API (error string: "Could not dynamically load libnvcuvid.so.1. Please ensure Nvidia Graphics drivers are correctly installed!", plus cuvidCreateDecoder/cuvidDecodePicture/cuvidMapVideoFrame64/... resolution errors). (3) The build hard-requires the CUDA toolkit. setup.py is a bare skbuild.setup() (matching the wheel''s Generator: skbuild 0.19.1), src/CMakeLists.txt does find_package(CUDAToolkit 11.2 REQUIRED), and src/VideoCodecSDKUtils/CMakeLists.txt is project(VideoCodecSDKUtils LANGUAGES CXX CUDA) with a CMAKE_CUDA_ARCHITECTURES list of sm_50..90 and four .cu sources (ColorSpace.cu, Resize.cu, BitDepth.cu, crc.cu) that need nvcc. (4) DEMUX_ONLY was checked as an escape hatch and rejected. It is a genuinely CUDA-free mode: src/CMakeLists.txt option(DEMUX_ONLY ...) skips find_package(CUDAToolkit) and the entire VideoCodecSDKUtils subdirectory, and src/PyNvVideoCodec/CMakeLists.txt then builds only PyNvDemuxer.cpp + NvDemuxer.cpp against ffmpeg. It still yields nothing: setup.py never sets it and the released wheels are the full build (both _121 and _130, with .nv_fatbin), so it ships nowhere upstream and publishing it would be gotcha 41 rejected-offline-build / gotcha 387 stub-build under a name that promises hardware codecs; the same __init__.py ships either way and would still dlopen libnvidia-encode.so.1 and raise, so the artifact would not even import on riscv64; and what survives the #ifdefs is an ffmpeg demuxer with every encode, decode and transcode API compiled out -- gotcha 419 dead stub, reached by a build flag instead of a torch branch. (5) Nothing exists on riscv64 to satisfy any of it. NVIDIA ships no riscv64 CUDA toolkit (redistrib_13.0.0.json, redistrib_13.2.0.json and redistrib_13.4.2.json list only linux-x86_64, linux-sbsa, linux-all and windows-x86_64/arm64) and no riscv64 driver, so libcuda.so.1, libnvidia-encode.so.1 and libnvcuvid.so.1 do not exist for the architecture. This one is additionally harder than the compute-only CUDA parks: it needs a GPU carrying the dedicated NVENC/NVDEC silicon, so even a future riscv64-hosted CUDA toolchain would not by itself make the package functional. (6) Secondary, fixable-but-moot arch wall, named so it is not mistaken for the blocker: the bundled prebuilt ffmpeg is external/ffmpeg/lib/{x86_64,aarch64,x64,arm64} only, and src/cmake/ffmpeg.cmake maps CMAKE_SYSTEM_PROCESSOR to just those four, leaving the library dir unset on anything else so link_av_component raises FATAL_ERROR "Required FFmpeg library avformat not found" -- that alone would be portable, since the wheel even ships the ffmpeg 9.0.1 LGPL source tarball under .data/data/external/ffmpeg/src/. Registry checked: pypi.riseproject.dev/simple/pynvvideocodec/ -> 404. No worktree, branch, workflow, docs/packages yaml, patches or PR created; nothing to rehearse locally since the build cannot start. Revisit only if NVIDIA ships a riscv64 CUDA toolkit AND a riscv64-hosted driver exposing the NVENC/NVDEC engines.'
 - pkg: guppy3
   version: 3.1.7
   home: https://github.com/zhuyifei1999/guppy3/

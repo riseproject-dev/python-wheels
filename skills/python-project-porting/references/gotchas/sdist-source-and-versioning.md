@@ -620,7 +620,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
       package like this, not sdist→bdist: the checkout supplies the headers the `setup.py`
       reaches for *and* the test helpers the sdist drops.
 
-452. **A host-side `git apply` -> commit -> `git tag -f` fix for a `versioneer` dirty tree
+454. **A host-side `git apply` -> commit -> `git tag -f` fix for a `versioneer` dirty tree
     (gotcha 315's mechanism) can still leave the tree dirty *inside* the cibuildwheel
     container if the project's own `before-build` hook also modifies a tracked file (the
     pandas case).** `build-pandas.yml`'s "Patch pandas source" step applies the riscv64

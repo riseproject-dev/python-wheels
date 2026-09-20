@@ -117,6 +117,13 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **450** — A vendored native payload can be a *GraalVM Native Image* (AOT-compiled Java), which
   moves the wall from "is there source?" to "does the AOT toolchain target riscv64?" — and an
   arch enum in the toolchain's own code is not shipping support (the saxonche/SaxonC-HE case).
+- **452** — A GPU-only package can enforce the GPU from its *pure-Python* `__init__.py`, through a
+  driver-probe module that has no CUDA linkage of its own — so the first `readelf -d` is
+  misleading, and a documented CUDA-free build flag upstream never ships rescues nothing
+  (the pynvvideocodec case).
+- **453** — A closed commercial engine is not one build recompiled per arch: each arch statically
+  links a *different* proprietary math kernel, and the x86_64↔aarch64 wheel-size gap names which
+  one — so "the vendor would just have to rebuild" is wrong (the gurobipy case).
 
 ---
 
@@ -2757,3 +2764,112 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       licence tiers, so the verdict carries to all three at once (and PE/EE have no published
       source at all) — gotcha 382's "one build, several distributions" arithmetic applied to a
       park rather than to a port.
+
+452. **A GPU-only package can enforce the GPU from its *pure-Python* `__init__.py`, through a
+    driver-probe module that has no CUDA linkage of its own — and a documented CUDA-free build
+    flag upstream never ships rescues nothing (the pynvvideocodec case).** Gotcha 411 says to
+    read the backend selector before parking a GPU-first package, and gotcha 284 says a
+    CUDA-calling extension is not automatically blocked. pynvvideocodec (NVIDIA's PyNvVideoCodec,
+    the Python binding for the NVENC/NVDEC hardware engines) answers both the other way, and the
+    mechanism is worth recognising because the obvious first check points the wrong way.
+    - **The probe module is the gate, and it is CUDA-free.** The wheel ships *three* extensions:
+      `PyNvVideoCodec_121.*.so` and `PyNvVideoCodec_130.*.so` (two NVENC API variants) plus a
+      small `VersionCheck.*.so`. `readelf -d VersionCheck…so` lists only
+      `libstdc++/libm/libgcc_s/libc` — no CUDA at all — yet that module is what makes the package
+      unusable: its `DriverWrapper` does `dlopen("libnvidia-encode.so.1", RTLD_LAZY)` and throws
+      on failure. **Read the pure-Python entry point before trusting any `readelf`**: the
+      top-level `__init__.py` runs `_get_driver_version()` at import, unconditionally, with no
+      lazy path and an `except` that re-`raise`s, then picks `_121` vs `_130` from the version the
+      driver reports (`>= 13*16` → `_130`, `>= 12*16+1` → `_121`, else
+      `RuntimeError("Driver version is too old")`). So `import <pkg>` cannot succeed without the
+      proprietary driver — stricter than gotcha 284's counterexample and than gotcha 183's
+      playwright, which at least imports. The real extensions confirm it one layer down:
+      `DT_NEEDED libcuda.so.1` plus a vendored `libcudart-*.so.12.*`, undefined `cuInit`/
+      `cuCtxCreate_v2`/`cuMemAlloc_v2`/`cudaLaunchKernel@libcudart.so.12`, `.nv_fatbin` +
+      `.nvFatBinSegment` sections, and a `dlopen` of `libnvcuvid.so.1` for the whole `cuvid*`
+      NVDEC API.
+    - **A CUDA-free build mode is not a CPU backend — check three things before calling it an
+      escape hatch.** The CMake tree has `option(DEMUX_ONLY …)`, and it is real: it skips
+      `find_package(CUDAToolkit 11.2 REQUIRED)` and the entire `VideoCodecSDKUtils` subdirectory
+      (four `.cu` files, `project(… LANGUAGES CXX CUDA)`, an SM-50…90 `CMAKE_CUDA_ARCHITECTURES`
+      list) and compiles two demuxer sources against ffmpeg. It still yields nothing, and the
+      three questions that settle any such flag are: (a) **does upstream ship it?** — `setup.py`
+      is a bare `skbuild.setup()` that never sets it, and the released wheels contain both
+      CUDA variants, so a `DEMUX_ONLY` wheel is gotcha 41's rejected offline build / gotcha 387's
+      docs-only stub, published under a name that promises hardware codecs; (b) **does the
+      package's Python entry point gate on the GPU independently of the flag?** — here yes, the
+      same `__init__.py` ships either way and still dlopens `libnvidia-encode.so.1` first, so the
+      artifact would not even import on riscv64; (c) **what is left?** — an ffmpeg demuxer, with
+      every encode/decode/transcode API `#ifdef`-ed out, i.e. gotcha 419's dead stub reached by a
+      build flag rather than a torch branch.
+    - **"Distributed via NGC, not PyPI" is worth checking and was false here** — and the check is
+      cheap, unauthenticated and useful for any NVIDIA package. `pypi.org/pypi/<pkg>/json` shows an
+      ordinary project (19 wheels, cp310–cp314, manylinux x86_64/aarch64 + Windows, **no sdist**,
+      zero `requires_dist`), so `pip install` is the documented path and no NGC key is involved;
+      NGC carries a *separate, fully public* source zip, and
+      `api.ngc.nvidia.com/v2/resources/<org>/<name>` reports `isPublic: true` /
+      `canGuestDownload: true`, with `…/versions/<v>/files` naming the artifact and
+      `…/versions/<v>/files/<name>` fetching it anonymously (the `…/versions/<v>/zip` form 404s).
+      Add that pair to the artifact-index collection beside `nodejs.org/dist`, NVIDIA's redist
+      manifests, conda `repodata.json` and npm `optionalDependencies`. Source being public did not
+      change the verdict — it is what let the `DEMUX_ONLY` and `__init__.py` reads above be made
+      against the real tree rather than inferred.
+    - **A secondary arch wall usually sits behind the first; name it, don't stop at it.** The
+      bundled prebuilt ffmpeg has exactly `lib/{x86_64,aarch64,x64,arm64}`, and `ffmpeg.cmake`
+      maps `CMAKE_SYSTEM_PROCESSOR` to those four only, leaving the library dir empty on anything
+      else so `link_av_component` fails with "Required FFmpeg library avformat not found". That
+      one is fixable (the wheel even ships the ffmpeg source tarball for LGPL compliance) — which
+      is exactly why it must not be reported as the blocker.
+453. **A closed commercial engine is not one build recompiled per architecture — each arch
+    statically links a *different* proprietary math kernel, and the x86_64↔aarch64 wheel-size
+    gap names which one (the gurobipy case).** gurobipy 13.0.3 reproduces gotcha 372's hdbcli
+    double lock exactly — `home`/`repo` both `https://www.gurobi.com`, `License: Proprietary`,
+    zero sdists across all 28 releases ever published (so per gotcha 431 the wheel is the only
+    evidence), and a bundled `dist-info/licenses/LICENSE.txt` whose §2.1/§2.2 grant is
+    "non-transferrable, non-sublicensable" and states "You will not use, copy, modify, or
+    distribute the Product", which forecloses rehosting a rebuilt wheel on
+    `pypi.riseproject.dev` independently of whether one could be built. The reusable finding is
+    the *third* lock, and it is two commands deep:
+    - **Diff the platform wheels' sizes, then `strings` the gap.** The same cp312 wheel is
+      15.0 MB for `manylinux_2_17_x86_64` and 87.2 MB for `manylinux_2_26_aarch64`; unzipped,
+      `gurobipy/.libs/libgurobi130.so` is 49.6 MB vs 168.5 MB. `strings -a` identifies the
+      delta: the x86_64 engine has Intel MKL linked in (`mkl_avx_d_opt_gemm_ker`,
+      `Intel(R) Math Kernel Library Version`, `Intel MKL FATAL ERROR: This system does not meet
+      the minimum requirements…`), the aarch64 one Arm Performance Libraries
+      (`ARMPL_NEOVERSE_N1`, `ARMPL_KUNPENG_920`, `ARMPL_APPLE_M1`). Neither engine contains a
+      single `riscv`/`rv64` string (0 hits in 712k). Gotcha 81 uses the size diff across
+      platform wheels to prove there *is* per-platform content; here the same one-JSON-read
+      diff tells you *what* the vendor would have to replace, and the answer — a
+      hand-optimised closed BLAS for our arch, from Intel or Arm, which neither ships — is
+      why a vendor port is not a recompile.
+    - **The shipped LICENSE file enumerates the vendored toolkits for free.** Gurobi's
+      `LICENSE.txt` carries a "SIMPLIFIED END USER LICENSE AGREEMENT FOR FREE OF CHARGE ARM
+      REDISTRIBUTABLES" section beside the Apache/BSD notices — reading the third-party
+      sections of a proprietary wheel's own licence text names its bundled vendor components
+      before any `strings` run, the mirror image of gotcha 376's HYPER_API_OSS_disclosure read.
+    - **A commercial vendor has the same two independent platform tables as an open one**
+      (gotcha 35/157's artifact-index move, gotcha 42's count-don't-trust-the-status):
+      `packages.gurobi.com/13.0/gurobi13.0.3_{linux64,armlinux64}.tar.gz` and the macOS pkg
+      answer `206` to a 2-byte range request while every riscv64 spelling 404s; and the
+      vendor's own conda channel has 124/88/122/124 packages in
+      `linux-64`/`linux-aarch64`/`osx-64`/`win-64` against **0** in `linux-riscv64`, which
+      still returns `200` with a synthesised empty index. Upstream's docs agree in prose —
+      the Supported Platforms table lists exactly `win64`, `linux64`, `macos_universal2`,
+      `armlinux64`.
+    - **A licence-key-gated payload has no swap-in escape hatch.** Gotcha 35's playwright
+      could in principle have been fed an unofficial Node build; here the wheel ships
+      `gurobipy/.libs/gurobi.lic` (`TYPE=PIP`, `EXPIRATION=`, `KEY=`) and the engine carries
+      the whole enforcement path (`Invalid PIP license`, `HostID mismatch (licensed to %x…)`,
+      `Model too large for size-limited license`), so any substitute binary would have to be
+      one the vendor signed. And the payload is hard-linked, not dlopened:
+      `readelf -d gurobipy/_core.cpython-312-*.so` shows `NEEDED libgurobi130.so` plus
+      `RPATH $ORIGIN/.libs`, and `gurobipy/__init__.py` imports `._core`/`._batch`/`._matrixapi`
+      at import time — the saxonche/gotcha 450 shape (no engine ⇒ no importable wheel at all),
+      stricter than gotcha 157's claude-agent-sdk, which at least imports.
+    - **"Is there a community edition?" is answered by the vendor's own OSS page, not by
+      searching for a source repo.** Gurobi publishes gurobipy-pandas, gurobi-machinelearning,
+      gurobi-optimods, gurobi-modelanalyzer and gurobi-logtools under Apache-2.0 and states in
+      the same article that the calls those make into "the proprietary Gurobi library" are a
+      support matter — wrappers around the engine, never the engine or `gurobipy` itself. One
+      read, and it also tells you which sibling distributions on the queue *are* ordinary
+      pure-Python ports.
