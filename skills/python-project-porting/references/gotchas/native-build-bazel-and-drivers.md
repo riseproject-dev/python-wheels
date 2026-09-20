@@ -27,6 +27,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
   `VPYTHON_BYPASS` is set (gsutil's vpython venv pins a crcmod wheel that has no riscv64 build).
 - **424** — Audit a chromium-style DEPS for riscv64-less CIPD packages with `cipd describe`
   before spending a build cycle finding them one at a time.
+- **427** — Under `VPYTHON_BYPASS` the checkout's own *DEPS-pinned* depot_tools breaks next:
+  its gsutil 4.68 vendors a six that cannot import on python ≥ 3.12.
 
 ---
 
@@ -503,3 +505,44 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       excluding riscv64 wholesale would drop gn and ninja too. Append
       `and host_cpu != "riscv64"` to the conditions of the missing packages only, and
       keep them in one list so the next version bump has one place to re-verify.
+
+427. **`VPYTHON_BYPASS` decides *which interpreter* gsutil gets, and a chromium-style
+    checkout carries two gsutils of different ages — the one its DEPS pins is the one that
+    breaks on python ≥ 3.12.** Gotcha 423's bypass is what makes gsutil runnable on riscv64
+    at all, but it also replaces vpython's hermetic 3.8 with whatever `python3` is on PATH
+    (in `manylinux_2_39_riscv64` that is 3.12). V8's DEPS pins its own
+    `third_party/depot_tools`, whose `gsutil.py` bootstraps **gsutil 4.68**, which vendors
+    **six 1.12**, whose `_SixMetaPathImporter` only implements the legacy `find_module()`
+    that CPython **removed in 3.12** — so every hook shelling out to
+    `third_party/depot_tools/download_from_google_storage.py` dies half an hour into the
+    sync, long past the gotcha 423/424 walls:
+    ```
+    File ".../external_bin/gsutil/gsutil_4.68/gsutil/gslib/__main__.py", line 36
+        from six.moves import configparser
+    ModuleNotFoundError: No module named 'six.moves'
+    ```
+    - **Nothing about this needs riscv64 to reproduce** — it is purely the interpreter, so
+      settle it on the x86 host in seconds instead of in CI:
+      `curl -sO https://storage.googleapis.com/pub/gsutil_4.68.zip && unzip -q gsutil_4.68.zip`,
+      then `python3.11 gsutil/gsutil version` prints `4.68` while `python3.12 gsutil/gsutil
+      version` raises the CI traceback verbatim.
+    - **The first-class `dep_type: 'gcs'` deps are unaffected**, which is exactly why the
+      sync now gets as far as the hooks: those run through the gsutil of the *outer*
+      depot_tools clone driving the sync (5.35, six 1.17). Read the gsutil version out of the
+      traceback path, not out of your own clone. That the deps came down is also how you
+      learn the container's `python3` is 3.12 — gsutil 5.35 dies on 3.13 in its vendored
+      `cryptography`, so a newer container python moves this wall rather than removing it.
+    - **Condition the offending hooks off; do not chase interpreters.** With V8
+      13.1.201.22's default DEPS vars only `wasm_spec_tests` and `wasm_js` reach gsutil, and
+      both only unpack test suites a `v8_monolith` build never reads. Inject
+      `'condition': 'host_cpu != "riscv64"'` into those two hook dicts from the same
+      post-checkout DEPS edit that carries gotcha 424's CIPD conditions, and prove it the
+      same way — `gclient_eval.Parse` then `EvaluateCondition` over `local_scope["hooks"]`
+      must drop exactly those two for `host_cpu: riscv64` and change nothing for x64.
+    - **Audit the hooks that run *after* the failing one in the same pass**, since they own
+      the next unattended half hour, and rehearse them locally for free: V8's `lastchange`
+      is pure git, `vpython3_common` exits 0 because depot_tools' `vpython3` wrapper returns
+      0 for any `-vpython-tool*` argument under the bypass, and `configure_reclient_cfgs
+      --skip_remoteexec_cfg_fetch` and `configure_siso` each only template one cfg file —
+      copy those two scripts out of `buildtools`/`build` (plus
+      `reclient_cfgs/reproxy_cfg_templates/`) and run them with the arguments DEPS passes.

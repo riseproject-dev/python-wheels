@@ -97,6 +97,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **426** — A `-cpu` sibling can be an *x86_64-only label* rather than a portable CPU variant:
   where the base package's wheel is already CPU-only on every non-x86 arch, the sibling name
   closes no gap and inherits the base's park (the tensorflow-cpu case).
+- **431** — A distribution that has never shipped an sdist leaves the wheel as the only
+  evidence: `strings -a` the vendored blob and its builder paths (`/.conan/data/…@vendor/prod`)
+  prove a closed vendor with no public source (the livekit-plugins-noise-cancellation case).
 
 ---
 
@@ -2426,3 +2429,55 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       one full build **per** interpreter (cp310–cp313 = 4), with none of the abi3/`py3-none`
       collapse that let mediapipe serve every interpreter from a single ctypes-loaded `.so`.
       That multiplier belongs in the estimate before anything else.
+
+431. **A distribution that has never shipped an sdist leaves the wheel as the only evidence —
+    read the vendored blob's build provenance out of its own debug strings (the
+    livekit-plugins-noise-cancellation case).** Gotchas 35 and 157 both triage a
+    `py3-none-<platform>` vendored-binary wheel the same way: find the *fetch* in the sdist's
+    build script (`scripts/build_driver.py`, `scripts/download_cli.py`), then ask the vendor's
+    artifact index whether riscv64 exists. That method presupposes an sdist. Some
+    distributions ship **none, at any version**: livekit-plugins-noise-cancellation has 13
+    releases, five platform wheels each (`macosx_10_9_x86_64`, `macosx_11_0_arm64`,
+    `manylinux_2_28_{x86_64,aarch64}`, `win_amd64`) and **zero** sdists — so there is no
+    `setup.py`, no download script and no hardcoded platform table to grep. Upstream's
+    monorepo doesn't help either: `livekit/agents/livekit-plugins/` holds ~80 plugin
+    directories and *no* noise-cancellation among them (the near-miss is a differently-named
+    `livekit-plugins-krisp`), a global code search for the payload filename returns only other
+    people's committed `site-packages` copies, and no `Cargo.toml` on GitHub defines the crate.
+    - **Count sdists across *every* release before concluding anything about source.** One
+      read settles it — `curl -s https://pypi.org/pypi/<pkg>/json`, then count
+      `packagetype == 'sdist'` over all of `d['releases']`, not just the target version.
+      "No sdist at this version" is common and recoverable (build one from the checkout);
+      "no sdist ever published, and no upstream directory" means there is no checkout to
+      build one *from*, which is a different and much harder finding.
+    - **`strings -a` the payload — a vendor's builder paths are its provenance.** Grep the
+      blob for builder/package-manager roots: here
+      `/var/lib/jenkins/.conan/data/<pkg>/<ver>/<user>/<channel>/…` named nine closed Conan
+      packages on a private remote (`krisp-core/2.0.41`, `krisp-inference-engine/2.2.23`,
+      `krisp-nc-processor/4.0.9`, `krisp-dsp`, `krisp-blas`, `krisp-mlops`, `krisp-common`,
+      `krisp-audio-stream`, plus `fftw/3.3.10_7@krisp/stable`), every one in a `krisp/prod`
+      channel. A vendor-private Conan/Jenkins path is gotcha 157's closed-source-vendor
+      finding reached **without** any vendor docs, installer script or release manifest —
+      and it is final: there is no public source to build for riscv64 at any version.
+      Generalize the grep, not the string: `/\.conan/data/`, `/\.hunter/`,
+      `/vcpkg/buildtrees/`, `/home/jenkins/`, `/builds/<org>/` all leak the same thing.
+    - **Don't let open-source crates in the same output talk you out of it.** That identical
+      `strings` run also lists `cargo/registry/src/index.crates.io-*/{ureq,rustls,ring,
+      serde_json,flate2,…}`, which makes the blob look like an ordinary Rust build someone
+      could retarget. Read what those crates *do*: an `ureq`+`rustls`+`serde_json` set is the
+      licence-check HTTP client wrapped **around** the closed DSP core, not the DSP. The
+      proportions say the same — 4 KB of Python, a 39 MB `.so`, and vendor-private paths
+      dominating its grep hits.
+    - **Price the non-code payload too.** ~64 MB of the 73 MB wheel is three opaque `.kef`
+      model files with no recognizable magic bytes, and the metadata reads
+      `License: SEE LICENSE IN https://livekit.io/legal/terms-of-service` — a proprietary ToS,
+      not an OSS licence. Even a hypothetical riscv64 rebuild of the wrapper would still have
+      to redistribute models we have no licence to republish, so the licensing answer blocks
+      it independently of the missing source.
+    - **Verdict `parked` on two independent grounds, and name the dependency one as well.**
+      Closed at the vendor layer (gotcha 157) *and* function-gated — the README requires
+      LiveKit Cloud, so the primary function is unreachable in gotcha 183's sense, not merely
+      degraded. Record the second-order blocker in the same note: the mandatory
+      `livekit>=0.21.3` runtime dep is itself `py3-none-<platform>` over those same five
+      platforms with no riscv64 wheel, so nothing downstream of this plugin resolves on
+      riscv64 today either.

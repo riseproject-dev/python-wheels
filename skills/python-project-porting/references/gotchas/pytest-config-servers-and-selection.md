@@ -32,6 +32,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
   `@pytest.mark.skipif(not X)` guard turns an omitted `CIBW_TEST_REQUIRES` entry into a
 - **355** — Gotcha 339 generalizes past `pytest` to any unpinned runtime dependency whose
   own heuristic changed across a major version — pin it for the test venv only.
+- **429** — A media project's suite is written against upstream's *full* FFmpeg; an FFmpeg
+  you configure yourself has no H.264/HEVC/VP9/AV1/MP3 encoder at all, and the failures
+  blame the wrong codec.
 
 ---
 
@@ -644,3 +647,37 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
     (gotcha 52) produced before trusting a pass count: a test-requires list assembled by
     reading `pyproject.toml`'s declared dependencies under-counts whenever the suite
     itself imports something optional that the accelerator's own tests exercise.
+
+429. **A media project's suite is written against upstream's *full* FFmpeg; an FFmpeg you
+    configure yourself has no H.264/HEVC/VP9/AV1/MP3 *encoder* at all, and the failures
+    blame the wrong codec (the torchcodec case).** The natural "just build FFmpeg in the
+    container" line — `./configure --disable-static --enable-shared --enable-pic
+    --disable-doc` — enables three external libraries: iconv, libxcb, zlib. Every video
+    encoder anyone actually uses, and the MP3 one, lives in an external library
+    (`libx264`, `libx265`, `libvpx`, `libaom`/`libsvtav1`, `libmp3lame`), and FFmpeg's
+    native AV1 *decoder* only works through a hardware accelerator
+    (`libavcodec/av1dec.c`: "Your platform doesn't suppport hardware accelerated AV1
+    decoding"), so such a build decodes nearly everything and encodes almost nothing.
+    Two of those libraries (`libx264`, `libx265`) require `--enable-gpl`, which a wheel
+    that links FFmpeg must not be built against, so an upstream encoder test surface is
+    **unreachable, not broken** — settle that once rather than iterating on CI. Nothing in
+    the output says "no H.264 encoder": FFmpeg silently falls back to the container
+    format's default codec, so the failures read `Specified pixel format yuv444p is not
+    supported by the mpeg4 encoder`, `avcodec_open2 failed: Invalid argument` (mpeg4
+    rejecting `crf`/`preset`/`profile`), `Video codec av1 not found`, `Codec not found`
+    for MP3 audio, and `ffmpeg ... returned non-zero exit status 8` wherever the suite
+    shells out to the CLI built beside the libraries — all of which read like a riscv64
+    port bug, and all 4 interpreter legs fail on the identical set (see gotcha 33 on
+    identical-across-legs meaning environment, not build). Upstream never sees it because
+    its test job does `conda install ffmpeg -c conda-forge`, whose default build is the
+    GPL one. Prove the gap in a minute on any arch without compiling: run the same
+    `./configure`, read its `External libraries:` block, and
+    `grep -E '^#define CONFIG_[A-Z0-9_]*(H264|HEVC|VP9|AV1|MP3)[A-Z0-9_]*_ENCODER 1$'
+    config.h` (empty). Deselect **by codec token wherever the parametrisation carries
+    one** — `-k "not ((test_audio_against_cli or test_multiple_audio_formats) and mp3)"`
+    keeps those tests' WAV and FLAC parametrisations, so the audio encoder, the image
+    encoder and every decoder stay covered instead of a whole module disappearing behind
+    `--ignore`. Reserve `--ignore` for a module that cannot work at all (a `smoke_test.py`
+    that H.264-encodes every fixture it then decodes). And say in the PR that the wheel
+    bundles no FFmpeg, so the codecs the *user's* distro FFmpeg provides are unaffected by
+    any of this — only the container's own test coverage is.

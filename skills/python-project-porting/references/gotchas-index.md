@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (386 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (387 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -164,6 +164,12 @@ The porting gotchas (386 of them) live in [`references/gotchas/`](gotchas/), spl
   sibling's whole release history for platform tags, compare the base's per-arch wheel sizes,
   and re-verify any sibling-family blocker at the revision your target actually pins
   (the tensorflow-cpu case).
+- **431** — When a distribution has **never** published an sdist, gotcha 35/157's "grep the
+  build script for the fetch" has nothing to grep: count sdists across every release, then
+  `strings -a` the vendored blob — private builder paths (`/.conan/data/…@vendor/prod`,
+  `/home/jenkins/`, `/vcpkg/buildtrees/`) prove a closed vendor with no riscv64 source, and
+  open-source crates in the same output are only the shim around it
+  (the livekit-plugins-noise-cancellation case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -361,6 +367,10 @@ The porting gotchas (386 of them) live in [`references/gotchas/`](gotchas/), spl
 - **424** — Audit a chromium-style DEPS for riscv64-less CIPD packages with
   `cipd describe <pkg>/linux-riscv64` (and `gclient_eval.EvaluateCondition`) before spending a
   build cycle discovering them one abort at a time.
+- **427** — `VPYTHON_BYPASS` also picks the interpreter gsutil runs on, and a chromium-style
+  checkout holds two gsutils: the one its DEPS pins (4.68, vendoring six 1.12) cannot import on
+  python ≥ 3.12, so its `download_from_google_storage` hooks fail — reproducible on x86 in
+  seconds, fixed by conditioning those test-data hooks off.
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
@@ -419,6 +429,11 @@ The porting gotchas (386 of them) live in [`references/gotchas/`](gotchas/), spl
   library (XNNPACK's `zvfh` kernels), where the fix is that dependency's own feature
   `--define` rather than an `-march` probe — and `--keep_going` hides a single-cause failure
   behind five hours of unrelated progress, making it look like a timeout.
+- **428** — A project still on the deprecated `find_package(PythonLibs REQUIRED)` has no
+  `Development.Module` way out of gotcha 374's static-libpython wall: satisfying it with
+  manylinux's non-PIC `libpython3.XX.a` only moves the failure to the final link after hours,
+  the project may already strip libpython from its own non-Windows link lines (making the
+  `REQUIRED` vestigial), and the header-only fix rehearses locally on x86_64 in a minute.
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
@@ -578,6 +593,9 @@ The porting gotchas (386 of them) live in [`references/gotchas/`](gotchas/), spl
 - **350** — A suite's own `try: import X except ImportError: X = None` plus
 - **355** — Gotcha 339 generalizes past `pytest` to any unpinned runtime dependency whose
   own heuristic changed across a major version — pin it for the test venv only.
+- **429** — A media project's suite is written against upstream's *full* FFmpeg; an FFmpeg
+  you configure yourself has no H.264/HEVC/VP9/AV1/MP3 encoder at all, and the failures
+  blame the wrong codec.
 
 ### Test failures, flakes & arch-specific bugs — [`gotchas/test-failures-and-flakes.md`](gotchas/test-failures-and-flakes.md)
 
@@ -678,6 +696,9 @@ The porting gotchas (386 of them) live in [`references/gotchas/`](gotchas/), spl
   arch macros in a scratch copy to exercise its generic architecture path natively — a
   restricted-egress host can still prove compilability without a container (the
   bitsandbytes case).
+- **430** — A `-k`/`--ignore` change is verifiable offline with no wheel at all: rebuild the
+  failed run's node ids into a synthetic test tree, then run the YAML-folded
+  `CIBW_TEST_COMMAND` through `sh -c`.
 
 ### PR, CI, triggers, publishing & maintainer signals — [`gotchas/pr-ci-and-maintainer.md`](gotchas/pr-ci-and-maintainer.md)
 
