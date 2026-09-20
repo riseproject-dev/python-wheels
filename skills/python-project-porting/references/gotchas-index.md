@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (430 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (431 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -183,6 +183,12 @@ The porting gotchas (430 of them) live in [`references/gotchas/`](gotchas/), spl
   `detect_host_arch.py`, `gcc_toolchain("riscv64")`) and the only two CIPD packages missing for
   `linux-riscv64` — siso and reclient — which `.gclient` `custom_deps` nulls out (the
   comfy-angle/ANGLE case).
+- **442** — A vendored dependency's build system can silently omit a capability flag its other
+  build system defaults on: XNNPACK's Bazel build never defines `XNN_ENABLE_RISCV_VECTOR` where
+  its CMake build defaults it ON, so half its riscv64 RVV dispatch sites (no runtime
+  `getauxval(AT_HWCAP)` check) compile out to scalar only by that omission — re-verify on every
+  XNNPACK version bump, since fixing it upstream would make the ungated blocks go live (the
+  mediapipe case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -399,6 +405,13 @@ The porting gotchas (430 of them) live in [`references/gotchas/`](gotchas/), spl
 - **440** — Gotcha 133's version-only bazel cache key is shared repo-wide, so a new
   workflow's bootstrap step is skipped on its first run and a broken variable reference in a
   copied bootstrap stays latent — check every `${VAR}` against the `docker run -e` list.
+- **441** — `VPYTHON_BYPASS` (gotcha 423) also takes `gclient.py`'s own vpython venv away, so
+  depot_tools' imports must be on the ambient interpreter: `pip install httplib2==0.13.1`
+  (unpinned drops the `httplib2.socks` gerrit_util needs), and nothing else is missing.
+- **443** — An upstream CMake per-arch block can `set(<OPT> OFF CACHE ... FORCE)` *after*
+  `include(third_party)` already ran the matching `add_definitions()`, so the feature is
+  compiled in and not linked — check the include line numbers and use the project's own
+  early default switch instead.
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
@@ -739,6 +752,9 @@ The porting gotchas (430 of them) live in [`references/gotchas/`](gotchas/), spl
 - **430** — A `-k`/`--ignore` change is verifiable offline with no wheel at all: rebuild the
   failed run's node ids into a synthetic test tree, then run the YAML-folded
   `CIBW_TEST_COMMAND` through `sh -c`.
+- **444** — Validate a hand-edited `.patch` with `git apply --check`, never `patch`: a wrong
+  `@@` line count makes GNU `patch` drop every following hunk in that file with no `.rej` and
+  exit 0.
 
 ### PR, CI, triggers, publishing & maintainer signals — [`gotchas/pr-ci-and-maintainer.md`](gotchas/pr-ci-and-maintainer.md)
 

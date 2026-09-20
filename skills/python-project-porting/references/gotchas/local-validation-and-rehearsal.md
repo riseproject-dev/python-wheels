@@ -33,6 +33,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
 - **430** — A `-k`/`--ignore` change is verifiable offline with no wheel at all: rebuild the
   failed run's node ids into a synthetic test tree, then run the YAML-folded
   `CIBW_TEST_COMMAND` through `sh -c`.
+- **444** — Verify a hand-edited `.patch` with `git apply --check`, never with `patch`:
+  a wrong `@@` line count makes GNU `patch` silently swallow the *next* hunk and exit 0.
 
 ---
 
@@ -469,3 +471,29 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
     `FAILED` line, so the generated tree grows both a truncated and a full variant of the
     same test and the "passing test dropped" list fills with truncated twins — compare
     names, not counts, before believing you have collateral damage.
+
+444. **When you hand-edit a hunk in `patches/<pkg>/<version>/*.patch`, validate it with `git
+    apply --check`, not with `patch --dry-run`: if the `@@ -a,b +c,d @@` counts disagree with
+    the hunk body, GNU `patch` does not fail — it consumes `b` lines, treats the remainder as
+    trailing garbage, silently drops every *following* hunk in that file, writes no `.rej`,
+    and exits 0.** Adding a one-line hunk to paddlepaddle's patch 1/5 with `@@ -356,4 +357,4
+    @@` over a five-line body cost a full debug loop: `patch -p1 -F 0` printed only `patching
+    file CMakeLists.txt`, and the *third* hunk — the whole `if(WITH_RISCV)` block — was
+    simply absent from the result. `git apply` rejects the same file outright, which is also
+    what the workflow's `git apply ../python-wheels/patches/...` step would have done, in CI,
+    an hour into the job.
+    - **Rehearse against the pristine upstream files, off-target, in seconds.** Fetch just
+      the files the patch touches from `raw.githubusercontent.com/<org>/<repo>/<tag>/<path>`
+      into a scratch tree, then `git apply --check --directory=<scratch> -p1 <patch>` from
+      inside this repo (git resolves paths from the worktree root, so `--directory` is what
+      makes a scratch subtree work). Expect one `has type 100644, expected 100755` warning
+      when the source file is executable upstream and `curl` dropped the bit — that is
+      cosmetic, and `--check` still exits 0.
+    - **Grep the applied result for the symbol you added, do not trust the exit code.**
+      `grep -n '<new option>' <file>` after a real apply is the cheap confirmation that every
+      hunk landed; a count of hunks in the patch versus `grep -c '^@@' <patch>` catches the
+      same class of error before you even run anything.
+    - **Better still, generate hunks rather than writing them.** Gotcha 435's note on this
+      port already records a hand-written hunk whose context matched byte-for-byte being
+      rejected; producing the diff with `difflib` from the pristine and edited files, and
+      then pasting it in, removes both failure modes at once.
