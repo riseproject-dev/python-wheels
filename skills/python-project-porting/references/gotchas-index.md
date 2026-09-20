@@ -223,6 +223,11 @@ The porting gotchas (438 of them) live in [`references/gotchas/`](gotchas/), spl
   byte-identical wheel sizes across ABIs are the tells); and the payload behind it can be a
   foreign-language runtime the package only shells out to, whose unknown-arch fallback quietly
   swaps in an arch-neutral build instead of failing (the artifacts-keyring case).
+- **465** — A closed vendor accelerator blob can be *full* of `riscv` strings and carry a whole
+  LLVM RISC-V code generator while shipping x86_64-only wheels, because the ISA runs on cores
+  inside the accelerator: the registered `LLVMInitialize*Target` set, the device-side proto
+  paths and the Bazel `k8-fastbuild` builder path tell host support apart from a device target
+  (the libtpu case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

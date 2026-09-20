@@ -134,6 +134,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   all, by a `Distribution.has_ext_modules()` that hardcodes `True`; and the payload behind it
   can be a *foreign-language runtime* the package only shells out to, whose arch fallback
   quietly produces a wheel with no arch-specific content (the artifacts-keyring case).
+- **465** — A closed vendor accelerator blob can be *full* of `riscv` strings and carry a whole
+  LLVM RISC-V backend while shipping x86_64-only wheels, because the ISA runs on cores inside
+  the accelerator; registered LLVM targets and device-side proto paths tell the two apart (the
+  libtpu case).
 
 ---
 
@@ -3029,3 +3033,47 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       Artifacts credentials by executing the provider) is *unreachable*, not merely degraded,
       until a riscv64 .NET runtime exists. Either one alone parks it; recording both is what
       makes the entry re-checkable when .NET riscv64 lands.
+
+465. **A closed vendor accelerator blob can be *full* of `riscv` — because the ISA runs on
+    cores inside the accelerator, not on the host (the libtpu case).** Every earlier
+    vendor-payload gotcha triages a blob whose arch strings name the *host*
+    (35/157/431/449/453). libtpu inverts the tell and is the one blob where grepping for our
+    own architecture actively misleads: `strings -a libtpu/libtpu.so | grep -ci riscv` returns
+    1190 (1188 unique), including a complete LLVM RISC-V code generator
+    (`_GLOBAL__sub_I_RISCVTargetMachine`, `…RISCVISelLowering`, `…RISCVInsertVSETVLI`,
+    `…RISCVZilsdOptimizer`, the `riscv-br-merging-base-cost` `cl::opt` help text, the whole
+    `R_RISCV_*` reloc table) — and the wheel is still `manylinux_2_31_x86_64` only, in all 60
+    releases since 2021. Two reads separate "compiled *for* riscv64" from "compiles *to*
+    riscv64":
+    - **`readelf -h` the payload, and list which LLVM targets are actually registered.**
+      `Machine: Advanced Micro Devices X86-64`, and the registration entry points present are
+      exactly `LLVMInitialize{AArch64,ARM,PowerPC,TPU,X86}Target{,Info,MC,AsmParser,AsmPrinter}`
+      — no `LLVMInitializeRISCVTarget` — beside a custom in-tree `TPU` backend
+      (`llvm::TPUInstrInfo::isMxuInstr`, `llvm::TPUAAResult`). The RISC-V TUs are linked but
+      unregistered, i.e. dead or device-side code, not a host target.
+    - **The device-side ISA leaves proto/path fingerprints; read those, not the string count.**
+      `platforms/asic_sw/lib/common/riscv/results.proto`, `.asic_sw.riscv.ExceptionInfo` and
+      `.asic_sw.riscv.StackFrameWithException` sit next to `platforms/asic_sw/driver/...`,
+      `/dev/accel0`, `/dev/vfio/*` and chip codenames (`jellyfish`, `pufferfish`, `viperfish`,
+      `TPU v4`…`TPUv7`) — the RISC-V here is firmware/exception plumbing on the ASIC, reached
+      only through the vendor's own kernel driver. Same distinction as gotcha 41's
+      cross-compiler-for-someone-else's-ISA, with the ISA swapped so it reads as good news.
+    - **A sibling `.so` in the same wheel carries the internal builder path.** `libtpu/sdk.so`
+      (23 MB, a *real* extension module — `PyInit_sdk` plus 159 undefined `Py*` symbols, so the
+      `cpXY-cpXY` tag is honest here, unlike gotcha 464's) contains
+      `bazel-out/k8-fastbuild/bin/sdk/client/python/sdk.so`. Bazel's `k8` is its x86_64 CPU
+      name: the release is configured for one host arch inside a tree nobody outside the vendor
+      has, and the project has never published an sdist (220 files on PyPI, 0 `.tar.gz`).
+    - **Two independent artifact indexes, then the framework's own platform table.** PyPI's
+      file list and the vendor's own bucket index
+      (`storage.googleapis.com/libtpu-releases/index.html`, 1283 wheel links across
+      libtpu/libtpu-nightly/jaxlib) both answer zero for `riscv|aarch64|arm64`; JAX's
+      installation matrix states Cloud TPU is supported on Linux x86_64 and `n/a` everywhere
+      else. And there is no CPU/simulator mode to fall back on — no `TPU_*` flag or string
+      offers one.
+    - **A `LICENSE` file that names a *cloud agreement* is a redistribution stop on its own**
+      (gotcha 453's EULA point, in its cheapest form): libtpu's 298-byte `LICENSE` says the
+      payload "is made available as \"Software\" under the agreement governing your use of
+      Google Cloud Platform", i.e. cloud.google.com/terms, whose §3.3 bars copying, derivative
+      works and distribution of the Services. No source, no non-x86_64 vendor build, and no
+      right to republish the bytes even if one appeared — three independent parks.
