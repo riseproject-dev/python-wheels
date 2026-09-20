@@ -127,6 +127,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **459** — A CUDA-only PyPI wheel does not make the *project* CUDA-only: a
   device-selecting build env var can produce a genuinely portable CPU distribution from the
   same tree, and upstream may already carry riscv64 kernels for it (the vllm case).
+- **462** — A `<pkg>-core` split sibling is still its own port after the main package shipped
+  in the *non-split* shape: the self-contained wheel closes the Python gap but not the
+  native-consumer one, and the missing piece is two tiny files (the sherpa-onnx-core case).
 
 ---
 
@@ -2931,3 +2934,39 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       BLAS symbol its CMake assumes every non-x86 torch wheel carries (gotcha 461). Treat
       "the project supports this arch" as permission to start, not as a prediction of a green
       first run.
+
+462. **A `<pkg>-core` split sibling is still its own port after the main package shipped in the
+    *non-split* shape — the self-contained wheel closes the Python gap, not the
+    native-consumer one (the sherpa-onnx-core case; see `build-sherpa-onnx-core.yml`).**
+    Gotcha 382/383 covers a split family as *one* unit of work; the trap here is the reverse
+    reading. `sherpa-onnx` was already ported and published for riscv64 by deliberately
+    building upstream's **non-split** shape (`SHERPA_ONNX_SPLIT_PYTHON_PACKAGE` unset), which
+    bundles `libsherpa-onnx-c-api.so`, `libsherpa-onnx-cxx-api.so`, `libonnxruntime.so` and the
+    C-API headers straight into the one wheel — precisely *because* the `-core` sibling had no
+    riscv64 wheel. That makes the sibling look closed out, and it isn't: `pip install
+    sherpa-onnx` on riscv64 delivers every `.so` and header, yet `python3 -m sherpa_onnx
+    --cflags` / `--c-api-libs` still fails, because the non-split wheel omits the two files
+    that *are* the `-core` package's Python half (`sherpa_onnx/_info.py` and
+    `sherpa_onnx/__main__.py`, ~1.8 KB together). Those are upstream's documented way for
+    C/C++/Rust/Go/Dart consumers to locate the payload, and upstream's own CI tests them as a
+    separate "Test sherpa-onnx-core" step.
+    - **Diff the two distributions' Python file lists, not their `.so` lists.** `unzip -l` both
+      wheels and compare only the non-`lib/`, non-`include/` entries; the native payload is the
+      part everyone checks and the part most likely to be identical. A split family's `-core`
+      package often carries a *discovery shim* whose absence is invisible to an import smoke
+      test and fatal to the package's actual audience.
+    - **The `py3-none` tag is honest here, which collapses the matrix** (gotcha 81's ctypes
+      reading, one step further: there is no `PyInit_*` *and* no `ctypes` loader — the wheel is
+      libraries plus headers plus a path-printing shim). One build serves every interpreter, so
+      there is no `python:` matrix at all; still install it on each of cp312/cp313/cp314/cp314t,
+      since the Python half is all that varies per interpreter.
+    - **Porting it also un-blocks the sibling's own divergence.** The non-split build is a
+      deviation from what upstream publishes (its `install_requires` is
+      `sherpa-onnx-core==<ver>` in the split shape), so landing `-core` is what would later let
+      `build-sherpa-onnx.yml` match upstream — goal 2 paid back. Say so in the PR rather than
+      leaving the two workflows looking like unrelated choices.
+    - **Watch for the file-collision footnote.** Both distributions install into the same
+      `sherpa_onnx/` directory, so a user who installs both gets overwrites. It is benign here
+      (our non-split wheel's `Requires-Dist` names no `-core`, so pip never pulls it in
+      implicitly) but it is worth one PR line, because the same shape in another family could
+      break the base package.

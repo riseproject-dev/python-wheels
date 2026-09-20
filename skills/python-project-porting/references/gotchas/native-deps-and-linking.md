@@ -33,6 +33,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
 - **461** — A dependency wheel *shipping* a library is not a promise that the library has the
   symbol a build gates on: a presence-of-file probe must become a presence-of-symbol probe, or
   the extension links clean and fails at import (the vllm/OpenBLAS `sbgemm_` case).
+- **463** — Substituting our dep wheel for an upstream prebuilt can change the SONAME: when the
+  package's own linker-flag emitter says `-l<name>`, re-soname the staged copy instead of
+  shipping a symlink farm (the sherpa-onnx-core/onnxruntime case).
 ---
 
 16. **All-static BUNDLED build + a dep the project can't bundle = link failure.**
@@ -635,3 +638,37 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
       `sbgemm_`, one exporting only `dsbgemm_`/`sbgemm_direct` — to prove both the positive case
       and the absence of a substring false positive. That is the whole patch under test without
       a riscv64 cycle.
+
+463. **Swapping our dep wheel in for an upstream prebuilt can change the SONAME, and that breaks
+    a package whose own linker-flag emitter says `-l<name>`: re-soname the staged copy rather
+    than shipping a symlink farm (the sherpa-onnx-core/onnxruntime case).** Gotcha 17's
+    dep-wheel pattern usually ends at "point the build's `*_LIB_DIR` at the extracted wheel".
+    The extra step appears when the wheel we ship is *versioned* and the binary upstream vendors
+    is not. Our `onnxruntime` riscv64 wheel carries `libonnxruntime.so.1.29.0` with
+    `SONAME libonnxruntime.so.1`; upstream sherpa-onnx vendors a plain `libonnxruntime.so` with
+    **no SONAME at all**. Three consequences follow from that one difference:
+    - **The consumer's own flags decide the required filename, not the build.** The `-core`
+      wheel ships `sherpa_onnx/_info.py`, which emits `-L<libdir> -lsherpa-onnx-c-api
+      -lonnxruntime`, so a user's `g++` needs a file literally named `libonnxruntime.so` in the
+      wheel. Grep the package for the code that *prints* link flags (`--libs`, a `.pc` template,
+      an `_info.py`) before choosing what to stage — the build succeeding proves nothing about
+      whether the shipped wheel is linkable.
+    - **Symlinks are not an option inside a wheel.** The zip format can carry them but installers
+      generally materialise them as regular files, so the honest alternatives are one real copy
+      or N real copies. Keeping the versioned name plus two compatibility names tripled a 19 MB
+      library (that is exactly why the sibling `sherpa-onnx` riscv64 wheel carries
+      `libonnxruntime.so`, `.so.1` and `.so.1.29.0` at 19.4 MB each).
+    - **So copy once under the linker name and fix the SONAME**: `cp
+      libonnxruntime.so.<ver> <dir>/libonnxruntime.so` then `patchelf --set-soname
+      libonnxruntime.so <dir>/libonnxruntime.so`, before configuring. `DT_NEEDED` follows the
+      SONAME, not the filename, so this is what makes the dependents record the short name; it
+      also narrows the project's own `file(GLOB … libonnxruntime*)` install rule to one file, so
+      a plain `cp install/lib/lib*.so` yields upstream's exact wheel content. Do it to the
+      *staged copy*, never in place in a shared location.
+    - **Rehearse it off-target with `--replace-needed`.** You cannot relink the dependents
+      without the real build, but you can reproduce the finished relationship exactly:
+      `patchelf --set-soname` the library, then `patchelf --replace-needed
+      lib<name>.so.<N> lib<name>.so` on **every** dependent (missing one leaves a dangling
+      `.so.1` that only shows up as an `ld` warning and a runtime loader failure), package it and
+      compile an example against the installed wheel under QEMU. That caught the omitted second
+      library in one minute instead of a two-hour CI cycle.

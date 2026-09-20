@@ -215,6 +215,9 @@ The porting gotchas (438 of them) live in [`references/gotchas/`](gotchas/), spl
 - **459** — A CUDA-only PyPI wheel does not make the *project* CUDA-only: a device-selecting
   build env var can produce a genuinely portable CPU distribution from the same tree, and
   upstream may already carry riscv64 kernels for it (the vllm case).
+- **462** — A `<pkg>-core` split sibling is still its own port after the main package shipped in
+  the *non-split* shape: the self-contained wheel closes the Python gap but not the
+  native-consumer one, and the missing piece is two tiny files (the sherpa-onnx-core case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -579,6 +582,9 @@ The porting gotchas (438 of them) live in [`references/gotchas/`](gotchas/), spl
 - **461** — A dependency wheel *shipping* a library is not a promise that it exports the symbol
   a build gates on: a presence-of-file probe must become a presence-of-symbol probe, or the
   extension links clean and fails at import (the vllm/OpenBLAS `sbgemm_` case).
+- **463** — Substituting our dep wheel for an upstream prebuilt can change the SONAME: when the
+  package's own linker-flag emitter says `-l<name>`, re-soname the staged copy instead of
+  shipping a symlink farm (the sherpa-onnx-core/onnxruntime case).
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 
