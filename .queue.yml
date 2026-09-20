@@ -2317,10 +2317,28 @@ packages:
     a gclient sync plus a full ANGLE build does not fit. Validation was static - patch applies with
     patch --dry-run --fuzz=0, py_compile of both patched scripts, a unit test of the new
     stage_licenses() against a synthetic checkout (including non-UTF8 licence bytes), bash -n of the
-    container script and compile() of both heredocs, and pending_versions.py resolving 0.1.1. PR
-    #2123 open, first CI run in flight; the two things to watch are the gclient sync step and
-    whether the statically linked Vulkan-Loader falls back to its C unknown-ext-chain path on
-    riscv64 instead of wanting per-arch assembly.'
+    container script and compile() of both heredocs, and pending_versions.py resolving 0.1.1. PR #2123 open; three CI rounds so far, every one inside gclient sync before anything compiled.
+    Round 1 (~2 min): vpython3 could not build its venv, since infra/python/wheels publishes no
+    linux-riscv64 crcmod/lxml (gotcha 423) - fixed by setting VPYTHON_BYPASS for riscv64 hosts in
+    build_linux.py. Round 2 (~4 min): the bypass worked and moved the wall one layer down - with
+    no vpython venv, gclient.py has no httplib2 of its own, and gerrit_util imports httplib2 and
+    httplib2.socks at module scope (ModuleNotFoundError: No module named ''httplib2'', ~80 s in) -
+    fixed in the workflow with pip install httplib2==0.13.1, the version depot_tools'' own
+    .vpython3 pins; unpinned resolves to 0.32.0, which no longer ships the httplib2.socks that
+    import needs (new gotcha 441). Round 3 in flight. That round-2 diagnosis was settled off-
+    target on x86 in seconds rather than in CI: the failure reproduces exactly under a bare cp312
+    venv against the pinned depot_tools tree (fetched as a gitiles archive, no clone), and with
+    httplib2 installed every module the sync path touches imports cleanly and a real
+    download_from_google_storage hook (angle-glslang-validator) fetches its object and exits 0 -
+    so no cryptography/crcmod chase and no extra index are needed, and the pyo3 PanicException a
+    host python with a system cryptography produces there is a host artifact. ANGLE pins
+    third_party/depot_tools at the same revision the driver clones, so gotcha 427''s gsutil
+    4.68/six split does not apply (both are 5.35, fine on 3.12), and the Linux hooks that follow
+    (clang, llvm_objdump, rust, lastchange, configure_siso) import nothing outside the stdlib and
+    depot_tools. Still not rehearsed end to end locally (no docker daemon, 4.5 GB free). Left to
+    watch: those hooks, gn gen with the prefixed GCC toolchain, and whether the statically linked
+    Vulkan-Loader falls back to its C unknown-ext-chain path on riscv64 instead of wanting
+    per-arch assembly.'
 - pkg: solders
   version: 0.29.0
   home: https://github.com/kevinheavey/solders

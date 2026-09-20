@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (430 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (431 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -399,6 +399,9 @@ The porting gotchas (430 of them) live in [`references/gotchas/`](gotchas/), spl
 - **440** — Gotcha 133's version-only bazel cache key is shared repo-wide, so a new
   workflow's bootstrap step is skipped on its first run and a broken variable reference in a
   copied bootstrap stays latent — check every `${VAR}` against the `docker run -e` list.
+- **441** — `VPYTHON_BYPASS` (gotcha 423) also takes `gclient.py`'s own vpython venv away, so
+  depot_tools' imports must be on the ambient interpreter: `pip install httplib2==0.13.1`
+  (unpinned drops the `httplib2.socks` gerrit_util needs), and nothing else is missing.
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
