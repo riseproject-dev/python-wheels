@@ -533,6 +533,9 @@ The porting gotchas (433 of them) live in [`references/gotchas/`](gotchas/), spl
   `Tag_RISCV_arch` carries `v1p0`, with 64,554 vector instructions against zero in the other 19,
   and upstream's own riscv64 CI only ever tests under `qemu -cpu rv64,v=true,vext_spec=v1.0`, so
   read the artifact's ELF attributes rather than trusting the upstream CI's existence.
+- **454** — The image's LLVM is a whole toolchain *minus Clang's static libraries*: `llvm-static`
+  installs 304 `libLLVM*.a`, `clang-devel` installs none, so a project that links Clang statically
+  has to build LLVM+Clang from source (the warp-lang case).
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 

@@ -80,6 +80,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **448** — "Genuine upstream riscv64 support" can still mean "requires RVV 1.0 hardware": a
   12-hour build can go green, produce every wheel, and die two minutes later in the smoke test
   with exit 132 — and the wheel's own ELF `Tag_RISCV_arch` proves it without another runner slot.
+- **454** — The image's LLVM is a whole toolchain *minus Clang's static libraries*:
+  `llvm-static` installs 304 `libLLVM*.a`, `clang-devel` installs none, so a project that
+  links Clang statically must build LLVM+Clang from source; plus the cmake/ninja and
+  `_GLIBCXX_USE_CXX11_ABI` facts that go with it.
 
 ---
 
@@ -1388,3 +1392,31 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       plugin needs RVV 1.0 SIGILLs for every user on baseline rv64gc — gotcha 139's exact
       prohibition. That makes "make it build" and "make it shippable" two different questions,
       and it is what turns this from a bug to fix into a decision to escalate.
+
+454. **The image's LLVM is a whole toolchain *minus Clang's static libraries* — `llvm-static`
+    exists, `clang-devel` ships no `.a` at all (the warp-lang case).** `build-tilelang.yml` links
+    LLVM out of the image with one `dnf --enablerepo=crb install llvm-devel` plus `llvm-config`,
+    which makes "the image already has LLVM" look like the answer for any LLVM-linking port. It
+    holds for LLVM and not for Clang. On manylinux_2_39_riscv64 (Rocky Linux 10.2),
+    `dnf --enablerepo=crb list --available 'llvm*' 'clang*'` answers
+    `llvm/llvm-devel/llvm-static/clang/clang-devel/clang-libs` all at **21.1.8** — recent enough
+    for anything — and:
+    - `llvm-static` installs **304** `libLLVM*.a` into `/usr/lib64`, so a *static LLVM* link is
+      available off the shelf.
+    - `clang-devel` installs **zero** `.a` files. RHEL/Fedora package Clang's C++ API only as the
+      shared `libclang-cpp.so`, so a project that statically links `libclangFrontend.a`,
+      `libclangCodeGen.a`, … has nothing to link against, and the port has to compile LLVM+Clang
+      from source the way `build-libclang.yml` does (~10h on these runners). One command prices it:
+      `dnf --enablerepo=crb repoquery -l clang-devel | grep -c '\.a$'` → `0`.
+    - Going shared instead is not just a `-L` change: the distro LLVM is built with
+      `_GLIBCXX_USE_CXX11_ABI=1`, while projects shipping a self-contained Clang follow the
+      manylinux/CentOS-7 convention and compile against it with `-D_GLIBCXX_USE_CXX11_ABI=0`
+      (warp's `build_dll.py` hardcodes it, upstream's Conan profiles say `compiler.libcxx=libstdc++`).
+      Mixing the two is an undefined-symbol wall in `std::string`, and it would also mean vendoring
+      ~180 MB of distro `.so` into a wheel upstream keeps self-contained.
+    - Two build-host facts for any from-source LLVM here: the image already carries **cmake 4.4.3
+      at `/usr/local/bin/cmake`** — ahead of dnf's `cmake` 3.31.8 in `/usr/bin`, so installing the
+      RPM does *not* change which `cmake` runs — and **no ninja at all**. When upstream's own
+      recipe pins them (warp's `tools/llvm/ci/build-linux.sh` pipx-installs `cmake==3.31.6` and
+      `ninja==1.11.1.4`), take the same pin from our registry, which serves `cmake 3.31.6` and
+      `ninja 1.11.1.3` for riscv64, and put it ahead of `/usr/local/bin` on `PATH`.
