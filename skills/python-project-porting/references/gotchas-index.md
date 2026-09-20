@@ -218,6 +218,11 @@ The porting gotchas (438 of them) live in [`references/gotchas/`](gotchas/), spl
 - **462** — A `<pkg>-core` split sibling is still its own port after the main package shipped in
   the *non-split* shape: the self-contained wheel closes the Python gap but not the
   native-consumer one, and the missing piece is two tiny files (the sherpa-onnx-core case).
+- **464** — A full `cpXY-cpXY-<platform>` tag can be fabricated by a `has_ext_modules()` that
+  hardcodes `True`, with no extension module anywhere (PyPy tags beside CPython ones and
+  byte-identical wheel sizes across ABIs are the tells); and the payload behind it can be a
+  foreign-language runtime the package only shells out to, whose unknown-arch fallback quietly
+  swaps in an arch-neutral build instead of failing (the artifacts-keyring case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

@@ -130,6 +130,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **462** — A `<pkg>-core` split sibling is still its own port after the main package shipped
   in the *non-split* shape: the self-contained wheel closes the Python gap but not the
   native-consumer one, and the missing piece is two tiny files (the sherpa-onnx-core case).
+- **464** — A full `cpXY-cpXY-<platform>` tag can be fabricated with no extension module at
+  all, by a `Distribution.has_ext_modules()` that hardcodes `True`; and the payload behind it
+  can be a *foreign-language runtime* the package only shells out to, whose arch fallback
+  quietly produces a wheel with no arch-specific content (the artifacts-keyring case).
 
 ---
 
@@ -2970,3 +2974,58 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       (our non-split wheel's `Requires-Dist` names no `-core`, so pip never pulls it in
       implicitly) but it is worth one PR line, because the same shape in another family could
       break the base package.
+
+464. **A full `cpXY-cpXY-<platform>` tag can be fabricated by `has_ext_modules()` alone, and
+    the payload behind it can be a foreign-language runtime the package only shells out to
+    (the artifacts-keyring case).** Gotcha 27 made the ABI half of the tag the fast, reliable
+    signal: `py3-none-<platform>` is a hand-set `--plat-name`, while `cpXY-cpXY-<platform>`
+    means a real extension module pinned to a CPython build. The second half of that is not
+    safe. artifacts-keyring 1.0.0 publishes 16 Linux wheels across cp39–cp313 **and**
+    pp39/pp310/pp311 and compiles nothing: `setup.py` declares no `Extension` at all, but
+    subclasses `Distribution` with `has_ext_modules()` returning a hardcoded `True` and
+    `bdist_wheel.finalize_options` setting `root_is_pure = False`, which is all setuptools
+    needs to emit an interpreter+platform tag. The 33 MB body is Microsoft's .NET Azure
+    Artifacts credential provider, downloaded at build time from a *different* repo's
+    releases (`Microsoft/artifacts-credprovider` v1.4.1).
+    - **Two tells outrank the tag, and both are in the PyPI JSON.** A **PyPy tag beside
+      CPython tags** for a supposedly compiled package (`pp310-pypy310_pp73-manylinux…`) —
+      nobody builds a CPython C extension for PyPy's ABI by accident — and **wheel sizes that
+      are identical across interpreters** (33257355–33257357 bytes for every one of
+      cp39…cp313 aarch64). A real extension cannot be byte-size-identical across ABIs.
+      `unzip -l | grep '\.so'` then confirms it: the only `.so`s are the vendored runtime's
+      (`libcoreclr.so`, `libclrjit.so`, …), and no `PyInit_*` exists anywhere.
+    - **The arch payload is picked by an env var with a silent fallback — read the fallback,
+      not just the platform table.** Upstream's pipeline sets
+      `ARTIFACTS_CREDENTIAL_PROVIDER_RID` per job (`win-x64`, `osx-x64`, `osx-arm64`,
+      `linux-x64`; `[tool.cibuildwheel.linux] archs = ["x86_64", "aarch64"]`) to fetch the
+      *self-contained* provider for that RID. Unset — or set for an arch the helper doesn't
+      know — and `get_runtime_identifier()` prints a warning, returns `""`, and the build
+      downloads the **framework-dependent** provider instead: arch-neutral managed
+      assemblies, the same payload the sdist carries. So a riscv64 build never fails; it
+      succeeds and yields a wheel containing nothing riscv64-specific. A fallback that
+      degrades the *content* instead of erroring is the dangerous shape — it looks like a
+      green port.
+    - **Then the wall is one layer outside Python: the payload needs `dotnet` on PATH.**
+      `plugin.py` treats the presence of a `runtimes/` directory as "not self-contained", runs
+      `dotnet --list-runtimes`, raises `Unable to find dependency dotnet` when it is missing,
+      and only otherwise runs `dotnet exec CredentialProvider.Microsoft.dll`. Microsoft ships
+      no `linux-riscv64` .NET runtime (community builds only — dkurt/dotnet_riscv,
+      filipnavara; RISE's own LR_04_001 is porting it) and no riscv64 self-contained
+      credprovider asset. Note `runtimeconfig.json`'s `"rollForward": "Major"`, which means a
+      future riscv64 .NET ≥8 *would* run the net8.0 provider unchanged — the missing piece is
+      a runtime the user installs, not bytes a wheel could ship.
+    - **Rehearse the riscv64 artifact on x86_64 in one command.** `env
+      ARTIFACTS_CREDENTIAL_PROVIDER_NON_SC=true pip wheel <sdist> --no-deps` takes the exact
+      same code path riscv64 takes and produced `…-cp311-cp311-linux_x86_64.whl`, 5.8 MB, zero
+      `.so`, 49 entries; installing it imports fine and registers the keyring backend, while
+      constructing `CredentialProvider()` raises the missing-`dotnet` error. (It needs
+      setuptools ≥ 70.1 for `setuptools.command.bdist_wheel`, which `[build-system] requires =
+      ["setuptools>=42", …]` under-declares — use a fresh venv, not a distro setuptools.)
+    - **Verdict: parked, under both existing rules at once.** Gotcha 27's watchdog clause —
+      upstream ships no `py3-none-any` wheel, so riscv64 `pip install` already falls back to
+      the sdist, which needs no compiler, finishes in seconds and installs exactly the
+      arch-neutral bytes a riscv64 wheel could carry, making the wheel a packaging
+      convenience, not a port — and gotcha 183's, because the primary function (fetch Azure
+      Artifacts credentials by executing the provider) is *unreachable*, not merely degraded,
+      until a riscv64 .NET runtime exists. Either one alone parks it; recording both is what
+      makes the entry re-checkable when .NET riscv64 lands.
