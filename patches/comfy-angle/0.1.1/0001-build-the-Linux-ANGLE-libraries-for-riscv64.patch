@@ -21,14 +21,24 @@ ANGLE's GCC toolchain expects and turns off Clang, the bundled libc++ and
 warnings-as-errors; generalise that to a toolprefix table and add riscv64
 to it. The build-time GN args are otherwise unchanged.
 
-Two CIPD packages have no linux-riscv64 build and would abort
-"gclient sync" before anything compiles: buildtools/reclient (which has no
-linux-arm64 build either, hence the host_cpu carve-out already in DEPS) and
-third_party/siso/cipd. Neither is used here - use_remoteexec is false, and
-use_siso_default in //build/toolchain/siso.gni is false unless
-build_with_chromium, which a standalone ANGLE checkout is not - so null
-them out through the same custom_deps mechanism that already drops
-SwiftShader, VK-GL-CTS and catapult.
+Three DEPS entries pull CIPD packages with no linux-riscv64 build, so the
+"cipd ensure" that ends the sync cannot resolve them and "gclient sync"
+aborts before anything compiles: buildtools/reclient (infra/rbe/client),
+third_party/siso/cipd (build/siso) and tools/luci-go (the isolate and
+swarming tools under infra/tools/luci; only its cas tool is published).
+None of them is reachable from a local build - reclient and siso need an
+RBE backend, and luci-go drives swarming - so delete those entries from the
+checkout's DEPS before the sync. A custom_deps override cannot do it:
+gclient applies custom_deps while resolving a "git" dep's URL, whereas a
+"cipd" entry is copied out of DEPS into a CipdDependency that never
+consults custom_deps, so a None there is accepted and then ignored.
+
+Dropping siso has to be reflected in the GN args too. ANGLE's .gn sets
+use_siso=true in default_args for a standalone checkout, and autoninja
+picks siso or ninja by reading use_siso back out of args.gn, so it would
+otherwise look for a binary that was never fetched. Set use_siso=false for
+that host; use_remoteexec is unset, which keeps use_reclient false, so
+ninja drives the build with no remote execution of any kind.
 
 gclient's helper scripts run under vpython3, which builds their venvs from
 prebuilt wheels in CIPD, and infra/python/wheels publishes no linux-riscv64
@@ -52,8 +62,9 @@ manylinux_2_39 is the riscv64 baseline (the 2_28 images upstream uses for
 x86-64 and arm64 are not published for riscv64), so that is the platform
 tag the riscv64 wheel carries.
 
-Both new tables are keyed by architecture, so x86-64 and arm64 render
-byte-identical .gclient and GN args to before.
+The new tables are all keyed by architecture, so x86-64 and arm64 render a
+byte-identical .gclient and byte-identical GN args to before, against an
+untouched DEPS.
 
 Upstream-Status: To upstream [not submitted: no cross-repo issue/PR contributions from this port]
 
@@ -99,14 +110,22 @@ diff --git a/scripts/build.py b/scripts/build.py
 diff --git a/scripts/build_linux.py b/scripts/build_linux.py
 --- a/scripts/build_linux.py
 +++ b/scripts/build_linux.py
-@@ -19,7 +19,31 @@
+@@ -9,7 +9,7 @@
+ import shutil
+ import subprocess
+ from pathlib import Path
+-from typing import Dict, Optional
++from typing import Dict, Optional, Sequence
+ 
+ 
+ ROOT = Path(__file__).resolve().parent.parent
+@@ -19,8 +19,39 @@
  PLATFORM_TAGS = {
      "x86_64": ("x64", "manylinux_2_28_x86_64"),
      "aarch64": ("arm64", "manylinux_2_28_aarch64"),
--}
 +    "riscv64": ("riscv64", "manylinux_2_39_riscv64"),
-+}
-+
+ }
+ 
 +# Chromium publishes its prebuilt Clang only for x86-64 hosts, so the other
 +# architectures build with the container's GCC, reached through ANGLE's
 +# "<toolprefix>-<tool>" command names.
@@ -115,11 +134,18 @@ diff --git a/scripts/build_linux.py b/scripts/build_linux.py
 +    "riscv64": "riscv64-linux-gnu",
 +}
 +
-+# CIPD packages that do not exist for a host architecture. Both are unused for a
-+# standalone ANGLE build (use_remoteexec and use_siso are false), so drop them
-+# from the checkout rather than letting "gclient sync" fail on them.
++# DEPS entries whose CIPD packages are not published for a host architecture;
++# "gclient sync" fails on the first one it cannot resolve. None of them is
++# reachable from a local build: reclient and siso need an RBE backend, and
++# luci-go drives swarming. They have to be removed from DEPS itself, because a
++# custom_deps entry only overrides a "git" dep - gclient copies a "cipd" one
++# straight out of DEPS and never consults custom_deps for it.
 +UNAVAILABLE_CIPD_DEPS = {
-+    "riscv64": ("buildtools/reclient", "third_party/siso/cipd"),
++    "riscv64": (
++        "buildtools/reclient",
++        "third_party/siso/cipd",
++        "tools/luci-go",
++    ),
 +}
 +
 +# infra/python/wheels/* publishes no linux-riscv64 builds, so vpython3 cannot
@@ -129,10 +155,11 @@ diff --git a/scripts/build_linux.py b/scripts/build_linux.py
 +VPYTHON_BYPASS = {"riscv64"}
 +
 +LICENSE_GLOBS = ("LICENSE*", "LICENCE*", "COPYING*")
- 
++
  FORBIDDEN_LIBRARIES = {
      "libX11.so.6",
-@@ -66,24 +90,46 @@
+     "libXext.so.6",
+@@ -66,18 +97,18 @@
          raise RuntimeError(f"{library.name} still depends on {names}")
  
  
@@ -156,9 +183,24 @@ diff --git a/scripts/build_linux.py b/scripts/build_linux.py
          alias.unlink(missing_ok=True)
          alias.symlink_to(executable)
  
-     configured = env.copy()
-     configured["PATH"] = str(toolchain_dir) + os.pathsep + configured["PATH"]
+@@ -86,6 +117,44 @@
      return configured
+ 
+ 
++def drop_deps(angle: Path, paths: Sequence[str]) -> None:
++    """Delete dependency entries from the checkout's DEPS file."""
++    deps_file = angle / "DEPS"
++    text = deps_file.read_text()
++    for path in paths:
++        text, replaced = re.subn(
++            rf"\n  '{re.escape(path)}': \{{\n.*?\n  \}},\n",
++            "\n",
++            text,
++            flags=re.DOTALL,
++        )
++        if replaced != 1:
++            raise RuntimeError(f"Found {replaced} DEPS entries for {path}, want 1")
++    deps_file.write_text(text)
 +
 +
 +def stage_licenses(angle: Path, destination: Path) -> None:
@@ -181,28 +223,23 @@ diff --git a/scripts/build_linux.py b/scripts/build_linux.py
 +        for source in sources:
 +            aggregate.write(f"\n{'=' * 78}\n{source.relative_to(angle)}\n{'=' * 78}\n")
 +            aggregate.write(source.read_text(encoding="utf-8", errors="replace"))
- 
- 
++
++
  def main() -> None:
-@@ -111,6 +157,9 @@
+     parser = argparse.ArgumentParser()
+     parser.add_argument("--work-dir", type=Path, default=ROOT / ".angle-build")
+@@ -111,6 +180,10 @@
      checkout(DEPOT_TOOLS_URL, depot_tools, depot_tools_revision)
      checkout(ANGLE_URL, angle, angle_revision)
  
-+    unavailable_deps = "".join(
-+        f"    '{dep}': None,\n" for dep in UNAVAILABLE_CIPD_DEPS.get(machine, ())
-+    )
++    unavailable_deps = UNAVAILABLE_CIPD_DEPS.get(machine, ())
++    if unavailable_deps:
++        drop_deps(angle, unavailable_deps)
++
      (angle / ".gclient").write_text(
          "solutions = [{\n"
          "  'name': '.',\n"
-@@ -121,6 +170,7 @@
-         "    'third_party/SwiftShader': None,\n"
-         "    'third_party/VK-GL-CTS/src': None,\n"
-         "    'third_party/catapult': None,\n"
-+        f"{unavailable_deps}"
-         "  },\n"
-         "  'custom_vars': {\n"
-         "    'checkout_angle_cl_deps': False,\n"
-@@ -134,11 +184,16 @@
+@@ -134,11 +207,16 @@
      env = os.environ.copy()
      env["PATH"] = str(depot_tools) + os.pathsep + env["PATH"]
      env["DEPOT_TOOLS_UPDATE"] = "0"
@@ -221,7 +258,7 @@ diff --git a/scripts/build_linux.py b/scripts/build_linux.py
  
      out_dir = angle / "out" / "Release"
      gn_args_list = [
-@@ -166,12 +221,12 @@
+@@ -166,12 +244,12 @@
          "angle_enable_overlay=false",
          "angle_has_frame_capture=false",
      ]
@@ -239,7 +276,20 @@ diff --git a/scripts/build_linux.py b/scripts/build_linux.py
          gn_args_list.extend(
              [
                  "is_clang=false",
-@@ -206,6 +261,8 @@
+@@ -180,6 +258,12 @@
+                 "use_custom_libcxx_for_host=false",
+             ]
+         )
++    if "third_party/siso/cipd" in unavailable_deps:
++        # ANGLE's .gn turns Siso on for a standalone checkout, but the dep
++        # dropped above is the only Siso there is. gn formats args.gn one
++        # argument per line, which is where autoninja reads this back to
++        # dispatch to ninja instead.
++        gn_args_list.append("use_siso=false")
+     gn_args = " ".join(gn_args_list)
+     run("gn", "gen", str(out_dir), f"--args={gn_args}", cwd=angle, env=env)
+     run(
+@@ -206,6 +290,8 @@
          verify_dependencies(target)
          libraries.append(target)
  
