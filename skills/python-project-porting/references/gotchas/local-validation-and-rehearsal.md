@@ -30,6 +30,11 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
 - **410** — Gotcha 188's "lower the optimisation level for the local rehearsal only" can
   silently produce a broken wheel when the project has a C99 `inline` helper with no
   `static` — and the suite still passes, because the pure-Python fallback catches it.
+- **430** — A `-k`/`--ignore` change is verifiable offline with no wheel at all: rebuild the
+  failed run's node ids into a synthetic test tree, then run the YAML-folded
+  `CIBW_TEST_COMMAND` through `sh -c`.
+- **444** — Verify a hand-edited `.patch` with `git apply --check`, never with `patch`:
+  a wrong `@@` line count makes GNU `patch` silently swallow the *next* hunk and exit 0.
 
 ---
 
@@ -444,3 +449,51 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
       FFmpeg build into a few minutes and changed nothing about the bug under
       investigation — but say so in the PR, because it does mean the *decode* tests were
       left to CI.
+
+430. **A `-k`/`--ignore` change is verifiable offline with no wheel at all: rebuild the
+    failed run's node ids into a synthetic test tree, then run the YAML-folded
+    `CIBW_TEST_COMMAND` through `sh -c` (the torchcodec case).** Dropping a couple of
+    hundred failing tests by name risks two silent mistakes, each costing a full CI cycle:
+    a clause that misses some failures (job still red) and a substring that also matches a
+    test that *passed* (coverage lost quietly, job green). Both are decidable on the host.
+    Scrape `FAILED <nodeid>` out of the failed job's log, generate one throwaway module per
+    test file — a class per class, and for a parametrised test
+    `@pytest.mark.parametrize("p", [pytest.param(0, id="<the exact param string>")])` so
+    the ids match character for character — add a handful of ids you know passed, and run
+    `pytest --collect-only -q -k "<expr>"` in a plain `python:3.x-slim` container: the
+    deselected count must equal the failures in scope, and every known-passing id must
+    still be selected. Then close the loop on the workflow file itself rather than on your
+    draft of the expression: `yaml.safe_load()` it, pull `CIBW_TEST_COMMAND` out of the
+    `cibuildwheel` step's `env`, assert `cmd.count("\n") == 0` (gotcha 93's folding trap)
+    and run `subprocess.run(["sh", "-c", cmd], cwd=<synthetic tree>)` — which is exactly
+    how cibuildwheel invokes it, so this also catches a shell-quoting bug in the `-k`
+    string. One artefact to expect: the log truncates a long parametrised id in its
+    `FAILED` line, so the generated tree grows both a truncated and a full variant of the
+    same test and the "passing test dropped" list fills with truncated twins — compare
+    names, not counts, before believing you have collateral damage.
+
+444. **When you hand-edit a hunk in `patches/<pkg>/<version>/*.patch`, validate it with `git
+    apply --check`, not with `patch --dry-run`: if the `@@ -a,b +c,d @@` counts disagree with
+    the hunk body, GNU `patch` does not fail — it consumes `b` lines, treats the remainder as
+    trailing garbage, silently drops every *following* hunk in that file, writes no `.rej`,
+    and exits 0.** Adding a one-line hunk to paddlepaddle's patch 1/5 with `@@ -356,4 +357,4
+    @@` over a five-line body cost a full debug loop: `patch -p1 -F 0` printed only `patching
+    file CMakeLists.txt`, and the *third* hunk — the whole `if(WITH_RISCV)` block — was
+    simply absent from the result. `git apply` rejects the same file outright, which is also
+    what the workflow's `git apply ../python-wheels/patches/...` step would have done, in CI,
+    an hour into the job.
+    - **Rehearse against the pristine upstream files, off-target, in seconds.** Fetch just
+      the files the patch touches from `raw.githubusercontent.com/<org>/<repo>/<tag>/<path>`
+      into a scratch tree, then `git apply --check --directory=<scratch> -p1 <patch>` from
+      inside this repo (git resolves paths from the worktree root, so `--directory` is what
+      makes a scratch subtree work). Expect one `has type 100644, expected 100755` warning
+      when the source file is executable upstream and `curl` dropped the bit — that is
+      cosmetic, and `--check` still exits 0.
+    - **Grep the applied result for the symbol you added, do not trust the exit code.**
+      `grep -n '<new option>' <file>` after a real apply is the cheap confirmation that every
+      hunk landed; a count of hunks in the patch versus `grep -c '^@@' <patch>` catches the
+      same class of error before you even run anything.
+    - **Better still, generate hunks rather than writing them.** Gotcha 435's note on this
+      port already records a hand-written hunk whose context matched byte-for-byte being
+      rejected; producing the diff with `difflib` from the pristine and edited files, and
+      then pasting it in, removes both failure modes at once.

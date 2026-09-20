@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sat, 19 Sep 2026 19:40:00 +0200
+Subject: [PATCH] DecodeAvif: give the no-libavif stub the declared signature
+
+Upstream-Status: To upstream [not yet submitted; upstream never builds this path - their wheels always link the libavif they fetch from S3, and no CI job sets TORCHCODEC_BUILD_AVIF=0]
+
+decode_avif() is declared in DecodeAvif.h - and defined by the
+TORCHCODEC_ENABLE_AVIF branch of DecodeAvif.cpp - with four parameters
+(input, mode, output_dtype, num_threads), and image_custom_ops.cpp takes
+its address with TORCH_BOX(&decode_avif) to register the
+"decode_avif(Tensor input, int mode, int output_dtype=0, int
+num_threads=1) -> Tensor" op. The !TORCHCODEC_ENABLE_AVIF stub, however,
+still has the three-parameter signature from before num_threads was
+added, so it defines a *different* overload and the four-parameter one is
+never defined anywhere.
+
+An ELF shared object may carry undefined symbols, so nothing complains:
+libtorchcodec_image.so links, the wheel builds, auditwheel repairs it,
+and the first torch.ops.load_library() of it fails with
+
+  OSError: .../torchcodec/libtorchcodec_image.so: undefined symbol:
+  _ZN8facebook10torchcodec11decode_avifERKN5torch6stable6TensorElll
+
+i.e. facebook::torchcodec::decode_avif(torch::stable::Tensor const&,
+long, long, long). Because load_image_library() runs at
+`import torchcodec`, every entry point of the package is dead, not just
+decode_avif - which defeats the documented purpose of the build flag
+("A codec set to OFF is not built; its decode_*() then raises an
+actionable error at call time [...] while importing torchcodec still
+works").
+
+Add the missing num_threads parameter to the stub. Nothing else changes:
+the stub still just raises the actionable "not compiled with libavif
+support" error, which is what test/utils.py's avif_is_available() looks
+for to skip the AVIF tests.
+
+This is not riscv64-specific - any build with TORCHCODEC_BUILD_AVIF=0 or
+TORCHCODEC_BUILD_IMAGE=0 produces an unloadable image library - but it is
+what our wheels hit, since libavif comes from upstream's S3 bucket, which
+has no riscv64 build, and neither Rocky 10 nor a riscv64 EPEL packages it.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ src/torchcodec/_core/DecodeAvif.cpp | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/torchcodec/_core/DecodeAvif.cpp b/src/torchcodec/_core/DecodeAvif.cpp
+index 17fd03a..b40b9b9 100644
+--- a/src/torchcodec/_core/DecodeAvif.cpp
++++ b/src/torchcodec/_core/DecodeAvif.cpp
+@@ -19,7 +19,8 @@ namespace facebook::torchcodec {
+ torch::stable::Tensor decode_avif(
+     [[maybe_unused]] const torch::stable::Tensor& input,
+     [[maybe_unused]] int64_t mode,
+-    [[maybe_unused]] int64_t output_dtype) {
++    [[maybe_unused]] int64_t output_dtype,
++    [[maybe_unused]] int64_t num_threads) {
+   STD_TORCH_CHECK(
+       false,
+       "decode_avif: torchcodec was not compiled with libavif support. Rebuild "
+--
+2.51.0

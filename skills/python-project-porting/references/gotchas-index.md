@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (386 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (431 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -164,6 +164,31 @@ The porting gotchas (386 of them) live in [`references/gotchas/`](gotchas/), spl
   sibling's whole release history for platform tags, compare the base's per-arch wheel sizes,
   and re-verify any sibling-family blocker at the revision your target actually pins
   (the tensorflow-cpu case).
+- **431** — When a distribution has **never** published an sdist, gotcha 35/157's "grep the
+  build script for the fetch" has nothing to grep: count sdists across every release, then
+  `strings -a` the vendored blob — private builder paths (`/.conan/data/…@vendor/prod`,
+  `/home/jenkins/`, `/vcpkg/buildtrees/`) prove a closed vendor with no riscv64 source, and
+  open-source crates in the same output are only the shim around it
+  (the livekit-plugins-noise-cancellation case).
+- **436** — A big CMake project's whole non-x86 story can be a single `uname -m == aarch64`
+  boolean, so a third arch silently takes the x86_64 path: `grep` every site of that boolean to
+  enumerate the prebuilt-x86_64 downloads (all fixable), then triage the one site whose
+  `aarch64` branch works only because the dep itself ships an ARM SIMD shim — a mandatory dep
+  with no off switch and no scalar path (gotcha 366) is the verdict, and the same branch's
+  configure failure reproduces on any x86 host (the Open3D case).
+- **438** — A "redistributable `<vendor binary>`" distribution can repack a vendor blob on some OSes
+  and build genuinely from source on the one a port needs, so apply gotcha 35/157/431 per OS by
+  reading the build scripts rather than the download script; includes the minutes-long check that
+  depot_tools/gn/CIPD already support riscv64 (302-vs-404 probes against chrome-infra-packages,
+  `detect_host_arch.py`, `gcc_toolchain("riscv64")`) and the only two CIPD packages missing for
+  `linux-riscv64` — siso and reclient — which `.gclient` `custom_deps` nulls out (the
+  comfy-angle/ANGLE case).
+- **442** — A vendored dependency's build system can silently omit a capability flag its other
+  build system defaults on: XNNPACK's Bazel build never defines `XNN_ENABLE_RISCV_VECTOR` where
+  its CMake build defaults it ON, so half its riscv64 RVV dispatch sites (no runtime
+  `getauxval(AT_HWCAP)` check) compile out to scalar only by that omission — re-verify on every
+  XNNPACK version bump, since fixing it upstream would make the ungated blocks go live (the
+  mediapipe case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -244,7 +269,9 @@ The porting gotchas (386 of them) live in [`references/gotchas/`](gotchas/), spl
 - **402** — A two-leg abi3 + free-threaded matrix expressed only through `include:` collapses
   into a single job, so the abi3 wheel is never built and nothing fails — make the leg a real
   matrix dimension (the primp/arro3-core case: two already-published packages are quietly
-  shipping only their free-threaded wheel).
+  shipping only their free-threaded wheel). Any include-only leg set does it, not just abi3
+  ones — grain's cp312/cp313/cp314 set collapsed to cp314, and 58 jobs repo-wide still carry
+  the shape.
 - **408** — A `setup.py` that reaches for `wheel.bdist_wheel` behind a `try/except ImportError`
   still gets its abi3 tag under modern setuptools — setuptools ships a `wheel.bdist_wheel`
   shim, so do not add `wheel` to `build-system.requires` to "fix" it.
@@ -361,6 +388,36 @@ The porting gotchas (386 of them) live in [`references/gotchas/`](gotchas/), spl
 - **424** — Audit a chromium-style DEPS for riscv64-less CIPD packages with
   `cipd describe <pkg>/linux-riscv64` (and `gclient_eval.EvaluateCondition`) before spending a
   build cycle discovering them one abort at a time.
+- **427** — `VPYTHON_BYPASS` also picks the interpreter gsutil runs on, and a chromium-style
+  checkout holds two gsutils: the one its DEPS pins (4.68, vendoring six 1.12) cannot import on
+  python ≥ 3.12, so its `download_from_google_storage` hooks fail — reproducible on x86 in
+  seconds, fixed by conditioning those test-data hooks off.
+- **432** — A monorepo that vendors C++ deps as submodules and has its CMake "fix up" their
+  versions with `git checkout <tag>` builds the stale recorded commit in CI: `actions/checkout`
+  clones submodules without tags, so the checkout fails (`error: pathspec '<tag>' did not
+  match`) and is never checked — move the submodule to the tag from the workflow.
+- **434** — Under `EXTERNAL_PROJECT_LOG_ARGS`/`LOG_CONFIGURE 1` a failed `ExternalProject`
+  prints only `Command failed: 1`, with the real diagnostic in a stamp log that dies with the
+  runner — add an `if: failure()` step that tails
+  `build/third_party/*/src/*-stamp/*-*-*.log`.
+- **437** — The same `git checkout <tag>` in an `ExternalProject_Add` `PATCH_COMMAND` aborts
+  the build instead of building the stale tree quietly; check the gitlink against the tag
+  (usually equal, so only the ref is missing — `git fetch --depth 1 origin tag <tag>`), and
+  sweep every `cmake/external/*.cmake` at once, splitting `*_TAG` names from SHAs.
+- **440** — Gotcha 133's version-only bazel cache key is shared repo-wide, so a new
+  workflow's bootstrap step is skipped on its first run and a broken variable reference in a
+  copied bootstrap stays latent — check every `${VAR}` against the `docker run -e` list.
+- **441** — `VPYTHON_BYPASS` (gotcha 423) also takes `gclient.py`'s own vpython venv away, so
+  depot_tools' imports must be on the ambient interpreter: `pip install httplib2==0.13.1`
+  (unpinned drops the `httplib2.socks` gerrit_util needs), and nothing else is missing.
+- **443** — An upstream CMake per-arch block can `set(<OPT> OFF CACHE ... FORCE)` *after*
+  `include(third_party)` already ran the matching `add_definitions()`, so the feature is
+  compiled in and not linked — check the include line numbers and use the project's own
+  early default switch instead.
+- **445** — Companion to 424: a `.gclient` `custom_deps: None` drops a *git* dep and is
+  silently ignored for a `cipd` one, so a riscv64-less CIPD package survives into the
+  `cipd ensure` that ends `gclient sync` — edit the checkout's `DEPS` instead, and add
+  `use_siso=false` to the gn args when siso is one of them.
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
@@ -419,6 +476,24 @@ The porting gotchas (386 of them) live in [`references/gotchas/`](gotchas/), spl
   library (XNNPACK's `zvfh` kernels), where the fix is that dependency's own feature
   `--define` rather than an `-march` probe — and `--keep_going` hides a single-cause failure
   behind five hours of unrelated progress, making it look like a timeout.
+- **428** — A project still on the deprecated `find_package(PythonLibs REQUIRED)` has no
+  `Development.Module` way out of gotcha 374's static-libpython wall: satisfying it with
+  manylinux's non-PIC `libpython3.XX.a` only moves the failure to the final link after hours,
+  the project may already strip libpython from its own non-Windows link lines (making the
+  `REQUIRED` vestigial), and the header-only fix rehearses locally on x86_64 in a minute.
+- **435** — `libquadmath` does not exist on riscv64 or aarch64 — GCC builds it only where
+  `__float128` differs from `long double`, so `dnf install libquadmath` fails outright. A project
+  that copies it beside `libgfortran` unconditionally needs that copy made conditional; and never
+  pad a `dnf install` with unconfirmed runtime packages, since one bad name fails the transaction.
+- **433** — OpenBLAS built from source stops at `getarch.c: #error "This arch/CPU is not
+  supported by OpenBLAS."` on riscv64 whatever the version: its riscv64 definitions are reached
+  only through `TARGET=`, so pass `TARGET=RISCV64_GENERIC` (the rv64gc baseline) as the twin of
+  the `TARGET=ARMV8` the project already has — and first ask whether gotcha 401's Rocky
+  `openblas` package would do.
+- **446** — The image's free-threaded interpreter directory is `/opt/python/cp3XX-cp3XXt`
+  (`<implementation tag>-<ABI tag>`), not `cp3XXt-cp3XXt`, so a hand-written per-interpreter
+  loop that doubles the `t` exits 127 — derive it as `${TAG%t}-${TAG}`, and confirm any
+  `/opt/python` path with a `grep` over the green workflows rather than a CI round.
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
@@ -578,6 +653,12 @@ The porting gotchas (386 of them) live in [`references/gotchas/`](gotchas/), spl
 - **350** — A suite's own `try: import X except ImportError: X = None` plus
 - **355** — Gotcha 339 generalizes past `pytest` to any unpinned runtime dependency whose
   own heuristic changed across a major version — pin it for the test venv only.
+- **429** — A media project's suite is written against upstream's *full* FFmpeg; an FFmpeg
+  you configure yourself has no H.264/HEVC/VP9/AV1/MP3 encoder at all, and the failures
+  blame the wrong codec.
+- **439** — A Bazel project runs one process per `py_test` target, so one `pytest --pyargs`
+  over the whole package invents failures: run each file as its own absltest script, and take
+  the `env`/`args` from the `py_test` rules (per-target, not globally).
 
 ### Test failures, flakes & arch-specific bugs — [`gotchas/test-failures-and-flakes.md`](gotchas/test-failures-and-flakes.md)
 
@@ -678,6 +759,12 @@ The porting gotchas (386 of them) live in [`references/gotchas/`](gotchas/), spl
   arch macros in a scratch copy to exercise its generic architecture path natively — a
   restricted-egress host can still prove compilability without a container (the
   bitsandbytes case).
+- **430** — A `-k`/`--ignore` change is verifiable offline with no wheel at all: rebuild the
+  failed run's node ids into a synthetic test tree, then run the YAML-folded
+  `CIBW_TEST_COMMAND` through `sh -c`.
+- **444** — Validate a hand-edited `.patch` with `git apply --check`, never `patch`: a wrong
+  `@@` line count makes GNU `patch` drop every following hunk in that file with no `.rej` and
+  exit 0.
 
 ### PR, CI, triggers, publishing & maintainer signals — [`gotchas/pr-ci-and-maintainer.md`](gotchas/pr-ci-and-maintainer.md)
 

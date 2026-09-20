@@ -97,6 +97,20 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **426** — A `-cpu` sibling can be an *x86_64-only label* rather than a portable CPU variant:
   where the base package's wheel is already CPU-only on every non-x86 arch, the sibling name
   closes no gap and inherits the base's park (the tensorflow-cpu case).
+- **431** — A distribution that has never shipped an sdist leaves the wheel as the only
+  evidence: `strings -a` the vendored blob and its builder paths (`/.conan/data/…@vendor/prod`)
+  prove a closed vendor with no public source (the livekit-plugins-noise-cancellation case).
+- **436** — A project's whole non-x86 story can be one `uname -m == aarch64` boolean, and an
+  `aarch64` branch is only as portable as the dependency behind it — survey every site of the
+  boolean, then triage the one whose branch works only because that dep ships an ARM SIMD shim
+  (the Open3D case).
+- **438** — A "redistributable `<vendor binary>`" distribution can repack a vendor blob on some
+  OSes and build from source on the one that matters, so decide gotcha 35/157/431 per OS; plus the
+  depot_tools/gn/CIPD riscv64 readiness check and the two CIPD gaps `custom_deps` removes (the
+  comfy-angle/ANGLE case).
+- **442** — A vendored dependency's *build system* can silently omit a capability flag its other
+  build system defaults on, and only auditing every dispatch site (not just "does it build")
+  proves which one actually shipped (the mediapipe/XNNPACK case).
 
 ---
 
@@ -2314,13 +2328,19 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       only way to find these, because nothing links against them (Paddle `dlopen`s
       LAPACK through `phi/backends/dynload/lapack.cc`, so the build is green and the
       failure is a runtime `paddle.linalg` error).
-    - **A prebuilt-for-one-arch dependency is not automatically gotcha 35's wall.** Ask
-      what it would take to *produce* the missing artifact. Here it is Reference-LAPACK
-      v3.10.0 — the same release the tarball packages — built by its own CMake against
-      the manylinux image's `gfortran`, i.e. a 30-line `ExternalProject_Add`, not gotcha
-      186's "authoring a new build system". Gate the source build on the new arch flag so
-      x86-64 and macOS keep the tarball, and say in the patch that the fix would repair
-      the sibling arch too.
+    - **A prebuilt-for-one-arch dependency is not automatically gotcha 35's wall** — but
+      *building* the missing artifact is the second answer, not the first. Ask what the
+      payload actually is: here it is Reference-LAPACK, which gotcha 401's Rocky 10
+      riscv64 `lapack`/`blas` packages already provide as the very `liblapack.so.3` and
+      `libblas.so.3` the `dlopen` asks for, so one `dnf install` plus four
+      `${CMAKE_C_COMPILER} -print-file-name=<soname>` lookups replaces the whole tarball
+      branch. Adding a 30-line `ExternalProject_Add` for Reference-LAPACK v3.10.0 instead
+      cost a CI round to a `cmake` configure failure whose diagnostic gotcha 434's stamp
+      logs had swallowed — and it puts a Fortran build on a 4-core riscv64 runner for a
+      library nothing links against. Whichever you pick, gate it on the new arch flag so
+      x86-64 and macOS keep the tarball, resolve the sonames with a `FATAL_ERROR` so a
+      missing one fails in the first configure minute rather than at wheel-packing time,
+      and say in the patch that the fix would repair the sibling arch too.
 
 419. **Gotcha 411's "is the CPU backend the default?" test can pass and still not yield a
     port: a torch extension's non-CUDA branch can compile *operator schemas with no
@@ -2426,3 +2446,204 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       one full build **per** interpreter (cp310–cp313 = 4), with none of the abi3/`py3-none`
       collapse that let mediapipe serve every interpreter from a single ctypes-loaded `.so`.
       That multiplier belongs in the estimate before anything else.
+
+431. **A distribution that has never shipped an sdist leaves the wheel as the only evidence —
+    read the vendored blob's build provenance out of its own debug strings (the
+    livekit-plugins-noise-cancellation case).** Gotchas 35 and 157 both triage a
+    `py3-none-<platform>` vendored-binary wheel the same way: find the *fetch* in the sdist's
+    build script (`scripts/build_driver.py`, `scripts/download_cli.py`), then ask the vendor's
+    artifact index whether riscv64 exists. That method presupposes an sdist. Some
+    distributions ship **none, at any version**: livekit-plugins-noise-cancellation has 13
+    releases, five platform wheels each (`macosx_10_9_x86_64`, `macosx_11_0_arm64`,
+    `manylinux_2_28_{x86_64,aarch64}`, `win_amd64`) and **zero** sdists — so there is no
+    `setup.py`, no download script and no hardcoded platform table to grep. Upstream's
+    monorepo doesn't help either: `livekit/agents/livekit-plugins/` holds ~80 plugin
+    directories and *no* noise-cancellation among them (the near-miss is a differently-named
+    `livekit-plugins-krisp`), a global code search for the payload filename returns only other
+    people's committed `site-packages` copies, and no `Cargo.toml` on GitHub defines the crate.
+    - **Count sdists across *every* release before concluding anything about source.** One
+      read settles it — `curl -s https://pypi.org/pypi/<pkg>/json`, then count
+      `packagetype == 'sdist'` over all of `d['releases']`, not just the target version.
+      "No sdist at this version" is common and recoverable (build one from the checkout);
+      "no sdist ever published, and no upstream directory" means there is no checkout to
+      build one *from*, which is a different and much harder finding.
+    - **`strings -a` the payload — a vendor's builder paths are its provenance.** Grep the
+      blob for builder/package-manager roots: here
+      `/var/lib/jenkins/.conan/data/<pkg>/<ver>/<user>/<channel>/…` named nine closed Conan
+      packages on a private remote (`krisp-core/2.0.41`, `krisp-inference-engine/2.2.23`,
+      `krisp-nc-processor/4.0.9`, `krisp-dsp`, `krisp-blas`, `krisp-mlops`, `krisp-common`,
+      `krisp-audio-stream`, plus `fftw/3.3.10_7@krisp/stable`), every one in a `krisp/prod`
+      channel. A vendor-private Conan/Jenkins path is gotcha 157's closed-source-vendor
+      finding reached **without** any vendor docs, installer script or release manifest —
+      and it is final: there is no public source to build for riscv64 at any version.
+      Generalize the grep, not the string: `/\.conan/data/`, `/\.hunter/`,
+      `/vcpkg/buildtrees/`, `/home/jenkins/`, `/builds/<org>/` all leak the same thing.
+    - **Don't let open-source crates in the same output talk you out of it.** That identical
+      `strings` run also lists `cargo/registry/src/index.crates.io-*/{ureq,rustls,ring,
+      serde_json,flate2,…}`, which makes the blob look like an ordinary Rust build someone
+      could retarget. Read what those crates *do*: an `ureq`+`rustls`+`serde_json` set is the
+      licence-check HTTP client wrapped **around** the closed DSP core, not the DSP. The
+      proportions say the same — 4 KB of Python, a 39 MB `.so`, and vendor-private paths
+      dominating its grep hits.
+    - **Price the non-code payload too.** ~64 MB of the 73 MB wheel is three opaque `.kef`
+      model files with no recognizable magic bytes, and the metadata reads
+      `License: SEE LICENSE IN https://livekit.io/legal/terms-of-service` — a proprietary ToS,
+      not an OSS licence. Even a hypothetical riscv64 rebuild of the wrapper would still have
+      to redistribute models we have no licence to republish, so the licensing answer blocks
+      it independently of the missing source.
+    - **Verdict `parked` on two independent grounds, and name the dependency one as well.**
+      Closed at the vendor layer (gotcha 157) *and* function-gated — the README requires
+      LiveKit Cloud, so the primary function is unreachable in gotcha 183's sense, not merely
+      degraded. Record the second-order blocker in the same note: the mandatory
+      `livekit>=0.21.3` runtime dep is itself `py3-none-<platform>` over those same five
+      platforms with no riscv64 wheel, so nothing downstream of this plugin resolves on
+      riscv64 today either.
+
+436. **A big CMake project's whole non-x86 story can be one `uname -m == aarch64` boolean, and
+    an `aarch64` branch is only as portable as the dependency behind it — survey every site of
+    that boolean, then triage the one whose branch exists solely because *that dep* has an ARM
+    SIMD shim (the Open3D case).** Open3D 0.19.0 is a 753-TU / 250 kLoC CMake C++ tree that
+    upstream already builds for a non-x86 Linux arch, with a dedicated slim config
+    (`docker/Dockerfile.openblas`: `BUILD_SHARED_LIBS=OFF`, CUDA/PyTorch/TensorFlow/SYCL all
+    OFF) exercised by `.github/workflows/ubuntu-openblas.yml` on a GCE `t2a-standard-4`. That
+    reads as a ready-made riscv64 precedent and is not one: every arch fallback in the tree is
+    gated on `LINUX_AARCH64`, set in `CMakeLists.txt` by `execute_process(COMMAND uname -m)`
+    matching the literal string `aarch64`, so riscv64 takes the `else()` branch written for
+    x86_64 everywhere.
+    - **`grep -rn <ARCH_BOOL> CMakeLists.txt 3rdparty/` *is* the survey, and it is the
+      authoritative list of what upstream itself considers arch-conditional.** Here six sites,
+      five of which name a prebuilt **x86_64-only** archive riscv64 would try to download:
+      MKL static (`USE_BLAS=OFF` → `mkl_static-2024.1.0-linux_x86_64.tar.xz`), Filament
+      (`BUILD_FILAMENT_FROM_SOURCE=OFF` → `filament-v1.9.19-linux-20.04.tgz`), WebRTC
+      (`BUILD_WEBRTC=ON` → `webrtc_<rev>_cxx-abi-1.tar.gz`), the ISPC compiler
+      (`BUILD_ISPC_MODULE=ON`) and prebuilt VTK 9.1 (`BUILD_VTK_FROM_SOURCE=OFF`). All five
+      have a from-source route the aarch64 branch already takes, so they are configuration
+      work, not blockers — the point of the survey is that the set is finite and enumerated
+      before any container is started. A dep that self-gates on its own (`WITH_IPP` drops out
+      via `IPP_SUPPORTED_HW AMD64 x86_64 x64`) needs nothing at all.
+    - **The sixth site is the verdict: an `elseif(<ARCH_BOOL>)` that only turns the x86 ISAs
+      off works because the dependency has an ARM-specific SIMD backend, and nothing more.**
+      `3rdparty/embree/embree.cmake`'s aarch64 branch passes
+      `-DEMBREE_ISA_{SSE2,SSE42,AVX,AVX2,AVX512}=OFF` and lets Embree pick NEON. Copy that
+      branch for a third arch and gotcha 366 lands unchanged — and it is unavoidable here,
+      because unlike the other five Embree has **no** `BUILD_*`/`WITH_*`/`USE_*` off switch:
+      it is appended to `Open3D_3RDPARTY_PRIVATE_TARGETS_FROM_CUSTOM` unconditionally and
+      `cpp/open3d/t/geometry/CMakeLists.txt` compiles `RaycastingScene.cpp` in *both* the SYCL
+      and non-SYCL branch, for a class (`o3d.t.geometry.RaycastingScene`) that is documented
+      public Python API. So there is no honest reduced wheel, and gotcha 41's
+      "escape-hatch build with the payload missing" is the only alternative.
+    - **Reproduce a third arch's configure failure on an x86 host in seconds, before booking a
+      riscv64 runner.** Whatever the `aarch64` branch passes is by construction also what a
+      non-x86/non-ARM arch would pass, and on an x86 host the dep's ARM boolean is OFF exactly
+      as it is on riscv64 — so `cmake <embree-4.3.3-src>
+      -DEMBREE_ISA_{SSE2,SSE42,AVX,AVX2,AVX512}=OFF -DEMBREE_TASKING_SYSTEM=INTERNAL` prints
+      `CMake Error at CMakeLists.txt:636 (MESSAGE): You have to enable at least one ISA!` on
+      any laptop. That costs one download and settles the "just add riscv64 to the arch
+      boolean" patch idea, which is always the first thing you will want to try.
+    - **Check the *compiler* gate on the source-build fallbacks too, not just the arch gate.**
+      The Filament fallback the aarch64 branch relies on hard-errors for any non-Clang
+      toolchain (`message(FATAL_ERROR "Detected C compiler ${CMAKE_C_COMPILER_ID} is
+      unsupported")`, `MIN_CLANG_VERSION 6.0`) and the pinned revision is a 2021-era
+      `isl-org/filament` fork, so "build it from source like aarch64 does" carries a second
+      prerequisite our GCC-based manylinux images do not meet. `BUILD_GUI=OFF` sidesteps it at
+      the cost of `open3d.visualization.{gui,rendering,draw}` — worth knowing, but it does not
+      reach the Embree blocker, so it changes nothing about the verdict.
+    - **Price it anyway, so the park note can say "and it would also have been expensive".**
+      The openblas config builds OpenBLAS + VTK 9.1 + Filament + Embree + assimp/curl/
+      boringssl/TBB/qhull from source and then 753 Open3D TUs, per interpreter (cp38–cp312 =
+      5 full builds; the wheel is `cp3X-cp3X`, no abi3 collapse), for a ~450 MB payload each —
+      against PR #2104 (mediapipe) at 5h23m plus 2h24m–3h21m of queue wait per job on the same
+      shared pool. Independently disproportionate, which is worth one sentence but is *not*
+      the reason: state the hard blocker first and the cost second, so an unpark attempt does
+      not start by trying to make it cheaper.
+438. **A "redistributable `<vendor binary>`" package can be a blob repack on *some* OSes and a
+    genuine from-source build on the one that matters — decide gotcha 35/157/431 per OS, not per
+    distribution (the comfy-angle/ANGLE case).** Every surface reading says vendored blob:
+    summary "Redistributable ANGLE libraries", nine releases with **zero** sdists, every wheel
+    `py3-none-<platform>`, and a payload of two prebuilt-looking `.so` files beside an
+    `electron-LICENSE` and a 19 MB `LICENSES.chromium.html`. `scripts/download.js` plus
+    `scripts/electron-version.txt` then confirm a vendor fetch — but only for Windows and macOS.
+    The same repo also carries `scripts/build_linux.py`, `scripts/angle-revision.txt` and
+    `scripts/depot-tools-revision.txt`, and builds the **Linux** libraries from that pinned ANGLE
+    revision with depot_tools/gn/ninja. The only wheel a riscv64 port needs is the one built from
+    source, so the park reasoning never applies.
+    - **Enumerate the build scripts, not just the download script.** A `download.js`/`fetch_*.py`
+      sitting next to a `build_<os>.py` means the vendor path is per-OS. One `README` read settles
+      which is which ("Windows and macOS libraries are extracted from Electron releases. Linux
+      libraries are built from the corresponding ANGLE revision"), and upstream's release workflow
+      confirms it — a `download` job feeding artifacts to a separate `build-linux` job that runs
+      inside a `manylinux` container is the shape to look for. Gotcha 385's "read `WHEEL`'s
+      `Generator:`" does not catch this, because both halves are packaged by the same setuptools
+      run.
+    - **"No sdist ever" stops meaning much once the git tag builds.** Gotcha 431 treats a
+      zero-sdist history as near-fatal because there is nothing to build from; here the checkout
+      *is* the build input (the build-from-checkout shape), so the finding downgrades to "derive
+      the version from the tag", nothing more.
+    - **The depot_tools/gn/CIPD stack is already riscv64-capable, and you can prove it in minutes
+      without a checkout.** `curl -s -o /dev/null -w '%{http_code}'
+      "https://chrome-infra-packages.appspot.com/dl/<pkg>/<platform>/+/latest"` answers 302 when a
+      CIPD package exists and 404 when it does not — calibrate with a bogus `linux-notarch` first,
+      which must 404. For `linux-riscv64` these exist: the cipd client (`infra/tools/cipd`),
+      `infra/3pp/tools/cpython3`, `infra/3pp/tools/ninja`, `gn/gn` and `infra/tools/luci/*`.
+      depot_tools' own `detect_host_arch.py` maps `riscv*` to `riscv64`, so gclient does not reject
+      the host. On the build side, `build/toolchain/linux/BUILD.gn` defines
+      `gcc_toolchain("riscv64")` with `toolprefix = "riscv64-linux-gnu"`, `BUILDCONFIG.gn` selects
+      `//build/toolchain/linux:$target_cpu` as soon as `is_clang=false`, and
+      `config/compiler/BUILD.gn` carries riscv64 cflags.
+    - **Two CIPD packages are the whole gap, and `custom_deps` removes them.** `build/siso` has no
+      `linux-riscv64` build and `infra/rbe/client` (reclient) has neither `linux-riscv64` **nor**
+      `linux-arm64` — which is why upstream's `DEPS` already carries a
+      `not (host_os == "linux" and host_cpu == "arm64")` carve-out on reclient, the precedent to
+      cite. Both are unused for a standalone checkout (`use_remoteexec` is false, and
+      `use_siso_default` in `build/toolchain/siso.gni` is false unless `build_with_chromium`, so
+      `autoninja` dispatches ninja), so null them in the generated `.gclient` —
+      `'third_party/siso/cipd': None` — the same mechanism such scripts already use to drop
+      SwiftShader/VK-GL-CTS/catapult. A missing CIPD package aborts `gclient sync` before anything
+      compiles, so this is worth settling before booking a runner.
+    - **The x86-only DEPS *hooks* are noise, not blockers.** `tools/clang/scripts/update.py` maps
+      every Linux host to a flat `'linux': 'Linux_x64'` with no arch check, so it downloads an
+      unusable x86-64 clang and succeeds; the prebuilt `glslang_validator` and `flex_bison` hooks
+      are the same. A green upstream **aarch64** job is the proof that none of those binaries is
+      executed by a narrow target set — reuse that argument instead of auditing each hook.
+    - **Price the enabled targets, not the project's reputation.** "ANGLE" reads as
+      Chromium-scale, but the gn args decide: `libEGL`+`libGLESv2` only, one backend, with tests,
+      SwiftShader, dawn, the GL and WGPU backends, the validation layers and frame capture all
+      off. Read the arg list before invoking proportionality (gotcha 41), and reuse the *existing*
+      non-x86 branch verbatim — aliasing the container's `gcc/g++/ar/readelf/nm` under the
+      `<toolprefix>-` names the GCC toolchain expects, with `is_clang=false`,
+      `use_custom_libcxx=false` and `treat_warnings_as_errors=false` — so the patch is a
+      toolprefix table entry rather than a new code path.
+    - **Building what upstream downloads changes the licence payload.** Electron's
+      `electron-LICENSE` and the `LICENSES.chromium.html` that Electron's build generates describe
+      an artifact this wheel no longer contains, so shipping them would be wrong. Stage the
+      licences of the tree actually built instead — the project's own `LICENSE` plus an aggregate
+      of the `third_party` `LICENSE`/`LICENCE`/`COPYING` files — and collect it by directory so it
+      over-reports rather than omit something statically linked.
+
+442. **A vendored dependency's build system can silently omit a capability flag its *other* build
+    system defaults on, and only auditing every dispatch site proves which one actually shipped
+    (the mediapipe case).** mediapipe vendors XNNPACK, whose riscv64 RVV (vector) microkernels are
+    gated behind a preprocessor macro, `XNN_ENABLE_RISCV_VECTOR`. XNNPACK's **CMake** build defines
+    it (`XNNPACK_ENABLE_RISCV_VECTOR` option, default ON); XNNPACK's **Bazel** build — the one
+    mediapipe actually uses — never defines it at all, in any `.bzl`/`BUILD.bazel` file. An
+    undefined macro in `#if`/`#elif` evaluates to 0, so every RVV dispatch block compiles out to
+    its scalar `#else` branch. That matters because roughly half of those dispatch blocks
+    (68 of 128 in `src/configs/`, audited exhaustively) have **no runtime `getauxval(AT_HWCAP)`
+    check** before selecting an RVV kernel — they assume the macro means what CMake's default
+    would mean. On a `manylinux_riscv64` wheel, which must not crash on V-less hardware, those
+    ungated blocks going live would SIGILL — and QEMU cannot catch this in rehearsal, since it
+    reports the V bit set regardless of what real hardware has.
+    - **"The build passed" and "the fp16 build passed" are different claims.** Gotcha 420's
+      `--define=xnn_enable_riscv_fp16_vector=false` fixed a *different*, narrower macro (the
+      fp16-vector family, which failed at the assembler for an unrelated ISA-string reason). It
+      does not touch `XNN_ENABLE_RISCV_VECTOR`, and fixing one does not tell you the state of the
+      other — check each capability macro independently by grepping the actual build files for
+      where the wheel's *build system* defines it, not by pattern-matching on the vendor's most
+      publicized default.
+    - **The safety here is an omission, not a guarantee — re-verify on every version bump.**
+      Two changes would silently turn this into a shipping SIGILL bug: XNNPACK's Bazel build
+      catching up to `build_defs.bzl`'s own pattern (every sibling `XNN_ENABLE_*` macro is already
+      emitted there) and adding the missing definition, or mediapipe/TFLite switching XNNPACK's
+      build from Bazel to CMake. On any XNNPACK version bump inside a Bazel-built riscv64 wheel,
+      re-grep `build_defs.bzl` for `XNN_ENABLE_RISCV_VECTOR`; if it appears, the ungated dispatch
+      blocks go live and `--define=xnn_enable_riscv_vector=false` becomes mandatory, not optional.

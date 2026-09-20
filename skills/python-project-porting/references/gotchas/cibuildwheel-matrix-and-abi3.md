@@ -858,6 +858,26 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
       <tag>-manylinux_riscv64` jobs against the legs declared before believing a green
       run. `docs/packages/<pkg>.yaml` is the after-the-fact tell — a published version
       carrying only the free-threaded wheel where an earlier version carried both.
+    - **It is not an abi3/free-threading shape, it is any include-only leg set.**
+      `build-grain.yml` expressed a plain per-interpreter set that way —
+      `include: [{tag: cp312, python: '3.12'}, {tag: cp313, ...}, {tag: cp314, ...}]`
+      over a `version`-only base — and PR #2124's run 35492217884 went green with one
+      build job, `Build grain 0.2.18 cp314-manylinux_riscv64`, no cp312/cp313 wheel at
+      all. It was copied from `build-array-record.yml`, which carries the same three
+      entries (0.8.3 shipped all three wheels from the older base matrix, so the loss
+      only shows on its next rebuild).
+    - **The rule that decides it**: an include entry that keys on *no* real dimension
+      attaches to every base combination, so two such entries sharing a key overwrite
+      each other; an entry that keys on a real dimension only updates the combinations
+      it matches, which is the correct use (`build-lz4.yml`'s `- python: "cp314t"` over
+      `python: ["cp312", "cp313", "cp314", "cp314t"]` — all four wheels published).
+    - **It is repo-wide, not a two-package slip**: applying that rule to every
+      `.github/workflows/*.yml` flags 58 jobs whose declared legs collapse into one
+      (2 to 5 legs each, `build`/`tag`/`python`/`features`/`test_requires` the usual
+      shared keys). Already visible on the registry: `protobuf-py-ext` 0.4.0/0.5.0 and
+      `primp` 2.0.0/2.0.1 and `arro3-core` 0.8.2/0.8.3 carry only their cp314t wheel,
+      and `rigour` 2.5.0 carries only cp314 where 2.4.1 carried five. Fix the workflow
+      you are touching; the rest need a sweep of their own.
 
 408. **A `setup.py` that reaches for `wheel.bdist_wheel` behind a `try/except ImportError`
      still gets its abi3 tag under modern setuptools — do not "fix" it by adding `wheel`

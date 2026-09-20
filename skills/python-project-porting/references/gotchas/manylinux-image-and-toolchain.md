@@ -64,6 +64,16 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
   `/usr/include/ev.h`.
 - **401** — Rocky 10 riscv64 ships OpenBLAS, LAPACK and FFTW but no SuiteSparse, GSL or
   GLPK, and a numeric package's optional-extension set has to be cut along that line.
+- **433** — OpenBLAS built from source needs an explicit `TARGET=RISCV64_GENERIC`; its
+  `getarch` has no riscv64 autodetection to fall back on, and the `ZVL*` targets bake RVV in.
+- **435** — There is no `libquadmath` on riscv64 (or aarch64) at all — not a missing package,
+  a library GCC does not build for those targets.
+- **428** — A project on the *deprecated* `find_package(PythonLibs REQUIRED)` has no
+  `Development.Module` way out of gotcha 374's static-libpython wall — and satisfying it
+  with manylinux's non-PIC `libpython3.XX.a` only moves the failure to the final link.
+- **446** — The image's free-threaded interpreter directory is `/opt/python/cp3XX-cp3XXt`, not
+  `cp3XXt-cp3XXt`; a hand-written loop that doubles the `t` dies with exit 127, possibly on the
+  last line of an hour-long build.
 
 ---
 
@@ -1129,3 +1139,122 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       `grep -c '^ERROR'` plus `grep -oE 'from target @@[^)]*' | sort -u`: one distinct
       target and one distinct extension name is what tells you a single `--define` fixes
       the whole run, rather than guessing from the first error you happen to see.
+
+428. **A project still on the *deprecated* `find_package(PythonLibs REQUIRED)` has no
+    `Development.Module` escape hatch from gotcha 374's static-libpython wall, and the
+    obvious way to satisfy it is a trap that only fails at the very end of the build (the
+    paddlepaddle case).** manylinux configures every interpreter it ships with
+    `--disable-shared` — `pypa/manylinux`'s `build_scripts/build-cpython.sh`, with no
+    architecture condition — so `/opt/python/cp3XX-cp3XX` carries `Python.h` and a
+    `libpython3.XX.a` but no `libpython3.XX.so`, and the old `FindPythonLibs` module, which
+    never consults `PYTHON_EXECUTABLE` at all, stops configure with `Could NOT find
+    PythonLibs (missing: PYTHON_LIBRARIES PYTHON_INCLUDE_DIRS)`. Two things to establish
+    before touching it:
+    - **Never point `PYTHON_LIBRARY` at the static archive to make the error go away.** It
+      configures, compiles for hours and *then* fails at the final link. CPython's
+      `configure` adds `CFLAGSFORSHARED` (i.e. `-fPIC`) only
+      `if test ! "$LIBRARY" = "$LDLIBRARY"`, which a `--disable-shared` build never
+      satisfies, so `libpython3.XX.a` holds no position-independent code and cannot be
+      linked into a shared object on any architecture. The cycle this wastes is the whole
+      build, not the configure step.
+    - **Check whether the project already refuses to link libpython, which makes the
+      `REQUIRED` vestigial.** Paddle's `cmake/generic.cmake` strips `python` out of every
+      non-Windows target's `target_link_libraries()`, keeps it only as an
+      `add_dependencies()` ordering edge and links `-Wl,-undefined,dynamic_lookup`
+      instead — citing pybind11's own "Building manually" notes — so `PYTHON_LIBRARIES` is
+      read only by the `cc_test()` executables that embed an interpreter (off under
+      `WITH_TESTING=OFF`) and by two dead variables. A `grep -rn '${PYTHON_LIBRARIES}'`
+      across the cmake tree is the whole audit, and it decides whether dropping the library
+      changes any link line at all.
+    The fix is to require only the headers, and to take them from the interpreter being
+    built against rather than from whatever the module finds on the host: pre-seed the
+    `PYTHON_INCLUDE_DIR` cache entry from `sysconfig.get_config_var('INCLUDEPY')`, which
+    keeps pointing at the real installation from inside a virtualenv. Pre-seeding also makes
+    a now-optional `find_package(PythonLibs)` skip its own `find_path()` and still report the
+    right `PYTHONLIBS_VERSION_STRING` out of `patchlevel.h`, so a distro build that does have
+    a shared libpython keeps behaving exactly as before. Guard the imported target too: a
+    `SHARED IMPORTED` target with an empty `IMPORTED_LOCATION` is invalid, so create
+    `add_library(<name> INTERFACE IMPORTED GLOBAL)` when no library was found.
+    **All of this rehearses locally on x86_64 in a minute, with no image pull and no QEMU**,
+    which matters when the real build is a multi-hour riscv64 job: `include()` the patched
+    `.cmake` from a throwaway CMake project, stub the project's own helper modules, and force
+    the manylinux branch with `-DCMAKE_DISABLE_FIND_PACKAGE_PythonLibs=TRUE`; then build a
+    real `.so` that calls a `Py_*` function the way the project builds its extension module,
+    and confirm `nm -D --undefined-only` reports the symbols as `U` and `readelf -d` shows no
+    `libpython` in `DT_NEEDED`.
+
+433. **A project that vendors and builds its own OpenBLAS must be told
+    `TARGET=RISCV64_GENERIC`: OpenBLAS cannot detect a riscv64 host, so a plain `make`
+    stops at `getarch.c: error: #error "This arch/CPU is not supported by OpenBLAS."`
+    however new the checkout is.** `getarch.c` reaches its riscv64 definitions only through
+    `-DFORCE_RISCV64_*`, which `Makefile.system` derives from `TARGET=` (`GETARCH_FLAGS :=
+    -DFORCE_$(TARGET)`); the `#ifdef __riscv` / `cpuid_riscv64.c` autodetect branch that
+    other architectures have arrived far later than the pins most projects carry. Projects
+    already answer this for aarch64 and nothing else — Paddle's
+    `cmake/external/openblas.cmake` has `if(WITH_ARM) set(ARM_ARGS TARGET=ARMV8) endif()`
+    and passes `${ARM_ARGS}` to its `BUILD_COMMAND` — so the patch is the three-line
+    riscv64 twin of a block that is already there, which is also the argument for taking it
+    upstream.
+    - **Pick `RISCV64_GENERIC`, not a vector target.** Its `TARGET_FLAGS` are `-march=rv64imafdc
+      -mabi=lp64d`, i.e. the rv64gc baseline a published wheel has to run on, while
+      `RISCV64_ZVL128B`/`RISCV64_ZVL256B` compile `-march=rv64imafdcv` and would put RVV
+      instructions into a `libopenblas.a` that gets statically linked into the extension —
+      gotcha 139's RVV wall, but discovered by a user's SIGILL instead of by CI.
+    - **Only the build step needs it.** `getarch` writes the choice into `Makefile.conf`,
+      so the `make install` step reads it back; mirror upstream's arm block rather than
+      threading `TARGET=` through every invocation.
+    - **First ask whether the project needs to build OpenBLAS at all.** Gotcha 401's Rocky
+      10 riscv64 `openblas`/`lapack`/`blas` packages are one `dnf install` away and are
+      what every other BLAS consumer in this repo links against; a from-source OpenBLAS is
+      worth it only when the project statically links it or patches it.
+
+435. **`libquadmath` does not exist on riscv64 — GCC does not build it for that target, so
+    `dnf install libquadmath` fails with `Unable to find a match` and no
+    `libquadmath.so.0` is anywhere on the image.** It is not a gap in the distro's riscv64
+    coverage like gotcha 401's SuiteSparse; libquadmath only exists where `__float128` is a
+    type distinct from `long double`, which is true on x86-64 and not on riscv64 or aarch64.
+    Any project that pairs `libgfortran` with `libquadmath` as "the GCC Fortran runtime" and
+    copies both unconditionally is therefore broken on both architectures — Paddle's
+    `setup.py` does exactly this with `GFORTRAN_LIB` and `GNU_RT_LIB_1`, and its released
+    aarch64 wheel only gets away with it by shipping the x86-64 `libquadmath.so.0` out of
+    gotcha 418's tarball.
+    - **The fix is to make the copy conditional, not to substitute another library.** Such a
+      project usually already has the pattern somewhere nearby — Paddle guards its
+      `GNU_RT_LIB_2` (Windows/macOS `libgcc_s`) copy on the variable being set, so guarding
+      `GNU_RT_LIB_1` the same way is the change upstream would make, and it needs no
+      architecture flag. Do not point the variable at `libgcc_s.so.1` or at the same path as
+      `libgfortran` to keep an unconditional copy happy: the first ships a library nothing
+      asked for, the second ships the same file twice.
+    - **Do not "harden" a `dnf install` by adding runtime packages you have not confirmed.**
+      This cost a whole round: the list `lapack blas libgfortran libquadmath` was written to
+      pre-empt a missing dependency, and the two additions were the only things wrong with
+      it — `libgfortran` was already installed, and `libquadmath` cannot be. `dnf` fails the
+      whole transaction on one unmatched argument, so a speculative package name is a build
+      failure, not insurance. Install what the build needs and let the dependency solver
+      pull the runtimes.
+
+446. **The manylinux image's free-threaded interpreter directory is
+     `/opt/python/cp3XX-cp3XXt`, not `/opt/python/cp3XXt-cp3XXt` — the directory is
+     `<implementation tag>-<ABI tag>`, and only the ABI tag carries the `t`.** A hand-written
+     per-interpreter loop that appends the free-threaded tag to itself (`cp314t-cp314t`) names
+     a path that does not exist, `"$pybin/bin/pip"` is "No such file or directory", and `set -e`
+     ends the step with **exit 127**. This is a one-line typo with an expensive failure mode:
+     in comfy-angle's round 4 (run 35496806279) it landed on the *last* line of the container
+     script, after a 64-minute ANGLE compile had already produced the wheel and the smoke test
+     had passed on cp312/cp313/cp314 — the log's final error says nothing about the build that
+     worked, so read *upwards* from an exit 127 before concluding the port regressed.
+     - **Derive the directory, don't write it out.** The rule is `${TAG%t}-${TAG}`, which
+       `build-onnxruntime.yml`, `build-labmaze.yml` and `build-vtk.yml` all encode as
+       `case "$PYTHON_TAG" in *t) python_dir="/opt/python/${PYTHON_TAG%t}-${PYTHON_TAG}/bin" ;;
+       *) python_dir="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin" ;; esac`. A literal list is
+       fine only if every free-threaded entry is spelled `cp3XX-cp3XXt` (as
+       `build-mujoco.yml`'s matrix and `build-cryptography.yml`'s do).
+     - **Verify a `/opt/python` path off-target instead of in CI.** No container is needed:
+       `grep -rn 'opt/python' .github/workflows/` shows how every green workflow on the same
+       `MANYLINUX_RISCV64_IMAGE` spells it, and `docs/packages/<pkg>.yaml` listing a published
+       `…-cp314-cp314t-manylinux_2_39_riscv64.whl` (mujoco has two) is proof that that exact
+       directory exists on that exact image. That pair of greps is seconds against an hour.
+     - **A `py3-none` wheel still wants the free-threaded leg in the smoke test.** The
+       interpreter list here is not a build matrix (gotcha 145): one platform wheel is loaded
+       on every interpreter we ship for, so a wrong path in the list fails a job that has
+       nothing else left to do.
