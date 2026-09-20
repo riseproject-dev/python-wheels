@@ -1,0 +1,229 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sat, 20 Sep 2026 00:00:00 +0000
+Subject: [PATCH] build the Linux ANGLE libraries for riscv64
+
+scripts/build_linux.py builds libEGL/libGLESv2 from the pinned ANGLE
+revision for x86-64 and arm64 only, so there is no riscv64 wheel. Every
+layer below it already knows the architecture:
+
+  * depot_tools' detect_host_arch.py maps riscv* to riscv64, and CIPD
+    publishes linux-riscv64 for the cipd client, cpython3, ninja and gn;
+  * with is_clang=false Chromium's build selects
+    //build/toolchain/linux:riscv64, a gcc_toolchain whose toolprefix is
+    riscv64-linux-gnu, and config/compiler/BUILD.gn has riscv64 flags;
+  * ANGLE's own gni/angle.gni lists riscv64 among the 64-bit CPUs, so it
+    does not hit the "Unknown current CPU" assert.
+
+So reuse the arm64 recipe rather than adding a new one. The arm64 path
+already aliases the container's gcc/g++/ar/readelf/nm under the names
+ANGLE's GCC toolchain expects and turns off Clang, the bundled libc++ and
+warnings-as-errors; generalise that to a toolprefix table and add riscv64
+to it. The build-time GN args are otherwise unchanged.
+
+Two CIPD packages have no linux-riscv64 build and would abort
+"gclient sync" before anything compiles: buildtools/reclient (which has no
+linux-arm64 build either, hence the host_cpu carve-out already in DEPS) and
+third_party/siso/cipd. Neither is used here - use_remoteexec is false, and
+use_siso_default in //build/toolchain/siso.gni is false unless
+build_with_chromium, which a standalone ANGLE checkout is not - so null
+them out through the same custom_deps mechanism that already drops
+SwiftShader, VK-GL-CTS and catapult.
+
+The riscv64 libraries are compiled from source instead of being extracted
+from an Electron release, so the wheel cannot carry Electron's
+electron-LICENSE or the LICENSES.chromium.html that Electron's own build
+generates. Stage the licences of the tree the libraries were actually built
+from: ANGLE's LICENSE, plus an aggregate of the LICENSE/LICENCE/COPYING
+files found under third_party/ in the checkout, which is what the
+statically linked Vulkan loader, SPIRV-Tools, Abseil and friends require.
+The aggregate is collected by directory rather than from the link line, so
+it over-reports rather than risk omitting a component that is linked in.
+
+manylinux_2_39 is the riscv64 baseline (the 2_28 images upstream uses for
+x86-64 and arm64 are not published for riscv64), so that is the platform
+tag the riscv64 wheel carries.
+
+Both new tables are keyed by architecture, so x86-64 and arm64 render
+byte-identical .gclient and GN args to before.
+
+Upstream-Status: To upstream [not submitted: no cross-repo issue/PR contributions from this port]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -25,4 +25,10 @@
+ include = ["comfy_angle*"]
+ 
+ [tool.setuptools.package-data]
+-comfy_angle = ["libs/*", "electron-LICENSE", "LICENSES.chromium.html"]
++comfy_angle = [
++    "libs/*",
++    "electron-LICENSE",
++    "LICENSES.chromium.html",
++    "LICENSE.angle",
++    "LICENSES.angle.txt",
++]
+diff --git a/scripts/build.py b/scripts/build.py
+--- a/scripts/build.py
++++ b/scripts/build.py
+@@ -29,11 +29,17 @@
+     "macosx_11_0_arm64",
+     "manylinux_2_28_aarch64",
+     "manylinux_2_28_x86_64",
++    "manylinux_2_39_riscv64",
+     "win_amd64",
+     "win_arm64",
+ ]
+ 
+-LICENSE_FILES = ["electron-LICENSE", "LICENSES.chromium.html"]
++LICENSE_FILES = [
++    "electron-LICENSE",
++    "LICENSES.chromium.html",
++    "LICENSE.angle",
++    "LICENSES.angle.txt",
++]
+ FORBIDDEN_LINUX_LIBRARIES = {
+     "libX11.so.6",
+     "libXext.so.6",
+diff --git a/scripts/build_linux.py b/scripts/build_linux.py
+--- a/scripts/build_linux.py
++++ b/scripts/build_linux.py
+@@ -19,7 +19,25 @@
+ PLATFORM_TAGS = {
+     "x86_64": ("x64", "manylinux_2_28_x86_64"),
+     "aarch64": ("arm64", "manylinux_2_28_aarch64"),
+-}
++    "riscv64": ("riscv64", "manylinux_2_39_riscv64"),
++}
++
++# Chromium publishes its prebuilt Clang only for x86-64 hosts, so the other
++# architectures build with the container's GCC, reached through ANGLE's
++# "<toolprefix>-<tool>" command names.
++NATIVE_GCC_TOOLPREFIX = {
++    "aarch64": "aarch64-linux-gnu",
++    "riscv64": "riscv64-linux-gnu",
++}
++
++# CIPD packages that do not exist for a host architecture. Both are unused for a
++# standalone ANGLE build (use_remoteexec and use_siso are false), so drop them
++# from the checkout rather than letting "gclient sync" fail on them.
++UNAVAILABLE_CIPD_DEPS = {
++    "riscv64": ("buildtools/reclient", "third_party/siso/cipd"),
++}
++
++LICENSE_GLOBS = ("LICENSE*", "LICENCE*", "COPYING*")
+ 
+ FORBIDDEN_LIBRARIES = {
+     "libX11.so.6",
+@@ -66,24 +84,46 @@
+         raise RuntimeError(f"{library.name} still depends on {names}")
+ 
+ 
+-def configure_native_arm64_gcc(
+-    work_dir: Path, env: Dict[str, str]
++def configure_native_gcc(
++    work_dir: Path, env: Dict[str, str], toolprefix: str
+ ) -> Dict[str, str]:
+-    """Expose the native compiler under ANGLE's ARM64 toolchain names."""
+-    toolchain_dir = work_dir / "native-arm64-toolchain"
++    """Expose the native compiler under ANGLE's GCC toolchain names."""
++    toolchain_dir = work_dir / f"native-{toolprefix}-toolchain"
+     toolchain_dir.mkdir(parents=True, exist_ok=True)
+ 
+     for command in ("gcc", "g++", "ar", "readelf", "nm"):
+         executable = shutil.which(command, path=env["PATH"])
+         if executable is None:
+             raise RuntimeError(f"Required build tool is unavailable: {command}")
+-        alias = toolchain_dir / f"aarch64-linux-gnu-{command}"
++        alias = toolchain_dir / f"{toolprefix}-{command}"
+         alias.unlink(missing_ok=True)
+         alias.symlink_to(executable)
+ 
+     configured = env.copy()
+     configured["PATH"] = str(toolchain_dir) + os.pathsep + configured["PATH"]
+     return configured
++
++
++def stage_licenses(angle: Path, destination: Path) -> None:
++    """Stage ANGLE's licence and those of the code linked into the libraries."""
++    shutil.copy2(angle / "LICENSE", destination / "LICENSE.angle")
++
++    sources = sorted(
++        {
++            path
++            for pattern in LICENSE_GLOBS
++            for path in angle.glob(f"third_party/**/{pattern}")
++            if path.is_file()
++        }
++    )
++    with (destination / "LICENSES.angle.txt").open("w") as aggregate:
++        aggregate.write(
++            "Licences of the third-party code in the ANGLE checkout that these\n"
++            "libraries are built from.\n"
++        )
++        for source in sources:
++            aggregate.write(f"\n{'=' * 78}\n{source.relative_to(angle)}\n{'=' * 78}\n")
++            aggregate.write(source.read_text(encoding="utf-8", errors="replace"))
+ 
+ 
+ def main() -> None:
+@@ -111,6 +151,9 @@
+     checkout(DEPOT_TOOLS_URL, depot_tools, depot_tools_revision)
+     checkout(ANGLE_URL, angle, angle_revision)
+ 
++    unavailable_deps = "".join(
++        f"    '{dep}': None,\n" for dep in UNAVAILABLE_CIPD_DEPS.get(machine, ())
++    )
+     (angle / ".gclient").write_text(
+         "solutions = [{\n"
+         "  'name': '.',\n"
+@@ -121,6 +164,7 @@
+         "    'third_party/SwiftShader': None,\n"
+         "    'third_party/VK-GL-CTS/src': None,\n"
+         "    'third_party/catapult': None,\n"
++        f"{unavailable_deps}"
+         "  },\n"
+         "  'custom_vars': {\n"
+         "    'checkout_angle_cl_deps': False,\n"
+@@ -137,8 +181,9 @@
+     run(str(depot_tools / "ensure_bootstrap"), cwd=depot_tools, env=env)
+     run("gclient", "sync", "--no-history", "--shallow", cwd=angle, env=env)
+ 
+-    if machine == "aarch64":
+-        env = configure_native_arm64_gcc(work_dir, env)
++    toolprefix = NATIVE_GCC_TOOLPREFIX.get(machine)
++    if toolprefix is not None:
++        env = configure_native_gcc(work_dir, env, toolprefix)
+ 
+     out_dir = angle / "out" / "Release"
+     gn_args_list = [
+@@ -166,12 +211,12 @@
+         "angle_enable_overlay=false",
+         "angle_has_frame_capture=false",
+     ]
+-    if machine == "aarch64":
++    if toolprefix is not None:
+         # Chromium only publishes its Linux Clang package for x86-64. ANGLE's
+-        # GCC ARM64 toolchain works natively once the expected prefixed command
+-        # names above resolve to the container's compiler. The bundled libc++
+-        # requires GCC 15, while the manylinux image provides GCC 14, so use
+-        # the image's libstdc++ and tolerate upstream's Clang-specific warnings.
++        # GCC toolchains work natively once the expected prefixed command names
++        # above resolve to the container's compiler. The bundled libc++ requires
++        # GCC 15, while the manylinux images provide GCC 14, so use the image's
++        # libstdc++ and tolerate upstream's Clang-specific warnings.
+         gn_args_list.extend(
+             [
+                 "is_clang=false",
+@@ -206,6 +251,8 @@
+         verify_dependencies(target)
+         libraries.append(target)
+ 
++    stage_licenses(angle, destination.parent)
++
+     mode = getattr(ctypes, "RTLD_GLOBAL", 0)
+     for library in libraries:
+         ctypes.CDLL(str(library), mode=mode)
