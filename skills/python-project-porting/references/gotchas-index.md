@@ -361,6 +361,10 @@ The porting gotchas (386 of them) live in [`references/gotchas/`](gotchas/), spl
 - **424** — Audit a chromium-style DEPS for riscv64-less CIPD packages with
   `cipd describe <pkg>/linux-riscv64` (and `gclient_eval.EvaluateCondition`) before spending a
   build cycle discovering them one abort at a time.
+- **427** — `VPYTHON_BYPASS` also picks the interpreter gsutil runs on, and a chromium-style
+  checkout holds two gsutils: the one its DEPS pins (4.68, vendoring six 1.12) cannot import on
+  python ≥ 3.12, so its `download_from_google_storage` hooks fail — reproducible on x86 in
+  seconds, fixed by conditioning those test-data hooks off.
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
