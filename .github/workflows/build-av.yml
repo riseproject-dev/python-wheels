@@ -8,34 +8,53 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'av version to build (PyPI version, e.g. 18.1.0)'
-        required: true
-        default: '18.1.0'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/av.yaml not released yet'
+        required: false
+        default: ''
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/build-av.yml'
-      - 'ci/av/**'
+      - 'docs/packages/av.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-av.yml'
+      - 'docs/packages/av.yaml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || '18.1.0' }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: read  # to fetch code (actions/checkout)
 
 env:
-  # `inputs.version` is empty on pull_request events; default to 18.1.0 there.
-  AV_VERSION: ${{ inputs.version || '18.1.0' }}
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: av
+      version: ${{ inputs.version }}
+
   # The wheels bundle prebuilt FFmpeg libraries from a pyav-ffmpeg release,
   # including GPL x264/x265 and LGPL FFmpeg, GnuTLS, Nettle, GMP, libunistring,
   # alsa-lib and LAME. Publishing them obliges us to ship their licence texts
   # and to make the corresponding sources permanently available.
   vendor_sources:
-    name: Collect vendored FFmpeg sources
+    name: Collect av ${{ matrix.version }} vendored FFmpeg sources
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      AV_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout PyAV v${{ env.AV_VERSION }}
@@ -186,10 +205,18 @@ jobs:
           if-no-files-found: error
 
   build_wheels:
-    name: Build av ${{ inputs.version || '18.1.0' }} manylinux_riscv64
-    needs: [vendor_sources]
+    name: Build av ${{ matrix.version }} manylinux_riscv64
+    needs: [setup, vendor_sources]
+    if: needs.setup.outputs.versions != '[]'
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      AV_VERSION: ${{ matrix.version }}
 
     steps:
       - name: Checkout PyAV v${{ env.AV_VERSION }}
@@ -249,22 +276,20 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish av ${{ inputs.version || '18.1.0' }} to GitLab
-    needs: [build_wheels, vendor_sources]
-    runs-on: ubuntu-latest
+    name: Publish av ${{ matrix.version }}
+    needs: [setup, vendor_sources, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
     permissions:
       contents: write
       pull-requests: write
-
-    steps:
-      - name: Publish wheels and open docs PR
-        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
-        with:
-          artifact-pattern: av-${{ env.AV_VERSION }}-manylinux_riscv64
-          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
-          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
-          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
-          gh-token: ${{ secrets.GITHUB_TOKEN }}
-          gpl-sources-artifact: av-${{ env.AV_VERSION }}-gpl-sources
-          gpl-sources-release-tag: av-v${{ env.AV_VERSION }}
-          gpl-sources-description: FFmpeg, x264, x265
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: av-${{ matrix.version }}-manylinux_riscv64
+      gpl-sources-artifact: av-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: FFmpeg, x264, x265
