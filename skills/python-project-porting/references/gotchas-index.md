@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (428 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (430 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -396,6 +396,9 @@ The porting gotchas (428 of them) live in [`references/gotchas/`](gotchas/), spl
   the build instead of building the stale tree quietly; check the gitlink against the tag
   (usually equal, so only the ref is missing — `git fetch --depth 1 origin tag <tag>`), and
   sweep every `cmake/external/*.cmake` at once, splitting `*_TAG` names from SHAs.
+- **440** — Gotcha 133's version-only bazel cache key is shared repo-wide, so a new
+  workflow's bootstrap step is skipped on its first run and a broken variable reference in a
+  copied bootstrap stays latent — check every `${VAR}` against the `docker run -e` list.
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
@@ -630,6 +633,9 @@ The porting gotchas (428 of them) live in [`references/gotchas/`](gotchas/), spl
 - **429** — A media project's suite is written against upstream's *full* FFmpeg; an FFmpeg
   you configure yourself has no H.264/HEVC/VP9/AV1/MP3 encoder at all, and the failures
   blame the wrong codec.
+- **439** — A Bazel project runs one process per `py_test` target, so one `pytest --pyargs`
+  over the whole package invents failures: run each file as its own absltest script, and take
+  the `env`/`args` from the `py_test` rules (per-target, not globally).
 
 ### Test failures, flakes & arch-specific bugs — [`gotchas/test-failures-and-flakes.md`](gotchas/test-failures-and-flakes.md)
 

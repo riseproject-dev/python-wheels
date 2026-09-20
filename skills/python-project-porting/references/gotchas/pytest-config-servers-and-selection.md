@@ -35,6 +35,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
 - **429** — A media project's suite is written against upstream's *full* FFmpeg; an FFmpeg
   you configure yourself has no H.264/HEVC/VP9/AV1/MP3 encoder at all, and the failures
   blame the wrong codec.
+- **439** — A Bazel project runs one process per `py_test` target — one `pytest --pyargs` over
+  the whole package invents failures; run each file as its own absltest script.
 
 ---
 
@@ -681,3 +683,45 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
     that H.264-encodes every fixture it then decodes). And say in the PR that the wheel
     bundles no FFmpeg, so the codecs the *user's* distro FFmpeg provides are unaffected by
     any of this — only the container's own test coverage is.
+
+439. **A Bazel project runs one *process per `py_test` target*, so collecting the wheel's
+    shipped `*_test.py` files into a single `pytest` invocation invents failures upstream
+    never sees — run each file as its own absltest script instead, and read the `py_test`
+    rules for the `env`/`args` bazel was supplying (the grain case; see
+    `build-grain.yml`).** Gotcha 6 says mirror upstream's testing; for a Bazel project that
+    instruction is about the *process model*, not just the command. grain ships 54
+    `*_test.py` files in its wheel and its OSS `build_whl.sh` offers
+    `pytest --pyargs grain` as the non-Bazel path, but upstream's own CI calls that template
+    with `run_tests_with_bazel: true`, so the pytest path is untested and breaks three
+    separate ways at once:
+    - **Cross-file state pollution.** `data_loader_test.py` passes **120/120** run on its
+      own and then most of those same 120 fail inside `pytest --pyargs grain`, because every
+      file shares one interpreter (grain's tests leak shared-memory segments and
+      multiprocessing state; the run also hangs outright around 4%). This is the failure
+      that reads most like a riscv64 bug and is not one — the one-line check is to re-run
+      the offending file alone before believing anything else.
+    - **`env`/`args` the `py_test` rules supply, which nothing else does.** Three targets
+      pass `args = ["--test_srcdir=grain/_src/python"]` (`data_loader_test`,
+      `data_sources_test`, `tfrecord_dataset_test`) and without it their testdata lookups
+      error; `profiler_test.py` is instantiated **twice**, as
+      `profiler_test_no_framework` and `profiler_test_with_jax`, differing only by
+      `env = {"EXPECTED_FRAMEWORK": ...}`; and `.bazelrc`'s
+      `test --action_env PYTHON_VERSION=` is what makes `py_version_test` pass. Grep the
+      BUILD files for `args = [` and `env = {` and supply exactly those — **not** globally:
+      `autotune_test.py` uses plain `unittest.main()` and dies on
+      `unrecognized arguments: --test_srcdir`, so pass each flag only to the targets that
+      declare it.
+    - **pytest's own instrumentation.** `traceback_util_test.py` is 4 failures under pytest
+      and **18 OK** as a script, because the tests assert on `__tracebackhide__`/traceback
+      filtering that pytest itself rewrites.
+    Two more things to check before settling the file list. **The set of declared `py_test`
+    targets can be smaller than the set of `*_test.py` files the wheel ships** — grain
+    declares 48 srcs against 54 shipped, and the six undeclared ones are where the dead
+    code is (`multiprocessing_test.py` patches `multiprocessing._endoscope_shm_name`, which
+    exists only inside Google, and its `__main__` calls an undefined `grain_absltest`), so
+    diff the two sets and treat a file upstream never runs as a file you need not run
+    either. And **a test can require a dependency it never imports**: `batch_test.py` has
+    no module-level `import jax`, so an import-based taint scan clears it, yet 11 of its
+    cases do `sys.modules["jax"]` and its `py_test` declares
+    `"@pypi//jax:pkg",  # buildcleaner: keep` — grep `sys.modules[` and the BUILD `deps` as
+    well as the imports.
