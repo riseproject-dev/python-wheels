@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (427 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (428 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -385,6 +385,10 @@ The porting gotchas (427 of them) live in [`references/gotchas/`](gotchas/), spl
   prints only `Command failed: 1`, with the real diagnostic in a stamp log that dies with the
   runner — add an `if: failure()` step that tails
   `build/third_party/*/src/*-stamp/*-*-*.log`.
+- **437** — The same `git checkout <tag>` in an `ExternalProject_Add` `PATCH_COMMAND` aborts
+  the build instead of building the stale tree quietly; check the gitlink against the tag
+  (usually equal, so only the ref is missing — `git fetch --depth 1 origin tag <tag>`), and
+  sweep every `cmake/external/*.cmake` at once, splitting `*_TAG` names from SHAs.
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
