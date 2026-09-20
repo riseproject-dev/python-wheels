@@ -1,0 +1,63 @@
+From bb045ca51b3f98290f3194192d5a72fde6af1667 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 20 Sep 2026 12:05:00 +0000
+Subject: [PATCH 2/4] clang: name the rv64gc/lp64d target ABI for JIT-compiled
+ kernels
+
+Upstream-Status: To upstream [no riscv64 runner upstream to regression-test it on]
+
+warp-clang.so drives Clang through CompilerInvocation, i.e. at the cc1 level,
+where none of the driver's per-target defaults are applied. On RV64 that leaves
+clang::RISCVTargetInfo with a bare rv64i ISA (initFeatureMap sees no
+-target-feature flags) and, because the invocation names no ABI, an ABIFLen of
+zero -- the soft-float lp64 ABI.
+
+warp.so, crt.cpp and warp-clang.so itself are compiled by the host gcc for
+rv64gc/lp64d, so every call a JIT-compiled kernel makes into them that passes or
+returns a float or a double -- _wp_isfinite(double) and the other crt.cpp shims
+-- would read the value from the wrong register class. The base ISA is wrong for
+the same reason: without M/A/F/D the frontend emits integer-multiply and
+soft-float libcalls for operations the hardware performs natively.
+
+Named explicitly rather than derived from the triple, because
+LLVM_DEFAULT_TARGET_TRIPLE is whatever LLVM was configured with (build_llvm.py
+sets riscv64-pc-linux) and cc1 infers neither a RISC-V ISA nor an ABI from the
+triple's environment field.
+
+Mirrors the x86_64 (+f16c) and aarch64 (+reserve-x28) blocks beside it.
+---
+ warp/native/clang/clang.cpp | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/warp/native/clang/clang.cpp b/warp/native/clang/clang.cpp
+index d7734b0..f535c92 100644
+--- a/warp/native/clang/clang.cpp
++++ b/warp/native/clang/clang.cpp
+@@ -231,6 +231,24 @@ static std::unique_ptr<clang::CompilerInstance> create_compiler(
+         args.push_back("+f16c");
+ #endif
+ 
++#if defined(__riscv) && __riscv_xlen == 64
++        // cc1 defaults RV64 to a bare rv64i ISA and, with no ABI named, to soft-float lp64.
++        // warp.so and crt.cpp are compiled rv64gc/lp64d, so without this every kernel call
++        // into them (_wp_isfinite(double), ...) would pass floats in the wrong registers.
++        args.push_back("-target-abi");
++        args.push_back("lp64d");
++        args.push_back("-target-feature");
++        args.push_back("+m");
++        args.push_back("-target-feature");
++        args.push_back("+a");
++        args.push_back("-target-feature");
++        args.push_back("+f");
++        args.push_back("-target-feature");
++        args.push_back("+d");
++        args.push_back("-target-feature");
++        args.push_back("+c");
++#endif
++
+ #if defined(__aarch64__)
+         if (tiles_in_stack_memory) {
+             // Static memory support is broken on AArch64 CPUs. As a workaround we reserve some stack memory on kernel
+-- 
+2.43.0
+
