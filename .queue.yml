@@ -2278,9 +2278,49 @@ packages:
   version: 0.1.1
   home: https://github.com/Comfy-Org/comfy-angle
   repo: https://github.com/Comfy-Org/comfy-angle
-  status: queued
-  pr: null
-  notes: '2 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev.'
+  status: in-review
+  pr: https://github.com/riseproject-dev/python-wheels/pull/2123
+  notes: 'Feasible and ported - despite the "Redistributable ANGLE libraries" summary and zero
+    sdists across all 9 releases, this is NOT a prebuilt-blob redistribution like
+    livekit-plugins-noise-cancellation (gotcha 431). Upstream unpacks an Electron release only for
+    Windows/macOS; the Linux wheels are genuinely built from the pinned ANGLE revision by
+    scripts/build_linux.py (depot_tools + gclient + gn + autoninja, headless, Vulkan-only, no X11 /
+    Wayland / GBM, tests / SwiftShader / dawn / GL / wgpu / validation-layers all off), so riscv64
+    needed only the architecture added to that build rather than a Chromium-scale port. Every layer
+    below already supports riscv64, which is what makes this cheap: depot_tools detect_host_arch.py
+    maps riscv* to riscv64; CIPD publishes linux-riscv64 for the cipd client, cpython3, ninja, gn
+    and luci-go; Chromium build/toolchain/linux/BUILD.gn has gcc_toolchain("riscv64") with toolprefix
+    riscv64-linux-gnu, which BUILDCONFIG selects once is_clang=false, and config/compiler/BUILD.gn
+    carries riscv64 cflags; ANGLE''s own gni/angle.gni lists riscv64 among the 64-bit CPUs, so gn
+    analysis does not hit its "Unknown current CPU" assert. Only two real gaps: buildtools/reclient
+    and third_party/siso/cipd publish no linux-riscv64 package and would abort gclient sync before
+    anything compiles. Neither is used here (use_remoteexec is false, and use_siso_default in
+    build/toolchain/siso.gni is false unless build_with_chromium, which a standalone ANGLE checkout
+    is not), so the patch nulls both through the same custom_deps mechanism build_linux.py already
+    uses for SwiftShader / VK-GL-CTS / catapult; reclient has no linux-arm64 build either, which is
+    why upstream''s DEPS already carves arm64 out of that dep. The patch otherwise reuses upstream''s
+    existing arm64 recipe (alias the container''s gcc/g++/ar/readelf/nm under the prefixed names
+    ANGLE expects, is_clang=false, use_custom_libcxx=false, treat_warnings_as_errors=false),
+    generalised to a toolprefix table, and both new tables are keyed by arch so x86_64/arm64 render
+    byte-identical .gclient and gn args. The x86-only prebuilt host tools the DEPS hooks fetch
+    (clang, llvm_objdump, rust, glslang_validator, flex_bison) are not a blocker: update.py maps
+    every Linux host to Linux_x64 with no arch check, and upstream''s green aarch64 job proves those
+    binaries are never executed by the libEGL/libGLESv2 targets. Wheel is a single
+    py3-none-manylinux_2_39_riscv64 (2_28 is not published for riscv64) with no interpreter matrix,
+    but the smoke test still loads both libraries and prints the EGL client extension string on
+    cp312/cp313/cp314/cp314t (gotcha 145). Licensing: the riscv64 libraries are compiled rather than
+    extracted from Electron, so electron-LICENSE and LICENSES.chromium.html genuinely do not apply -
+    the patch stages ANGLE''s LICENSE plus an aggregate of the third_party LICENSE/LICENCE/COPYING
+    files (collected by directory, so it over-reports rather than miss a statically linked
+    component), and a gpl_sources job collects the image''s gcc since the libs are built with it and
+    link its libstdc++. Not rehearsed locally: no docker daemon on this host and only 5 GB free, so
+    a gclient sync plus a full ANGLE build does not fit. Validation was static - patch applies with
+    patch --dry-run --fuzz=0, py_compile of both patched scripts, a unit test of the new
+    stage_licenses() against a synthetic checkout (including non-UTF8 licence bytes), bash -n of the
+    container script and compile() of both heredocs, and pending_versions.py resolving 0.1.1. PR
+    #2123 open, first CI run in flight; the two things to watch are the gclient sync step and
+    whether the statically linked Vulkan-Loader falls back to its C unknown-ext-chain path on
+    riscv64 instead of wanting per-arch assembly.'
 - pkg: solders
   version: 0.29.0
   home: https://github.com/kevinheavey/solders
