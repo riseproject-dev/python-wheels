@@ -151,18 +151,38 @@ jobs:
             CARGO_BUILD_JOBS=2
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
           # Without this pip prefers PyPI's releases, which have no riscv64
-          # wheel for these, and source-builds them in the container.
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,pandas,pyarrow,duckdb,pydantic-core
-          CIBW_TEST_REQUIRES: pytest pytest-asyncio numpy pandas pyarrow duckdb
+          # wheel for these, and source-builds them in the container. pylance
+          # is pinned to our registry's exact published version (not just
+          # named) per gotcha 30: with PIP_EXTRA_INDEX_URL alone pip picks the
+          # highest version across both indexes, and PyPI's latest pylance is
+          # newer than what pypi.riseproject.dev hosts, so an unpinned
+          # `pylance` would resolve to a PyPI release with no riscv64 wheel
+          # and source-build the whole lance Rust workspace here.
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,pandas,pyarrow,duckdb,pydantic-core,pylance
+          CIBW_TEST_REQUIRES: pytest pytest-asyncio numpy pandas pyarrow duckdb pylance==11.0.0
           CIBW_TEST_SOURCES: python/pyproject.toml python/python/tests
           # test_table.py, test_util.py, test_embeddings.py and
           # test_namespace_integration.py import `polars` and/or `lance`
-          # (pylance) unconditionally at module scope, as do
-          # docs/test_guide_tables.py and docs/test_python.py; neither package
-          # has a riscv64 wheel and both are large enough Rust projects in
-          # their own right that building them from source here is out of
-          # scope, so those six files fail collection and are excluded rather
-          # than left to error. Otherwise mirrors run_tests/action.yml's
+          # (pylance) and/or `lance_namespace` unconditionally at module
+          # scope, as do docs/test_guide_tables.py and docs/test_python.py;
+          # polars has no riscv64 wheel and is a large enough Rust project in
+          # its own right that building it from source here is out of scope,
+          # so those six files fail collection and stay excluded. This was
+          # not re-checked file-by-file against pylance's newer availability
+          # below -- only test_blob.py, the one file CI actually reported
+          # failing here, was fixed rather than excluded.
+          #
+          # test_blob.py imports `lance` (the pylance package) unconditionally
+          # at module scope too, but is new in 0.38.0/0.39.0 (not present in
+          # 0.37.1, when the six-file exclusion above was established) so it
+          # was never checked against pylance's availability until now. It
+          # isn't excluded because pypi.riseproject.dev already hosts a
+          # pylance riscv64 wheel (see docs/packages/pylance.yaml, added to
+          # CIBW_TEST_REQUIRES above) and lance's python/python/lance/blob.py
+          # is unchanged between the v9.0.0 pylance/lance release lancedb's
+          # own pyproject.toml `tests` extra pins and the v11.0.0 this repo
+          # publishes, aside from an added BlobFile.read_ranges method
+          # test_blob.py doesn't use. Otherwise mirrors run_tests/action.yml's
           # non-integration path (`-m "not slow and not s3_test"`, no docker
           # compose/localstack).
           #
