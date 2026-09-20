@@ -12,9 +12,22 @@ for riscv64, so a riscv64 build takes every x86 branch.
 WITH_RISCV mirrors the WITH_LOONGARCH block, plus three riscv64-specific
 additions:
 
- - WITH_SLEEF=OFF. Paddle only reaches SLEEF through AVX code paths
-   (paddle/phi/kernels/funcs/sleef_vectorized_math.h gates every use on
-   __AVX__/__AVX2__/__AVX512F__), so building it buys nothing here.
+ - WITH_SLEEF=OFF, set through upstream's own WITH_SLEEF_DEFAULT switch
+   rather than from the WITH_RISCV block, because cmake/third_party.cmake
+   is included at CMakeLists.txt:591, long before that block: a
+   set(WITH_SLEEF OFF ... FORCE) there is read too late, after
+   cmake/sleef.cmake has already run add_definitions(-DPADDLE_WITH_SLEEF),
+   and only paddle/phi/CMakeLists.txt's `if(WITH_SLEEF) list(APPEND
+   PHI_DEPS sleef)` still sees the OFF - compiling the SLEEF path without
+   linking SLEEF. SLEEF 3.6.1 cannot serve Paddle on riscv64 in any case:
+   src/libm/CMakeLists.txt leaves DSP_SCALAR out of SLEEF_ARCH_RISCV64's
+   header list, alone among the six architectures, and DSP_SCALAR is the
+   only entry with no ISA name, i.e. the only one mkrename.c emits the
+   unsuffixed scalar declarations from. The generated riscv64 sleef.h
+   therefore declares Sleef_sinf1_u35purec but never Sleef_sinf1_u35,
+   which is what paddle/phi/kernels/funcs/activation_functor.h calls
+   under PADDLE_WITH_SLEEF. WIN32 and WITH_ROCM already take this same
+   SLEEF-less configuration.
 
  - -latomic on the link lines. riscv64 has no inline instructions for
    1- and 2-byte atomics, so GCC emits libatomic calls; without this
@@ -34,9 +47,9 @@ a riscv64 build running there first.
 
 Signed-off-by: RISE Project CI <ci@riseproject.dev>
 ---
- CMakeLists.txt    | 21 +++++++++++++++++++++
+ CMakeLists.txt    | 20 +++++++++++++++++++-
  cmake/flags.cmake |  3 ++-
- 2 files changed, 23 insertions(+), 1 deletion(-)
+ 2 files changed, 21 insertions(+), 2 deletions(-)
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index a07b810..884b37d 100755
@@ -50,7 +63,14 @@ index a07b810..884b37d 100755
  option(WITH_MUSL "Compile with musl libc instead of glibc" OFF)
  option(WITH_UNITY_BUILD "Compile with UnityBuild mode" OFF)
  option(WITH_STRIP "Strip so files of Whl packages" OFF)
-@@ -684,6 +685,26 @@ if(WITH_LOONGARCH)
+@@ -356,5 +357,5 @@
+ set(WITH_SLEEF_DEFAULT ON)
+-if(WIN32 OR WITH_ROCM)
++if(WIN32 OR WITH_ROCM OR WITH_RISCV)
+   set(WITH_SLEEF_DEFAULT OFF)
+ endif()
+ option(
+@@ -684,6 +685,23 @@ if(WITH_LOONGARCH)
    add_definitions(-DPADDLE_WITH_LOONGARCH)
  endif()
  
@@ -64,9 +84,6 @@ index a07b810..884b37d 100755
 +  set(WITH_AVX
 +      OFF
 +      CACHE STRING "Disable AVX when compiling WITH_RISCV=ON." FORCE)
-+  set(WITH_SLEEF
-+      OFF
-+      CACHE STRING "Disable SLEEF when compiling WITH_RISCV=ON." FORCE)
 +  # riscv64 has no inline instructions for sub-word atomics, so GCC emits calls
 +  # into libatomic that are otherwise left undefined in libpaddle.so.
 +  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -latomic")
