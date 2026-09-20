@@ -38,6 +38,12 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
   aborts the build outright — fetch the missing tag, and sweep every dependency at once.
 - **440** — The version-only bazel cache key is shared repo-wide, so a new workflow's
   bootstrap step never runs and a copied bootstrap's broken `${VAR}` stays latent.
+- **441** — `VPYTHON_BYPASS` also strips `gclient.py` of *its own* vpython venv: install
+  `httplib2==0.13.1` on the ambient interpreter or the sync dies on `import httplib2`.
+- **443** — An upstream CMake arch block that `set(... CACHE ... FORCE)`s features OFF can
+  run *after* `include(third_party)`, making the FORCE dead for that configure.
+- **445** — gclient ignores a `custom_deps` `None` for a `cipd` dep: edit the DEPS entry
+  instead (424's audit finds them), and add `use_siso=false` when the dropped one is siso.
 
 ---
 
@@ -670,3 +676,136 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
     - **Corollary for triage**: "the bazel job was green" is not evidence the bootstrap
       works. Check whether the step reported a cache hit before crediting it, and if you need
       to exercise a bootstrap deliberately, bump `BAZEL_VERSION` or change the key.
+
+441. **Gotcha 423's `VPYTHON_BYPASS` does not only change which interpreter gsutil gets — it
+    takes `gclient.py`'s *own* vpython venv away too, so depot_tools' third-party imports
+    must be present on the ambient interpreter, and `httplib2` is the one that stops the sync
+    before it fetches anything.** `depot_tools/gclient` ends in `exec vpython3
+    "$base_dir/gclient.py"`, which the bypass turns into plain `python3 gclient.py`;
+    `gclient.py` imports `gclient_scm`, which imports `gerrit_util`, which does `import
+    httplib2` and `import httplib2.socks` at module scope. A manylinux `/opt/python/cp3xx-cp3xx`
+    has neither, so `gclient sync` dies ~80 s in with a bare
+    `ModuleNotFoundError: No module named 'httplib2'` plus a `CalledProcessError` from
+    whatever driver script ran it — nothing in the log mentions vpython, and the traceback
+    looks like a broken checkout rather than a missing venv.
+    - **Fix it in the workflow, pinned: `pip install -q httplib2==0.13.1`** (the version
+      depot_tools' own `.vpython3` pins) on the interpreter that is first on `PATH`, before
+      the driver script runs. **Unpinned is not a fix**: `pip install httplib2` resolves to
+      0.32.0, and `httplib2.socks` ships up to 0.22.0 and is gone from 0.30.0 on, so the
+      second import fails exactly like the first. The wheel is `py3-none-any`, so this needs
+      no registry index and no riscv64 wheel — it is not the CIPD wheel problem again.
+    - **Do not pre-install the rest of `.vpython3` while you are there.** The `lxml` and
+      `crcmod` whose missing `linux-riscv64` builds forced the bypass are reached only by
+      PRESUBMIT and as an optional gsutil hash accelerator. Prove the set instead of guessing:
+      unpack the pinned depot_tools from gitiles (`+archive/<rev>.tar.gz` — no clone, 1.2MB),
+      make a bare venv on the *container's* python version, install httplib2, and import every
+      module the sync path touches (`gclient`, `gclient_scm`, `gclient_eval`, `gerrit_util`,
+      `git_cache`, `download_from_google_storage`, `gsutil`, `metrics`, `autoninja`, `siso`,
+      `ninja`, …). All clean in seconds on x86; only httplib2 was ever missing.
+    - **Rehearse the gsutil hooks with a *bare* ambient python, not the host's.** Pointed at a
+      host `python3` that carries a system `cryptography`, `download_from_google_storage.py`
+      dies inside gsutil's vendored google-auth (`pyo3_runtime.PanicException: Python API call
+      failed`) — a host artifact that does not happen in the image. Put a directory holding a
+      `python3` symlink to the bare venv first on `PATH`, and the real hook downloads its
+      object and exits 0 with only httplib2 installed.
+    - **Check whether the checkout pins the same depot_tools revision the driver clones before
+      assuming gotcha 427.** comfy-angle 0.1.1's ANGLE revision pins `third_party/depot_tools`
+      at exactly the sha in `scripts/depot-tools-revision.txt`, so both gsutils are 5.35 (six
+      1.17, fine on 3.12) and the two-gsutils split never arises — `grep` the DEPS for the
+      revision instead of inferring it from the project's age.
+    - **Only vpython-dispatched scripts are affected.** `depot_tools/gn` and `autoninja` run
+      through `python-bin/python3`, the hermetic CIPD cpython, and every hook a standalone
+      ANGLE sync runs on Linux (`clang`, `llvm_objdump`, `rust`, `lastchange`,
+      `configure_siso`) imports nothing outside the stdlib and depot_tools itself — so
+      httplib2 is the whole bill, not the first of many.
+
+443. **A per-architecture block in an upstream `CMakeLists.txt` that turns x86 features off
+    with `set(<OPT> OFF CACHE ... FORCE)` is only as good as its position in the file: when
+    the block sits *after* `include(third_party)`/`include(flags)`/`include(configure)`, the
+    FORCE is read too late and every `add_definitions()` those includes already ran stays in
+    effect for the rest of the build.** Paddle puts `WITH_ARM`, `WITH_SW`, `WITH_MIPS` and
+    `WITH_LOONGARCH` at `CMakeLists.txt:638-686` but includes `cmake/third_party.cmake` at
+    line 591, so a `WITH_RISCV` block copied from them inherits the same defect. In round 6
+    of the paddlepaddle port the configure log said `-- Compile with Sleef support` even
+    though the block FORCEd `WITH_SLEEF OFF`, and the build died 2h33m later at 21% of
+    `phi_core` with eight `error: 'Sleef_sinf1_u35' was not declared in this scope` out of
+    `paddle/phi/kernels/funcs/activation_functor.h`, which gates its `Sine`/`Cosine`
+    specialisations on `PADDLE_WITH_SLEEF` alone.
+    - **The failure mode is a *split* configuration, which is worse than either setting.**
+      `cmake/sleef.cmake` had already run `add_definitions(-DPADDLE_WITH_SLEEF)` at line 591,
+      while `paddle/phi/CMakeLists.txt`'s `if(WITH_SLEEF) list(APPEND PHI_DEPS sleef)` is
+      processed by `add_subdirectory()` *after* the block and did see the OFF — so the tree
+      compiled the SLEEF path and linked no SLEEF. Had the header declared the symbols, the
+      same bug would have surfaced hours further on as undefined references at the final
+      link instead.
+    - **Read the include line numbers before trusting the block, and prefer the project's own
+      early switch.** `grep -n '^include(' CMakeLists.txt` against the block's line number
+      answers it in one command. Paddle already had the right hook 230 lines earlier —
+      `set(WITH_SLEEF_DEFAULT ON)` / `if(WIN32 OR WITH_ROCM)` at line 356, feeding
+      `option(WITH_SLEEF ... ${WITH_SLEEF_DEFAULT})` — so adding `OR WITH_RISCV` there is
+      both minimal and the most upstreamable form, and it reaches the arch variable because
+      `setup.py` forwards every `WITH_*` environment variable as a `-D`, which populates the
+      cache before `CMakeLists.txt` runs at all.
+    - **Check the *other* options the block forces before assuming only one leaked.** Same
+      file, same block: `WITH_AVX` and `WITH_MKL` default to `${AVX_FOUND}` and so were
+      already OFF on riscv64, but `WITH_XBYAK` defaults ON and `cmake/external/xbyak.cmake`
+      does `add_definitions(-DPADDLE_WITH_XBYAK -DXBYAK64)` — which leaked identically. That
+      one happens to be benign (`cpu_info.h` only uses it to *skip* defining `cpuid()`, and
+      the `jit/gen` subdirectory is added after the block, so it was correctly dropped), but
+      it is benign by luck, not by design, and it still builds a dependency nothing uses.
+    - **A third-party library can be missing entry points on riscv64 that exist everywhere
+      else, so "just turn the feature on" is not the alternative fix.** SLEEF 3.6.1's
+      `src/libm/CMakeLists.txt` omits `DSP_SCALAR` from `SLEEF_ARCH_RISCV64`'s header list,
+      alone among its six architectures, and `DSP_SCALAR` is the only entry with no ISA-name
+      argument — `mkrename.c` reads that ninth argv as the suffix, so it is the only section
+      emitting *unsuffixed* scalar declarations. The generated riscv64 `sleef.h` therefore
+      declares `Sleef_sinf1_u35purec` and never `Sleef_sinf1_u35`. Worth reporting upstream
+      to SLEEF, but not something a wheel port should carry a patch for.
+
+445. **The companion to gotcha 424: once you know which CIPD packages have no riscv64
+    build, a `.gclient` `custom_deps` entry set to `None` is *not* how you get rid of them.
+    That removes a `git` dep and is silently ignored for a `cipd` one, so the package
+    survives into the sync anyway — edit the checkout's `DEPS`, either by appending
+    `and host_cpu != "riscv64"` to the entry's condition (424) or by deleting the entry
+    outright.** In `gclient.py`, `_postprocess_deps` copies the DEPS dict
+    verbatim and only ever *adds* custom_deps whose value is truthy; the removal path for a
+    git dep is `Dependency._OverrideUrl`, which asks `get_custom_deps` for the URL and skips
+    the dep when it comes back `None`. `_deps_to_objects` builds a `CipdDependency`
+    straight from the DEPS entry and passes it only `custom_vars` — nothing in that path
+    consults `custom_deps`, and nothing warns. The null looks right in the `.gclient`, the
+    sync proceeds normally for several minutes, and the package still turns up in the
+    `cipd ensure` that ends the sync: `failed to resolve <pkg>/linux-riscv64 (line N): no
+    such package`, one line per unresolvable package, then a bare `CalledProcessError`.
+    - **Run 424's `cipd describe` audit first.** It costs two commands from an x86 host and
+      names the whole set, which is the difference between one fix and one CI round per
+      package. For a standalone ANGLE checkout the answer is the same list 424 already
+      records for V8 — `infra/rbe/client`, siso, and the luci `isolate`/`swarming` tools.
+    - **Rewrite the DEPS entries before the sync, and raise if one is not found.**
+      The driver script already has the checkout on disk before it writes `.gclient`, so a
+      `re.subn(rf"\n  '{re.escape(path)}': \{{\n.*?\n  \}},\n", "\n", text, flags=re.DOTALL)`
+      per path is enough for Chromium-family DEPS formatting. Assert the count is exactly 1:
+      a future revision that reformats DEPS must fail loudly rather than quietly restore the
+      dep you thought you had dropped.
+    - **`cipd ensure` reports *every* unresolvable package at once**, because gclient batches
+      all cipd deps in the tree into a single ensure file for the root. That list is the
+      complete set — fix them in one round instead of expecting another wall per package.
+    - **Read the ensure-file failure by dep entry, not by package.** ANGLE's `tools/luci-go`
+      names three packages and only `isolate` and `swarming` lack a riscv64 build, but they
+      share one entry, so dropping the entry also drops `cas`. Fine when the whole entry is
+      test-distribution tooling; check before assuming.
+    - **Dropping siso means saying so in the GN args, or you just move the failure later.**
+      `//build/toolchain/siso.gni` defaults `use_siso` to false for a non-Chromium checkout,
+      but a project's own `.gn` can override that in `default_args` — ANGLE's sets
+      `use_siso = true` — and `autoninja` chooses siso or ninja by reading `use_siso` back out
+      of `args.gn`. Add `use_siso=false` to the args wherever you remove the siso package.
+      It does reach autoninja despite the args being passed as one space-separated
+      `--args=` string: gn runs `gn format` over that string in `Setup::SaveArgsToFile`, so
+      `args.gn` lands one `key = value` per line, which is the only shape depot_tools'
+      `gn_helper.args` regex matches. Leave `use_remoteexec` unset and `use_reclient` stays
+      false on its own (`use_reclient = use_remoteexec && !use_siso`), so nothing wants the
+      reclient package either.
+    - **All of this is checkable off-target in seconds.** Fetch the pinned `DEPS` and
+      `gclient.py` from gitiles (`?format=TEXT`, base64 — no clone), run the rewrite against
+      the real DEPS, `exec` the result to confirm it still parses and count the deps and
+      hooks, and diff the rendered `.gclient` and gn args for the untouched architectures to
+      prove the port changed nothing for them.
