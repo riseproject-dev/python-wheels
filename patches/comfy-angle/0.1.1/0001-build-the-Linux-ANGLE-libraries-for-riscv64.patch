@@ -30,6 +30,14 @@ build_with_chromium, which a standalone ANGLE checkout is not - so null
 them out through the same custom_deps mechanism that already drops
 SwiftShader, VK-GL-CTS and catapult.
 
+gclient's helper scripts run under vpython3, which builds their venvs from
+prebuilt wheels in CIPD, and infra/python/wheels publishes no linux-riscv64
+builds - so "gclient sync" aborts with "no such package:
+infra/python/wheels/crcmod/linux-riscv64_cp311_cp311" (and the same for
+lxml) before any dependency is fetched. Set VPYTHON_BYPASS for that host so
+those scripts run under the interpreter already on PATH, which is the
+documented escape hatch for a manually managed Python.
+
 The riscv64 libraries are compiled from source instead of being extracted
 from an Electron release, so the wheel cannot carry Electron's
 electron-LICENSE or the LICENSES.chromium.html that Electron's own build
@@ -91,7 +99,7 @@ diff --git a/scripts/build.py b/scripts/build.py
 diff --git a/scripts/build_linux.py b/scripts/build_linux.py
 --- a/scripts/build_linux.py
 +++ b/scripts/build_linux.py
-@@ -19,7 +19,25 @@
+@@ -19,7 +19,31 @@
  PLATFORM_TAGS = {
      "x86_64": ("x64", "manylinux_2_28_x86_64"),
      "aarch64": ("arm64", "manylinux_2_28_aarch64"),
@@ -114,11 +122,17 @@ diff --git a/scripts/build_linux.py b/scripts/build_linux.py
 +    "riscv64": ("buildtools/reclient", "third_party/siso/cipd"),
 +}
 +
++# infra/python/wheels/* publishes no linux-riscv64 builds, so vpython3 cannot
++# assemble the venvs gclient's helper scripts ask for ("no such package:
++# infra/python/wheels/crcmod/linux-riscv64_cp311_cp311"). Run them under the
++# interpreter already on PATH instead, which is what VPYTHON_BYPASS is for.
++VPYTHON_BYPASS = {"riscv64"}
++
 +LICENSE_GLOBS = ("LICENSE*", "LICENCE*", "COPYING*")
  
  FORBIDDEN_LIBRARIES = {
      "libX11.so.6",
-@@ -66,24 +84,46 @@
+@@ -66,24 +90,46 @@
          raise RuntimeError(f"{library.name} still depends on {names}")
  
  
@@ -170,7 +184,7 @@ diff --git a/scripts/build_linux.py b/scripts/build_linux.py
  
  
  def main() -> None:
-@@ -111,6 +151,9 @@
+@@ -111,6 +157,9 @@
      checkout(DEPOT_TOOLS_URL, depot_tools, depot_tools_revision)
      checkout(ANGLE_URL, angle, angle_revision)
  
@@ -180,7 +194,7 @@ diff --git a/scripts/build_linux.py b/scripts/build_linux.py
      (angle / ".gclient").write_text(
          "solutions = [{\n"
          "  'name': '.',\n"
-@@ -121,6 +164,7 @@
+@@ -121,6 +170,7 @@
          "    'third_party/SwiftShader': None,\n"
          "    'third_party/VK-GL-CTS/src': None,\n"
          "    'third_party/catapult': None,\n"
@@ -188,7 +202,14 @@ diff --git a/scripts/build_linux.py b/scripts/build_linux.py
          "  },\n"
          "  'custom_vars': {\n"
          "    'checkout_angle_cl_deps': False,\n"
-@@ -137,8 +181,9 @@
+@@ -134,11 +184,16 @@
+     env = os.environ.copy()
+     env["PATH"] = str(depot_tools) + os.pathsep + env["PATH"]
+     env["DEPOT_TOOLS_UPDATE"] = "0"
++    if machine in VPYTHON_BYPASS:
++        env["VPYTHON_BYPASS"] = (
++            "manually managed python not supported by chrome operations"
++        )
      run(str(depot_tools / "ensure_bootstrap"), cwd=depot_tools, env=env)
      run("gclient", "sync", "--no-history", "--shallow", cwd=angle, env=env)
  
@@ -200,7 +221,7 @@ diff --git a/scripts/build_linux.py b/scripts/build_linux.py
  
      out_dir = angle / "out" / "Release"
      gn_args_list = [
-@@ -166,12 +211,12 @@
+@@ -166,12 +221,12 @@
          "angle_enable_overlay=false",
          "angle_has_frame_capture=false",
      ]
@@ -218,7 +239,7 @@ diff --git a/scripts/build_linux.py b/scripts/build_linux.py
          gn_args_list.extend(
              [
                  "is_clang=false",
-@@ -206,6 +251,8 @@
+@@ -206,6 +261,8 @@
          verify_dependencies(target)
          libraries.append(target)
  
