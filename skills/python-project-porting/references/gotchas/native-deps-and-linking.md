@@ -30,6 +30,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
   drifted from its declaration; the ELF links anyway and the first `dlopen` is where it
   dies.
 
+- **461** — A dependency wheel *shipping* a library is not a promise that the library has the
+  symbol a build gates on: a presence-of-file probe must become a presence-of-symbol probe, or
+  the extension links clean and fails at import (the vllm/OpenBLAS `sbgemm_` case).
 ---
 
 16. **All-static BUNDLED build + a dep the project can't bundle = link failure.**
@@ -588,3 +591,47 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
       and are expected on manylinux. Anything else is a real dangling reference. That
       turned "is there a second bug hiding behind this one?" into a fact for five
       libraries at once, instead of one more multi-hour CI cycle per symbol.
+
+461. **A dependency wheel *shipping* a library is not a promise that the library exports the
+    symbol a build gates on — turn a presence-of-file probe into a presence-of-symbol probe
+    (the vllm/OpenBLAS `sbgemm_` case).** vLLM's `cmake/cpu_extension.cmake` decides whether
+    to compile its OpenBLAS bf16 GEMM path with
+    `file(GLOB ... "${TORCH_INSTALL_PREFIX}/lib/libopenblas*.so*")` and defines
+    `VLLM_HAS_OPENBLAS` if the glob hits. Our riscv64 `torch==2.13.0+cpu` wheel does ship
+    `torch/lib/libopenblas.so.0`, so the glob hits — but that OpenBLAS is built **without
+    `BUILD_BFLOAT16`**, which OpenBLAS only enables for the targets it has bf16 kernels for
+    (x86_64 Cooper Lake and later, ARM64 Neoverse, POWER10, z14 and later). RISC-V is not one
+    of them: `nm -D --defined-only libopenblas.so.0` finds `sgemm_` and **no `sbgemm_`, and
+    zero bf16 symbols at all**. The build still succeeded; `import vllm._C` then failed with
+    `undefined symbol: sbgemm_` after a 75-minute job.
+    - **The reason it reaches import rather than link is worth internalizing.** The same file
+      comments "we don't link openblas directly to _C extension, as it's available through
+      libtorch.so" — a deliberate choice, since torch loads it `RTLD_GLOBAL`. A shared object
+      with an unresolved symbol and no library to resolve it against **links without
+      complaint**; only `dlopen` reports it. So this class of bug is invisible to the build log
+      and to `auditwheel`, and is caught only by actually importing the extension — which is
+      why gotcha 6's "wire up real testing" earns its keep even when the test is one `import`.
+    - **Check what the dependency wheel actually exports, on the host, before theorising.**
+      `nm` reads foreign-arch ELF perfectly well, so download the riscv64 wheel, extract the
+      library and query it — no QEMU, no container, about a minute. The wheel's `torch/lib/`
+      also reveals the transitive companions (`libgfortran.so.5`, `libgomp.so.1`) that decide
+      whether a *link*-based probe would even work.
+    - **Prefer the arch-agnostic probe to an arch exclusion** when the upstream code already has
+      a fallback. Here `blas_gemm.h`'s `#else` branch dispatches through
+      `at::native::cpublas::gemm_no_downcast_stub`, which `libtorch_cpu.so` does export
+      (verify: `nm -D --defined-only libtorch_cpu.so | grep gemm_no_downcast_stub`), so the fix
+      is to probe with `execute_process(COMMAND ${CMAKE_NM} --dynamic --defined-only <lib>)` and
+      only define the macro when the symbol is there. `if (SYMS STREQUAL "" OR SYMS MATCHES
+      "[ \t]sbgemm_[\r\n]")` keeps the old behaviour whenever the probe itself cannot run, so
+      no working platform regresses — which is what makes it `To upstream` rather than a
+      riscv64-only exclusion.
+    - **`check_library_exists()` is the tempting CMake idiom and the wrong one here**: it links
+      the library, so it drags in `libgfortran`/`libgomp` from the same wheel directory and
+      fails for *link-environment* reasons on platforms where the symbol does exist — silently
+      turning the fast path off everywhere. The `nm` probe cannot fail that way.
+    - **Validate the CMake logic locally in seconds, on any arch.** Point a four-line throwaway
+      `CMakeLists.txt` at the extracted riscv64 `libopenblas.so.0` and print the decision, then
+      re-run it against two synthetic `.so` files built with `gcc -shared` — one exporting
+      `sbgemm_`, one exporting only `dsbgemm_`/`sbgemm_direct` — to prove both the positive case
+      and the absence of a substring false positive. That is the whole patch under test without
+      a riscv64 cycle.

@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (435 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (438 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -212,6 +212,9 @@ The porting gotchas (435 of them) live in [`references/gotchas/`](gotchas/), spl
   (there is none) — plus a vendor's package server and conda channel are the same two platform
   tables as an open project's, and a `.lic` key check in the payload kills gotcha 35's
   swap-in-another-build escape hatch (the gurobipy case).
+- **459** — A CUDA-only PyPI wheel does not make the *project* CUDA-only: a device-selecting
+  build env var can produce a genuinely portable CPU distribution from the same tree, and
+  upstream may already carry riscv64 kernels for it (the vllm case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -543,6 +546,9 @@ The porting gotchas (435 of them) live in [`references/gotchas/`](gotchas/), spl
   the `-static` subpackage installs, so a *lowercase* `find_package(zlib)` hard-errors on the
   riscv64 image; `-DCMAKE_DISABLE_FIND_PACKAGE_zlib=ON` routes the project back to its own
   `find_library` fallback (the pulsar-client case).
+- **460** — An upstream Dockerfile's `apt-get install` line is a build-dependency manifest
+  nothing else in the tree declares: translate its `-dev` packages to Rocky names before the
+  first run, or the image's missing header stops the compile (the vllm `numa.h` case).
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
@@ -570,6 +576,9 @@ The porting gotchas (435 of them) live in [`references/gotchas/`](gotchas/), spl
 - **415** — Turning an optional native codec OFF can select a stub whose signature has
   drifted from its declaration; the ELF links anyway and the first `dlopen` is where it
   dies.
+- **461** — A dependency wheel *shipping* a library is not a promise that it exports the symbol
+  a build gates on: a presence-of-file probe must become a presence-of-symbol probe, or the
+  extension links clean and fails at import (the vllm/OpenBLAS `sbgemm_` case).
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 

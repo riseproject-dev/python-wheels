@@ -87,6 +87,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **455** — Rocky 10's zlib is `zlib-ng-compat` and its CMake config names a `libz.a` it never
   installs, so a *lowercase* `find_package(zlib)` aborts the configure — `QUIET` or not.
 
+- **460** — An upstream Dockerfile's `apt-get install` line is a build-dependency manifest
+  nothing else in the tree declares: translate its `-dev` packages to Rocky names before the
+  first run, or the image's missing header stops the compile (the vllm `numa.h` case).
 ---
 
 26. **The riscv64 runners ship GCC 13; some packages need GCC 14 or later.** The compiler
@@ -1445,3 +1448,36 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       also clears it, at the cost of a static archive that must not end up in the wheel.
     - Reproduces identically on `rockylinux/rockylinux:10` x86_64, so a two-minute configure
       settles it instead of a riscv64 cycle.
+
+460. **An upstream Dockerfile's `apt-get install` line is a build-dependency manifest that
+    nothing else in the tree declares — read it and translate before the first run (the vllm
+    `numa.h` case).** A workflow mirroring a project whose only wheel build is a Dockerfile
+    inherits that Dockerfile's *Python* build requirements naturally (they are in
+    `requirements/build/*.txt` or `pyproject.toml`) and its *system* requirements not at all:
+    they exist only as a `RUN apt-get install` layer, which cibuildwheel's container never
+    replays. vLLM's `docker/Dockerfile.cpu` installs `libnuma-dev` among a dozen other
+    packages; `csrc/cpu/utils.cpp` then `#include <numa.h>` behind nothing but
+    `#ifndef VLLM_NUMA_DISABLED`, and `cmake/cpu_extension.cmake` sets `ENABLE_NUMA TRUE`
+    unconditionally (its only carve-out is Apple) and links `numa`. The first riscv64 run died
+    on `fatal error: numa.h: No such file or directory` after burning six minutes installing
+    torch — a failure with no signal in any Python metadata.
+    - **Diff the Dockerfile's package list against the image before you push, not after.**
+      Every `-dev`/`-devel` name in it is a header the manylinux image probably lacks, and
+      each one costs a full cycle to discover serially. `libnuma-dev` → `numactl-devel` on
+      Rocky, which is in **appstream** and needs no `--enablerepo=crb` (gotcha 180's note
+      that CRB *is* enabled still applies, but is not needed here).
+    - **Confirm the name and that it carries the header you want, in the 60MB proxy container
+      rather than the multi-GB manylinux image** (gotcha 51's technique):
+      `docker run --platform linux/riscv64 quay.io/rockylinux/rockylinux:10` then
+      `dnf -q list numactl-devel` and `dnf -q repoquery -l numactl-devel`, which prints
+      `/usr/include/numa.h`, `/usr/lib64/libnuma.so`, `/usr/lib64/pkgconfig/numa.pc`. Behind
+      an egress proxy this needs `--network host` plus the proxy CA mounted into
+      `/etc/pki/ca-trust/source/anchors/` and `update-ca-trust extract`, or dnf fails the
+      mirrorlist on a self-signed chain.
+    - **Installing it is mirroring upstream, not deviating from it** (SKILL.md's goal 2), so it
+      needs no "differs from upstream" note in the PR — the Debian and Rocky names are the same
+      dependency. What *would* be a deviation is disabling the feature (here `VLLM_NUMA_DISABLED`)
+      to route around a package the image can supply.
+    - **auditwheel then vendors the library into the wheel**, which is correct: upstream relies on
+      its image carrying `libnuma.so.1` at run time and a wheel has no image. Do not add it to
+      `--exclude` on the strength of "upstream does not ship it".
