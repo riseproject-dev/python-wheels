@@ -1,0 +1,300 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sat, 20 Sep 2026 00:00:00 +0000
+Subject: [PATCH] build the Linux ANGLE libraries for riscv64
+
+scripts/build_linux.py builds libEGL/libGLESv2 from the pinned ANGLE
+revision for x86-64 and arm64 only, so there is no riscv64 wheel. Every
+layer below it already knows the architecture:
+
+  * depot_tools' detect_host_arch.py maps riscv* to riscv64, and CIPD
+    publishes linux-riscv64 for the cipd client, cpython3, ninja and gn;
+  * with is_clang=false Chromium's build selects
+    //build/toolchain/linux:riscv64, a gcc_toolchain whose toolprefix is
+    riscv64-linux-gnu, and config/compiler/BUILD.gn has riscv64 flags;
+  * ANGLE's own gni/angle.gni lists riscv64 among the 64-bit CPUs, so it
+    does not hit the "Unknown current CPU" assert.
+
+So reuse the arm64 recipe rather than adding a new one. The arm64 path
+already aliases the container's gcc/g++/ar/readelf/nm under the names
+ANGLE's GCC toolchain expects and turns off Clang, the bundled libc++ and
+warnings-as-errors; generalise that to a toolprefix table and add riscv64
+to it. The build-time GN args are otherwise unchanged.
+
+Three DEPS entries pull CIPD packages with no linux-riscv64 build, so the
+"cipd ensure" that ends the sync cannot resolve them and "gclient sync"
+aborts before anything compiles: buildtools/reclient (infra/rbe/client),
+third_party/siso/cipd (build/siso) and tools/luci-go (the isolate and
+swarming tools under infra/tools/luci; only its cas tool is published).
+None of them is reachable from a local build - reclient and siso need an
+RBE backend, and luci-go drives swarming - so delete those entries from the
+checkout's DEPS before the sync. A custom_deps override cannot do it:
+gclient applies custom_deps while resolving a "git" dep's URL, whereas a
+"cipd" entry is copied out of DEPS into a CipdDependency that never
+consults custom_deps, so a None there is accepted and then ignored.
+
+Dropping siso has to be reflected in the GN args too. ANGLE's .gn sets
+use_siso=true in default_args for a standalone checkout, and autoninja
+picks siso or ninja by reading use_siso back out of args.gn, so it would
+otherwise look for a binary that was never fetched. Set use_siso=false for
+that host; use_remoteexec is unset, which keeps use_reclient false, so
+ninja drives the build with no remote execution of any kind.
+
+gclient's helper scripts run under vpython3, which builds their venvs from
+prebuilt wheels in CIPD, and infra/python/wheels publishes no linux-riscv64
+builds - so "gclient sync" aborts with "no such package:
+infra/python/wheels/crcmod/linux-riscv64_cp311_cp311" (and the same for
+lxml) before any dependency is fetched. Set VPYTHON_BYPASS for that host so
+those scripts run under the interpreter already on PATH, which is the
+documented escape hatch for a manually managed Python.
+
+The riscv64 libraries are compiled from source instead of being extracted
+from an Electron release, so the wheel cannot carry Electron's
+electron-LICENSE or the LICENSES.chromium.html that Electron's own build
+generates. Stage the licences of the tree the libraries were actually built
+from: ANGLE's LICENSE, plus an aggregate of the LICENSE/LICENCE/COPYING
+files found under third_party/ in the checkout, which is what the
+statically linked Vulkan loader, SPIRV-Tools, Abseil and friends require.
+The aggregate is collected by directory rather than from the link line, so
+it over-reports rather than risk omitting a component that is linked in.
+
+manylinux_2_39 is the riscv64 baseline (the 2_28 images upstream uses for
+x86-64 and arm64 are not published for riscv64), so that is the platform
+tag the riscv64 wheel carries.
+
+The new tables are all keyed by architecture, so x86-64 and arm64 render a
+byte-identical .gclient and byte-identical GN args to before, against an
+untouched DEPS.
+
+Upstream-Status: To upstream [not submitted: no cross-repo issue/PR contributions from this port]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -25,4 +25,10 @@
+ include = ["comfy_angle*"]
+ 
+ [tool.setuptools.package-data]
+-comfy_angle = ["libs/*", "electron-LICENSE", "LICENSES.chromium.html"]
++comfy_angle = [
++    "libs/*",
++    "electron-LICENSE",
++    "LICENSES.chromium.html",
++    "LICENSE.angle",
++    "LICENSES.angle.txt",
++]
+diff --git a/scripts/build.py b/scripts/build.py
+--- a/scripts/build.py
++++ b/scripts/build.py
+@@ -29,11 +29,17 @@
+     "macosx_11_0_arm64",
+     "manylinux_2_28_aarch64",
+     "manylinux_2_28_x86_64",
++    "manylinux_2_39_riscv64",
+     "win_amd64",
+     "win_arm64",
+ ]
+ 
+-LICENSE_FILES = ["electron-LICENSE", "LICENSES.chromium.html"]
++LICENSE_FILES = [
++    "electron-LICENSE",
++    "LICENSES.chromium.html",
++    "LICENSE.angle",
++    "LICENSES.angle.txt",
++]
+ FORBIDDEN_LINUX_LIBRARIES = {
+     "libX11.so.6",
+     "libXext.so.6",
+diff --git a/scripts/build_linux.py b/scripts/build_linux.py
+--- a/scripts/build_linux.py
++++ b/scripts/build_linux.py
+@@ -9,7 +9,7 @@
+ import shutil
+ import subprocess
+ from pathlib import Path
+-from typing import Dict, Optional
++from typing import Dict, Optional, Sequence
+ 
+ 
+ ROOT = Path(__file__).resolve().parent.parent
+@@ -19,8 +19,39 @@
+ PLATFORM_TAGS = {
+     "x86_64": ("x64", "manylinux_2_28_x86_64"),
+     "aarch64": ("arm64", "manylinux_2_28_aarch64"),
++    "riscv64": ("riscv64", "manylinux_2_39_riscv64"),
+ }
+ 
++# Chromium publishes its prebuilt Clang only for x86-64 hosts, so the other
++# architectures build with the container's GCC, reached through ANGLE's
++# "<toolprefix>-<tool>" command names.
++NATIVE_GCC_TOOLPREFIX = {
++    "aarch64": "aarch64-linux-gnu",
++    "riscv64": "riscv64-linux-gnu",
++}
++
++# DEPS entries whose CIPD packages are not published for a host architecture;
++# "gclient sync" fails on the first one it cannot resolve. None of them is
++# reachable from a local build: reclient and siso need an RBE backend, and
++# luci-go drives swarming. They have to be removed from DEPS itself, because a
++# custom_deps entry only overrides a "git" dep - gclient copies a "cipd" one
++# straight out of DEPS and never consults custom_deps for it.
++UNAVAILABLE_CIPD_DEPS = {
++    "riscv64": (
++        "buildtools/reclient",
++        "third_party/siso/cipd",
++        "tools/luci-go",
++    ),
++}
++
++# infra/python/wheels/* publishes no linux-riscv64 builds, so vpython3 cannot
++# assemble the venvs gclient's helper scripts ask for ("no such package:
++# infra/python/wheels/crcmod/linux-riscv64_cp311_cp311"). Run them under the
++# interpreter already on PATH instead, which is what VPYTHON_BYPASS is for.
++VPYTHON_BYPASS = {"riscv64"}
++
++LICENSE_GLOBS = ("LICENSE*", "LICENCE*", "COPYING*")
++
+ FORBIDDEN_LIBRARIES = {
+     "libX11.so.6",
+     "libXext.so.6",
+@@ -66,18 +97,18 @@
+         raise RuntimeError(f"{library.name} still depends on {names}")
+ 
+ 
+-def configure_native_arm64_gcc(
+-    work_dir: Path, env: Dict[str, str]
++def configure_native_gcc(
++    work_dir: Path, env: Dict[str, str], toolprefix: str
+ ) -> Dict[str, str]:
+-    """Expose the native compiler under ANGLE's ARM64 toolchain names."""
+-    toolchain_dir = work_dir / "native-arm64-toolchain"
++    """Expose the native compiler under ANGLE's GCC toolchain names."""
++    toolchain_dir = work_dir / f"native-{toolprefix}-toolchain"
+     toolchain_dir.mkdir(parents=True, exist_ok=True)
+ 
+     for command in ("gcc", "g++", "ar", "readelf", "nm"):
+         executable = shutil.which(command, path=env["PATH"])
+         if executable is None:
+             raise RuntimeError(f"Required build tool is unavailable: {command}")
+-        alias = toolchain_dir / f"aarch64-linux-gnu-{command}"
++        alias = toolchain_dir / f"{toolprefix}-{command}"
+         alias.unlink(missing_ok=True)
+         alias.symlink_to(executable)
+ 
+@@ -86,6 +117,44 @@
+     return configured
+ 
+ 
++def drop_deps(angle: Path, paths: Sequence[str]) -> None:
++    """Delete dependency entries from the checkout's DEPS file."""
++    deps_file = angle / "DEPS"
++    text = deps_file.read_text()
++    for path in paths:
++        text, replaced = re.subn(
++            rf"\n  '{re.escape(path)}': \{{\n.*?\n  \}},\n",
++            "\n",
++            text,
++            flags=re.DOTALL,
++        )
++        if replaced != 1:
++            raise RuntimeError(f"Found {replaced} DEPS entries for {path}, want 1")
++    deps_file.write_text(text)
++
++
++def stage_licenses(angle: Path, destination: Path) -> None:
++    """Stage ANGLE's licence and those of the code linked into the libraries."""
++    shutil.copy2(angle / "LICENSE", destination / "LICENSE.angle")
++
++    sources = sorted(
++        {
++            path
++            for pattern in LICENSE_GLOBS
++            for path in angle.glob(f"third_party/**/{pattern}")
++            if path.is_file()
++        }
++    )
++    with (destination / "LICENSES.angle.txt").open("w") as aggregate:
++        aggregate.write(
++            "Licences of the third-party code in the ANGLE checkout that these\n"
++            "libraries are built from.\n"
++        )
++        for source in sources:
++            aggregate.write(f"\n{'=' * 78}\n{source.relative_to(angle)}\n{'=' * 78}\n")
++            aggregate.write(source.read_text(encoding="utf-8", errors="replace"))
++
++
+ def main() -> None:
+     parser = argparse.ArgumentParser()
+     parser.add_argument("--work-dir", type=Path, default=ROOT / ".angle-build")
+@@ -111,6 +180,10 @@
+     checkout(DEPOT_TOOLS_URL, depot_tools, depot_tools_revision)
+     checkout(ANGLE_URL, angle, angle_revision)
+ 
++    unavailable_deps = UNAVAILABLE_CIPD_DEPS.get(machine, ())
++    if unavailable_deps:
++        drop_deps(angle, unavailable_deps)
++
+     (angle / ".gclient").write_text(
+         "solutions = [{\n"
+         "  'name': '.',\n"
+@@ -134,11 +207,16 @@
+     env = os.environ.copy()
+     env["PATH"] = str(depot_tools) + os.pathsep + env["PATH"]
+     env["DEPOT_TOOLS_UPDATE"] = "0"
++    if machine in VPYTHON_BYPASS:
++        env["VPYTHON_BYPASS"] = (
++            "manually managed python not supported by chrome operations"
++        )
+     run(str(depot_tools / "ensure_bootstrap"), cwd=depot_tools, env=env)
+     run("gclient", "sync", "--no-history", "--shallow", cwd=angle, env=env)
+ 
+-    if machine == "aarch64":
+-        env = configure_native_arm64_gcc(work_dir, env)
++    toolprefix = NATIVE_GCC_TOOLPREFIX.get(machine)
++    if toolprefix is not None:
++        env = configure_native_gcc(work_dir, env, toolprefix)
+ 
+     out_dir = angle / "out" / "Release"
+     gn_args_list = [
+@@ -166,12 +244,12 @@
+         "angle_enable_overlay=false",
+         "angle_has_frame_capture=false",
+     ]
+-    if machine == "aarch64":
++    if toolprefix is not None:
+         # Chromium only publishes its Linux Clang package for x86-64. ANGLE's
+-        # GCC ARM64 toolchain works natively once the expected prefixed command
+-        # names above resolve to the container's compiler. The bundled libc++
+-        # requires GCC 15, while the manylinux image provides GCC 14, so use
+-        # the image's libstdc++ and tolerate upstream's Clang-specific warnings.
++        # GCC toolchains work natively once the expected prefixed command names
++        # above resolve to the container's compiler. The bundled libc++ requires
++        # GCC 15, while the manylinux images provide GCC 14, so use the image's
++        # libstdc++ and tolerate upstream's Clang-specific warnings.
+         gn_args_list.extend(
+             [
+                 "is_clang=false",
+@@ -180,6 +258,12 @@
+                 "use_custom_libcxx_for_host=false",
+             ]
+         )
++    if "third_party/siso/cipd" in unavailable_deps:
++        # ANGLE's .gn turns Siso on for a standalone checkout, but the dep
++        # dropped above is the only Siso there is. gn formats args.gn one
++        # argument per line, which is where autoninja reads this back to
++        # dispatch to ninja instead.
++        gn_args_list.append("use_siso=false")
+     gn_args = " ".join(gn_args_list)
+     run("gn", "gen", str(out_dir), f"--args={gn_args}", cwd=angle, env=env)
+     run(
+@@ -206,6 +290,8 @@
+         verify_dependencies(target)
+         libraries.append(target)
+ 
++    stage_licenses(angle, destination.parent)
++
+     mode = getattr(ctypes, "RTLD_GLOBAL", 0)
+     for library in libraries:
+         ctypes.CDLL(str(library), mode=mode)

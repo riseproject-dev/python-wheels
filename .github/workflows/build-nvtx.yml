@@ -1,0 +1,104 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build:
+#   https://github.com/NVIDIA/NVTX/blob/b7e56f42f85989f6df2839ec08f1666460f972ec/.github/workflows/cibw.yml
+name: Build nvtx wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/nvtx.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-nvtx.yml'
+      - 'docs/packages/nvtx.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-nvtx.yml'
+      - 'docs/packages/nvtx.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # The Python package is released from the NVIDIA/NVTX monorepo by a
+  # workflow_dispatch-only job that never pushes a Python tag (gotcha 103); the
+  # repo's v3.* tags are the C/C++ library. This commit's python/ and c/include
+  # trees are byte-identical to the 0.2.16 PyPI sdist. Move with NVTX_VERSION.
+  NVTX_REF: b7e56f42f85989f6df2839ec08f1666460f972ec
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: nvtx
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build nvtx ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: [cp312, cp313, cp314, cp314t]
+
+    env:
+      NVTX_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout NVIDIA/NVTX ${{ env.NVTX_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: NVIDIA/NVTX
+          ref: ${{ env.NVTX_REF }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy, which upstream's test-command installs and uninstalls to
+          # cover both paths, has riscv64 wheels only on our own registry.
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: nvtx-${{ env.NVTX_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish nvtx ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: nvtx-${{ matrix.version }}-*-manylinux_riscv64

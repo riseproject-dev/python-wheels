@@ -1,0 +1,43 @@
+From 27d6cc73a823c9df9e6bee17a4440aaae660313e Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sat, 19 Sep 2026 16:52:55 +0000
+Subject: [PATCH] test: cache: sleep before the final mtime-advancing save in
+ test_file_is_not_updated
+
+test_file_is_not_updated writes the cache file three times and checks
+os.path.getmtime() strictly advances each time a write happens. Before the
+second write-then-assert-greater pair (line 557/561 upstream) the test
+already sleeps 0.1s to guarantee the filesystem's mtime clock ticks forward
+between writes. The third write-then-assert-greater pair (triggered by
+advancing the mocked snowflake.connector.cache.now() past entry_lifetime)
+has no such sleep, even though the write it precedes still hits the real
+filesystem clock, not the mocked one.
+
+On this repo's riscv64 runners the two real-wall-clock writes can land
+within the same mtime tick, making the final
+`os.path.getmtime(tmp_cache_file) > second_updated_time` assertion fail
+with equal values (e.g. run 35440238662, job
+Build snowflake-connector-python 4.7.4 cp313-manylinux_riscv64). Add the
+same 0.1s sleep used earlier in this test before the last write, matching
+the established pattern.
+
+Upstream-Status: Inappropriate [riscv64 runner filesystem mtime resolution/timing is coarser than upstream's CI hosts; the test already sleeps before an analogous write two lines earlier but is missing the same sleep before this one]
+---
+ test/unit/test_cache.py | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/test/unit/test_cache.py b/test/unit/test_cache.py
+index 78ab517..095caf6 100644
+--- a/test/unit/test_cache.py
++++ b/test/unit/test_cache.py
+@@ -566,6 +566,7 @@ def test_file_is_not_updated(tmpdir):
+         assert os.path.getmtime(tmp_cache_file) == second_updated_time
+         # Advance mocked time past entry_lifetime to trigger expiry
+         mock_now.return_value = start_time + datetime.timedelta(seconds=2)
++        time.sleep(0.1)  # sleep 0.1 to ensure mtime advances on the filesystem
+         sfcache.save()  # this save call will dump cache because cache item is expired
+         assert not sfcache._cache_modified
+         assert os.path.getmtime(tmp_cache_file) > second_updated_time
+-- 
+2.43.0
+

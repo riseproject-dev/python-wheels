@@ -1,0 +1,175 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on: https://github.com/Comfy-Org/comfy-angle/blob/v0.1.1/.github/workflows/publish.yml
+name: Build comfy-angle wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/comfy-angle.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-comfy-angle.yml'
+      - 'docs/packages/comfy-angle.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-comfy-angle.yml'
+      - 'docs/packages/comfy-angle.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: comfy-angle
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build comfy-angle ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+
+    env:
+      COMFY_ANGLE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout comfy-angle v${{ env.COMFY_ANGLE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Comfy-Org/comfy-angle
+          ref: v${{ env.COMFY_ANGLE_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply riscv64 patches
+        run: git apply -v python-wheels/patches/comfy-angle/${{ env.COMFY_ANGLE_VERSION }}/*.patch
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
+
+      # Upstream builds the Linux libraries from the pinned ANGLE revision rather than
+      # unpacking an Electron release, so riscv64 needs no prebuilt binaries at all.
+      - name: Build the ANGLE libraries and the wheel
+        run: |
+          docker run --rm -v "$(pwd):/work" -w /work "${MANYLINUX_RISCV64_IMAGE}" bash -c '
+            set -euxo pipefail
+            export PATH="/opt/python/cp312-cp312/bin:$PATH"
+            # Under VPYTHON_BYPASS gclient runs on this interpreter, so the httplib2 that
+            # vpython3 would provide comes from pip; 0.30 dropped the httplib2.socks it needs.
+            pip install -q httplib2==0.13.1
+            # Keep the multi-GB ANGLE checkout inside the container so it goes away with it.
+            python scripts/build_linux.py --work-dir /tmp/angle-build
+            pip install -q build
+            python scripts/build.py
+            for pybin in /opt/python/cp312-cp312 /opt/python/cp313-cp313 /opt/python/cp314-cp314 /opt/python/cp314-cp314t; do
+              "$pybin/bin/pip" install -q --no-index --find-links=dist comfy-angle
+              cd /tmp
+              "$pybin/bin/python" - <<PYEOF
+          import ctypes
+          import comfy_angle
+
+          mode = ctypes.RTLD_GLOBAL
+          egl = ctypes.CDLL(comfy_angle.get_egl_path(), mode=mode)
+          ctypes.CDLL(comfy_angle.get_glesv2_path(), mode=mode)
+          egl.eglQueryString.restype = ctypes.c_char_p
+          print("EGL client extensions:", egl.eglQueryString(0, 0x3055))
+          PYEOF
+              cd /work
+            done
+          '
+
+      - name: Check the libraries and licences made it into the wheel
+        run: |
+          python3 - dist/*.whl <<'EOF'
+          import sys, zipfile
+          expected = {
+              "comfy_angle/libs/libEGL.so",
+              "comfy_angle/libs/libGLESv2.so",
+              "comfy_angle/LICENSE.angle",
+              "comfy_angle/LICENSES.angle.txt",
+          }
+          for whl in sys.argv[1:]:
+              names = set(zipfile.ZipFile(whl).namelist())
+              missing = expected - names
+              assert not missing, f"{whl}: missing {sorted(missing)}"
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: comfy-angle-${{ env.COMFY_ANGLE_VERSION }}-py3-none-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources (gcc) for comfy-angle ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      COMFY_ANGLE_VERSION: ${{ matrix.version }}
+
+    steps:
+      # The libraries are compiled with the image's GCC and link its libstdc++.
+      - name: Collect gcc source RPM from manylinux_riscv64
+        uses: riseproject-dev/python-wheels/actions/collect-gpl-sources@main
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: comfy-angle-${{ env.COMFY_ANGLE_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish comfy-angle ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: comfy-angle-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: comfy-angle-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc

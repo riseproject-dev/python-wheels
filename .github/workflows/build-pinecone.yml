@@ -99,11 +99,42 @@ jobs:
       - name: Install wheel + test deps
         # ipython is not in [project.optional-dependencies] but is imported directly
         # by tests/unit/models/**/test_*_display.py's IPython.lib.pretty.pretty tests.
-        run: uv pip install dist/*.whl pytest pytest-asyncio pytest-timeout respx anyio hypothesis ipython
+        #
+        # jsonschema, python-dotenv, pyyaml, grpcio, grpcio-tools and
+        # googleapis-common-protos are new in 10.0.0: they back the OAS conformance
+        # suite (tests/unit/conformance), the credential-gated live-suite guard tests,
+        # and the repo's own CI-tooling smoke tests. None are in
+        # [project.optional-dependencies] either — upstream only declares them in its
+        # uv `dependency-groups.dev` (`uv sync --group dev`, `grpcio>=1.76`/
+        # `grpcio-tools>=1.76`), so they're named here like every other test-only dep
+        # in this step.
+        #
+        # googleapis-common-protos: tests/unit/conformance/_grpc_harness.py protoc-
+        # compiles db_data_2026_07_conformance.proto on the fly, and that generated
+        # _pb2.py imports google.api.annotations_pb2 (an HTTP-annotation extension the
+        # .proto references for its OpenAPI mapping) — a module this package provides,
+        # not grpc/protobuf itself. Without it, every conformance test errors at
+        # harness setup with "ModuleNotFoundError: No module named 'google.api'". Pure
+        # Python (py3-none-any on PyPI), so no riscv64 build is needed here.
+        #
+        # grpcio/grpcio-tools pinned to 1.83.1 (our registry's newest riscv64 build,
+        # gotcha 30): left unpinned, uv resolves PyPI's newer, wheel-less release first
+        # and, even under UV_ONLY_BINARY=:all:, still builds grpc's full native core to
+        # read that release's metadata before rejecting it — well past the job's
+        # 120-minute timeout on riscv64.
+        run: uv pip install dist/*.whl pytest pytest-asyncio pytest-timeout respx anyio hypothesis ipython jsonschema python-dotenv pyyaml googleapis-common-protos grpcio==1.83.1 grpcio-tools==1.83.1
 
       - name: pytest tests/unit
         # The checkout's own pinecone/ source tree would otherwise shadow the
         # installed wheel on sys.path (no compiled pinecone/_grpc there) — gotcha 25.
+        # 10.0.0 added source-scanning meta tests (test_path_param_encoding_417.py,
+        # test_orphaned_helpers.py, test_declared_dependencies.py, test_api_coverage.py,
+        # test_legacy_index_translation.py::TestPurity) that read pinecone/<file>.py via
+        # Path(__file__).resolve().parents[N] — independent of sys.path, so simply
+        # renaming pinecone/ away (the old fix) breaks them with FileNotFoundError.
+        # Overwriting pinecone/ with the *installed* (compiled) copy satisfies both:
+        # same relative paths for the scanners, the real _grpc extension for imports —
+        # gotcha 39's dulwich fix, applied to a wheel install instead of build_ext -i.
         #
         # test_async_transport_calls_module_level_compute_backoff deselected: its
         # asyncio.get_event_loop() call raises "There is no current event loop" once
@@ -122,7 +153,9 @@ jobs:
         # runner (gotcha 176) -- raised via `-o` rather than dropping the ini file.
         run: |
           set -euo pipefail
-          mv pinecone pinecone-src
+          site_dir=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+          rm -rf pinecone
+          cp -a "$site_dir/pinecone" pinecone
           python -m pytest tests/unit -v -o timeout=60 \
             --deselect tests/unit/_internal/test_retry_transport.py::test_async_transport_calls_module_level_compute_backoff \
             --deselect "tests/unit/_internal/test_bulk_upsert_storm.py::test_query_namespaces_bounded_fan_out_under_quota[asyncio]"
@@ -145,5 +178,7 @@ jobs:
       contents: write
       pull-requests: write
     uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
     with:
       artifact-pattern: pinecone-${{ matrix.version }}-*-manylinux_riscv64

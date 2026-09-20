@@ -37,6 +37,7 @@ ARTIFACTS_PATH = os.environ.get("ARTIFACTS_PATH", "dist")
 RELEASE_TAG = os.environ.get("RELEASE_TAG")
 GPL_SOURCES_DESCRIPTION = os.environ.get("GPL_SOURCES_DESCRIPTION", "").strip()
 DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() == "true"
+GH_TOKEN = os.environ.get("GH_TOKEN", "")
 
 
 def find_wheel_files(path):
@@ -262,22 +263,52 @@ def git_run(*args, check=True):
     return subprocess.run(["git", *args], check=check)
 
 
+def push_remote():
+    """
+    Where to push the docs branch.
+
+    The checkout's own credentials are whatever the workflow gave it, and a
+    push made with GITHUB_TOKEN raises no events, so the documentation PR would
+    get no checks. Push over GH_TOKEN instead -- the App installation token
+    when the publish workflow minted one -- and fall back to the checkout's
+    remote when there is none. Actions masks the token in the logs.
+    """
+    if not GH_TOKEN:
+        return "origin"
+    return f"https://x-access-token:{GH_TOKEN}@github.com/{REPO}"
+
+
 def checkout_shared_branch(branch):
     """
     Check out the shared docs branch as a local worktree HEAD, based on
-    origin/<branch> if it already exists, otherwise on origin/main.
+    origin/<branch> if it already exists, otherwise on origin/main, and replay
+    its pending commits on top of origin/main.
 
     All docs updates are pushed to this single branch, so a run needs to build
-    on whatever is already there rather than starting from main each time.
+    on whatever is already there rather than starting from main each time. main
+    keeps moving under it while it waits for review, so without the rebase the
+    branch carries an ever older tree and the PR ends up conflicting.
+
+    Returns the origin/<branch> commit the checkout started from, or None when
+    the branch is new, so the push can lease against it.
     """
     git_run("fetch", "origin")
     remote_ref = f"origin/{branch}"
-    exists = (
-        git_run("rev-parse", "--verify", "--quiet", remote_ref, check=False).returncode
-        == 0
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", remote_ref],
+        capture_output=True,
+        text=True,
     )
-    base = remote_ref if exists else "origin/main"
-    git_run("switch", "--force-create", branch, base)
+    remote_sha = result.stdout.strip() if result.returncode == 0 else None
+
+    git_run("switch", "--force-create", branch, remote_sha or "origin/main")
+    if remote_sha and git_run("rebase", "origin/main", check=False).returncode != 0:
+        git_run("rebase", "--abort", check=False)
+        raise SystemExit(
+            f"could not rebase {branch} onto origin/main; resolve the conflict "
+            f"and force-push the branch, then re-run this publish"
+        )
+    return remote_sha
 
 
 def pr_exists(branch):
@@ -306,10 +337,7 @@ def pr_exists(branch):
 
 
 def configure_git_identity():
-    git_run("config", "user.name", "github-actions[bot]")
-    git_run(
-        "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"
-    )
+    subprocess.run([CI_SCRIPTS_DIR / "git-identity.sh"], check=True)
 
 
 def extract_pr_url(stdout):
@@ -397,7 +425,7 @@ def main():
         return
 
     configure_git_identity()
-    checkout_shared_branch(branch)
+    remote_sha = checkout_shared_branch(branch)
 
     # Compute the change against the shared branch's contents, so a package
     # already documented there by an earlier run in this batch is seen.
@@ -416,7 +444,12 @@ def main():
     else:
         git_run("commit", "-s", "-m", f"docs: update {slug}\n\nAdd version {version}")
 
-    git_run("push", "origin", f"HEAD:{branch}")
+    # The rebase rewrote whatever was on the branch, so the push is no longer a
+    # fast-forward; the lease keeps it from clobbering a concurrent update.
+    push = ["push", push_remote(), f"HEAD:{branch}"]
+    if remote_sha:
+        push.insert(1, f"--force-with-lease={branch}:{remote_sha}")
+    git_run(*push)
 
     if pr_exists(branch):
         print(f"[+] PR already open for branch '{branch}'; pushed update")
