@@ -21,7 +21,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
 - **295** — A require-extension knob that reaches the container correctly (gotcha 129's
 - **308** — A maturin shim whose star-import name collides with the compiled submodule's
 - **398** — Reproducing a `py3-none-<platform>` wheel takes an explicit retag — setuptools'
-- **456** — On cp314t our registry can hand a package a *compiled* dependency wheel where
+- **457** — On cp314t our registry can hand a package a *compiled* dependency wheel where
 
 ---
 
@@ -419,7 +419,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
       package for the `ctypes`/`cffi` loader that opens it. Retagging a pybind11 payload
       this way ships a wheel that installs on interpreters it cannot load.
 
-456. **On cp314t our registry can hand a package a *compiled* dependency wheel where PyPI
+457. **On cp314t our registry can hand a package a *compiled* dependency wheel where PyPI
     hands every other arch the pure-Python one — and if that extension has no `Py_mod_gil`
     slot, importing it turns the GIL back on for the whole process while the leg stays
     green (the aioesphomeapi/protobuf case).** Gotcha 127 is the loud version of this: your
