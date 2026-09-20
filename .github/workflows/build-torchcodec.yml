@@ -157,7 +157,33 @@ jobs:
           # FAIL_WITHOUT_<CODEC> turns a missing image codec from a silent skip into a
           # failure, for the three we do build. test_transform_ops.py imports torchvision at
           # module scope and pypi.riseproject.dev has no riscv64 torchvision yet.
-          CIBW_TEST_COMMAND: FAIL_WITHOUT_JPEG=1 FAIL_WITHOUT_PNG=1 FAIL_WITHOUT_WEBP=1 pytest --ignore=test/test_transform_ops.py test
+          # Upstream tests against conda-forge's GPL FFmpeg; the LGPL build above has only
+          # FFmpeg's built-in codecs - no H.264/HEVC/VP9/AV1/MP3 encoder at all (libx264 and
+          # libx265 need --enable-gpl) and an AV1 decoder that only works through a hwaccel -
+          # so the tests that mux a real video, shell out to the ffmpeg CLI or ask for MP3 are
+          # dropped, smoke_test.py included: it encodes H.264 yuv444p to build every one of its
+          # fixtures. test_logging.py asserts an empty subprocess stderr, which torch's
+          # libcpuinfo pollutes on this runner by reading core_id -1 from /sys.
+          CIBW_TEST_COMMAND: >-
+            FAIL_WITHOUT_JPEG=1 FAIL_WITHOUT_PNG=1 FAIL_WITHOUT_WEBP=1 pytest
+            --ignore=test/test_transform_ops.py
+            --ignore=test/smoke_test.py
+            --ignore=test/test_logging.py
+            -k "not test_get_frame_at_av1
+            and not ((test_audio_against_cli or test_multiple_audio_formats
+            or test_audio_to_file_vs_to_file_like) and mp3)
+            and not (test_add_video_and_encode_frames or test_add_audio_and_video_and_encode
+            or test_multiple_video_streams_and_audio or test_video_round_trip
+            or test_video_to_file_vs_to_file_like or test_video_contiguity
+            or test_video_against_ffmpeg_cli or test_fragmented_mp4
+            or test_codec_parameter_utilized or test_codec_spec_vs_impl_equivalence
+            or test_extra_options_errors or test_extra_options_utilized
+            or test_crf_out_of_range_errors or test_invalid_preset_errors
+            or test_to_file_like_real_file_video
+            or (test_to_file_like_custom_file_object and not audio)
+            or test_add_audio_unsupported_num_channels_errors
+            or test_add_audio_invalid_out_sample_rate_errors)"
+            test
 
       - name: Check the wheel bundles the image codecs and no FFmpeg
         run: |
