@@ -36,6 +36,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
   line of a third_party failure in a stamp log — print the stamp logs on failure.
 - **437** — The same `git checkout <tag>` inside an `ExternalProject_Add` `PATCH_COMMAND`
   aborts the build outright — fetch the missing tag, and sweep every dependency at once.
+- **440** — The version-only bazel cache key is shared repo-wide, so a new workflow's
+  bootstrap step never runs and a copied bootstrap's broken `${VAR}` stays latent.
 
 ---
 
@@ -644,3 +646,27 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       checkout FETCH_HEAD` is what `git submodule update --init` leaves behind; the tag
       checkout then fails with the identical `pathspec` line, the tag fetch fixes it, and
       `git rev-parse HEAD` proves the commit did not move. No riscv64 runner needed.
+
+440. **Gotcha 133's version-keyed bazel cache is shared by *every* workflow in this repo, so
+    a new workflow's bootstrap step never executes — and a bootstrap script with a broken
+    variable reference can sit latent and green for months (the array-record case).** The
+    cache key gotcha 133 recommends is `bazel-${BAZEL_VERSION}-manylinux_riscv64`, with
+    nothing package-specific in it. That is the point — a warm cache turns a fresh bootstrap
+    into a ~40 s restore — but it also means the `if: steps.cache.outputs.cache-hit != 'true'`
+    step in a brand-new workflow is **skipped on its very first run**, so copying a
+    bootstrap job never proves that copy works. `build-array-record.yml` demonstrates the
+    consequence: its bootstrap `docker run` passes `-e RULES_PYTHON_VERSION` but the script
+    inside interpolates `${PROJECT_RULES_PYTHON_VERSION}`, a variable exported only in that
+    workflow's *build* job. Under the script's own `set -eux` (the `-u`) that download would
+    abort immediately — it has simply never run, because `bazel-7.5.0-manylinux_riscv64` was
+    already populated by ray/labmaze.
+    - **So diff a copied bootstrap against a workflow whose cache was cold**, not against
+      the nearest neighbour: `build-ray.yml` and `build-labmaze.yml` both use
+      `${RULES_PYTHON_VERSION}` consistently and are the ones to copy.
+    - **The mechanical check needs no CI**: for every `${VAR}` the heredoc expands, confirm
+      the same `docker run` names it in a `-e` flag. The heredoc is quoted (`<<'SCRIPT'`), so
+      nothing is substituted by the outer shell and a typo cannot be caught at YAML level —
+      only the container's `set -u` sees it, and only when the step actually runs.
+    - **Corollary for triage**: "the bazel job was green" is not evidence the bootstrap
+      works. Check whether the step reported a cache hit before crediting it, and if you need
+      to exercise a bootstrap deliberately, bump `BAZEL_VERSION` or change the key.
