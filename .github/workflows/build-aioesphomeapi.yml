@@ -1,0 +1,115 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build_wheels` job of
+# https://github.com/esphome/aioesphomeapi/blob/v46.2.1/.github/workflows/release.yml
+name: Build aioesphomeapi wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/aioesphomeapi.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-aioesphomeapi.yml'
+      - 'docs/packages/aioesphomeapi.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-aioesphomeapi.yml'
+      - 'docs/packages/aioesphomeapi.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: aioesphomeapi
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build aioesphomeapi ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      AIOESPHOMEAPI_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout aioesphomeapi v${{ env.AIOESPHOMEAPI_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: esphome/aioesphomeapi
+          ref: v${{ env.AIOESPHOMEAPI_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # Only manylinux: cryptography, a hard runtime dependency, has no musl
+          # riscv64 wheel, so a musllinux wheel could be neither installed nor tested.
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream passes REQUIRE_CYTHON as a plain step env var, which never
+          # reaches the Linux build container. only-binary keeps pip off the
+          # sdists of the compiled dependencies, whose riscv64 wheels are ours.
+          CIBW_ENVIRONMENT: >-
+            REQUIRE_CYTHON=1
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=cffi,cryptography,protobuf,zeroconf
+          CIBW_TEST_SOURCES: tests pyproject.toml
+          CIBW_TEST_REQUIRES: 'pytest>=9.1.1,<10 pytest-asyncio==1.4.0'
+          # setup.py's build_ext swallows every compile error, so the extensions
+          # are only proven by the modules the installed wheel actually loads.
+          CIBW_TEST_COMMAND: >-
+            python -c "from aioesphomeapi import _sanitize, client_base, connection;
+            from aioesphomeapi._frame_helper import base, noise, noise_encryption, pack, packets, plain_text;
+            m = [_sanitize, client_base, connection, base, noise, noise_encryption, pack, packets, plain_text];
+            bad = [x.__name__ for x in m if not x.__file__.endswith('.so')];
+            assert not bad, bad" &&
+            python -m pytest --ignore=tests/benchmarks tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: aioesphomeapi-${{ env.AIOESPHOMEAPI_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish aioesphomeapi ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: aioesphomeapi-${{ matrix.version }}-*-manylinux_riscv64
