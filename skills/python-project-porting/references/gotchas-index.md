@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (384 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (385 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -321,6 +321,11 @@ The porting gotchas (384 of them) live in [`references/gotchas/`](gotchas/), spl
   0.22.0-pinned crate fails outright); `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1` clears it
   without turning abi3 on, verified to build and run correctly, but cp314t stays a real
   wall since 0.22.0 predates PEP 703 entirely.
+- **425** — An aya/eBPF crate cannot build its BPF half on the riscv64 runner: `bpf-linker`
+  dlopens LLVM from the Rust toolchain's shared library, which only the x86_64/aarch64
+  dists ship (riscv64 hides it inside `librustc_driver`), and no system LLVM new enough for
+  a current toolchain's bitcode exists for riscv64 — cross-compile the object on an x86_64
+  job (gotcha 4) and patch the build script to embed a staged one.
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
