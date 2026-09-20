@@ -408,6 +408,10 @@ The porting gotchas (431 of them) live in [`references/gotchas/`](gotchas/), spl
 - **441** — `VPYTHON_BYPASS` (gotcha 423) also takes `gclient.py`'s own vpython venv away, so
   depot_tools' imports must be on the ambient interpreter: `pip install httplib2==0.13.1`
   (unpinned drops the `httplib2.socks` gerrit_util needs), and nothing else is missing.
+- **443** — An upstream CMake per-arch block can `set(<OPT> OFF CACHE ... FORCE)` *after*
+  `include(third_party)` already ran the matching `add_definitions()`, so the feature is
+  compiled in and not linked — check the include line numbers and use the project's own
+  early default switch instead.
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
@@ -748,6 +752,9 @@ The porting gotchas (431 of them) live in [`references/gotchas/`](gotchas/), spl
 - **430** — A `-k`/`--ignore` change is verifiable offline with no wheel at all: rebuild the
   failed run's node ids into a synthetic test tree, then run the YAML-folded
   `CIBW_TEST_COMMAND` through `sh -c`.
+- **444** — Validate a hand-edited `.patch` with `git apply --check`, never `patch`: a wrong
+  `@@` line count makes GNU `patch` drop every following hunk in that file with no `.rej` and
+  exit 0.
 
 ### PR, CI, triggers, publishing & maintainer signals — [`gotchas/pr-ci-and-maintainer.md`](gotchas/pr-ci-and-maintainer.md)
 

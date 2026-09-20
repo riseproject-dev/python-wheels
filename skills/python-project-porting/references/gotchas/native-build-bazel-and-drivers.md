@@ -40,6 +40,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
   bootstrap step never runs and a copied bootstrap's broken `${VAR}` stays latent.
 - **441** — `VPYTHON_BYPASS` also strips `gclient.py` of *its own* vpython venv: install
   `httplib2==0.13.1` on the ambient interpreter or the sync dies on `import httplib2`.
+- **443** — An upstream CMake arch block that `set(... CACHE ... FORCE)`s features OFF can
+  run *after* `include(third_party)`, making the FORCE dead for that configure.
 
 ---
 
@@ -714,3 +716,46 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       ANGLE sync runs on Linux (`clang`, `llvm_objdump`, `rust`, `lastchange`,
       `configure_siso`) imports nothing outside the stdlib and depot_tools itself — so
       httplib2 is the whole bill, not the first of many.
+
+443. **A per-architecture block in an upstream `CMakeLists.txt` that turns x86 features off
+    with `set(<OPT> OFF CACHE ... FORCE)` is only as good as its position in the file: when
+    the block sits *after* `include(third_party)`/`include(flags)`/`include(configure)`, the
+    FORCE is read too late and every `add_definitions()` those includes already ran stays in
+    effect for the rest of the build.** Paddle puts `WITH_ARM`, `WITH_SW`, `WITH_MIPS` and
+    `WITH_LOONGARCH` at `CMakeLists.txt:638-686` but includes `cmake/third_party.cmake` at
+    line 591, so a `WITH_RISCV` block copied from them inherits the same defect. In round 6
+    of the paddlepaddle port the configure log said `-- Compile with Sleef support` even
+    though the block FORCEd `WITH_SLEEF OFF`, and the build died 2h33m later at 21% of
+    `phi_core` with eight `error: 'Sleef_sinf1_u35' was not declared in this scope` out of
+    `paddle/phi/kernels/funcs/activation_functor.h`, which gates its `Sine`/`Cosine`
+    specialisations on `PADDLE_WITH_SLEEF` alone.
+    - **The failure mode is a *split* configuration, which is worse than either setting.**
+      `cmake/sleef.cmake` had already run `add_definitions(-DPADDLE_WITH_SLEEF)` at line 591,
+      while `paddle/phi/CMakeLists.txt`'s `if(WITH_SLEEF) list(APPEND PHI_DEPS sleef)` is
+      processed by `add_subdirectory()` *after* the block and did see the OFF — so the tree
+      compiled the SLEEF path and linked no SLEEF. Had the header declared the symbols, the
+      same bug would have surfaced hours further on as undefined references at the final
+      link instead.
+    - **Read the include line numbers before trusting the block, and prefer the project's own
+      early switch.** `grep -n '^include(' CMakeLists.txt` against the block's line number
+      answers it in one command. Paddle already had the right hook 230 lines earlier —
+      `set(WITH_SLEEF_DEFAULT ON)` / `if(WIN32 OR WITH_ROCM)` at line 356, feeding
+      `option(WITH_SLEEF ... ${WITH_SLEEF_DEFAULT})` — so adding `OR WITH_RISCV` there is
+      both minimal and the most upstreamable form, and it reaches the arch variable because
+      `setup.py` forwards every `WITH_*` environment variable as a `-D`, which populates the
+      cache before `CMakeLists.txt` runs at all.
+    - **Check the *other* options the block forces before assuming only one leaked.** Same
+      file, same block: `WITH_AVX` and `WITH_MKL` default to `${AVX_FOUND}` and so were
+      already OFF on riscv64, but `WITH_XBYAK` defaults ON and `cmake/external/xbyak.cmake`
+      does `add_definitions(-DPADDLE_WITH_XBYAK -DXBYAK64)` — which leaked identically. That
+      one happens to be benign (`cpu_info.h` only uses it to *skip* defining `cpuid()`, and
+      the `jit/gen` subdirectory is added after the block, so it was correctly dropped), but
+      it is benign by luck, not by design, and it still builds a dependency nothing uses.
+    - **A third-party library can be missing entry points on riscv64 that exist everywhere
+      else, so "just turn the feature on" is not the alternative fix.** SLEEF 3.6.1's
+      `src/libm/CMakeLists.txt` omits `DSP_SCALAR` from `SLEEF_ARCH_RISCV64`'s header list,
+      alone among its six architectures, and `DSP_SCALAR` is the only entry with no ISA-name
+      argument — `mkrename.c` reads that ninth argv as the suffix, so it is the only section
+      emitting *unsuffixed* scalar declarations. The generated riscv64 `sleef.h` therefore
+      declares `Sleef_sinf1_u35purec` and never `Sleef_sinf1_u35`. Worth reporting upstream
+      to SLEEF, but not something a wheel port should carry a patch for.
