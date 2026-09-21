@@ -1,0 +1,181 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+name: Build shfmt-py wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/shfmt-py.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-shfmt-py.yml'
+      - 'docs/packages/shfmt-py.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-shfmt-py.yml'
+      - 'docs/packages/shfmt-py.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: shfmt-py
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build shfmt-py ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    # Job outputs are not per matrix leg: with several pending versions the last
+    # leg's value wins, so publish shfmt-py one version at a time.
+    outputs:
+      pinned-version: ${{ steps.pinned.outputs.version }}
+
+    env:
+      SHFMT_PY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout shfmt-py v${{ env.SHFMT_PY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: MaxWinterstein/shfmt-py
+          ref: v${{ env.SHFMT_PY_VERSION }}
+          persist-credentials: false
+
+      - name: Read pinned mvdan/sh version
+        id: pinned
+        run: echo "version=$(grep -oP 'SHFMT_VERSION = "\K[^"]+' setup.py)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout mvdan/sh v${{ steps.pinned.outputs.version }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: mvdan/sh
+          ref: v${{ steps.pinned.outputs.version }}
+          path: sh-upstream
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: 'stable'
+
+      # mvdan/sh's own release process (goreleaser) has no riscv64 entry, so
+      # setup.py's POSTFIX_SHA256 download table has none either; its
+      # fetch_binaries command already falls back to whatever `shfmt` is on
+      # PATH when the platform is unrecognised (see fall_back_to_path_shfmt),
+      # so building it from source and placing it there needs no patch.
+      - name: Build the shfmt binary
+        working-directory: sh-upstream
+        run: |
+          mkdir -p ../shfmt-riscv64-bin
+          CGO_ENABLED=0 GOOS=linux GOARCH=riscv64 go build -trimpath -ldflags "-s -w" \
+            -o ../shfmt-riscv64-bin/shfmt ./cmd/shfmt
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_BUILD: cp /project/shfmt-riscv64-bin/shfmt /usr/local/bin/shfmt && chmod +x /usr/local/bin/shfmt
+          CIBW_ENVIRONMENT: >-
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SHFMT_PY=${{ env.SHFMT_PY_VERSION }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: shfmt-py-${{ env.SHFMT_PY_VERSION }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test shfmt-py ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 15
+    env:
+      SHFMT_PY_VERSION: ${{ matrix.version }}
+      # Without this uv would reuse the runner image's system CPython for 3.12
+      # and download a standalone build for the others.
+      UV_PYTHON_PREFERENCE: only-managed
+      SHFMT_PINNED_VERSION: ${{ needs.build_wheel.outputs.pinned-version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # This repo's default interpreter matrix (gotcha in workflow-anatomy.md);
+        # the wheel is interpreter-agnostic (py2.py3-none), so every interpreter --
+        # including free-threaded -- exercises the same binary.
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: shfmt-py-${{ env.SHFMT_PY_VERSION }}-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . shfmt-py
+
+      # Mirrors shfmt-py's own main.yml test job (shfmt --version / --help),
+      # plus a real -w format run since that's the whole point of the binary.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          shfmt --version
+          shfmt --help >/dev/null
+
+          [ "$(shfmt --version)" = "v${SHFMT_PINNED_VERSION}" ]
+
+          work=$(mktemp -d)
+          printf '#!/bin/sh\nif [ -n "$1" ]; then\necho "hi $1"\nfi\n' > "$work/a.sh"
+          ! shfmt -d "$work/a.sh"
+          shfmt -w "$work/a.sh"
+          shfmt -d "$work/a.sh"
+          grep -qP '^\techo' "$work/a.sh"
+
+  publish:
+    name: Publish shfmt-py ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: shfmt-py-${{ matrix.version }}-manylinux_riscv64
