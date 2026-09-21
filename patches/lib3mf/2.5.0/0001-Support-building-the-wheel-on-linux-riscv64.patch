@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 21 Sep 2026 00:00:00 +0000
+Subject: [PATCH] Support building the wheel on linux riscv64
+
+The Linux wheel is a per-architecture artifact: lib3mf/lib3mf.so is a
+compiled binary and build_wheels.py forces the platform tag by hand, so
+the two hardcoded x86_64 assumptions are what stop a riscv64 host from
+producing its own wheel.
+
+setup.py's SUPPORTED_PLATFORMS gate raises before setuptools runs, and
+get_platform_tag() returns manylinux2014_x86_64 for every Linux host.
+manylinux2014 is a glibc 2.17 baseline that predates riscv64 entirely -
+the oldest manylinux profile defined for that architecture is glibc 2.39
+- so the tag has to be selected per architecture rather than shared.
+
+Nothing else in the packaging is architecture-specific, and x86_64 keeps
+the exact tag it had.
+
+Upstream-Status: To upstream [not yet submitted: the same change is only useful once 3MFConsortium/lib3mf publishes a riscv64 SDK build for prepare_pypi_release.py to pick up, so it needs a maintainer discussion rather than a drive-by PR]
+---
+ build_wheels.py | 12 +++++++++++-
+ setup.py        |  2 +-
+ 2 files changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/build_wheels.py b/build_wheels.py
+index eb80ae0..a4457ee 100644
+--- a/build_wheels.py
++++ b/build_wheels.py
+@@ -6,11 +6,21 @@ import os
+ MANIFEST_FILE = "manifest.json"
+ TEMP_MANIFEST_IN = "MANIFEST.in"
+ 
++# manylinux tag per Linux architecture: the manylinux2014 (glibc 2.17) baseline
++# predates riscv64, whose oldest manylinux profile is glibc 2.39.
++LINUX_PLATFORM_TAGS = {
++    "x86_64": "manylinux2014_x86_64",
++    "riscv64": "manylinux_2_39_riscv64",
++}
++
+ def get_platform_tag():
+     """Return the appropriate platform tag for wheel building."""
+     system = platform.system()
+     if system == "Linux":
+-        return "manylinux2014_x86_64"
++        machine = platform.machine()
++        if machine not in LINUX_PLATFORM_TAGS:
++            raise RuntimeError(f"Unsupported Linux architecture: {machine}")
++        return LINUX_PLATFORM_TAGS[machine]
+     elif system == "Windows":
+         return "win_amd64"
+     elif system == "Darwin":
+diff --git a/setup.py b/setup.py
+index 059882e..97a51c4 100644
+--- a/setup.py
++++ b/setup.py
+@@ -24,7 +24,7 @@ else:
+ 
+ # Restrict installation to only supported platforms and architectures
+ SUPPORTED_PLATFORMS = {
+-    "Linux": ["x86_64"],
++    "Linux": ["x86_64", "riscv64"],
+     "Windows": ["AMD64"],
+     "Darwin": ["x86_64", "arm64"]  # macOS universal (Intel & Apple Silicon)
+ }
