@@ -53,6 +53,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
 - **477** — A CMake SuperBuild forwards only a whitelist of variable *names* into its nested
   ExternalProjects, so a vendored dependency's option can be silently unreachable from the
   top-level command line (the simpleitk/ITK/zlib-ng `WITH_RVV` case).
+- **493** — cmeel's own `-DCMAKE_INSTALL_LIBDIR=lib` does not reach an `ExternalProject_Add`
+  child, so such a cmeel distribution installs into `cmeel.prefix/lib64/`, not `lib/`.
 
 ---
 
@@ -917,3 +919,29 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       limited-API wheel is tagged `cp311-abi3` whatever interpreter builds it — which, by
       gotcha 96, fixes the matrix leg at cp311 instead of this repo's cp312 floor. Grep the
       *build system* for `py-limited-api`, not only `setup.py`/`pyproject.toml`.
+
+493. **cmeel's own `-DCMAKE_INSTALL_LIBDIR=lib` never reaches an `ExternalProject_Add` child,
+    so a cmeel distribution that delegates its whole build to one ships its payload in
+    `cmeel.prefix/lib64/`, not `cmeel.prefix/lib/` (the cmeel-zlib case; see
+    `build-cmeel-zlib.yml`).** `cmeel/config.py`'s `get_configure_args` always prepends
+    `-DCMAKE_INSTALL_LIBDIR=lib`, `-DCMAKE_BUILD_TYPE=Release` and `-DBUILD_TESTING=OFF` to the
+    one `cmake -S` it runs itself — which is why every sibling's contents assertion and
+    `ctypes` smoke path reads `cmeel.prefix/lib/lib<foo>.so` (cmeel-tinyxml2,
+    cmeel-console-bridge). cmeel-zlib's `CMakeLists.txt` compiles nothing of its own: it is one
+    `ExternalProject_Add` of `github.com/madler/zlib/archive/refs/tags/v<ver>.tar.gz` carrying
+    `CMAKE_ARGS "-DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX}"` and nothing else, and the
+    child configures from a fresh cache — so zlib's own `include(GNUInstallDirs)` decides, and
+    on every Rocky-based manylinux image that is `lib64` (gotcha 377). `BUILD_TESTING=OFF` is
+    lost the same way, so the child also compiles upstream's examples.
+    - **Read the released wheel's namelist, not the sibling workflow, before writing the
+      assertion.** `zipfile.ZipFile(whl).namelist()` on upstream's
+      `cmeel_zlib-1.3.2-0-py3-none-manylinux_2_28_x86_64.whl` shows
+      `cmeel.prefix/lib64/libz.so.1.3.2`, and a QEMU rehearsal in `manylinux_2_39_riscv64`
+      produces byte-for-byte the same layout — the distribution's shape on every arch, not a
+      riscv64 divergence to correct.
+    - **This is the mechanism behind gotcha 492.** cmeel-assimp's bare `-lz` resolves against
+      the host libz precisely because cmeel-zlib's copy sits in `lib64`, off the
+      `$ORIGIN/../../../../lib` RUNPATH its consumers resolve through. Do not try to "fix" it
+      with `CMEEL_CMAKE_ARGS=-DCMAKE_INSTALL_LIBDIR=lib`: that appends to the *outer* configure
+      line, the same dead end, and a patch that changed it would desync the riscv64 wheel from
+      the same distribution on every other arch.

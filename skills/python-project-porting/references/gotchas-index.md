@@ -554,6 +554,10 @@ The porting gotchas (479 of them) live in [`references/gotchas/`](gotchas/), spl
   ExternalProjects, so `-D<vendored dep option>` on the top-level line reaches nothing and no
   warning says so; prove the forwarding off-target by grepping the child's
   `CMakeCacheInit.txt` (the simpleitk/ITK/zlib-ng `WITH_RVV` case).
+- **493** — cmeel's own `-DCMAKE_INSTALL_LIBDIR=lib` does not reach an `ExternalProject_Add`
+  child, so a cmeel distribution that delegates its whole build to one ships into
+  `cmeel.prefix/lib64/` rather than `lib/`; read the released wheel's namelist, not the sibling
+  workflow (the cmeel-zlib case, and the mechanism behind gotcha 492).
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
