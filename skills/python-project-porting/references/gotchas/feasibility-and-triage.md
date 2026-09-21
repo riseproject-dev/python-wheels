@@ -179,6 +179,11 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **492** — A declared dependency the build never actually links against still blocks the
   port, because pip enforces metadata and not linkage — prove which it is with the wheel's
   own `.pc`/`readelf` output, then block anyway (the cmeel-assimp/cmeel-zlib case).
+- **503** — Triage a framework's closure by each node's *own published artifacts*: the
+  same-org siblings that look like the native core can be `py3-none-any` while the leaves
+  block, an exact `==` pin makes an already-ported package a blocker at the *version* level,
+  `--only-binary` resolvers false-positive on sdist-only pure Python, and an sdist with zero
+  native sources can still be unbuildable (the angr case).
 
 ---
 
@@ -3696,3 +3701,47 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     - **Worth the five minutes even when the answer changes nothing**, because it tells the
       next agent whether a missing sibling means "the library will not load" or only "pip will
       refuse" — and only the first of those can still bite after the sibling lands.
+
+503. **Triage a framework's dependency closure by each node's *own published artifacts*, not
+    by who publishes it — and count exact-pin *version* gaps as blockers (the angr case).**
+    angr 9.3.3 sits on a stack of same-org siblings (archinfo, pyvex, cle, claripy, ailment)
+    plus third-party engines (capstone, unicorn, keystone), and every intuition about which
+    layer blocks was inverted by one walk of `info.requires_dist` plus the released filenames.
+    - **The siblings that look like the native core are pure Python; the leaves block.**
+      `archinfo`, `claripy`, `cle` and `angr-data` all publish exactly two files, a
+      `py3-none-any` wheel and an sdist — they install on riscv64 as-is and need no port at
+      all. The blockers are `pyvex` (VEX/libvex C), `pypcode` (Ghidra SLEIGH C++ via
+      nanobind+cmake), `pydemumble` (C++ via scikit-build-core+nanobind), `pyxdia` and
+      `uefi-firmware` (C extension), reached partly *through* the pure-Python siblings —
+      `cle`'s own `Requires-Dist` is what drags in `pyxdia` and `uefi-firmware`. Classify
+      every node by the wheels it actually ships; family membership predicts nothing.
+    - **The queue's `abi:` note can be right about the top-level package and still not be the
+      reason it is blocked.** angr really is compiled — `cp312-abi3` from setuptools-rust
+      (`angr.rustylib`, pyo3 `abi3-py312`) plus a make-built `native/unicornlib` — so there
+      was nothing misattributed to correct; the port is blocked anyway, one layer down.
+    - **An exact `==` pin turns a package we already publish into a blocker.** angr pins
+      `lmdb==2.1.1` (registry has 2.3.0 and 1.7.x only) and `claripy` pins
+      `z3-solver==4.13.0.0` (registry has 4.12.x/4.14.x/4.15.x/4.16.0.0; upstream PyPI ships
+      riscv64 only from 5.0.0.0). `riscv64_resolve.py` says so in its `from versions: …`
+      line — read that list rather than stopping at "we host this name" (gotcha 30's sharper
+      form). This is the cheapest class of unblock: one `- version:` entry in the *other*
+      package's `docs/packages/<pkg>.yaml`, so name the exact versions in the queue note.
+    - **`--only-binary` resolvers false-positive on sdist-only pure Python.** `arpy` 1.1.1 and
+      `mulpyplexer` 0.09 publish no wheel for *any* platform, so `riscv64_resolve.py` reports
+      them unresolvable while they install identically from sdist on x86_64 and riscv64.
+      Separate "no riscv64 wheel" from "no wheel at all" before a name enters a blocking list.
+    - **An sdist with zero native sources can be the hardest blocker of the set.** `pyxdia`
+      0.1.1's sdist is 21 pure-Python files, yet its wheels are `py3-none-<platform>`: a
+      custom `build` sub-command *downloads* prebuilt binaries (`xdia.zip`, `xdialdr.tar.xz`)
+      and, for any non-x86_64 Linux, a prebuilt `blink` x86-64 emulator to run them under.
+      Its table covers `darwin-x86_64`/`darwin-arm64`/`linux-aarch64` and `assert`s otherwise,
+      so riscv64 fails at *build* time (gotcha 35/183's blob class, arrived at from a file
+      list that looked pure). Read the custom build command before calling an sdist portable.
+    - **`[build-system] requires` can repeat the runtime blocker, which doubles it.** angr's
+      `native/unicornlib/Makefile` links `-lpyvex` against `PYVEX_INCLUDE_PATH`/
+      `PYVEX_LIB_PATH` taken from the *installed* pyvex distribution, so the missing wheel
+      stops the build itself and not only the end user's install — gotcha 249 with the
+      build-time dep being the same package as the runtime one. Check the build list for a
+      second, build-only gap while you are there (`grpcio-tools~=1.80.0` here against 1.83.1
+      on the registry) and record whether it is patchable, so the next agent knows which
+      items are hard and which are a pin relaxation.

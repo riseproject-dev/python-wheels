@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (492 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (493 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -295,6 +295,11 @@ The porting gotchas (492 of them) live in [`references/gotchas/`](gotchas/), spl
   because pip enforces the metadata and not the linkage; the wheel's own `.pc` and `readelf -d`
   say which it is, and editing it out of `pyproject.toml` is the shortcut to refuse (the
   cmeel-assimp/cmeel-zlib case).
+- **503** — Triage a framework's closure by each node's own published artifacts: same-org
+  siblings that look like the native core can be `py3-none-any` while the leaves block, an
+  exact `==` pin makes an already-ported package a blocker at the *version* level,
+  `--only-binary` resolvers false-positive on sdist-only pure Python, and an sdist with no
+  native sources can still be unbuildable (the angr case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
