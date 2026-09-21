@@ -59,6 +59,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **536** — A removed cibuildwheel option makes 4.2.0 reject upstream's whole
   `[tool.cibuildwheel]` table before any build starts; `--print-build-identifiers` catches it
   in a minute.
+- **542** — A `setup.py` that `raise SystemExit`s above a hardcoded max Python minor version
+  blocks the build itself, not just runtime behavior — trim the matrix, don't override it.
 
 ---
 
@@ -1081,3 +1083,37 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
       is a commit to cite (explosion did exactly this in thinc as 6f3a08b1), `To upstream`
       when there is not (spacy-pkuseg's master still carries the line three commits past the
       tag).
+
+542. **A `setup.py` that itself `raise SystemExit`s above a hardcoded max Python minor
+    version blocks the *build*, not just runtime behavior — trim the matrix to match rather
+    than reaching for the documented override env var (the cocotb case).** cocotb 2.0.1's
+    `setup.py` runs this check before `setup()` is even called:
+    ```python
+    max_python3_minor_version = 13
+    if "COCOTB_IGNORE_PYTHON_REQUIRES" not in os.environ and sys.version_info >= (3, max_python3_minor_version + 1):
+        raise RuntimeError(...)
+    ```
+    Distinct from gotcha 514 (a tool that models a target Python version and only fails when
+    *run*): this fails at `pip wheel`/`build_ext` time, before a single `.cpp` file compiles,
+    so every `cp314`/`cp314t` matrix leg dies in seconds with a clear `RuntimeError`, not a
+    mysterious compiler error. The queue note's wheel-count tally is the tell before you even
+    open `setup.py`: 16 upstream Linux wheels for 8 CPython minors (`cp36`..`cp313`) × 2
+    architectures, with nothing for `cp314` despite the release postdating 3.14's GA.
+    - **The guard names its own escape hatch, and that is a trap, not a fix.**
+      `COCOTB_IGNORE_PYTHON_REQUIRES=1` will make the build proceed, but upstream's own
+      comment is explicit that this is unsupported and untested ("no guarantee this will work
+      and no support will be provided") — setting it to force a `cp314` build substitutes our
+      own untested guess for upstream's own tested ceiling, exactly the divergence goal 2
+      (mirror upstream's own recipe) exists to prevent. Trim the matrix instead:
+      `python: ["cp312", "cp313"]`, deviating from the repo-default four with a one-line
+      comment citing the guard.
+    - **Generalizes past cocotb**: any pure-setuptools project that gates its own supported
+      range with a version check in `setup.py` (rather than only via `python_requires`, which
+      pip enforces as a resolver constraint and never touches the build) needs the same
+      treatment — grep the checkout's `setup.py` for `sys.version_info` comparisons against a
+      literal tuple before assuming the repo-default `cp312/cp313/cp314/cp314t` matrix
+      applies.
+    - **Verify site-independent**: `python3.14 -c "exec(open('setup.py').read())"` from the
+      checkout root (or just `pip wheel . --no-deps` under a 3.14 interpreter) reproduces the
+      `RuntimeError` on any host, x86 included — no riscv64/QEMU needed to confirm the ceiling
+      is real and not an artifact of the build container.

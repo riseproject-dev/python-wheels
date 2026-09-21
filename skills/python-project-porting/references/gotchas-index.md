@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (519 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (520 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -485,7 +485,7 @@ The porting gotchas (519 of them) live in [`references/gotchas/`](gotchas/), spl
   tag carries it, `cibuildwheel --print-build-identifiers --only <id> .` catches it on any
   host, and the fix is a one-line patch rather than a `config-file:` override
   (the spacy-pkuseg case).
-- **541** — A `setup.py` that itself `raise SystemExit`s above a hardcoded max Python minor
+- **542** — A `setup.py` that itself `raise SystemExit`s above a hardcoded max Python minor
   version blocks the *build*, not just runtime behavior — trim the matrix to match rather
   than exporting the documented override env var (the cocotb case).
 
