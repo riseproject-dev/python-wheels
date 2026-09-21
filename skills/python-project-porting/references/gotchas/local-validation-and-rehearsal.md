@@ -39,6 +39,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
 - **495** — A Bazel port's loading phase rehearses on x86_64 in minutes, even in a sandbox
   that cannot fetch the dependencies.
   wheel hands you a byte-comparable feature oracle
+- **517** — `-fsyntax-only` every translation unit of a `setup.py` C++ build inside the
+  real riscv64 image, using the flags `setup.py` itself computes
 - **498** — The manylinux image's `curl`/`pip` ignore the trust store gotcha 384 fixes, a
   sampling profiler cannot be rehearsed under QEMU at all, and the way to see where one
   crashes is a throwaway unstripped CI build.
@@ -600,3 +602,33 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
       `tests.yml` does exactly this, and its `utils.bt()` then prints `bt full` for every
       SIGSEGV. That turned an opaque `returncode -11` into `events.c:83` in ~20 minutes.
       Push it as its own commit and drop it with a `--force-with-lease` once read.
+
+517. **For a `setup.py`/distutils C++ world, gotcha 404's "a configure is the honest local
+    ceiling" has a stronger analogue: `-fsyntax-only` *every* translation unit inside the
+    real riscv64 image, with the flags `setup.py` itself computes — ~20 minutes for 289
+    units, and it catches what a GCC 13 host cannot (the pybullet case).** There is no
+    configure step to lean on, but the `Extension` objects carry the whole compile line.
+    Capture them the way gotcha 403 captures a build variant — stub the entry point
+    *before* exec'ing the script, so `from distutils.core import setup` binds the stub:
+    ```python
+    import distutils.core
+    captured = []
+    distutils.core.setup = lambda **kw: captured.append(kw)
+    exec(compile(open("setup.py").read(), "setup.py", "exec"),
+         {"__file__": os.path.abspath("setup.py"), "__name__": "__main__"})
+    ext = captured[0]["ext_modules"][0]   # .sources, .include_dirs, .extra_compile_args
+    ```
+    Then run `gcc`/`g++ -fsyntax-only <extra_compile_args> -I<include_dirs> <source>` over
+    the list, threaded. Three things to get right:
+    - **Add `sysconfig.get_paths()["include"]` yourself.** distutils appends the Python
+      headers at build time, so the captured `Extension` carries no `Python.h` path and the
+      one unit that matters — the binding source — is the only one that fails.
+    - **Mount the checkout `:ro`** (unlike gotcha 404's CMake case, syntax-only writes
+      nothing), and install inside the container whatever `setup.py` feature-detects
+      (`setuptools`, here `numpy`): a missing optional import silently skips the `#ifdef`'d
+      code you most want checked.
+    - **`update-ca-trust` costs minutes under QEMU** and can starve outright on a host
+      shared with other agents' containers — check `uptime` before blaming the recipe.
+    What it bought: four `error: passing argument 1 of 'PyArray_DATA' from incompatible
+    pointer type` in `pybullet.c` — gotcha 226's GCC-14 class, invisible on a GCC 13 host,
+    and otherwise a wasted ~1h CI cycle on every interpreter.

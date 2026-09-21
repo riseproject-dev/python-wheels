@@ -1021,6 +1021,9 @@ The porting gotchas (500 of them) live in [`references/gotchas/`](gotchas/), spl
   arch macros in a scratch copy to exercise its generic architecture path natively — a
   restricted-egress host can still prove compilability without a container (the
   bitsandbytes case).
+- **517** — For a `setup.py`/distutils C++ world, `-fsyntax-only` every translation unit
+  inside the real riscv64 image using the flags `setup.py` itself computes — a ~20-minute
+  preflight that catches gotcha 226's GCC-14 errors a GCC 13 host cannot (the pybullet case).
 - **430** — A `-k`/`--ignore` change is verifiable offline with no wheel at all: rebuild the
   failed run's node ids into a synthetic test tree, then run the YAML-folded
   `CIBW_TEST_COMMAND` through `sh -c`.
