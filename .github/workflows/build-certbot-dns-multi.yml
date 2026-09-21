@@ -1,0 +1,218 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `wheels` job of
+# https://github.com/alexzorin/certbot-dns-multi/blob/5.4.0/.github/workflows/build-and-publish.yml
+name: Build certbot-dns-multi wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/certbot-dns-multi.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-certbot-dns-multi.yml'
+      - 'docs/packages/certbot-dns-multi.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-certbot-dns-multi.yml'
+      - 'docs/packages/certbot-dns-multi.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Upstream's .github/build-manylinux.py default.
+  GO_VERSION: '1.26.0'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: certbot-dns-multi
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build certbot-dns-multi ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # No cp314t: the Go bridge declares no Py_mod_gil slot, so a free-threaded
+        # wheel would re-enable the GIL on import. Upstream ships cp311-cp314 only.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      CERTBOT_DNS_MULTI_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout certbot-dns-multi ${{ env.CERTBOT_DNS_MULTI_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: alexzorin/certbot-dns-multi
+          ref: ${{ env.CERTBOT_DNS_MULTI_VERSION }}
+          persist-credentials: false
+
+      - name: Stage smoke tests
+        run: |
+          cat > tests/test_certbot_dns_multi.py <<'PYTEST'
+          """Smoke tests for the riscv64 certbot-dns-multi wheel.
+
+          Upstream ships no Python test suite, so these drive the compiled Go
+          bridge end to end over its JSON protocol. lego's `exec` provider in RAW
+          mode needs no network and no credentials: it shells out to a script with
+          the challenge arguments, which proves the Python -> cgo -> Go runtime ->
+          lego path and back.
+          """
+
+          import json
+
+          import pytest
+
+          import lego_bridge
+
+
+          def cmd(**kwargs):
+              return json.loads(lego_bridge.cmd(json.dumps(kwargs)))
+
+
+          @pytest.fixture
+          def hook(tmp_path):
+              log = tmp_path / "hook.log"
+              script = tmp_path / "hook.sh"
+              script.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\n')
+              script.chmod(0o755)
+              return script, log
+
+
+          def test_extension_module_is_compiled():
+              assert lego_bridge.__file__.endswith(".so"), lego_bridge.__file__
+
+
+          def test_unknown_action():
+              response = cmd(action="frobnicate")
+              assert response["success"] is False
+              assert "frobnicate" in response["error"]
+
+
+          def test_unknown_provider():
+              response = cmd(action="configure", provider="does-not-exist", credentials={})
+              assert response["success"] is False
+              assert "does-not-exist" in response["error"]
+
+
+          def test_missing_provider_credentials():
+              response = cmd(action="configure", provider="cloudflare", credentials={})
+              assert response["success"] is False
+              assert "cloudflare" in response["error"]
+
+
+          def test_exec_provider_round_trip(hook):
+              script, log = hook
+              assert cmd(
+                  action="configure",
+                  provider="exec",
+                  credentials={"EXEC_PATH": str(script), "EXEC_MODE": "RAW"},
+              ) == {"success": True}
+              assert cmd(
+                  action="perform",
+                  domain="example.com",
+                  token="a-token",
+                  key_authorization="a-token.key-auth",
+              ) == {"success": True}
+              assert cmd(
+                  action="cleanup",
+                  domain="example.com",
+                  token="a-token",
+                  key_authorization="a-token.key-auth",
+              ) == {"success": True}
+              assert log.read_text().splitlines() == [
+                  "present -- example.com a-token a-token.key-auth",
+                  "cleanup -- example.com a-token a-token.key-auth",
+              ]
+
+
+          def test_certbot_plugin_entry_point():
+              from importlib.metadata import entry_points
+
+              from certbot.plugins import dns_common
+
+              (plugin,) = [
+                  entry_point
+                  for entry_point in entry_points(group="certbot.plugins")
+                  if entry_point.name == "dns-multi"
+              ]
+              authenticator = plugin.load()
+              assert issubclass(authenticator, dns_common.DNSAuthenticator)
+          PYTEST
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Same Go tarball as upstream's .github/build-wheel.sh, for our GOARCH.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl -sSfL https://go.dev/dl/go${{ env.GO_VERSION }}.linux-riscv64.tar.gz
+            | tar -zx -C /usr/local/
+          # setuptools-scm reads the tag from the checkout, which cibuildwheel does
+          # not copy into the container.
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="/usr/local/go/bin:$PATH"
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_CERTBOT_DNS_MULTI=${{ env.CERTBOT_DNS_MULTI_VERSION }}
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Without it pip prefers PyPI's cryptography releases, which have no
+          # riscv64 wheels, and source-builds them in the container.
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=cryptography
+          CIBW_TEST_REQUIRES: pytest certbot
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: python -m pytest -v tests
+
+      - name: Check the wheel ships the compiled extension
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = [n for n in names if n.endswith(".so")]
+          assert len(sos) == 1, names
+          print("extension:", sos[0])
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: certbot-dns-multi-${{ env.CERTBOT_DNS_MULTI_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish certbot-dns-multi ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: certbot-dns-multi-${{ matrix.version }}-*-manylinux_riscv64
