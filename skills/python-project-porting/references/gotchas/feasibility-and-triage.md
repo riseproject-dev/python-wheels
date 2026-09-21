@@ -173,6 +173,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   vendored `CMakeLists.txt` is below CMake 4's floor fails from sdist, and the environment
   variable that rescues it in CI does not travel with the published wheel (the cmeel-urdfdom
   case).
+- **484** — A large C++ project with its own architecture abstraction layer concentrates the
+  whole port into a handful of `#error` gates in that one directory — and the build config
+  the *wheel* uses decides how many of them you ever reach (the usd-core/OpenUSD case).
 
 ---
 
@@ -3621,3 +3624,38 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       on riscv64 with only public PyPI plus our index, no extra environment?", and answer it
       by actually building each unported dependency's sdist. "Can I get CI green?" is the
       wrong question and has a more generous answer.
+
+484. **A large C++ project with its own architecture abstraction layer concentrates the whole
+    port into a handful of `#error` gates in that one directory — and the build config the
+    *wheel* uses decides how many of them you ever reach (the usd-core/OpenUSD case; see
+    `build-usd-core.yml`).** OpenUSD is ~1330 translation units for the non-imaging build, and
+    a first look is discouraging: `grep -rn '#error' pxr/` returns 40+ hits. Nearly all are
+    noise. Separate them on what they switch on, because only one class blocks a port:
+    - **CPU-gated vs OS-gated is the whole triage.** `pxr/base/arch/{systemInfo,fileSystem,
+      assumptions}.cpp` end in `#error Unknown system architecture` too, but each is selecting
+      on `ARCH_OS_LINUX`/`ARCH_OS_DARWIN`/`ARCH_OS_WINDOWS` and is satisfied on any Linux. The
+      three that actually fire on riscv64 all select on the CPU: `arch/defines.h` (`#error
+      "Unsupported architecture.  x86_64 or ARM64 required."`, which kills *every* TU before
+      anything else compiles), `arch/math.h` (a CPU gate around portable IEEE-754 bit
+      twiddling), and `nonLockingLinux__execve()` in `arch/stackTrace.cpp` (hand-written
+      syscall asm for aarch64 and x86_64). One patch covers all three; nothing else in the
+      tree needed touching.
+    - **Grep `ARCH_CPU_`/the project's own CPU macro, not just `#error`** — a gate can compile
+      to a silently wrong branch instead of failing. Here exactly one such site existed outside
+      `arch/` (`pxr/exec/vdf/executorDataVector.cpp`), and it is excluded because upstream's
+      own wheel build passes `-DPXR_BUILD_EXEC=OFF`. **Read the wheel's build flags before
+      auditing the tree**: imaging, MaterialX, tutorials, examples, tools and exec are all off,
+      which removes ~1700 of the 3050 TUs and every OpenGL/Vulkan/X11 `find_package` along
+      with them.
+    - **The arch layer is also where the *absence* of a problem gets confirmed.** timing.h
+      reaches `rdtsc` only behind `PXR_ARCH_PREFER_TSC_TIMING` and otherwise uses
+      `std::chrono::steady_clock`; `ARCH_SPIN_PAUSE()` has a no-op `#else`; the vendored
+      double-conversion already lists `__riscv`; `gf/nc/nanocolor.c` gates SIMD on
+      `__SSE2__`/`__ARM_NEON` with a scalar path (*not* the gotcha-442 shape). Checking those
+      four costs minutes and is what separates "needs a 20-line patch" from "park it".
+    - **A cache-line warning is not a failure.** `Arch_ObtainCacheLineSize()` is
+      `sysconf(_SC_LEVEL1_DCACHE_LINESIZE)`, which the riscv64 runners do not answer with 64,
+      so every `import pxr` prints `ArchWarn: ARCH_CACHE_LINE_SIZE !=
+      Arch_ObtainCacheLineSize()`. It is `ARCH_WARNING`, not `ARCH_ERROR`; the endianness check
+      beside it is the one that would abort, and riscv64 is little-endian. Leave upstream's own
+      diagnostic alone rather than spending a multi-hour rebuild to silence it.

@@ -36,6 +36,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
 - **463** — Substituting our dep wheel for an upstream prebuilt can change the SONAME: when the
   package's own linker-flag emitter says `-l<name>`, re-soname the staged copy instead of
   shipping a symlink farm (the sherpa-onnx-core/onnxruntime case).
+- **486** — Legacy TBB 2020.x (the hand-written makefile build, not oneTBB's CMake one) needs
+  no riscv64 patch, so don't switch a project to `--onetbb` on suspicion — settle it with one
+  QEMU `make` (the usd-core/OpenUSD case).
 ---
 
 16. **All-static BUNDLED build + a dep the project can't bundle = link failure.**
@@ -672,3 +675,30 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
       `.so.1` that only shows up as an `ld` warning and a runtime loader failure), package it and
       compile an example against the installed wheel under QEMU. That caught the omitted second
       library in one minute instead of a two-hour CI cycle.
+
+486. **Legacy TBB 2020.x — the hand-written makefile build, not oneTBB's CMake one — needs no
+    riscv64 patch, so do not switch a project to `--onetbb` on suspicion (the usd-core/OpenUSD
+    case; see `build-usd-core.yml`).** A project pinned to `oneTBB` tag `v2020.3.x` looks like a
+    guaranteed deviation: that tree predates RISC-V, has per-arch `machine/*.h` atomics headers,
+    and its `build/linux.inc` arch table lists only i686/ia64/x86_64/sparc64/armv7. It builds
+    anyway, for three separate reasons, each of which is the one you would expect to break:
+    - `build/linux.inc` ends its table with `export arch := $(uname_m)`, so `arch` becomes the
+      literal `riscv64` rather than failing.
+    - the export-list prefix is chosen by `ifeq (64,$(findstring 64,$(arch)))` → `def_prefix =
+      lin64`, so `src/tbb/lin64-tbb-export.def` is found by substring match, not by an arch
+      allowlist.
+    - `include/tbb/tbb_machine.h` falls through its per-arch `#elif`s to
+      `#elif __TBB_GCC_BUILTIN_ATOMICS_PRESENT → machine/gcc_generic.h`, which any GCC ≥ 4.7
+      satisfies. There is no `#error` for an unmatched platform.
+    `make -j4` in `quay.io/pypa/manylinux_2_39_riscv64` under QEMU exits 0 and links
+    `libtbb.so.2` from `build/linux_riscv64_gcc_cc14.3.1_.../`, with only C++20
+    `-Wtemplate-id-cdtor` warnings from `atomic.h`.
+    - **The general point: a per-arch build system that degrades by substring/uname fallback is
+      not the same as one that degrades by allowlist** (contrast gotcha 294, where casadi's
+      `-fPIC` block names only x86_64/aarch64 and riscv64 silently gets nothing). Find the
+      fallback branch before deciding, and prove it with the cheapest possible build — TBB 2020
+      is ~6 minutes under QEMU, against a multi-hour cycle for the project that consumes it.
+    - **Sticking with upstream's default keeps the workflow a clean precedent.** Passing
+      `--onetbb` "to be safe" would have been an unexplainable divergence in a file meant to be
+      handed to upstream, and it changes the library the wheel vendors (`libtbb.so.2` vs
+      oneTBB's) for no gain.

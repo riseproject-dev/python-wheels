@@ -90,6 +90,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **460** — An upstream Dockerfile's `apt-get install` line is a build-dependency manifest
   nothing else in the tree declares: translate its `-dev` packages to Rocky names before the
   first run, or the image's missing header stops the compile (the vllm `numa.h` case).
+- **485** — CMake's `find_package(Python3 COMPONENTS Development)` fails inside the manylinux
+  image because PEP 513 forbids shipping `libpython`, and the fix is a zero-byte file, not a
+  build-flag change (the usd-core/OpenUSD case).
 ---
 
 26. **The riscv64 runners ship GCC 13; some packages need GCC 14 or later.** The compiler
@@ -1491,3 +1494,31 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
     - **auditwheel then vendors the library into the wheel**, which is correct: upstream relies on
       its image carrying `libnuma.so.1` at run time and a wheel has no image. Do not add it to
       `--exclude` on the strength of "upstream does not ship it".
+
+485. **CMake's `find_package(Python3 COMPONENTS Development)` fails inside the manylinux image
+    because PEP 513 forbids shipping `libpython`, and the fix is a zero-byte file, not a
+    build-flag change (the usd-core/OpenUSD case; see `build-usd-core.yml`).** Every
+    `/opt/python/cpXY-cpXY` in `quay.io/pypa/manylinux_2_39_riscv64` reports
+    `LIBDIR/LDLIBRARY = /opt/_internal/cpython-3.X.Y/lib/libpython3.X.a` and **that file does
+    not exist** — checked on cp312/cp313/cp314. PEP 513 explains why: a manylinux wheel must
+    not link libpython at all. But `FindPython`'s `Development` component validates the library
+    path before it will configure, so a CMake project that asks for `Development` dies in
+    configure even when it is about to be told not to link it.
+    - **The project's own escape hatch is the flag that makes the file irrelevant** —
+      `-DPXR_PY_UNDEFINED_DYNAMIC_LOOKUP=ON` for USD, and the equivalent
+      `-undefined dynamic_lookup`/`--allow-shlib-undefined` knob elsewhere. With it set,
+      nothing ever opens the library, so `touch`ing an empty file at the path FindPython
+      expects is sound rather than a hack that could link garbage:
+      ```bash
+      "$PY" -c "import pathlib,sysconfig; pathlib.Path(sysconfig.get_config_var('LIBDIR'), sysconfig.get_config_var('LDLIBRARY')).touch()"
+      ```
+    - **Check whether upstream already does this before inventing it.** OpenUSD's own
+      `.github/workflows/pypi.yml` carries exactly this line, with a long comment calling it a
+      "terrible, terrible hack" — so it is not a riscv64 deviation and belongs in no "differs
+      from upstream" list. An upstream that publishes manylinux wheels from a CMake build has
+      almost certainly hit this already; grep its release workflow for `LDLIBRARY` or
+      `UNDEFINED_DYNAMIC_LOOKUP` first.
+    - **Reproduce it in seconds rather than in a CI cycle**: `docker run --rm --platform
+      linux/riscv64 $MANYLINUX_RISCV64_IMAGE` and print `os.path.exists(LIBDIR/LDLIBRARY)` for
+      each interpreter you plan to build. `False` everywhere means this gotcha applies to any
+      `Development`-requiring configure in that image.

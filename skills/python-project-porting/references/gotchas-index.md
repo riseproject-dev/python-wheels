@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (472 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (476 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -287,6 +287,10 @@ The porting gotchas (472 of them) live in [`references/gotchas/`](gotchas/), spl
   `cmake_minimum_required` is below CMake 4's floor — and the `CMAKE_POLICY_VERSION_MINIMUM`
   that fixes that in `CIBW_ENVIRONMENT` does not ship with the wheel, so a green CI run would
   publish an index entry the index cannot install (the cmeel-urdfdom case).
+- **484** — A large C++ project with its own architecture abstraction layer concentrates the
+  whole port into a handful of `#error` gates in that one directory, and the CPU-gated ones are
+  a small minority of them; the build config the wheel uses decides how many you ever reach
+  (the usd-core/OpenUSD case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -639,6 +643,9 @@ The porting gotchas (472 of them) live in [`references/gotchas/`](gotchas/), spl
 - **460** — An upstream Dockerfile's `apt-get install` line is a build-dependency manifest
   nothing else in the tree declares: translate its `-dev` packages to Rocky names before the
   first run, or the image's missing header stops the compile (the vllm `numa.h` case).
+- **485** — CMake's `find_package(Python3 COMPONENTS Development)` cannot configure in the
+  manylinux image because PEP 513 forbids shipping `libpython`; the fix is a zero-byte file at
+  the path FindPython validates, and upstream probably already carries it (the usd-core case).
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
@@ -672,6 +679,9 @@ The porting gotchas (472 of them) live in [`references/gotchas/`](gotchas/), spl
 - **463** — Substituting our dep wheel for an upstream prebuilt can change the SONAME: when the
   package's own linker-flag emitter says `-l<name>`, re-soname the staged copy instead of
   shipping a symlink farm (the sherpa-onnx-core/onnxruntime case).
+- **486** — Legacy TBB 2020.x (the hand-written makefile build, not oneTBB's CMake one) needs no
+  riscv64 patch — `uname -m` fallback, `findstring 64` export prefix, generic GCC atomics — so
+  do not switch a project to `--onetbb` on suspicion (the usd-core case).
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 
