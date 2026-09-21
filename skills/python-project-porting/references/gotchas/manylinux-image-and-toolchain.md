@@ -99,6 +99,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
   opposite way from Debian for binutils and xz; `demangle.h` also sits outside `libiberty/`.
 - **515** — The image's minimal perl also breaks packages that shell out to perl at *runtime*,
   not just ones that build OpenSSL from source (gotcha 46's other half).
+- **525** — The image's GCC 14 turns three old-C sloppinesses into hard errors, and `-w` cannot
+  suppress any of them — OpenBLAS's own `linktest.c` is the one you will hit first.
+- **526** — An asymmetry between two upstream invocations of the same command is load-bearing
+  until proven otherwise — normalising it is a self-inflicted bug.
 ---
 
 26. **The riscv64 runners ship GCC 13; some packages need GCC 14 or later.** The compiler
@@ -1597,3 +1601,52 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
        install of a package that *does* exist returns non-zero — a false "no such package"
        precisely when you are running gotcha 106's `dnf provides` check to settle the name:
        `docker run --rm --platform linux/riscv64 -v /root/.ccr/ca-bundle.crt:/etc/pki/ca-trust/source/anchors/proxy.crt:ro <image> bash -c "update-ca-trust extract; dnf -q provides '*/Safe.pm'"`.
+
+525. **The image's GCC 14 turns three old-C sloppinesses into hard errors, and `-w` cannot
+    suppress any of them — OpenBLAS's own `linktest.c` is the one you will hit first (the vosk
+    case; see `build-vosk.yml`).** GCC 14 promotes `implicit-function-declaration`,
+    `implicit-int` and `int-conversion` from warnings to *errors* by default. Anything C that
+    predates roughly 2023 and is built from source in the manylinux image is exposed, and the
+    failure lands at the *end* of a long build, not the start. OpenBLAS is the common victim
+    because several ports build it themselves: `exports/gensymbol` generates a `linktest.c`
+    that calls every exported symbol with **no prototype in scope**, so the `shared` target
+    dies with `error: implicit declaration of function 'cblas_ztrmv'` →
+    `[Makefile:190: ../libopenblas_<core>-r<ver>.so] Error 1`. The rule already passes `-w`,
+    which is exactly why the reflex "add `-w`" does not help: `-w` inhibits *warnings*, and
+    these are errors.
+    - **Fix it through the project's own flag knob, not `CFLAGS=`.** OpenBLAS does
+      `override CFLAGS += $(COMMON_OPT) $(CCOMMON_OPT) -I$(TOPDIR)` (`Makefile.system:1529`)
+      with `COMMON_OPT` defaulted under an `ifndef` at `:1521`, so
+      `COMMON_OPT="-O2 -Wno-error=implicit-function-declaration"` lands in `CFLAGS` cleanly and
+      `-O2` restores the default you replaced. A command-line `CFLAGS=` is the trap: make lets a
+      command-line variable override every non-`override` assignment in *every* sub-makefile, so
+      it silently drops flags those sub-makefiles meant to append.
+    - **A version bump is not the fix here.** 0.3.29's `exports/Makefile` still emits the same
+      prototype-less `linktest.c` and neither release carries any implicit-declaration handling,
+      so check the actual file before reaching for a newer tag.
+    - **Nor can you skip the shared library** when Kaldi-style `configure` scripts probe for
+      `$PREFIX/lib/libopenblas.so` even though the final link uses `-l:libopenblas.a`.
+    - **Settle it in seconds instead of at the end of a multi-hour build**: `docker run --rm -i
+      --platform linux/riscv64 <image> gcc -w -fsyntax-only` on a four-line stand-in whose calls
+      sit **inside `main()`** — at file scope you get `-Wimplicit-int` instead and prove the
+      wrong thing. To sweep a whole old-C tree ahead of time, run
+      `gcc -fsyntax-only -Werror=implicit-function-declaration -Werror=implicit-int
+      -Werror=int-conversion -Werror=incompatible-pointer-types` over its `*.c` on any arch with
+      GCC ≥13; that cleared CLAPACK's 1896 files in under a minute and correctly predicted it
+      needed no flags. (`-Wreturn-mismatch` is GCC 14-only and errors out on GCC 13.)
+
+526. **An asymmetry between two upstream invocations of the same command is load-bearing until
+    proven otherwise — normalising it is a self-inflicted bug (the vosk/OpenBLAS case).**
+    vosk's `Dockerfile.manylinux` and `Dockerfile.dockcross-manylinux` both pass `ONLY_CBLAS=1`
+    to `make all` and then **omit it** from `make install`. Tidying the two lines to match
+    looked like an obvious cleanup and instead removed a header: `ONLY_CBLAS=1` implies
+    `NO_LAPACKE`, and `Makefile.install:75` guards the `lapacke.h` copy with
+    `ifndef NO_LAPACKE`, while Kaldi's `matrix/kaldi-blas.h` includes `lapacke.h`
+    *unconditionally* on the `HAVE_OPENBLAS` path. The build then dies ~11 minutes in, in a
+    different project, with `fatal error: lapacke.h: No such file or directory`.
+    - **This is goal 2 in miniature**: the workflow is meant to mirror upstream, so a diff
+      against upstream's script that you cannot justify in one sentence is a defect, and
+      "the two lines now look consistent" is not a justification.
+    - **The general shape**: a flag that selects *what gets built* often also selects *what
+      gets installed*. Before dropping or adding one on an `install` line, grep the project's
+      install makefile for that flag and for whatever it implies.

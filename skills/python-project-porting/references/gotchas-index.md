@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (502 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (517 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -729,6 +729,13 @@ The porting gotchas (502 of them) live in [`references/gotchas/`](gotchas/), spl
 - **515** — Gotcha 46's minimal perl also breaks a package that shells out to perl at
   *runtime*: the wheel builds and the tests then die on a missing `Safe.pm`, so the fix is
   `CIBW_BEFORE_TEST: dnf -y install perl-Safe` (the systemrdl-compiler case).
+- **525** — The image's GCC 14 makes implicit-function-declaration/implicit-int/int-conversion
+  hard errors and `-w` cannot suppress them; OpenBLAS's generated prototype-less `linktest.c` is
+  the usual first casualty, fixed through `COMMON_OPT` (never a command-line `CFLAGS=`), and a
+  `-fsyntax-only` sweep predicts the whole tree in a minute (the vosk case).
+- **526** — An asymmetry between two upstream invocations of the same command is load-bearing
+  until proven otherwise: vosk's `ONLY_CBLAS=1` on `all` but not `install` is what installs
+  `lapacke.h`, and normalising the two lines broke Kaldi eleven minutes in (the vosk case).
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
