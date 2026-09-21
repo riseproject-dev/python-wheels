@@ -80,6 +80,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
   interpreter, which cfg-removes pyo3's `not(Py_LIMITED_API)` conversions (chrono).
 - **537** — Gotcha 344 inverted: upstream's own workflow can pin a pre-riscv64
   `maturin-version:`, and the fix is to delete the input, not override it.
+- **539** — A workspace's root `Cargo.lock` can be mostly a sibling crate's *dev*-dependencies:
+  filter `dep_kinds`, not just `--filter-platform`.
 
 ---
 
@@ -1264,6 +1266,33 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       the interpreter instead.
     - Generalises past chrono: grep the pinned pyo3 release's `src/conversions/` for
       `not(Py_LIMITED_API)` before assuming the flag costs nothing.
+
+539. **A Cargo workspace's root `Cargo.lock` can be dominated by a sibling crate's
+    *dev*-dependencies, so the extension's real crate graph is a fraction of it — filter
+    `dep_kinds`, not just `--filter-platform` (the chonkie-core case).** Gotcha 78 uses
+    `cargo metadata --filter-platform <triple>` to enumerate what riscv64 would compile,
+    and that is the right command — but its `resolve.nodes` graph still carries
+    dev-dependencies, which a PEP 517 `maturin build` never touches. In a workspace whose
+    *library* crate benchmarks itself against competitors, those dev-deps are exactly the
+    arch-sensitive crates a triager is hunting for: chonkie-core's lock resolves **176**
+    crates for riscv64 — ring, rustls, quinn, tokio, reqwest, criterion — while the
+    `cdylib` compiles **30**, none of them a `-sys` crate and none with a line of C. Walk
+    `resolve.nodes[].deps[].dep_kinds` and skip any edge whose kinds are `{"dev"}` only;
+    what remains is what rustc is actually handed.
+    ```python
+    kinds = {k["kind"] for k in dep.get("dep_kinds", [])}
+    if kinds <= {"dev"}:      # None == normal, plus "build" and "dev"
+        continue
+    ```
+    - **Reading the unfiltered list manufactures a blocker that is not there.** `ring`'s
+      per-arch assembly and the pinned-embedded-engine crates of gotchas 273/335/509 are
+      precisely what gotcha 78's two signatures hunt for, so a port that is 30 portable
+      crates deep reads like a multi-hour investigation. Ask which crate pulls the suspect
+      in before investigating it — `cargo tree -i <crate>` from the extension's manifest
+      answers it, and a bench-only path means there is nothing to triage.
+    - **`Cargo.lock` itself never says which kind an edge is** — it is a flat package
+      list, so grepping it (or reading a crate count off the lock) is the same trap one
+      level cheaper. `dep_kinds` exists only in `cargo metadata` output.
 
 537. **Gotcha 344 inverted: the stale maturin pin can live in upstream's own *workflow*,
     and the fix is to delete it rather than add one (the squawk-cli case; see

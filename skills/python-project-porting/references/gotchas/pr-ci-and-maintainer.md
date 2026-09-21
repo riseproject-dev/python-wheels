@@ -23,6 +23,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
 - **413** — `git -C <dir> apply <glob>` hands git the *literal* glob — the shell expands
 - **458** — A failed job with no log at all and its steps still `in_progress` is a dead
 - **508** — A job is not hung because *you* think it has been long: compare its `started_at`
+- **540** — `Failed to FinalizeArtifact … (403) Forbidden` after a green build is an
+  artifact-service flake; re-run failed jobs, but only once the whole run has finished.
 
 ---
 
@@ -447,6 +449,31 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
       wall".** When there is no log to read, the annotation plus the unfinished steps are
       the substitute — and reaching for a source fix, a parallelism cap or a parked entry
       without checking them costs a full build cycle to disprove.
+
+540. **`Failed to FinalizeArtifact: Received non-retryable error: Failed request: (403)
+     Forbidden: Error from intermediary` is a GitHub artifact-service flake, not a port
+     defect — and `rerun-failed-jobs` refuses to start while sibling matrix legs are
+     still in flight (the chonkie-core case).** One leg of a three-interpreter matrix went
+     red with the job's *only* failing step being `actions/upload-artifact`, after
+     cibuildwheel had already printed `1 wheel produced`, the wheel's size and SHA256, and
+     `23 passed`. The upload itself succeeded (`Uploaded bytes 374360`, `Finished
+     uploading artifact content to blob storage!`); the finalize call after it got a 403
+     from an intermediary. Nothing in the workflow or the package is implicated, so read
+     the failing *step* name before debugging the build: a `Build`-step failure and an
+     `upload-artifact`-step failure on the same job line look identical in the job list.
+     - **Re-run it, do not edit the workflow.** `POST /repos/{owner}/{repo}/actions/runs/
+       {id}/rerun-failed-jobs` replays just that leg; the successful legs carry over into
+       attempt 2 with their original timestamps, and `publish` — skipped on attempt 1
+       because a `needs:` leg failed — runs at the end of attempt 2 and dry-runs normally.
+       The retry took the same ~10 minutes and went green.
+     - **It answers `403 {"message": "This workflow is already running"}` until the run
+       reaches `completed`.** The 403 is easy to misread as a token-scope problem, since
+       the flake it is recovering from is also a 403. Poll the run's `status` and only
+       then re-issue — a sibling leg that is still building blocks it, so the wait is real
+       work, not a retry loop.
+     - **Distinct from gotcha 458's dead job**: there the steps stay `in_progress` and no
+       log exists at all; here every step has a log and the run's own summary is green
+       right up to the finalize call.
 
 508. **Never call a running CI job hung from your own sense of elapsed time — read the
     job's `started_at` next to `date -u` before cancelling anything (the cmeel-qhull

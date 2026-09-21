@@ -585,6 +585,11 @@ The porting gotchas (518 of them) live in [`references/gotchas/`](gotchas/), spl
   riscv64 assets; plus a `bindings = "bin"` crate in a workspace subdirectory usually wants
   `working-directory:` rather than gotcha 312's write-a-pyproject-at-root step, and a linter
   CLI exits non-zero under its JSON reporter too (the squawk-cli case).
+- **539** — A Cargo workspace's root `Cargo.lock` can be dominated by a sibling crate's
+  *dev*-dependencies (176 crates resolved for riscv64, 30 actually compiled), so gotcha 78's
+  `cargo metadata --filter-platform` must also drop `{"dev"}`-only `dep_kinds` edges before the
+  graph describes what the wheel builds — read unfiltered, it manufactures a ring/tokio-shaped
+  blocker no `maturin build` ever reaches (the chonkie-core case).
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
@@ -1180,3 +1185,8 @@ The porting gotchas (518 of them) live in [`references/gotchas/`](gotchas/), spl
 - **508** — A job is not hung because your own sense of elapsed time says so: an agent's
   `sleep` does not track the runners' clock, so compare the job's `started_at` with
   `date -u`, let `timeout-minutes` do the killing, and re-run a run rather than cancel it.
+- **540** — `Failed to FinalizeArtifact … (403) Forbidden: Error from intermediary` on a job
+  whose build, tests and wheel summary are all green is a GitHub artifact-service flake, not a
+  port defect: re-run that leg with `rerun-failed-jobs`, which itself answers `403 "This
+  workflow is already running"` until every sibling matrix leg has finished (the chonkie-core
+  case).
