@@ -1,0 +1,134 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/MikePopoloski/slang/blob/v11.0/.github/workflows/python-dist.yml
+name: Build pyslang wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyslang.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyslang.yml'
+      - 'docs/packages/pyslang.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyslang.yml'
+      - 'docs/packages/pyslang.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # external/CMakeLists.txt FetchContent-pulls fmt and bindings/CMakeLists.txt
+  # pybind11; bump these alongside those pins.
+  FMT_TAG: '12.1.0'
+  PYBIND11_TAG: v3.0.4
+  BS_THREAD_POOL_TAG: v5.1.0
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyslang
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyslang ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      PYSLANG_VERSION: ${{ matrix.version }}
+
+    steps:
+      # Upstream tags two components (v11.0) but the wheel says 11.0.0.
+      - id: tag
+        run: echo "ref=v${PYSLANG_VERSION%.0}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout slang ${{ steps.tag.outputs.ref }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: MikePopoloski/slang
+          ref: ${{ steps.tag.outputs.ref }}
+          # cmake/gitversion.cmake reads `git describe --tags` for the patch segment.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # fmt (MIT) and pybind11 (BSD-3-Clause) are fetched from source and compiled
+      # in, as are the vendored BS_thread_pool.hpp (MIT) and the Boost/expected-lite
+      # headers (BSL-1.0); upstream's `wheel.license-files = ["LICENSE"]` ships none
+      # of them, so stage each notice and widen the list.
+      - name: Stage the vendored dependencies' licences
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/fmtlib/fmt/${FMT_TAG}/LICENSE" -o LICENSE.fmt
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/pybind/pybind11/${PYBIND11_TAG}/LICENSE" -o LICENSE.pybind11
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/bshoshany/thread-pool/${BS_THREAD_POOL_TAG}/LICENSE.txt" -o LICENSE.bs-thread-pool
+          cp LICENSES/BSL-1.0.txt LICENSE.boost-headers
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: 'SKBUILD_WHEEL_LICENSE_FILES="LICENSE;LICENSE.boost-headers;LICENSE.bs-thread-pool;LICENSE.fmt;LICENSE.pybind11"'
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          exts = [n for n in names if n.endswith(".so")]
+          assert len(exts) == 1 and exts[0].startswith("pyslang/pyslang.cpython-"), exts
+          assert exts[0].endswith("-riscv64-linux-gnu.so"), exts
+          assert any(n.endswith(".pyi") for n in names), names
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          assert licences == {"LICENSE", "LICENSE.boost-headers", "LICENSE.bs-thread-pool",
+                              "LICENSE.fmt", "LICENSE.pybind11"}, licences
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyslang-${{ env.PYSLANG_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyslang ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyslang-${{ matrix.version }}-*-manylinux_riscv64
