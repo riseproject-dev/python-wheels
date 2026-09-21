@@ -197,6 +197,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   absent, so the build test passes and proves nothing: read the released wheel's `DT_NEEDED`
   against `setup.py`'s `auditwheel --exclude` list, and get the toolkit's arch axis from the
   vendor's image registry (the torch-npu / Huawei CANN case).
+- **518** — A commercial vendor's package with a complete, buildable sdist but *no licence
+  declared anywhere* is a licensing question for the maintainer, not a feasibility verdict —
+  keep the two axes separate and port it with the gap flagged.
 
 ---
 
@@ -3945,3 +3948,35 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       `version.txt` already read `2.12.0.post3`); the release is tagged
       `v26.1.0-pytorch2.12.0` — vendor train first, framework version second. `git ls-remote
       <url>` before assuming gotcha 3's tag shape, and check `version.txt` at the tag.
+
+518. **A commercial vendor's package with a complete, buildable sdist but *no licence declared
+    anywhere* is a licensing question for the maintainer, not a feasibility verdict — keep the
+    two axes separate and port it with the gap flagged (the chalkpy-rs case; see
+    `build-chalkpy-rs.yml`).** Gotcha 372's hdbcli park reads a generic vendor homepage in both
+    `home` and `repo` plus a sdist-less release history as a closed-source drop, and gotcha
+    435's livekit park adds a licence leg on top of a closed core. chalkpy-rs trips the first
+    half of 372's signal and none of the rest: `home`/`repo` are both `https://chalk.ai`, PyPI
+    lists only `chalk.ai`/`docs.chalk.ai` URLs, and the vendor's public GitHub org carries
+    client SDKs and dependency forks but not this crate — yet the release *does* ship a
+    `.tar.gz`, and that tarball is the entire Cargo workspace, every dependency resolvable from
+    crates.io or a public git tag. Source availability and licence grant are independent
+    questions, and only the first one decides feasibility.
+    - **Check the *parent* distribution's licence too before concluding anything.** A native
+      extension split out of a larger SDK (`chalkpy-rs` under `chalkpy`) inherits its
+      packaging, so the absence is usually the vendor's house style rather than something
+      specific to this artifact — `unzip -l` the parent's wheel and read its `METADATA`. Here
+      neither carries `License`, `License-Expression`, a `License ::` classifier, or any
+      `LICEN[CS]E*`/`COPYING*`/`NOTICE*` file in sdist, wheel or `dist-info/licenses/`. That is
+      silence, not a proprietary grant like 435's `SEE LICENSE IN …/terms-of-service`, and the
+      two do not warrant the same verdict.
+    - **`license: Unknown` in `docs/packages/<pkg>.yaml` is the existing convention for an
+      undeterminable licence** (google-crc32c, vhacdx already use it) — use it rather than
+      inventing an SPDX id, say so in one sentence of the PR's **License** section, and leave
+      the PR a draft so the maintainer decides redistribution. Asserting a licence the upstream
+      never granted is the one outcome worse than either porting or parking.
+    - **Do the technical triage anyway; it is what makes the flag actionable.** The port is
+      otherwise ordinary — gotcha 156's sdist-is-upstream shape, setuptools-rust/PyO3, no
+      `build.rs`, no vendored blobs — and gotcha 156's own one-minute cross-compile pre-flight
+      settles the arch question outright. A maintainer answering "may we redistribute this?"
+      wants to know the build works; "unknown licence, and also unknown whether it builds" is
+      an answer nobody can act on.

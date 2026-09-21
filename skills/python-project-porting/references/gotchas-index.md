@@ -314,6 +314,10 @@ The porting gotchas (500 of them) live in [`references/gotchas/`](gotchas/), spl
   absent, so a clean local build proves nothing: the released wheel's `DT_NEEDED` read against
   `setup.py`'s `auditwheel --exclude` list is the real test, and the toolkit's arch axis comes
   from the vendor's image registry (the torch-npu / Huawei CANN case).
+- **518** — A commercial vendor's package with a complete, buildable sdist but no licence
+  declared anywhere — not in its own metadata, not in the parent distribution's — is a
+  licensing question for the maintainer, not a feasibility verdict: record `license: Unknown`,
+  flag it in the PR, and port it (the chalkpy-rs case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
