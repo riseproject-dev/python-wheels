@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (469 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (472 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -274,6 +274,11 @@ The porting gotchas (469 of them) live in [`references/gotchas/`](gotchas/), spl
   renames the artifact cannot yield the queued version; and the CPU mode's only transport is
   Huawei's UB/urma `hcom`, whose CMake sends everything that is not aarch64 to `-msse4.2`
   (the memfabric-hybrid case).
+- **481** — A `[tool.poetry.build] script` makes poetry-core stamp a full
+  `cpXY-cpXY-<platform>` tag whatever the script does — jsonschema2md's only compiles gettext
+  `.po` into `.mo` — so the wheel holds zero `.so`, the tag halves are whatever runner
+  published it, and the release history dates the flip to the release that added i18n
+  (the jsonschema2md case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -715,6 +720,11 @@ The porting gotchas (469 of them) live in [`references/gotchas/`](gotchas/), spl
 - **422** — A build container you drive yourself needs `PIP_EXTRA_INDEX_URL` on the *build*
   `podman run`, not only on the test one — otherwise its `pip install -r requirements.txt`
   source-builds numpy and dies on Pillow (the paddlepaddle case).
+- **482** — `pypi.riseproject.dev/simple/<dep>/` is case-sensitive (a static GitHub Pages
+  tree, no PEP 503 normalization), so gotcha 30/353's `curl` check and
+  `queue_triage.py --deps` both report "not on RISE" for a package we publish whenever the
+  dependency's PyPI spelling is not normalized — `PyYAML` 404s where `pyyaml` 200s; settle
+  it with `check_riscv64_deps.py`, which drives pip.
 
 ### Build-tool drift & pins — [`gotchas/build-tool-drift-and-pins.md`](gotchas/build-tool-drift-and-pins.md)
 

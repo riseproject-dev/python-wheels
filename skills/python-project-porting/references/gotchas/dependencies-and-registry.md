@@ -43,6 +43,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
   be unusable as its *build* input: a wheel ships `.so` files, not headers or a CMake package.
 - **422** — A build container you drive yourself needs `PIP_EXTRA_INDEX_URL` on the *build*
   `podman run`, not only on the test one.
+- **482** — The registry's simple index is case-sensitive, so gotcha 30/353's `curl` check
+  and `queue_triage.py --deps` both report "not on RISE" for a package we do publish
+  whenever the dependency's PyPI spelling is not already PEP 503-normalized.
 
 ---
 
@@ -791,3 +794,23 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       exact versions: a pip running on an older interpreter than `--python-version`
       backtracks past wheels whose `Requires-Python` excludes the *running* one (pip
       24.0 on 3.11 walked numpy 2.5.3 → 2.4.3 with `--python-version 3.12`).
+
+482. **`pypi.riseproject.dev/simple/<dep>/` is case-sensitive, so gotcha 30/353's check —
+    and `ci_scripts/queue_triage.py --deps`, which passes `requires_dist` names raw —
+    reports "not on RISE" for packages we do publish.** Triaging jsonschema2md,
+    `queue_triage.py --deps` printed `PyYAML  NO riscv64 wheel | sdist | not on RISE`,
+    which reads as a hard blocker, and its first half is true: PyPI publishes zero riscv64
+    files for PyYAML 6.0.3 (73 files, none riscv64). The registry half is wrong.
+    `curl -I https://pypi.riseproject.dev/simple/PyYAML/` → **404**, while
+    `…/simple/pyyaml/` → **200**, listing
+    `pyyaml-6.0.3-cp313-cp313-manylinux_2_31_riscv64.manylinux_2_39_riscv64.whl`. The index
+    is the static GitHub Pages tree of gotcha 353, and a static tree has no PEP 503
+    normalization step — only the normalized spelling exists as a path.
+    - **Anything not already normalized hits this**: `PyYAML`, `Babel`, `Flask-Cors`,
+      `zope.interface`, `ruamel.yaml`. Normalize before asking —
+      `re.sub(r'[-_.]+', '-', name).lower()`.
+    - **Settle it with pip, not with the index.** `ci_scripts/check_riscv64_deps.py`
+      resolved the same `PyYAML<7,>=6` requirement to the riscv64 wheel above on both cp312
+      and cp313, because pip normalizes names itself. Treat `queue_triage.py`'s RISE column
+      as advisory (its docstring already warns about `py3-none-any` facades) and never park
+      a package or trim a matrix on a bare 404 from a name you did not normalize.

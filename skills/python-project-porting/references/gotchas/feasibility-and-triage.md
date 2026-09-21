@@ -165,6 +165,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   `readelf -d` clean, and the CPU backend its CMake advertises can be stamped `+cpu` by
   upstream's own `setup.py` — a build mode that renames the artifact cannot produce the
   queued version (the memfabric-hybrid / Huawei Ascend case).
+- **481** — A `[tool.poetry.build] script` makes poetry-core stamp a full
+  `cpXY-cpXY-<platform>` tag whatever the script does, and compiling gettext catalogs is the
+  commonest reason — the release history dates the fabricated tag (the jsonschema2md case).
 
 ---
 
@@ -3539,3 +3542,40 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       collection beside NVIDIA's redist manifests and conda `repodata.json`. A Chinese-vendor
       host being unfamiliar is not evidence, and the release branch head can be a version ahead
       of the queued release (`VERSION` said 1.2.1 on `release/1.2`), so check out the tag.
+
+481. **A `[tool.poetry.build] script` makes poetry-core stamp a full `cpXY-cpXY-<platform>`
+    tag whatever the script does — and compiling i18n catalogs is the commonest reason
+    (the jsonschema2md case).** Gotcha 464 found a fabricated `cpXY-cpXY` tag behind
+    setuptools' hardcoded `has_ext_modules()`; poetry-core has its own one-line trigger and
+    it fires on projects that never touch a compiler: declaring a build script makes the
+    distribution non-pure, full stop. jsonschema2md 1.7.0 publishes exactly one Linux wheel,
+    `cp313-cp313-manylinux_2_39_x86_64`, `Root-Is-Purelib: false`, with eleven entries that
+    are all `.py`, `.po` and `dist-info` — zero `.so`, no `PyInit_*`. Its `scripts/build.py`
+    only runs babel's `CompileCatalog` over `jsonschema2md/locales/*`, turning `.po` into
+    `.mo`; gettext catalogs are arch-independent data.
+    - **The release history dates the fabricated tag, for free, before any download.**
+      0.1.0 through 1.5.2 are all `py3-none-any`; the tag flips to `cp313-cp313-manylinux_…`
+      at exactly 1.6.0, the release that added i18n (the `[tool.poetry.build]` stanza plus
+      `babel` in `build-system.requires` — 1.5.2's `pyproject.toml` has neither).
+      `ci_scripts/queue_triage.py <pkg>` prints that per-version table in one read. A tag
+      that changes shape in a release adding no C source is fabricated — read the change
+      that introduced it, not the tag.
+    - **The tag follows the publishing runner, not the content.** `pip wheel <sdist>
+      --no-deps` on a 3.11 x86_64 host produces `…-cp311-cp311-linux_x86_64.whl` in about a
+      second with no compiler: both halves of the tag are simply whatever built it. Upstream
+      confirms it — `main.yaml` publishes with one `tag-publish` step on `ubuntu-24.04`, no
+      cibuildwheel, no arch matrix and no macOS/Windows wheels at all, so *every*
+      non-x86_64-Linux user already installs from the sdist today.
+    - **Verdict is gotcha 27's watchdog clause, once gotcha 383's sdist check is actually
+      run.** Every release ships an sdist; the three runtime deps and the whole
+      poetry-core/poetry-dynamic-versioning/babel build closure resolve to riscv64 wheels
+      (`ci_scripts/check_riscv64_deps.py`), so riscv64 `pip install` already works in
+      seconds and a `manylinux_2_39_riscv64` wheel would carry byte-identical content —
+      a packaging convenience, not a port. `parked`, no workflow or `docs/packages` entry.
+    - **A build script that emits *data* can even leave the published wheel worse than the
+      sdist.** The 1.7.0 wheel (poetry-core 2.1.3) ships the `.po` sources and **none** of
+      the `.mo` files its own build script compiles, while a local build with poetry-core
+      2.5.0 includes them — and the package's `get_locales()` globs
+      `locales/*/LC_MESSAGES/messages.mo`, so the released x86_64 wheel silently has no
+      translations where a from-sdist riscv64 install does. Check what the script's output
+      actually contributes to the wheel before crediting the tag with meaning.
