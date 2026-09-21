@@ -1,0 +1,373 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# This workflow is based on:
+# https://github.com/google-ai-edge/LiteRT/blob/main/.github/workflows/linux_nightly_wheel.yml
+# and https://github.com/google-ai-edge/LiteRT/blob/main/ci/build_pip_package_with_bazel.sh
+---
+name: Build ai-edge-litert wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ai-edge-litert.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ai-edge-litert.yml'
+      - 'docs/packages/ai-edge-litert.yaml'
+      - 'patches/ai-edge-litert/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ai-edge-litert.yml'
+      - 'docs/packages/ai-edge-litert.yaml'
+      - 'patches/ai-edge-litert/**'
+
+run-name: build-ai-edge-litert ${{ inputs.version && format('- {0}', inputs.version) || '' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Upstream's .bazelversion is 7.7.0, which no bazel release publishes a riscv64
+  # binary for and which cannot bootstrap from source: its MODULE.bazel pulls
+  # apple_support 1.23.1, hence bazel_features, whose generated globals.bzl re-exports
+  # bazel 8's macro(). 7.5.0 is the version this repo bootstraps from source, and
+  # LiteRT builds with --noenable_bzlmod and no versions.check, so nothing gates it.
+  BAZEL_VERSION: '7.5.0'
+  # versions bazel 7.5.0's MODULE.bazel pins; both need a riscv64 fix below
+  RULES_PYTHON_VERSION: '0.33.2'
+  RULES_JAVA_VERSION: '7.6.5'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: ai-edge-litert
+      version: ${{ inputs.version }}
+
+  bazel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Bootstrap bazel (riscv64)
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+
+    steps:
+      - name: Restore bazel binary
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: bazel-bin
+          key: bazel-${{ env.BAZEL_VERSION }}-manylinux_riscv64
+
+      - name: Bootstrap bazel ${{ env.BAZEL_VERSION }}
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p bazel-bin
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e BAZEL_VERSION \
+            -e RULES_PYTHON_VERSION \
+            -e RULES_JAVA_VERSION \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+
+          # rules_python 0.33.2's PLATFORMS has no riscv64 entry, aborting the bootstrap
+          # (bazelbuild/bazel#23018). Any linux entry is a safe stand-in: the toolchain it names
+          # is never selected on a riscv64 host. Fixed in bazel 8.2.0; the 7.x backport is open.
+          mkdir -p /tmp/rules_python
+          curl -fsSLo /tmp/rules_python.tar.gz "https://github.com/bazel-contrib/rules_python/releases/download/${RULES_PYTHON_VERSION}/rules_python-${RULES_PYTHON_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_python.tar.gz -C /tmp/rules_python --strip-components=1
+          sed -i 's|fail("No platform declared for host OS {} on arch {}".format(os_name, arch))|return "x86_64-unknown-linux-gnu"|' \
+            /tmp/rules_python/python/private/toolchains_repo.bzl
+
+          # rules_java 7.x maps riscv64 to a stray-colon include path, so a JNI library
+          # can't find jni_md.h. Fixed in rules_java 8.x, never backported.
+          mkdir -p /tmp/rules_java
+          curl -fsSLo /tmp/rules_java.tar.gz "https://github.com/bazelbuild/rules_java/releases/download/${RULES_JAVA_VERSION}/rules_java-${RULES_JAVA_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_java.tar.gz -C /tmp/rules_java
+          sed -i 's|\[":include/linux"\]|["include/linux"]|g' /tmp/rules_java/toolchains/BUILD
+
+          mkdir -p /tmp/bazel-src
+          cd /tmp/bazel-src
+          curl -fsSLo dist.zip "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-dist.zip"
+          unzip -q dist.zip
+
+          EXTRA_BAZEL_ARGS="--tool_java_runtime_version=local_jdk \
+            --override_module=rules_python=/tmp/rules_python \
+            --override_module=rules_java=/tmp/rules_java" \
+            bash ./compile.sh
+          install -m 0755 output/bazel /work/bazel-bin/bazel
+          SCRIPT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin/bazel
+          if-no-files-found: error
+
+  build_wheels:
+    name: Build ai-edge-litert ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    needs: [setup, bazel]
+    if: needs.setup.outputs.versions != '[]'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream builds 3.10-3.14; 3.10 is dropped because ml_dtypes, a runtime
+        # dependency, ships no riscv64 wheel for it.
+        # tag is a real dimension: legs introduced only through include collapse
+        # into a single job, keeping the last one (gotcha 402).
+        tag: [cp311, cp312, cp313, cp314]
+        include:
+          - {tag: cp311, python: '3.11'}
+          - {tag: cp312, python: '3.12'}
+          - {tag: cp313, python: '3.13'}
+          - {tag: cp314, python: '3.14'}
+
+    env:
+      AI_EDGE_LITERT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout google-ai-edge/LiteRT ${{ matrix.version }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: google-ai-edge/LiteRT
+          ref: v${{ env.AI_EDGE_LITERT_VERSION }}
+          path: litert
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Apply patches
+        working-directory: litert
+        run: git apply -v ../python-wheels/patches/ai-edge-litert/${{ env.AI_EDGE_LITERT_VERSION }}/*.patch
+
+      - name: Download bazel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin
+
+      - name: Build wheel
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
+        run: |
+          mkdir -p wheelhouse
+          set -o pipefail
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e PYTHON_VERSION \
+            -e AI_EDGE_LITERT_VERSION \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT' 2>&1 | tee build.log
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+          install -m 0755 /work/bazel-bin/bazel /usr/local/bin/bazel
+
+          PYTAG="cp${PYTHON_VERSION/./}"
+          export PYTHON_BIN="/opt/python/${PYTAG}-${PYTAG}/bin/python"
+          export PATH="/opt/python/${PYTAG}-${PYTAG}/bin:${PATH}"
+          "${PYTHON_BIN}" -m pip install -q -U pip setuptools wheel auditwheel
+          ln -sf "${PYTHON_BIN}" /usr/local/bin/python3
+
+          cd /work/litert
+
+          test "$(awk '/LITERT_EXPERIMENTAL_VERSION/ {split($0, a, "="); print a[2]}' litert/version.bzl | tr -d '" ')" \
+            = "${AI_EDGE_LITERT_VERSION}"
+
+          # The hermetic pip resolves TensorFlow's requirements lock, which pins a
+          # numpy PyPI publishes no riscv64 wheel for, and the lock is hash-pinned so
+          # the version cannot drift. HERMETIC_REQUIREMENTS_LOCK is rules_ml_toolchain's
+          # own hook for supplying a different lock; point numpy at our index's wheel
+          # and leave every other pin untouched.
+          mkdir -p /work/deps
+          "${PYTHON_BIN}" -m pip download --only-binary=:all: --no-deps -d /work/deps \
+            --index-url https://pypi.riseproject.dev/simple/ numpy
+          TF_COMMIT="$(sed -n 's/.*strip_prefix = "tensorflow-\(.*\)",.*/\1/p' WORKSPACE)"
+          curl -fsSLo /work/requirements_lock.txt \
+            "https://raw.githubusercontent.com/tensorflow/tensorflow/${TF_COMMIT}/requirements_lock_${PYTHON_VERSION/./_}.txt"
+          "${PYTHON_BIN}" - <<'PY'
+          import glob
+
+          wheel = glob.glob("/work/deps/numpy-*.whl")[0]
+          path = "/work/requirements_lock.txt"
+          out, dropping = [], False
+          for line in open(path).read().splitlines():
+              if line.startswith("numpy=="):
+                  marker = line.split(";", 1)[1].rstrip(" \\") if ";" in line else ""
+                  out.append("numpy @ file://%s%s" % (wheel, " ;" + marker if marker else ""))
+                  dropping = line.rstrip().endswith("\\")
+                  continue
+              if dropping:
+                  dropping = line.rstrip().endswith("\\")
+                  continue
+              out.append(line)
+          assert any(l.startswith("numpy @ ") for l in out)
+          open(path, "w").write("\n".join(out) + "\n")
+          PY
+
+          {
+            # No remote JDK is published for riscv64.
+            echo "build --java_runtime_version=local_jdk"
+            echo "build --tool_java_runtime_version=local_jdk"
+            # XNNPACK's rvvfp16arith microkernels build with -march=rv64gc_zvfh, and
+            # the image's binutils 2.41 assembler rejects the whole ISA string (zvfh
+            # landed in 2.42); this is XNNPACK's own off-switch, as it uses for Android.
+            echo "build --define=xnn_enable_riscv_fp16_vector=false"
+            echo "common --curses=no --show_progress_rate_limit=60"
+          } >> .bazelrc
+
+          export HERMETIC_PYTHON_VERSION="${PYTHON_VERSION}"
+          export PYTHON_BIN_PATH="${PYTHON_BIN}"
+          PYTHON_LIB_PATH="$("${PYTHON_BIN}" -c 'import site; print(site.getsitepackages()[0])')"
+          export PYTHON_LIB_PATH
+          export TF_NEED_ROCM=0
+          export TF_NEED_CUDA=0
+          # upstream answers this prompt with clang 18 from its build image; Rocky 10
+          # ships GCC 14 and no clang, and the warnings it silences are clang-only
+          export TF_NEED_CLANG=0
+          export TF_SET_ANDROID_WORKSPACE=0
+          export CC_OPT_FLAGS='-Wno-sign-compare'
+          "${PYTHON_BIN}" configure.py < <(yes "")
+
+          # Only the wheel target: the vendor-SDK sdists the release script also
+          # builds are separate distributions for NPUs that riscv64 has none of.
+          bazel build -c opt --cxxopt=-std=gnu++17 --copt=-O3 \
+            --repo_env=USE_PYWRAP_RULES=True \
+            --repo_env=HERMETIC_PYTHON_VERSION="${PYTHON_VERSION}" \
+            --repo_env=HERMETIC_REQUIREMENTS_LOCK=/work/requirements_lock.txt \
+            --action_env=HERMETIC_PYTHON_VERSION="${PYTHON_VERSION}" \
+            //ci/tools/python/wheel:litert_wheel
+
+          auditwheel repair --plat manylinux_2_39_riscv64 -w /work/wheelhouse \
+            bazel-bin/ci/tools/python/wheel/dist/*.whl
+          SCRIPT
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ai-edge-litert-${{ env.AI_EDGE_LITERT_VERSION }}-${{ matrix.tag }}-build-log
+          path: build.log
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ai-edge-litert-${{ env.AI_EDGE_LITERT_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+      - name: Test wheel
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
+          PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+        run: |
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e PYTHON_VERSION \
+            -e AI_EDGE_LITERT_VERSION \
+            -e PIP_EXTRA_INDEX_URL \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          PYTAG="cp${PYTHON_VERSION/./}"
+          PYTHON_BIN="/opt/python/${PYTAG}-${PYTAG}/bin/python"
+          "${PYTHON_BIN}" -m pip install --only-binary=:all: /work/wheelhouse/*.whl
+
+          # /work/litert would shadow the installed package with the checkout
+          cd /tmp
+          MODEL=/work/litert/litert/test/testdata/simple_l2_norm.tflite \
+            "${PYTHON_BIN}" - <<'PY'
+          import os
+
+          import numpy as np
+
+          import ai_edge_litert
+          from ai_edge_litert import interpreter as tflite
+
+          assert ai_edge_litert.__version__ == os.environ["AI_EDGE_LITERT_VERSION"]
+          assert tflite._interpreter_wrapper.__file__.endswith(
+              ".so"
+          ), tflite._interpreter_wrapper.__file__
+
+          model = os.environ["MODEL"]
+          expected = np.full((1, 768), 1.0 / np.sqrt(768.0), dtype=np.float32)
+
+          interpreter = tflite.Interpreter(model_path=model)
+          interpreter.allocate_tensors()
+          inp = interpreter.get_input_details()[0]
+          interpreter.set_tensor(inp["index"], np.ones(tuple(inp["shape"]), dtype=np.float32))
+          interpreter.invoke()
+          out = interpreter.get_tensor(interpreter.get_output_details()[0]["index"])
+          np.testing.assert_allclose(out, expected, rtol=1e-6)
+
+          from ai_edge_litert.compiled_model import CompiledModel
+          from ai_edge_litert.environment import Environment, EnvironmentOptions
+          from ai_edge_litert.hardware_accelerator import HardwareAccelerator
+          from ai_edge_litert.options import CpuOptions, Options
+
+          environment = Environment.create(options=EnvironmentOptions())
+          compiled = CompiledModel.from_file(
+              model,
+              options=Options(
+                  hardware_accelerators=HardwareAccelerator.CPU,
+                  cpu_options=CpuOptions(num_threads=1),
+              ),
+              environment=environment,
+          )
+          inputs = compiled.create_input_buffers(0)
+          outputs = compiled.create_output_buffers(0)
+          inputs[0].write(np.ones((1, 768), dtype=np.float32))
+          compiled.run_by_index(0, inputs, outputs)
+          np.testing.assert_allclose(
+              np.asarray(outputs[0].read(768, np.float32)), expected.ravel(), rtol=1e-6
+          )
+          PY
+          SCRIPT
+
+  publish:
+    name: Publish ai-edge-litert ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: ai-edge-litert-${{ matrix.version }}-*-manylinux_riscv64
