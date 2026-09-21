@@ -1,0 +1,194 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Mirrors the Linux job of upstream's .github/workflows/pypi.yml: build_usd.py with
+# imaging/MaterialX/examples/tutorials off, then build_scripts/pypi/{setup.py,
+# updatePluginfos.py}, narrowed to riscv64.
+name: Build usd-core wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/usd-core.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-usd-core.yml'
+      - 'docs/packages/usd-core.yaml'
+      - 'patches/usd-core/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-usd-core.yml'
+      - 'docs/packages/usd-core.yaml'
+      - 'patches/usd-core/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: usd-core
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build usd-core ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream publishes cp39-cp314 and no free-threaded wheel; the
+        # pxr_boost::python bindings never declare Py_mod_gil, so a cp314t wheel
+        # would only re-enable the GIL.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      USD_CORE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Resolve the OpenUSD release tag
+        id: tag
+        run: |
+          set -euo pipefail
+          printf 'tag=v%s\n' \
+            "$(awk -F. '{printf "%s.%02d", $1, $2}' <<<"${USD_CORE_VERSION}")" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout OpenUSD ${{ steps.tag.outputs.tag }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: PixarAnimationStudios/OpenUSD
+          ref: ${{ steps.tag.outputs.tag }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Patch OpenUSD
+        run: git apply python-wheels/patches/usd-core/${{ env.USD_CORE_VERSION }}/00*.patch
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
+
+      - name: Build USD and the wheel
+        run: |
+          mkdir -p dist
+          docker run -i --rm \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            "${MANYLINUX_RISCV64_IMAGE}" bash -s <<'USD_BUILD_EOF'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+
+          PY="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin/python"
+          "$PY" -m pip install setuptools wheel
+
+          # Upstream's own pypi.yml hack: the manylinux image ships no libpython
+          # (PEP 513), and FindPython's Development component refuses to configure
+          # without the file even though PXR_PY_UNDEFINED_DYNAMIC_LOOKUP means USD
+          # never links against it.
+          "$PY" -c "import pathlib,sysconfig; pathlib.Path(sysconfig.get_config_var('LIBDIR'), sysconfig.get_config_var('LDLIBRARY')).touch()"
+
+          "$PY" build_scripts/build_usd.py --build-monolithic \
+            --build-args USD,"-DPXR_PY_UNDEFINED_DYNAMIC_LOOKUP=ON -DPXR_BUILD_USD_TOOLS=OFF -DPXR_BUILD_EXEC=OFF -DPXR_INSTALL_LOCATION=../pxr/pluginfo -DPXR_PYTHON_INSTALL_DIR=lib/python" \
+            --no-materialx --no-imaging --no-examples --no-tutorials \
+            --build /work/gen/build --src /work/gen/src /work/inst -v
+
+          mkdir packaging
+          cp -R /work/inst ./packaging
+          cp build_scripts/pypi/package_files/* ./packaging
+          cp LICENSE.txt ./packaging
+          # auditwheel vendors the TBB shared library into the wheel, so its
+          # Apache-2.0 text has to travel with it; setuptools' default
+          # license_files glob picks LICENSE* up without a setup.py edit.
+          cp gen/src/oneTBB-*/LICENSE ./packaging/LICENSE.oneTBB.txt
+
+          cd packaging
+          "$PY" setup.py bdist_wheel --python-tag "${PYTHON_TAG}"
+          cd /work
+
+          PYTHONPATH=/work/packaging/pypi/lib/python \
+          LD_LIBRARY_PATH="/work/packaging/pypi/lib:${LD_LIBRARY_PATH:-}" \
+            auditwheel repair packaging/dist/*.whl
+
+          repaired="$(echo wheelhouse/*.whl)"
+          "$PY" build_scripts/pypi/updatePluginfos.py \
+            "${repaired}" "/work/dist/$(basename "${repaired}")"
+          ls -la /work/dist
+          USD_BUILD_EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: usd-core-${{ env.USD_CORE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+      - name: Test usd-core wheel
+        run: |
+          docker run -i --rm \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            "${MANYLINUX_RISCV64_IMAGE}" bash -s <<'USD_TEST_EOF'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+
+          PY="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin/python"
+          "$PY" -m pip install pytest
+          "$PY" -m pip install --no-index --find-links=/work/dist usd-core
+
+          # /work/pxr is the checkout's C++ source tree and would shadow the
+          # installed package as a namespace package, so run from elsewhere and
+          # prove which pxr was imported.
+          cd /tmp
+          "$PY" -c "
+          import pathlib, pxr
+          p = pathlib.Path(pxr.__file__)
+          print(p)
+          assert 'site-packages' in p.parts
+          import importlib, pkgutil
+          mods = sorted(m.name for m in pkgutil.iter_modules(pxr.__path__))
+          for m in mods:
+              importlib.import_module('pxr.' + m)
+          print(len(mods), 'modules imported:', ' '.join(mods))
+          assert 'Usd' in mods and 'Sdf' in mods and 'UsdGeom' in mods
+          "
+          "$PY" -m pytest -v /work/build_scripts/pypi/test.py
+          USD_TEST_EOF
+
+  publish:
+    name: Publish usd-core ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: usd-core-${{ matrix.version }}-*-manylinux_riscv64
