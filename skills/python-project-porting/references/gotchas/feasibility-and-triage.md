@@ -212,6 +212,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   would be the one building it: an unpinned `-latest-` fetch URL makes a self-built substitute
   unversionable, the vendor's own package manifest is the platform table, and the pure-Python
   sdist already serves the arch (the adbutils/Android platform-tools case).
+- **528** — An open upstream and a permissive licence do not rescue a vendor runtime wheel: read
+  the build tree out of the unstripped `.so`'s debug paths (an internal release branch, not a
+  public ref), diff the loader's `dlopen` backend list against the adapters the wheel actually
+  ships, and check that any consumer could exist on our arch (the intel-cmplr-lib-ur case).
 
 ---
 
@@ -4133,3 +4137,46 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       long-abandoned `apkutils2` dep has no wheel either. Passing 2.12.0's own requirements
       (`requests`, `deprecation`, `retry2`, `Pillow`) resolves clean on cp312/cp313/cp314/cp314t
       against PyPI + our registry, which is the answer that matters.
+
+528. **An open upstream and a permissive licence do not rescue a vendor runtime wheel — check
+     that the shipped *version* maps to a public ref, that the vendor ships the *arch-neutral*
+     components, and that any consumer could exist on our arch (the intel-cmplr-lib-ur case).**
+     Gotcha 263 rescues a closed-looking wheel whose contents are an open project; gotcha 506
+     says that rescue is per package, not per vendor. This is the case where the open project
+     really is there and the answer is still park: intel-cmplr-lib-ur's payload is oneAPI
+     Unified Runtime, Apache-2.0 WITH LLVM-exception, `project(unified-runtime VERSION 0.12.0)`
+     in intel/llvm's `unified-runtime/` (oneapi-src/unified-runtime is now only a mirror), and
+     0.12.0 is exactly the wheel's `libur_loader.so.0.12.0` SONAME. Three cheap checks decide
+     it, and each generalises to any plugin-shaped vendor runtime:
+     - **Debug paths beat the licence file: read the *tree* the binary was built from.** The
+       `.so` files ship unstripped, so
+       `strings -a lib*.so | grep -oE '(/[A-Za-z0-9_.+-]+){2,}\.(cpp|hpp)'` prints
+       `/netbatch/<user>/…/xmain-rel/LX/xmainefi2linux_release/ws/icsws/llvm/unified-runtime/source/…`
+       — Intel's build farm and Intel's *internal* release branch, not a public ref. The
+       distribution version `2026.1.1` is a release-train number (intel/llvm's public tags are
+       `nightly-YYYY-MM-DD` and `v7.1.1`), so gotcha 263's "PyPI version == open tag" premise
+       fails even though the source is open, and a rebuild would be a different artifact under
+       the same name. The banner and `readelf -d` close it: all three libraries say
+       `Intel(R) oneAPI DPC++/C++ Compiler 2026.1.1` and need
+       `libimf.so`/`libsvml.so`/`libirng.so`/`libintlc.so.5`, i.e. the published bytes cannot be
+       reproduced with a free toolchain from that source anyway.
+     - **A plugin runtime names every backend it can load; diff that list against what the
+       wheel ships.** `strings` the loader for its `dlopen` table —
+       `libur_adapter_{level_zero,level_zero_v2,opencl,cuda,hip,native_cpu,offload,mock}.so.0` —
+       then list the wheel: only the two Level Zero adapters and OpenCL are in it. The
+       arch-neutral backends the open project has (`native_cpu`, `offload`) are precisely the
+       ones the vendor does not ship, and the shipped ones `dlopen` `libze_loader.so.1`, whose
+       only implementation is Intel's GPU/NPU stack (intel/compute-runtime publishes amd64-only
+       packages; Debian's `libze1` and `intel-opencl-icd` are amd64-only; Debian has no
+       `unified-runtime` source package at any arch). A vendor's *selection* of an open
+       project's plugins is itself platform evidence, and it is one `strings` away.
+     - **Ask who could install it: a runtime shim with no reachable consumer is dead weight even
+       if it builds.** Upward, the only PyPI consumers are `intel-openmp` and `intel-sycl-rt`,
+       both 0-sdist Intel binary wheels tagged `manylinux*_x86_64`/`win_amd64` only; downward
+       the wheel hard-pins `Requires-Dist: umf==1.1.*`, itself 0 sdists, x86_64/win-only and 404
+       on our index (gotcha 40's shape). Intel publishes oneAPI for no non-x86 architecture at
+       all — `apt.repos.intel.com/oneapi dists/all/Release` says
+       `Architectures: all amd64 i386 i686`. Gotcha 465's inverted tell also repeats here:
+       `strings -a libur_loader.so | grep -ci riscv` is 1015 (`R_RISCV_*`, `RISCVISAInfo.cpp`,
+       `DW_CC_LLVM_RISCVVectorCall`) from bundled LLVM tables, while the ELF is x86-64, no
+       `LLVMInitialize*Target` symbol exists at all, and the adapters have zero riscv strings.

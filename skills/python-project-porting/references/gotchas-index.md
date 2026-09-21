@@ -331,6 +331,12 @@ The porting gotchas (517 of them) live in [`references/gotchas/`](gotchas/), spl
   platform table when the URL has no arch segment, and the pure-Python sdist plus a
   `$PATH`/env-var resolver already serves the arch; also gotcha 503's resolver false positive,
   concretely (the adbutils case).
+- **528** — An open upstream and a permissive licence do not rescue a vendor runtime wheel
+  (the intel-cmplr-lib-ur case): the unstripped `.so`'s debug paths name the vendor's internal
+  release branch rather than a public ref, so gotcha 263's "PyPI version == open tag" premise
+  fails; the loader's `dlopen` backend list minus the adapters actually shipped shows the vendor
+  withholding the arch-neutral ones; and the reverse dependencies (plus a hard-pinned, equally
+  x86-only payload dep) mean nothing on riscv64 could ever pull the rebuilt library in.
 - **516** — Link-time *stub* shared libraries let a vendor-SDK package build with the SDK
   absent, so a clean local build proves nothing: the released wheel's `DT_NEEDED` read against
   `setup.py`'s `auditwheel --exclude` list is the real test, and the toolkit's arch axis comes
