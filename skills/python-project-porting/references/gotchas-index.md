@@ -328,6 +328,9 @@ The porting gotchas (438 of them) live in [`references/gotchas/`](gotchas/), spl
 - **468** — An upstream `build = ["cp3??-*"]` glob excludes every free-threaded interpreter by
   character count, so the project ships no `cp3NNt` wheel and an unguarded `py_limited_api`
   would mis-tag one if a `cp314t` leg were added.
+- **469** — An abi3 build *tests* on its floor interpreter, so a package using a
+  newer-Python-only API (`code.co_qualname`, 3.11+) fails our CI while upstream's own CI
+  stays green; rehearse on the abi3 floor, not your host's default interpreter.
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 

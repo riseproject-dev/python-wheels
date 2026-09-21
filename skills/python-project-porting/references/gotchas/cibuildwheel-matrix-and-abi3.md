@@ -50,6 +50,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
   still gets its abi3 tag under modern setuptools.
 - **468** — An upstream `build = ["cp3??-*"]` glob excludes every free-threaded interpreter by
   character count, so the project ships no `cp3NNt` wheel at all.
+- **469** — An abi3 build *tests* on its floor interpreter, so a package using a
+  newer-Python-only API fails our CI while upstream's own CI stays green.
 
 ---
 
@@ -967,3 +969,43 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
      - **The same glob makes the abi3 floor mandatory rather than chosen** (gotcha 96):
        `cp310` is the first identifier the glob matches, and it is also the only
        interpreter the fixed `py_limited_api="cp310"` tag may be compiled against.
+
+469. **An abi3 build *tests* on its floor interpreter, so a package that uses a
+     newer-Python-only API fails our CI while upstream's own CI stays green (the
+     oai-statsig-python-core `co_qualname` case).** Gotcha 96 is about the *wheel* being
+     broken on interpreters older than the one it was compiled on; this is the mirror
+     image, and no compiler is involved — the wheel is fine, and it is the project's
+     **own Python code** that cannot run on the oldest interpreter it claims. A
+     `pyo3/abi3-py310` project built with `only: cp310-manylinux_riscv64` has cibuildwheel
+     build *and run the whole test suite* under CPython 3.10, the floor of the abi3 range,
+     which is very often older than anything upstream tests on.
+     oai-statsig-python-core 0.29.0 reads `frame.f_code.co_qualname` in a pure-Python
+     exposure-callsite walk; `code.co_qualname` exists only from CPython 3.11, while the
+     package declares `requires-python >= 3.10` and ships exactly one `cp310-abi3` wheel.
+     Upstream's CI runs 3.12/3.13, so the bug shipped.
+     - **The symptom names the wrong layer.** Two tests failed because callsite metadata
+       came back `"unknown"`, preceded on stdout by `Statsig SDK Error (Python Bindings):
+       _find_exposure_callsite 'code' object has no attribute 'co_qualname'`. "Python
+       Bindings" plus a PyO3 package invites a hunt through the Rust crate for a
+       version-gated C-API call; the culprit was six lines of Python in `py_src/`.
+       `grep -rn <attribute>` the unpacked sdist before theorising, and when a failure
+       names a *missing attribute on a builtin object*, look up the version it was added
+       in and compare that against the interpreter the job actually runs — not the one you
+       rehearsed on.
+     - **A broad `except` turns it into a silent wrong answer instead of a crash.** The SDK
+       wraps every method in an error boundary that prints the exception and returns
+       `None`, so the `AttributeError` became a fallback value plus a stdout warning. Only
+       the assertion failed; nothing in the log mentioned 3.10, and `--reruns 3` did not
+       move it — deterministic, not flaky.
+     - **Rehearse on the abi3 floor, not your host's default interpreter.** This port's
+       x86_64 rehearsal ran cp312 and reported the whole suite green; cp312 is precisely
+       the interpreter that hides the bug. Against upstream's own published
+       `cp310-abi3-manylinux_2_17_x86_64` wheel the two tests fail on x86_64 under 3.10
+       and all pass under 3.11: one venv per interpreter, two minutes, no QEMU, and it
+       settles "riscv64-specific or not" before a CI cycle is spent. For any abi3 port,
+       make the floor interpreter the one you rehearse with.
+     - **Fix the code, don't skip the tests.** They assert real product behaviour that is
+       meant to work on 3.10, so the patch is
+       `getattr(code, "co_qualname", code.co_name)` in the source rather than an xfail on
+       the pair — `co_name` is identical for a module-level function and only loses the
+       class prefix for a method, which beats `"unknown"`.
