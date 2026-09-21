@@ -535,6 +535,11 @@ The porting gotchas (517 of them) live in [`references/gotchas/`](gotchas/), spl
   `CIBW_BUILD` list — not a `python:` matrix with `only:` — builds it once and re-tests it on
   every interpreter, free-threaded included, because cibuildwheel reuses an `abi == "none"`
   wheel where it refuses an abi3 one.
+- **527** — Gotcha 371's `PYO3_USE_ABI3_FORWARD_COMPATIBILITY` escape hatch is not free:
+  `is_abi3()` reads it with no version condition, so `Py_LIMITED_API` is set on every
+  interpreter and pyo3's `not(Py_LIMITED_API)` conversion modules — chrono among them —
+  are cfg-removed, breaking the build on interpreters that never needed the flag; the
+  failure impersonates gotcha 10's dependency drift (the pyvrl case).
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
