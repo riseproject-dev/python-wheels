@@ -1,0 +1,191 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/OHF-voice/piper1-gpl/blob/v1.7.0/.github/workflows/wheels.yml
+name: Build piper-tts wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/piper-tts.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-piper-tts.yml'
+      - 'docs/packages/piper-tts.yaml'
+      - 'patches/piper-tts/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-piper-tts.yml'
+      - 'docs/packages/piper-tts.yaml'
+      - 'patches/piper-tts/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # The commit CMakeLists.txt's ExternalProject_Add(espeak_ng_external) pins as
+  # GIT_TAG; the build compiles it and links it statically into espeakbridge.
+  ESPEAK_NG_REF: 724808c5a83f9ef95fdd0db886ba7ba537ff224a
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: piper-tts
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build piper-tts ${{ matrix.version }} cp39-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+
+    env:
+      PIPER_TTS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout piper1-gpl v${{ env.PIPER_TTS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: OHF-voice/piper1-gpl
+          ref: v${{ env.PIPER_TTS_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply -v python-wheels/patches/piper-tts/${{ env.PIPER_TTS_VERSION }}/*.patch
+
+      # The patch above widens setup.py's license_files to licenses/*, so these
+      # reach dist-info/licenses/ with the licences upstream already ships there.
+      - name: Stage the eSpeak NG licences
+        working-directory: licenses
+        run: |
+          set -euo pipefail
+          base="https://raw.githubusercontent.com/espeak-ng/espeak-ng/${ESPEAK_NG_REF}"
+          curl -fsSL --retry 5 "$base/COPYING" -o COPYING.espeak-ng
+          curl -fsSL --retry 5 "$base/COPYING.APACHE" -o COPYING.espeak-ng.APACHE
+          curl -fsSL --retry 5 "$base/COPYING.BSD2" -o COPYING.espeak-ng.BSD2
+          curl -fsSL --retry 5 "$base/COPYING.UCD" -o COPYING.espeak-ng.UCD
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          # Upstream builds cp39-* only, and the wheel is cp39-abi3 (setup.cfg's
+          # py_limited_api); cp312-cp314 reuse that wheel and only re-run the tests,
+          # which need onnxruntime - our riscv64 onnxruntime wheels start at cp312.
+          # No cp314t: py_limited_api rules out a free-threaded build, and upstream
+          # publishes no free-threaded wheel either.
+          CIBW_BUILD: cp39-manylinux_riscv64 cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_TEST_SKIP: cp39-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Upstream runs `pytest {project}/tests`; staging the suite and its ini
+          # keeps that working now that cibuildwheel takes test-sources instead.
+          CIBW_TEST_SOURCES: tests pytest.ini
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: python -m pytest -vv tests
+
+      - name: Check the extension, the eSpeak NG data and the licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          expected = {"COPYING",
+                      "licenses/LICENSE.g2pW-Apache-2.0",
+                      "licenses/COPYING.espeak-ng",
+                      "licenses/COPYING.espeak-ng.APACHE",
+                      "licenses/COPYING.espeak-ng.BSD2",
+                      "licenses/COPYING.espeak-ng.UCD"}
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert "piper/espeakbridge.so" in names, whl
+              assert "piper/espeak-ng-data/phonindex" in names, whl
+              licenses = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                          if ".dist-info/licenses/" in n and not n.endswith("/")}
+              assert licenses == expected, f"{whl}: {sorted(licenses)}"
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: piper-tts-${{ env.PIPER_TTS_VERSION }}-cp39-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources (piper1-gpl, eSpeak NG) for piper-tts ${{ matrix.version }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout piper1-gpl v${{ matrix.version }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: OHF-voice/piper1-gpl
+          ref: v${{ matrix.version }}
+          path: piper1-gpl
+          persist-credentials: false
+
+      - name: Checkout eSpeak NG ${{ env.ESPEAK_NG_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: espeak-ng/espeak-ng
+          ref: ${{ env.ESPEAK_NG_REF }}
+          path: espeak-ng
+          persist-credentials: false
+
+      # piper-tts is itself GPL-3.0-or-later and the wheel carries compiled code
+      # from both trees, so the Corresponding Source is these checkouts, not the
+      # build image (gotcha 66). The released piper_tts sdist is not a substitute:
+      # it ships neither CMakeLists.txt nor src/piper/espeakbridge.c.
+      - name: Archive the GPL sources
+        run: tar -cf gpl-sources.tar piper1-gpl espeak-ng
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: piper-tts-${{ matrix.version }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish piper-tts ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: piper-tts-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: piper-tts-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: piper1-gpl and eSpeak NG (both compiled from source)
