@@ -39,6 +39,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **414** — A native RNG seeded from `time(NULL)` makes a stochastic test a wall-clock
   lottery: replay consecutive epoch seconds through the library's own seed setter to
   measure the real failure rate instead of re-running the suite.
+- **502** — One binary of a multi-binary wheel can be unshippable while the others are
+  perfect: price the variant, not the package, and let upstream's own reduced builds be the
+  precedent.
 
 ---
 
@@ -1039,3 +1042,26 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       tests that were passing, because upstream cannot assume libpng is the backend. That
       is the right trade when the alternative is asserting a capability the wheel does not
       have, but it should be a decision, not a surprise.
+
+502. **One binary of a multi-binary wheel can be unshippable while the rest are perfect —
+    price the variant, not the package (the austin-dist case).** austin-dist's glibc wheels
+    carry two programs: `austin`, which samples a Python process through `/proc/<pid>/mem`,
+    and `austinp`, which also unwinds native stacks with libunwind. On riscv64 every austin
+    test passed and all six austinp tests died with `returncode -11`. Two distinct crashes,
+    both from core dumps of an unstripped build (gotcha 498):
+    - `mojo_event_handler__handle_new_frame` at `events.c:83` reads `frame->scope->key`
+      through `UNKNOWN_SCOPE`, the `(cached_string_t*)1` sentinel every *other* consumer
+      tests for — a latent upstream bug that riscv64 makes deterministic because libunwind
+      fails to name frames it names elsewhere. Fixing it (give the unresolved scope a real
+      cached string) moved the suite from 34 to 36 passes.
+    - `_Uelf64_lookup_symbol_from_dynamic` ← `_UPT_get_proc_name` ← `_Uriscv_get_proc_name`
+      faults **inside libunwind's own riscv64 symbol lookup**, which is not the port's to
+      fix; with the sampler dying mid-write the consumer then reports a truncated stream
+      (`MojoParseError: Invalid byte sequence at offset 8195`).
+    **Ship the subset upstream already ships somewhere.** austin's own musllinux wheels
+    contain `austin` alone, so dropping `austinp` on riscv64 is a shape upstream defined, not
+    an invention — the same call this repo made for py-spy, whose riscv64 wheel loses
+    `--native`. Dropping the variant also retires every patch and dependency it needed
+    (libunwind from source, binutils archives, two toolchain patches), so the port gets
+    smaller rather than more special; record the crashes in the PR and the version's
+    `warning:` so the gap is documented rather than silent.

@@ -95,6 +95,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
   target the gate sits in — an old pin may compile no vector kernels at all.
   image because PEP 513 forbids shipping `libpython`, and the fix is a zero-byte file, not a
   build-flag change (the usd-core/OpenUSD case).
+- **499** — `-lfoo` and `-l:libfoo.a` are different questions, and Rocky splits the two the
+  opposite way from Debian for binutils and xz; `demangle.h` also sits outside `libiberty/`.
 ---
 
 26. **The riscv64 runners ship GCC 13; some packages need GCC 14 or later.** The compiler
@@ -1544,3 +1546,25 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       `--define xnn_enable_riscv_vector=false` that setting no longer matches, so the select
       falls through to its default and RVV is off. The off-switch works; the indirection
       just does not read like one.
+
+499. **`-lfoo` and `-l:libfoo.a` are different questions, and Rocky splits the two the
+    opposite way from Debian for binutils and xz (the austin-dist case).** A project that
+    links its dependencies statically writes `-l:libfoo.a` on the link line while gating it
+    with an ordinary `AC_CHECK_LIB`/`-lfoo` probe. The two do not ask the same thing:
+    `-lfoo` also resolves against `libfoo.a`, so the probe passes for a static-only package,
+    while `-l:libfoo.a` fails hard when only the shared library is installed.
+    - On the riscv64 image `binutils-devel` ships `libbfd.a`, `libiberty.a` and `libsframe.a`
+      with **no** shared twin for the last two (probe passes, static link works), while
+      `xz-devel` ships `liblzma.so` with **no** archive anywhere — there is no `xz-static`
+      for riscv64 — so an unconditional `-l:liblzma.a` is what breaks the link:
+      `/usr/bin/ld: cannot find -l:liblzma.a`. There is no static libzstd either, and
+      `libz.a` comes from `zlib-ng-compat-static` in CRB (gotcha 455's package, a different
+      subpackage).
+    - **`binutils-devel` installs `demangle.h` at the top of `/usr/include`**, where Debian's
+      `libiberty-dev` puts it under `libiberty/`, so a `#include <libiberty/demangle.h>`
+      behind a passing `-liberty` probe stops the compile. `__has_include` picks the path
+      that exists without new autoconf plumbing.
+    - **`nm -u /usr/lib64/libbfd.a | grep -E 'ZSTD|lzma'` answers "does the archive really
+      need this" in seconds**, before you spend a cycle building the dependency from source:
+      Rocky's libbfd needs neither, so that lzma entry was vestigial rather than
+      load-bearing.

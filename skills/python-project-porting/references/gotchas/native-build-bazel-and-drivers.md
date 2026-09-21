@@ -59,6 +59,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
 - **497** — Drive an upstream build script through the env hooks it already exposes, and
   remember that the later flag wins.
   child, so such a cmeel distribution installs into `cmeel.prefix/lib64/`, not `lib/`.
+- **500** — When the wheel comes from a packer script, check whether it is *upstream's own*
+  and whether it has a local-files mode before reproducing it.
 
 ---
 
@@ -1005,3 +1007,23 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       (`gen/tflite_pip/${PYTHON}`), so an absolute path buries the wheel under a nested
       mirror of `/opt/python/...`; leaving it as `python3` keeps the output where upstream's
       own documentation says it is.
+
+500. **When the wheel comes from a packer script, check whether it is *upstream's own* and
+    whether it has a local-files mode before reproducing it (the austin-dist case).** Gotcha
+    233's sqlite-vec shape is a packer in a *separate* repo whose platform table cannot reach
+    riscv64, so the workflow rebuilds that tool's templates inline. This is the cheap variant
+    of the same shape: `scripts/build-wheel.py` lives in the project, and its
+    `--files austin:src/austin` mode packs a binary you have just built instead of
+    downloading the published release asset — upstream's own per-architecture release leg
+    calls it exactly that way. The port is then an ordinary from-source build plus a
+    one-entry patch to the packer's platform table, and the artifact is the shape upstream
+    publishes rather than an imitation of it.
+    - **Read `release*.yml` for the flag, not the script's `__main__`**: downloading the
+      release asset is the default path and the local-files option appears only at the call
+      site, so skimming the script alone reads like gotcha 35's fetch-a-prebuilt shape.
+    - The artifact is `py3-none-<platform>` with the binaries under
+      `<dist>-<ver>.data/scripts/` (gotcha 145's shape), so one wheel serves every
+      interpreter and an interpreter matrix is only ever about the *tests*.
+    - **The packer decides the wheel's contents, so a per-arch content change is a one-line
+      patch**: shipping only the binaries that work on this architecture means editing that
+      table entry, not the build.

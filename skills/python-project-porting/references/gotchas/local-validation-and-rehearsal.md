@@ -39,6 +39,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
 - **495** — A Bazel port's loading phase rehearses on x86_64 in minutes, even in a sandbox
   that cannot fetch the dependencies.
   wheel hands you a byte-comparable feature oracle
+- **498** — The manylinux image's `curl`/`pip` ignore the trust store gotcha 384 fixes, a
+  sampling profiler cannot be rehearsed under QEMU at all, and the way to see where one
+  crashes is a throwaway unstripped CI build.
 
 ---
 
@@ -570,3 +573,30 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
     - Point `--output_user_root` at `.git/pw-scratch/<pkg>/` and delete it afterwards: a
       bazel install base plus a shallow clone of a monorepo is ~700MB on a disk other agents
       share.
+
+498. **Three facts about validating a sampling profiler: the manylinux image's `curl` and
+    `pip` ignore the trust store gotcha 384 fixes, QEMU cannot host the rehearsal at all,
+    and the way to see where the thing crashes is a throwaway unstripped CI build (the
+    austin-dist case).**
+    - **`SSL_CERT_FILE=/opt/_internal/certs.pem` is baked into every manylinux image**, so
+      gotcha 384's `update-ca-trust extract` teaches `dnf` about a TLS-intercepting egress
+      proxy and nothing else: the next line, a `curl -fsSLO` of a dependency tarball, still
+      dies with `curl: (60) SSL certificate problem: self-signed certificate in certificate
+      chain`, and `pip install` with it. `cat <proxy CA> >> /opt/_internal/certs.pem` plus
+      `PIP_CERT=/opt/_internal/certs.pem` covers both. Rehearsal-only — CI has no proxy — so
+      it never belongs in the workflow.
+    - **A profiler that identifies its target by reading `/proc/<pid>/exe` sees
+      `qemu-<arch>`, not the program.** Under binfmt_misc every emulated process is a host
+      `qemu-riscv64` and that is what `/proc/<pid>/exe` points at, so austin spawned its
+      target, wrote the MOJO header and then reported `Cannot determine the version of the
+      Python interpreter`. The honest local ceiling for this class of package is the
+      binary's own `--version` plus the wheel's shape; sampling is proved on the runner
+      only. Complements gotcha 467's "a `--platform linux/riscv64` container runs an x86_64
+      bundled binary natively".
+    - **Buy the backtrace with one deliberately throwaway CI run**: build the binary
+      unstripped (austin: `./configure --enable-debug=symbols`), cut the matrix to one
+      interpreter, select only the failing tests, install `gdb` and set
+      `/proc/sys/kernel/core_pattern` with `ulimit -c unlimited` — upstream's own
+      `tests.yml` does exactly this, and its `utils.bt()` then prints `bt full` for every
+      SIGSEGV. That turned an opaque `returncode -11` into `events.c:83` in ~20 minutes.
+      Push it as its own commit and drop it with a `--force-with-lease` once read.

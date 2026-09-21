@@ -29,6 +29,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
 - **389** — A test `.pyx` that Cython-`include`s a checkout-root-relative path can be satisfied by
   staging just those files; a staged package dir with no `__init__.py` is a namespace
   portion and does not shadow the wheel.
+- **501** — A separate test job checks the upstream tree out again, so it needs the same
+  `git apply` the build job has, or the failure you just fixed comes back unchanged.
 
 ---
 
@@ -543,3 +545,17 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
       `python -c "import cassandra; print(cassandra.__file__)"` must print the
       `site-packages` path, and running the whole suite that way against upstream's
       released PyPI wheel costs two minutes on any host (gotcha 52).
+
+501. **A separate test job checks the upstream tree out again, so it needs the same
+    `git apply` step the build job has (the austin-dist case).** The build-then-test shape
+    (`build-py-spy.yml`, and any port whose tests run outside the container) has two jobs,
+    each with its own `actions/checkout` of the upstream repo. Patches applied in the build
+    job exist only in that job's workspace: the artifact carries the built binary, not the
+    patched sources. A test-suite patch — a fixed timeout, a host assumption, a deselection
+    helper — therefore has no effect until the test job also checks out this repo and runs
+    the same `git apply patches/<pkg>/<version>/*.patch`.
+    - **The tell is a failure that comes back byte-for-byte after you "fixed" it**, on every
+      matrix leg, with the patch verified locally and `git apply -v` green in the build job's
+      log. Check which job the failing step is in before re-reading the patch.
+    - Keep the two steps identical (checkout with `path: python-wheels`, then the same glob)
+      so the next person sees one pattern rather than two.

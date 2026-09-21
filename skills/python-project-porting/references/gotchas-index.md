@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (483 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (492 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -564,6 +564,9 @@ The porting gotchas (483 of them) live in [`references/gotchas/`](gotchas/), spl
 - **497** — Drive an upstream build script through the env hooks it already exposes
   (`CUSTOM_BAZEL_FLAGS`, `BAZEL_STARTUP_OPTIONS`), and use the fact that the later flag wins to
   cancel one it hardcodes, such as `-s`.
+- **500** — Gotcha 233's packer-script shape, cheap variant: when the packer is *upstream's
+  own* and takes locally built binaries (`--files austin:src/austin`), the port is a
+  from-source build plus a one-entry platform-table patch (the austin-dist case).
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
@@ -667,6 +670,10 @@ The porting gotchas (483 of them) live in [`references/gotchas/`](gotchas/), spl
 - **496** — Gotcha 420's XNNPACK fp16 define does not belong in an older tree: at a 2023 pin the
   riscv64 *production* microkernels are scalar-only and every RVV gate sits in a bench/test
   target, so attribute each `riscv` line to its target before adding a define.
+- **499** — `-lfoo` and `-l:libfoo.a` are different questions: Rocky's binutils-devel ships
+  `libiberty.a`/`libsframe.a` with no shared twin (probe passes, static link works) while
+  xz-devel ships only `liblzma.so`, so an unconditional `-l:liblzma.a` fails; `demangle.h`
+  also sits outside `libiberty/` there (the austin-dist case).
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
@@ -817,6 +824,9 @@ The porting gotchas (483 of them) live in [`references/gotchas/`](gotchas/), spl
 - **389** — A test `.pyx` that Cython-`include`s a checkout-root-relative path can be satisfied by
   staging just those files; a staged package dir with no `__init__.py` is a namespace
   portion and does not shadow the wheel.
+- **501** — A separate test job checks the upstream tree out again and needs the same
+  `git apply` the build job has; the tell is a failure returning byte-for-byte after you
+  fixed it (the austin-dist case).
 
 ### Testing: pytest config, servers & test selection — [`gotchas/pytest-config-servers-and-selection.md`](gotchas/pytest-config-servers-and-selection.md)
 
@@ -902,6 +912,10 @@ The porting gotchas (483 of them) live in [`references/gotchas/`](gotchas/), spl
 - **474** — Before skipping tests your build's missing backends fail, look for the
   system-dependency marker upstream already honours (`PG_DEPS_FROM_SYSTEM` and friends) —
   it usually exists, and usually needs extending to its siblings rather than replacing.
+- **502** — One binary of a multi-binary wheel can be unshippable while the others pass
+  everything: austinp segfaults on riscv64 in austin's own MOJO emitter and inside
+  libunwind's riscv64 symbol lookup, so the wheel ships `austin` alone — the shape
+  upstream's own musllinux wheels already have (the austin-dist case).
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
@@ -979,6 +993,10 @@ The porting gotchas (483 of them) live in [`references/gotchas/`](gotchas/), spl
 - **495** — A Bazel port's loading phase rehearses on x86_64 in minutes: check the project's
   `.bazelrc` flags against the bazel you bootstrap in an empty workspace, then evaluate the real
   WORKSPACE with the real overrides — blocked egress only stops it at the first archive fetch.
+- **498** — The manylinux image bakes `SSL_CERT_FILE=/opt/_internal/certs.pem`, so gotcha
+  384's trust-store fix reaches `dnf` and not `curl`/`pip`; a sampling profiler cannot be
+  rehearsed under QEMU (an emulated process's `/proc/<pid>/exe` is the host `qemu-<arch>`);
+  and a throwaway unstripped CI run with core dumps buys the backtrace (the austin-dist case).
 
 ### PR, CI, triggers, publishing & maintainer signals — [`gotchas/pr-ci-and-maintainer.md`](gotchas/pr-ci-and-maintainer.md)
 
