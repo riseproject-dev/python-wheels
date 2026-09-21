@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# intel-cmplr-lic-rt is Intel's oneAPI "COMMON LICENSING" carrier: its own
+# wheel (py2.py3-none-manylinux_2_28_x86_64, no sdist, no build docs) ships
+# zero compiled code -- the only payload beyond dist-info/ is the plain-text
+# EULA staged under <pkg>.data/data/licensing/compiler/, byte-identical to
+# dist-info/LICENSE.txt. The platform tag is hand-set to match the co-installed
+# compiled runtimes' release matrix (gotcha 27's shape), not arch-specific
+# content, and Intel's build pipeline is internal, so this repackages the
+# published payload verbatim under the riscv64 tag with `wheel tags`
+# (gotcha 398) instead of reproducing an unpublished build.
+name: Build intel-cmplr-lic-rt wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/intel-cmplr-lic-rt.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-intel-cmplr-lic-rt.yml'
+      - 'docs/packages/intel-cmplr-lic-rt.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-intel-cmplr-lic-rt.yml'
+      - 'docs/packages/intel-cmplr-lic-rt.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: intel-cmplr-lic-rt
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build intel-cmplr-lic-rt ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-latest  # no compiled code (gotcha 4): retagging is arch-independent
+    timeout-minutes: 10
+
+    env:
+      INTEL_CMPLR_LIC_RT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Download and retag the upstream wheel
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet --upgrade pip wheel
+          python3 -m pip download "intel-cmplr-lic-rt==${INTEL_CMPLR_LIC_RT_VERSION}" --no-deps -d dist
+          python3 -m wheel tags --platform-tag manylinux_2_39_riscv64 --remove dist/*.whl
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: intel-cmplr-lic-rt-${{ env.INTEL_CMPLR_LIC_RT_VERSION }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test intel-cmplr-lic-rt ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 10
+    env:
+      INTEL_CMPLR_LIC_RT_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: intel-cmplr-lic-rt-${{ env.INTEL_CMPLR_LIC_RT_VERSION }}-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . intel-cmplr-lic-rt
+
+      # No importable module ships (top_level.txt is empty); the payload lands
+      # under sys.prefix via the wheel's .data/data/ scheme, so check it there.
+      - name: Verify the EULA payload
+        run: |
+          python - <<'PY'
+          import importlib.metadata as md
+
+          files = md.files("intel-cmplr-lic-rt")
+          eula = [f for f in files if f.name == "Intel Developer Tools EULA"]
+          assert len(eula) == 1, files
+          path = eula[0].locate()
+          assert path.is_file(), path
+          assert path.stat().st_size > 0, path
+          PY
+
+  publish:
+    name: Publish intel-cmplr-lic-rt ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: intel-cmplr-lic-rt-${{ matrix.version }}-manylinux_riscv64
