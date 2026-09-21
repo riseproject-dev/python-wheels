@@ -1,0 +1,149 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.cpu
+name: Build vllm wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/vllm.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-vllm.yml'
+      - 'docs/packages/vllm.yaml'
+      - 'patches/vllm/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-vllm.yml'
+      - 'docs/packages/vllm.yaml'
+      - 'patches/vllm/**'
+
+run-name: build-vllm ${{ inputs.version && format('- {0}', inputs.version) || '' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: vllm
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build vllm ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      VLLM_VERSION: ${{ matrix.version }}
+
+    steps:
+      # The wheel carries vLLM's CPU-build local segment (0.29.0+cpu); the tag does not.
+      - id: ref
+        run: echo "ref=v${VLLM_VERSION%+cpu}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout vllm ${{ steps.ref.outputs.ref }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ steps.ref.outputs.ref }}
+          path: vllm
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch vllm source
+        working-directory: vllm
+        run: |
+          git apply ../python-wheels/patches/vllm/${{ env.VLLM_VERSION }}/*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: vllm
+          output-dir: wheelhouse/
+        env:
+          CIBW_BUILD: "cp312-manylinux_riscv64"
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # csrc/cpu/utils.cpp #includes <numa.h> unconditionally on the CPU backend;
+          # the manylinux image doesn't ship it.
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf install -y --setopt=install_weak_deps=False numactl-devel
+            && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs
+            | sh -s -- -y --default-toolchain none
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          # Upstream's Dockerfile.cpu passes --py-limited-api to bdist_wheel; cibuildwheel
+          # does not, and without it the abi3 extensions get a cp312-only wheel tag. cp312
+          # rather than upstream's cp38 because torch 2.13.0 starts at cp312 on riscv64, so
+          # cp312 is the oldest interpreter this wheel is ever built on (gotcha 96).
+          CIBW_CONFIG_SETTINGS: "--build-option=--py-limited-api=cp312"
+          CIBW_BEFORE_BUILD: >-
+            pip install --only-binary=:all: -r {package}/requirements/build/cpu.txt
+          CIBW_ENVIRONMENT: >-
+            VLLM_TARGET_DEVICE=cpu
+            VLLM_VERSION_OVERRIDE=${{ env.VLLM_VERSION }}
+            CMAKE_ARGS=-DVLLM_RVV_VLEN=0
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # The torch wheel already carries these and loads them RTLD_GLOBAL.
+          CIBW_REPAIR_WHEEL_COMMAND: >-
+            auditwheel repair -w {dest_dir} {wheel}
+            --exclude libtorch.so
+            --exclude libtorch_cpu.so
+            --exclude libtorch_python.so
+            --exclude libtorch_global_deps.so
+            --exclude libc10.so
+            --exclude libgomp.so.1
+          CIBW_TEST_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            VLLM_TARGET_DEVICE=cpu
+          CIBW_TEST_COMMAND: >-
+            python -c "import vllm, vllm._C, torch;
+            from vllm.platforms import current_platform;
+            print(vllm.__version__, current_platform.get_cpu_architecture())"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: vllm-${{ env.VLLM_VERSION }}-abi3-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish vllm ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: vllm-${{ matrix.version }}-*-manylinux_riscv64
