@@ -97,6 +97,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
   build-flag change (the usd-core/OpenUSD case).
 - **499** — `-lfoo` and `-l:libfoo.a` are different questions, and Rocky splits the two the
   opposite way from Debian for binutils and xz; `demangle.h` also sits outside `libiberty/`.
+- **515** — The image's minimal perl also breaks packages that shell out to perl at *runtime*,
+  not just ones that build OpenSSL from source (gotcha 46's other half).
 ---
 
 26. **The riscv64 runners ship GCC 13; some packages need GCC 14 or later.** The compiler
@@ -1568,3 +1570,30 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       need this" in seconds**, before you spend a cycle building the dependency from source:
       Rocky's libbfd needs neither, so that lzma entry was vestigial rather than
       load-bearing.
+
+515. **Gotcha 46's minimal perl bites a second, later way: a package that shells out to
+     `perl` at *runtime* fails in the **test** phase, not the build (the
+     systemrdl-compiler case; see `build-systemrdl-compiler.yml`).** Gotcha 46 is about
+     `Configure` dying while a dependency builds OpenSSL from source, so its fix lands in
+     `before-all`/`before-build`. The mirror case is a package whose own Python code runs a
+     bundled `.pl` script — systemrdl's RDL preprocessor pipes a generated miniscript
+     through `preprocessor/ppp_runner.pl`, which opens with `use Safe` — where the wheel
+     builds, `auditwheel` repairs it, the extension imports, and then 14 tests die with
+     `Can't locate Safe.pm in @INC (you may need to install the Safe module)`. The module
+     is part of the perl core distribution, so upstream's Ubuntu CI has it and nothing in
+     their workflow hints it is a dependency at all.
+     - **The fix is a test-phase install — `CIBW_BEFORE_TEST: dnf -y install perl-Safe`** —
+       not a `before-all` one and not a deselect: the tests assert real product behaviour
+       that works anywhere perl is complete. `perl-Safe` is a real Rocky 10 riscv64
+       appstream package (`perl-Safe-2.46-515.el10_2`) and pulls `Opcode` in with it, so
+       gotcha 46's "install the whole distribution" is unnecessary here — one named module
+       is the entire gap. Grep the package for `.pl` files and `subprocess`/`Popen` calls
+       naming `perl` before the first CI cycle; the `use` lines at the top of that script
+       *are* the dependency list.
+     - **Nothing about it is riscv64-specific** — every manylinux image carries the same
+       minimal perl — so it reproduces in the x86_64 or aarch64 image in seconds.
+     - **`dnf` probes of the image need the agent proxy's CA mounted**, or dnf fails with
+       `SSL certificate problem: self-signed certificate in certificate chain` and an
+       install of a package that *does* exist returns non-zero — a false "no such package"
+       precisely when you are running gotcha 106's `dnf provides` check to settle the name:
+       `docker run --rm --platform linux/riscv64 -v /root/.ccr/ca-bundle.crt:/etc/pki/ca-trust/source/anchors/proxy.crt:ro <image> bash -c "update-ca-trust extract; dnf -q provides '*/Safe.pm'"`.

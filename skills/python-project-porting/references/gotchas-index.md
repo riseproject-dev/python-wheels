@@ -692,6 +692,9 @@ The porting gotchas (500 of them) live in [`references/gotchas/`](gotchas/), spl
   `libiberty.a`/`libsframe.a` with no shared twin (probe passes, static link works) while
   xz-devel ships only `liblzma.so`, so an unconditional `-l:liblzma.a` fails; `demangle.h`
   also sits outside `libiberty/` there (the austin-dist case).
+- **515** — Gotcha 46's minimal perl also breaks a package that shells out to perl at
+  *runtime*: the wheel builds and the tests then die on a missing `Safe.pm`, so the fix is
+  `CIBW_BEFORE_TEST: dnf -y install perl-Safe` (the systemrdl-compiler case).
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
