@@ -267,6 +267,13 @@ The porting gotchas (469 of them) live in [`references/gotchas/`](gotchas/), spl
   interpreter coverage can miss the default matrix entirely, CUDA is not the blocker in a TF
   custom-ops package, and a negated-x86 arch allowlist mis-classifies riscv64 into `-mavx`
   (the tensorflow-addons case).
+- **480** — A non-NVIDIA accelerator vendor (Huawei Ascend/CANN) can keep its whole toolkit
+  behind `dlopen`, so the released wheel's `DT_NEEDED` is clean and the tell is in `strings`
+  plus an import-time `provision()`; a three-valued `XPU_TYPE=NONE/NPU/GPU` selector is not
+  gotcha 459's rescue when `setup.py` appends `+cpu` to the version, because a build mode that
+  renames the artifact cannot yield the queued version; and the CPU mode's only transport is
+  Huawei's UB/urma `hcom`, whose CMake sends everything that is not aarch64 to `-msse4.2`
+  (the memfabric-hybrid case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

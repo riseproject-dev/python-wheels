@@ -161,6 +161,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   the blocked project is *archived*: its dependency pin is frozen on a historical window,
   so unblocking needs an old version of the dep nobody would port, and that window's own
   interpreter coverage can miss this repo's matrix entirely (the tensorflow-addons case).
+- **480** — A non-NVIDIA accelerator vendor can hide its toolkit behind `dlopen`, leaving
+  `readelf -d` clean, and the CPU backend its CMake advertises can be stamped `+cpu` by
+  upstream's own `setup.py` — a build mode that renames the artifact cannot produce the
+  queued version (the memfabric-hybrid / Huawei Ascend case).
 
 ---
 
@@ -3481,3 +3485,57 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       GitHub repo-metadata read, `raw.githubusercontent.com` reads of `setup.py`,
       `configure.py`, `WORKSPACE`, `tf_configure.bzl`, `BUILD.tpl`, `tensorflow_addons.bzl`
       and `release.yml`, and `readelf -d` on the released x86_64 wheel.
+480. **A non-NVIDIA accelerator vendor can hide its whole toolkit dependency behind `dlopen`, so
+    the released wheel's `readelf -d` looks perfectly portable — and the vendor-agnostic build
+    mode its CMake advertises is stamped by upstream's own `setup.py` as a *different
+    distribution version*, which is what actually shuts the door (the memfabric-hybrid / Huawei
+    Ascend case).** Gotcha 471 is the same shape for NVIDIA, but every tell it teaches is absent
+    here: the project is fully open (Mulan PSL v2), there is no vendored blob, no `libcuda.so.1`
+    equivalent in `DT_NEEDED`, and the CMake even offers a CPU backend. Ascend is Huawei's NPU
+    line; CANN is its closed toolkit, and the family reaches five `.queue.yml` entries
+    (memfabric-hybrid, memfabric-zbal, memcache-hybrid, triton-ascend, torch-npu).
+    - **`readelf -d` is clean; the vendor lives in `strings`.** All five `.so` in the x86_64
+      wheel need only `libstdc++`/`libm`/`libgcc_s`/`libc`/`librt`/`libpthread`/`libdl` plus each
+      other. The CANN dependency appears only as `dlopen` names inside `libmf_hybm_core.so` —
+      `libascendcl.so`, `libascend_hal.so`, `libhccl.so`, `libruntime.so`, `libtsdclient.so` —
+      emitted by a `csrc/under_api/dl_hybrid_api.h` wrapper switched on `-DASCEND_NPU` /
+      `-DNVIDIA_GPU` / `-DNO_XPU`. So for a dlopen-style vendor binding, run
+      `strings -a <lib> | grep -oE 'lib[a-z_]+\.so[0-9.]*'` beside `readelf -d`, and read the
+      pure-Python entry point as gotcha 452 says: `__init__.py` ends in `provision()`, which
+      installs an AICPU kernel into CANN's `opp/vendors/cust/op_impl/aicpu` (silently skipped
+      when `ASCEND_HOME_PATH` is unset, so the package *imports* on a CANN-less host and proves
+      nothing).
+    - **A three-valued backend selector is not automatically gotcha 459's rescue — check what
+      the packaging does to the version string.** `cmake/config_xpu.cmake` really does accept
+      `XPU_TYPE=NONE` (`-DNO_XPU`), with live `#if defined(NO_XPU)` code paths, so the backend
+      selector alone reads like bitsandbytes (gotcha 411). But `setup.py` has
+      `if xpu_type == "NONE": current_version += "+cpu"` (and `"+gpu"` for GPU), and PyPI's 76
+      files across 14 releases are *all* plain-versioned manylinux aarch64/x86_64 NPU builds —
+      no `+cpu` or `+gpu` local version has ever been published. Upstream's own packaging
+      therefore declares the CPU build a different distribution version than the one queued, so
+      "build it with the CPU flag" cannot produce `<pkg> <queued version>` at all. That is a
+      sharper, packaging-level form of gotcha 452's "does upstream ship this flag?" test: when a
+      build mode renames the artifact, the answer is in `setup.py`, not in the wheel list.
+    - **Behind the CPU mode sits a second Huawei stack, not CANN.** The only host transport is
+      hcom (`libhcom.so`, `FetchContent` of `atomgit.com/openeuler/ubs-comm` @
+      `br_BeiMing_MF_Poc`), and its build is a two-arch switch, not an allowlist:
+      `src/hcom/umq/CMakeLists.txt` sets `aarch64 → -march=armv8-a+crc -DUB_ARCH_ARM64` and
+      **everything else → `-msse4.2 -DUB_ARCH_X86_64`**, so riscv64 fails on the first compiler
+      flag (gotcha 478's negated-x86 allowlist, one step worse — here the x86 arm is the
+      `else`). Its Bazel `copts.bzl` selects on `@platforms//cpu:x86_64` / `aarch64` with no
+      default, hardware CRC is aarch64 `crc32cx` inline asm vs SSE4.2, `urpc_get_cpu_cycles` is
+      `rdtsc`/`cntvct_el0`, the `NO_XPU` branches carry `URMA_EID_LENGTH` keys, and the repo rule
+      wants Huawei UMDK urma headers from `/usr/include/ub/umdk/urma`. A "CPU-only" mode of an
+      accelerator-vendor package is often still vendor-interconnect-only.
+    - **The arch axis is one line of the README, and the toolkit layout confirms it.**
+      `平台：aarch64/x86`, hardware `Atlas 800I/800T A2/A3`, `CANN 8.1.RC1及之后版本`, plus Ascend
+      HDK driver/firmware. CANN's own layout is `${ASCEND_HOME_PATH}/aarch64-linux/{include,lib64}`
+      and its AICPU cross-compiler is `toolkit/toolchain/hcc/bin/aarch64-target-linux-gnu-g++`,
+      i.e. aarch64-only by construction; `grep -ri riscv` over the whole tree returns nothing.
+    - **gitcode.com is an ordinary git host — triage from the tree, not from the org name.**
+      `git clone --depth 1 --branch release/1.2 https://gitcode.com/Ascend/<repo>.git` and
+      `git fetch --depth 1 origin tag v1.2.0` both work through the agent proxy, as does
+      `git ls-remote https://atomgit.com/openeuler/ubs-comm.git`; add both to the artifact-index
+      collection beside NVIDIA's redist manifests and conda `repodata.json`. A Chinese-vendor
+      host being unfamiliar is not evidence, and the release branch head can be a version ahead
+      of the queued release (`VERSION` said 1.2.1 on `release/1.2`), so check out the tag.
