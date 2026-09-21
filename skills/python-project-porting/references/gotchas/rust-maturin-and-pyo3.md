@@ -78,7 +78,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
   `CIBW_BUILD` list builds it once and re-tests it on every interpreter, cp314t included.
 - **527** — `PYO3_USE_ABI3_FORWARD_COMPATIBILITY` sets `Py_LIMITED_API` on every
   interpreter, which cfg-removes pyo3's `not(Py_LIMITED_API)` conversions (chrono).
-- **536** — Gotcha 344 inverted: upstream's own workflow can pin a pre-riscv64
+- **537** — Gotcha 344 inverted: upstream's own workflow can pin a pre-riscv64
   `maturin-version:`, and the fix is to delete the input, not override it.
 
 ---
@@ -1265,7 +1265,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
     - Generalises past chrono: grep the pinned pyo3 release's `src/conversions/` for
       `not(Py_LIMITED_API)` before assuming the flag costs nothing.
 
-536. **Gotcha 344 inverted: the stale maturin pin can live in upstream's own *workflow*,
+537. **Gotcha 344 inverted: the stale maturin pin can live in upstream's own *workflow*,
     and the fix is to delete it rather than add one (the squawk-cli case; see
     `build-squawk-cli.yml`).** 344 covers a `maturin==X.Y.Z` exact pin in the target
     crate's `[build-system] requires` that `maturin-action`'s `findVersion()` reads
