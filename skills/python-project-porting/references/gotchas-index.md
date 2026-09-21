@@ -371,6 +371,12 @@ The porting gotchas (520 of them) live in [`references/gotchas/`](gotchas/), spl
   probe with is in the payload's own `RPATH`/builder path; plus a FLEXlm gate as a second
   closed vendor, a licence that lives only behind a URL, and the vendor's retired packaging
   repo naming the download-and-repack method (the mosek case).
+- **543** — A CMake option named after a GPU vendor (`..._CUDA_PROVIDER`,
+  `..._LEVEL_ZERO_PROVIDER`) does not by itself mean the build needs that vendor's SDK — check
+  whether the code behind it `dlopen()`s the runtime at call time instead of linking it at
+  build time before disabling it; gotcha 480's dlopen tell used in the opposite direction, plus
+  a technique for recovering a library's exact upstream CMake flags from a self-describing
+  build-config string embedded in the shared library itself (the umf case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

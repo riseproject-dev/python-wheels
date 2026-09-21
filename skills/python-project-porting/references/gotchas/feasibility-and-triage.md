@@ -239,6 +239,23 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   probe with is in the payload's own `RPATH`/builder path; plus a FLEXlm gate as a second
   closed vendor, a licence that lives only behind a URL, and the vendor's retired packaging
   repo naming the download-and-repack method (the mosek case).
+- **543** — A CMake option named after a GPU vendor (`..._CUDA_PROVIDER`,
+  `..._LEVEL_ZERO_PROVIDER`) does not by itself mean the build needs that vendor's SDK —
+  check whether the code behind it `dlopen()`s the runtime at call time instead of linking it
+  at build time before disabling it. `strings`/`readelf -d` on the *official* wheel's `.so`
+  settles it fast: `libcuda.so.1`/`libze_loader.so.1` appearing only as strings (not `NEEDED`
+  entries), plus a generic `dlopen`/`dlsym` loader function in the source, means the provider
+  compiles against header-only content (often itself `FetchContent`'d from a public,
+  driver-free repo) and stays fully portable with no vendor SDK installed and no matching
+  hardware present — disabling it would be an unwarranted capability regression from the
+  reference wheel, not a required fix. This is gotcha 480's non-NVIDIA-vendor-hides-behind-
+  dlopen tell used in the opposite direction: there it explains why an accelerated build
+  silently becomes a CPU one; here the same mechanism is why a GPU-named option is safe to
+  leave on (the umf CUDA/Level Zero providers case, and — per the same wheel's embedded
+  `UMF_ALL_CMAKE_VARIABLES` build-config string, a generic technique for recovering a
+  library's *exact* upstream CMake flags when no upstream CI produces the wheel at all —
+  `grep`/`strings` the shared library itself for a self-describing build marker before
+  guessing at flags from the CMakeLists defaults).
 
 ---
 
