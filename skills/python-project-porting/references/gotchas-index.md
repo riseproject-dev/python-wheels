@@ -323,6 +323,14 @@ The porting gotchas (502 of them) live in [`references/gotchas/`](gotchas/), spl
   released wheel for link-time `NEEDED` siblings, and run the resolver oracle a second time with
   the known-missing requirements dropped because it stops at the first failure
   (the libpinocchio case).
+- **524** — A vendored payload that builds fine for riscv64 *elsewhere* (Debian ships `adb` for
+  it) is still a park when this repo would be the one building it: an unpinned `-latest-` fetch
+  URL means a self-built substitute can never be version-matched to the other platforms' wheels
+  of the same release, the vendor's package manifest
+  (`dl.google.com/android/repository/repository2-{1,3}.xml`, no `host-arch` at all) is the
+  platform table when the URL has no arch segment, and the pure-Python sdist plus a
+  `$PATH`/env-var resolver already serves the arch; also gotcha 503's resolver false positive,
+  concretely (the adbutils case).
 - **516** — Link-time *stub* shared libraries let a vendor-SDK package build with the SDK
   absent, so a clean local build proves nothing: the released wheel's `DT_NEEDED` read against
   `setup.py`'s `auditwheel --exclude` list is the real test, and the toolkit's arch axis comes

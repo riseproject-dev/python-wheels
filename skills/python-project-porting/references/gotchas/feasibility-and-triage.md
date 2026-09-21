@@ -208,6 +208,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   actionable: recompute the frontier per candidate, split "the missing sibling is a *build*
   requirement" (nothing to attempt) from "runtime only" (buildable ahead of it), and run the
   resolver oracle twice because it stops at the first failure (the libpinocchio case).
+- **524** — A vendored payload that *does* build for riscv64 elsewhere still parks when this repo
+  would be the one building it: an unpinned `-latest-` fetch URL makes a self-built substitute
+  unversionable, the vendor's own package manifest is the platform table, and the pure-Python
+  sdist already serves the arch (the adbutils/Android platform-tools case).
 
 ---
 
@@ -4065,3 +4069,50 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       cmeel still writes `Requires-Dist` from the unchanged `[project] dependencies`. The
       result is an unusable wheel that also diverges from the upstream recipe the port exists
       to mirror, which is goal 2's definition of a defect.
+
+524. **A vendored payload that builds fine for riscv64 *elsewhere* is still a park when this
+    repo would be the one building it — and an unpinned `-latest-` fetch URL is the sharpest
+    reason why (the adbutils case).** Gotcha 183 splits `vendored-binary` by whether the
+    payload's primary function is reachable on riscv64: playwright's browsers are not (park),
+    av's ffmpeg libraries are (port). adbutils is the third position, and it is the same
+    disposition as imageio-ffmpeg and pypandoc-binary for a different reason than playwright's.
+    The payload is Google's prebuilt `adb`: `build_wheel.py` builds one pure wheel, then for
+    each of four hand-written tags (`py3-none-manylinux1_x86_64`, a macOS pair, two Windows)
+    unpacks it, drops the platform's binary into `adbutils/binaries/`, rewrites `WHEEL`'s
+    `Tag:` line and repacks — so `Root-Is-Purelib: true` survives beside a platform tag
+    (gotcha 27's cosmetic-tag tell and gotcha 35's real payload in one wheel: 8.7 MB of x86-64
+    ELF in a 3.5 MB wheel whose sdist is 191 KB). `adb` itself is Apache-2.0 AOSP and Debian
+    builds it for riscv64 (`adb` binary package, riscv64 in trixie/sid/experimental), so the
+    function is reachable — and the port is still not ours to make.
+    - **An unpinned payload URL is a versioning stop, not just a maintenance smell.** The
+      fetch is `platform-tools-**latest**-linux.zip`, so every adbutils wheel carries whatever
+      Google shipped on its build day (r37.0.1 at time of writing) with no record of which.
+      Anything we compiled from source would be a *different* adb, from a different tree
+      (the AOSP build system cannot build the CLI tools alone — nmeum/android-tools exists
+      precisely to work around that, vendoring libusb/PCRE/gtest/protobuf/brotli/zstd/lz4),
+      at a version that cannot be matched to the x86_64 wheel of the same distribution
+      version, and the mismatch re-opens on every bump. Check the payload URL for a rolling
+      pointer (`latest`, `stable`, no version segment) before pricing a from-source rebuild.
+    - **The vendor's package manifest is the platform table when the download URL has no arch
+      segment.** Google's URL scheme is per-OS only, and all three arch-suffixed guesses 404;
+      the authoritative read is the Android SDK manifest the SDK Manager itself consumes,
+      `dl.google.com/android/repository/repository2-{1,3}.xml`, whose `platform-tools`
+      `remotePackage` lists exactly three `<archive>`s (`host-os` linux/macosx/windows) with
+      **no `host-arch` element at all**. Add it to gotcha 157's collection of one-curl
+      platform tables beside `nodejs.org/dist`, NVIDIA's redist index, npm
+      `optionalDependencies` and conda repodata.
+    - **Check what the arch gets *today* before calling it a gap.** No `-none-any` wheel has
+      been published since 0.7.3 (2020), but the sdist is on PyPI and is pure Python:
+      `pip wheel` on it produced a 45 KB `py3-none-any` wheel in seconds with no compiler, and
+      the installed package imports and resolves `adb` through `ADBUTILS_ADB_PATH` →
+      `shutil.which("adb")` → the (empty) bundled `binaries/` dir. riscv64 users are therefore
+      served by their distro's adb exactly as aarch64/ppc64el users are — upstream has never
+      published a non-x86_64 Linux wheel in 131 releases, so riscv64 is not uniquely excluded
+      (gotcha 50's shape one step in).
+    - **Run the resolver oracle on the target version's requirements, not on the distribution
+      name** (gotcha 503's false positive, concretely). `check_riscv64_deps.py adbutils`
+      reports `UNRESOLVABLE` on all four interpreters — because `--only-binary` can only see
+      the one `py3-none-any` wheel in the project's history, 0.7.3 from 2020, whose
+      long-abandoned `apkutils2` dep has no wheel either. Passing 2.12.0's own requirements
+      (`requests`, `deprecation`, `retry2`, `Pillow`) resolves clean on cp312/cp313/cp314/cp314t
+      against PyPI + our registry, which is the answer that matters.
