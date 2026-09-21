@@ -4069,6 +4069,23 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       cmeel still writes `Requires-Dist` from the unchanged `[project] dependencies`. The
       result is an unusable wheel that also diverges from the upstream recipe the port exists
       to mirror, which is goal 2's definition of a defect.
+    - **The frontier moves during the campaign, sometimes within hours — re-derive it at the
+      moment you start, not from a sibling entry written the same day (the libcoal case).**
+      libcoal 3.0.3 was recorded a few hours earlier as needing `cmeel-assimp`,
+      `cmeel-octomap` and `cmeel-qhull`, with the latter two's publishes "still in flight"
+      (both `simple/` URLs 404). By the time it was picked up both returned 200, and the
+      two oracle runs above reduced it to a *single* missing name, `cmeel-assimp` — a park
+      note that says "blocked on exactly X, re-run this one command when `simple/X/` is 200"
+      instead of "blocked on three, re-triage later". Checking the registry index and
+      re-running the oracle costs a minute; trusting a note you wrote this morning does not
+      cost less.
+    - **`find_package(<dep> REQUIRED)` in the upstream CMakeLists closes the reduced-build
+      escape hatch before the metadata argument even starts.** Before rejecting "just build
+      it without the feature" on `Requires-Dist` grounds, check whether the dependency is
+      optional at all: libcoal's `CMakeLists.txt` has a bare `find_package(assimp REQUIRED)`
+      with no `option()` guarding it, so unlike `-DBUILD_PYTHON_INTERFACE=OFF` there is no
+      configure-arg that drops it and the configure step fails outright. An `option()`-guarded
+      dep needs the metadata argument; a bare `REQUIRED` one is settled by one grep.
 
 524. **A vendored payload that builds fine for riscv64 *elsewhere* is still a park when this
     repo would be the one building it — and an unpinned `-latest-` fetch URL is the sharpest
