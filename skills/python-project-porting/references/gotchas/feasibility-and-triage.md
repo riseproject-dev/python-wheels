@@ -154,6 +154,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   measured per-edge cost, check whether the build runs twice, and remember that an upstream
   arch port living inside `if (CMAKE_CROSSCOMPILING)` gives a native build none of its
   accommodations (the chdb-core/ClickHouse case).
+- **476** — A CMake project whose CI submits to CDash publishes its own build cost per
+  platform, so a from-source C++ port can be priced before booking a runner — and the
+  per-language rows say whether the interpreter leg is cheap (the simpleitk/ITK case).
 
 ---
 
@@ -3350,3 +3353,40 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       that already had 8 runs in flight — two of them V8 builds measured in days — parking is the
       proportionate call, the same shape as the ortools and tensorflow entries: no hard
       architectural blocker, just a cost the pool cannot carry.
+
+476. **A CMake project whose CI submits to CDash has already published what its own build
+    costs, per platform — read the dashboard instead of estimating the size of the C++ world
+    (the simpleitk/ITK case; see `build-simpleitk.yml`).** SimpleITK presents as the most
+    expensive shape there is: a SWIG wrapper whose CMake SuperBuild compiles Lua, PCRE2, SWIG
+    4.4.1, *all* of ITK 5.4.7 and a static SimpleITK core from scratch, with upstream's own
+    docs asking for "4 GB of RAM plus 2 GB per thread" and 10-16 GB of disk — the family
+    (paddlepaddle, chdb, tensorstore) this repo parks. Its `CTestConfig.cmake` names the
+    dashboard, and one request prices it: `curl -s
+    "https://open.cdash.org/api/v1/index.php?project=SimpleITK&date=<YYYY-MM-DD>"` returns, per
+    submission, the site, the build name and `configure`/`compilation`/`test` seconds. At the
+    v2.5.6 tag the full SuperBuild is **1h03m-1h50m of compile on 4-core GitHub-hosted Linux**
+    (2h30m-3h30m on 4-core macOS) — a quarter of VTK's tree, not a multiple of it.
+    - **The per-language rows are the ones that decide the workflow's shape.** Beside each
+      full build sit `build-py311`, `build-py314t`, `build-java` rows at **2-8m** of compile
+      each, because those configure only `Wrapping/<lang>` against the already-built core. That
+      is gotcha 456's question — does the loop amortize anything? — answered from upstream's
+      own dashboard before writing any YAML: here the core dominates and the interpreter legs
+      are nearly free, so a per-interpreter matrix costs ~2x the core, not 2x the whole port.
+    - **Read the build group, not just the number.** A `Nightly`/`Continuous` row at 21m
+      compile is an incremental rebuild of a warm tree; price off the `Package`/`Experimental`
+      rows submitted at the release tag, whose names carry the tag (`…-30486816103-v2.5.6-`).
+    - **A hosted-runner cap is a second, independent upper bound, and a published wheel is
+      proof it was met.** SimpleITK's Linux wheels come out of `Package.yml`'s
+      `package-docker` job on `ubuntu-latest` / `ubuntu-22.04-arm` — 4 vCPU, GitHub's 6h
+      per-job ceiling — which builds the core once *plus* Java *plus* four Python wrappings
+      *plus* their ctest suites. The `manylinux2014_aarch64` wheel on PyPI says that job
+      finishes, so nothing in the port can be a 10h build on comparable cores.
+    - **Census the translation units against a port this repo already did.** 2409 compiled
+      sources in ITK, 1990 of them cheap vendored C (HDF5, GDCM, OpenJPEG, TIFF, PNG, zlib-ng,
+      MINC, NIFTI, MetaIO, VXL), plus 81 hand-written SimpleITK sources and one generated
+      filter `.cxx` per `Code/BasicFilters/json/*.json` (297) — ~2,800 edges against VTK's
+      12,192 and chdb's ~4,900 V8-class ones (gotcha 475), with abi3 halving the legs on top.
+    - **The lever generalizes**: every Kitware-adjacent project (ITK, VTK, ParaView, GDCM,
+      CMake itself) submits to `open.cdash.org`, `&date=` walks history, and the same JSON
+      carries the test counts, so the "how long, and how much of it is per-interpreter"
+      question is answerable for them without a single CI minute of ours.

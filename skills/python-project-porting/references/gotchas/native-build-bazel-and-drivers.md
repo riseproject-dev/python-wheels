@@ -50,6 +50,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
 - **456** — Gotcha 15's build-the-C++-once loop amortizes nothing when the build is
   reconfigured per interpreter: five interpreters, five full builds, one `cancelled` job at
   `timeout-minutes`. Measure the second iteration, then matrix the interpreters.
+- **477** — A CMake SuperBuild forwards only a whitelist of variable *names* into its nested
+  ExternalProjects, so a vendored dependency's option can be silently unreachable from the
+  top-level command line (the simpleitk/ITK/zlib-ng `WITH_RVV` case).
 
 ---
 
@@ -879,3 +882,38 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       `build-labmaze.yml` all have this shape). Keep `--local_ram_resources=HOST_RAM*.5`:
       the legs now run *concurrently* on the shared pool, so a leg assuming the whole host
       is worse than before.
+
+477. **A CMake SuperBuild forwards only a whitelist of variable *names* into its nested
+    ExternalProjects, so a vendored dependency's option can be unreachable from the top-level
+    command line — silently, with no warning (the simpleitk/ITK/zlib-ng case; see
+    `build-simpleitk.yml`).** `SuperBuild/External_ITK.cmake` walks
+    `get_cmake_property(_varNames VARIABLES)` and forwards only names matching `^ITK_`,
+    `^ITKV3`, `^ITKV4`, `FFTW`, `^GDCM_`, `^NIFTI_`, `^Module_` plus `TBB_DIR` into the cache
+    file it writes for the ITK sub-build. ITK adds its vendored zlib-ng with a plain
+    `add_subdirectory()`, so `WITH_RVV` is an ordinary option of the *ITK* build — and
+    `-DWITH_RVV:BOOL=OFF` passed to the SuperBuild reaches nothing: CMake accepts the cache
+    entry, `--no-warn-unused-cli` is already on, and the flag never appears downstream. It has
+    to be a patch (one `OR _varName MATCHES "^WITH_"` line), not a flag. On riscv64 it is not
+    optional: zlib-ng defaults `WITH_RVV` **ON** once `BASEARCH_RISCV_FOUND`, and its
+    `riscv_features.c` confirms the kernel's HWCAP report by executing `vsetvli`, which SIGILLs
+    on this fleet's hardware (gotchas 272/279) the first time anything reaches deflate/inflate —
+    every compressed NIfTI/NRRD/MetaImage or HDF5 read.
+    - **Prove the forwarding on any host in seconds, before the multi-hour build.**
+      ExternalProject writes each child's initial cache at *configure* time, so `cmake -S
+      SuperBuild -B x <the workflow's exact -D set>` on x86 (1.5s here, no compiler needed for
+      the sub-builds) and `grep WITH_RVV x/ITK-build/CMakeCacheInit.txt` shows
+      `set( WITH_RVV "OFF" CACHE "BOOL" ... FORCE )` when the patch works, and nothing when it
+      does not. The configure log's own `-- Passing variable "X=Y" to <proj> external project.`
+      lines are the same census in readable form: whatever is missing there is a patch.
+    - **A packaging target can route through a venv that pip-installs a pinned dependency.**
+      SimpleITK's `dist` target runs `setup.py bdist_wheel` from a venv whose creation
+      pip-installs `wheel`, `setuptools` and `numpy!=1.24.1,!=1.24.0,<2.5` — a pin with no
+      riscv64 wheel anywhere, so it would be compiled from source in the middle of the build.
+      `SimpleITK_PYTHON_USE_VIRTUALENV=OFF` alone breaks the target (it interpolates
+      `VIRTUAL_PYTHON_EXECUTABLE` unconditionally), so pass that variable as well, pointing at
+      the manylinux interpreter the leg builds for.
+    - **The abi3 floor can be hardcoded in the packaging target rather than in `setup.py`.**
+      `Wrapping/Python/dist/CMakeLists.txt` appends `--py-limited-api=cp311`, so the
+      limited-API wheel is tagged `cp311-abi3` whatever interpreter builds it — which, by
+      gotcha 96, fixes the matrix leg at cp311 instead of this repo's cp312 floor. Grep the
+      *build system* for `py-limited-api`, not only `setup.py`/`pyproject.toml`.

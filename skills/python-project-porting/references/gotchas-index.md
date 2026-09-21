@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (466 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (468 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -257,6 +257,10 @@ The porting gotchas (466 of them) live in [`references/gotchas/`](gotchas/), spl
   check whether the build script runs the whole tree twice behind a flag that lands in a
   generated header, and note that an upstream arch port guarded by `if (CMAKE_CROSSCOMPILING)`
   gives a native build none of its accommodations (the chdb-core/ClickHouse case).
+- **476** — A CMake project whose CI submits to CDash has already published its build cost per
+  platform: `open.cdash.org/api/v1/index.php?project=<p>&date=<d>` gives configure/compile/test
+  seconds per submission, the release-tag rows are the full builds, and the per-language rows
+  say whether the interpreter leg is cheap (the simpleitk/ITK case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -503,6 +507,10 @@ The porting gotchas (466 of them) live in [`references/gotchas/`](gotchas/), spl
 - **456** — A per-interpreter loop in one bazel output base amortizes nothing when the build
   is reconfigured per interpreter (tensorstore: 5 x 5h35), and the job that overruns
   `timeout-minutes` is reported as `cancelled`, not `failed`. Matrix the interpreters.
+- **477** — A CMake SuperBuild forwards only a whitelist of variable *names* into its nested
+  ExternalProjects, so `-D<vendored dep option>` on the top-level line reaches nothing and no
+  warning says so; prove the forwarding off-target by grepping the child's
+  `CMakeCacheInit.txt` (the simpleitk/ITK/zlib-ng `WITH_RVV` case).
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
