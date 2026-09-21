@@ -386,6 +386,10 @@ The porting gotchas (476 of them) live in [`references/gotchas/`](gotchas/), spl
 - **469** — An abi3 build *tests* on its floor interpreter, so a package using a
   newer-Python-only API (`code.co_qualname`, 3.11+) fails our CI while upstream's own CI
   stays green; rehearse on the abi3 floor, not your host's default interpreter.
+- **487** — `[tool.cmeel] has-sitelib` decides whether a cmeel port needs an interpreter
+  matrix: `false` means one `py3-none-<platform>` wheel and a single cibuildwheel job,
+  bindings mean a real per-interpreter matrix; the queue note's `abi: 0` cannot tell them
+  apart.
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 

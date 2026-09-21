@@ -52,6 +52,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
   character count, so the project ships no `cp3NNt` wheel at all.
 - **469** — An abi3 build *tests* on its floor interpreter, so a package using a
   newer-Python-only API fails our CI while upstream's own CI stays green.
+- **487** — `[tool.cmeel] has-sitelib` decides whether a cmeel port needs an interpreter
+  matrix at all.
 
 ---
 
@@ -1009,3 +1011,25 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
        `getattr(code, "co_qualname", code.co_name)` in the source rather than an xfail on
        the pair — `co_name` is identical for a module-level function and only loses the
        class prefix for a method, which beats `"unknown"`.
+
+487. **`[tool.cmeel] has-sitelib` decides whether a `cmake-wheel`/cmeel port needs an
+    interpreter matrix at all — read that one key before copying the sibling workflow's
+    matrix.** Every cmeel distribution reads `abi: 0` in a queue note (gotcha 470: that is
+    PEP 427's build number), so the note cannot tell the two shapes apart, and the two
+    shapes differ by a factor of N jobs.
+    - `has-sitelib = false` (cmeel-tinyxml2, cmeel-urdfdom, cmeel-console-bridge): the wheel
+      holds no Python extension at all, only `cmeel.prefix/{include,lib}` — headers, the
+      `.so`, `lib/cmake` and `lib/pkgconfig`. The backend tags it `py3-none-<platform>`, so
+      **one** cibuildwheel job (`only: cp312-manylinux_riscv64`) produces the wheel every
+      interpreter installs; an interpreter matrix would build N byte-identical wheels whose
+      filenames collide in `wheelhouse/`.
+    - `has-sitelib` unset/true with Python bindings (cmeel-boost's boost_python/boost_numpy,
+      eigenpy): the `.so` links the version-specific CPython ABI, so the matrix is real.
+    - The filename on PyPI is the fastest confirmation:
+      `cmeel_urdfdom-6.0.0-0-py3-none-manylinux_2_28_x86_64.whl` (one wheel per platform)
+      versus `cmeel_boost-1.90.0-0-cp312-cp312-...` (one per interpreter). Upstream's own
+      `release.yml` is *not* the signal — it pins a single `python: ["cp314"]` either way,
+      because for the `py3-none` shape any interpreter builds the same wheel.
+    - `CIBW_REPAIR_WHEEL_COMMAND: ""` still applies to both: cmeel links its libraries with
+      an `$ORIGIN` RUNPATH into the shared cmeel prefix, and auditwheel would only re-tag
+      them, which is why upstream's own release workflow disables repair.
