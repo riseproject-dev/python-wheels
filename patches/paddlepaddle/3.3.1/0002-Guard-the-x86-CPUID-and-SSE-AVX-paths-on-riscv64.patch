@@ -1,0 +1,140 @@
+From 0000000000000000000000000000000000000002 Mon Sep 17 00:00:00 2001
+From: RISE Project CI <ci@riseproject.dev>
+Date: Fri, 19 Sep 2026 00:00:00 +0000
+Subject: [PATCH 2/5] Guard the x86 CPUID and SSE/AVX paths on riscv64
+
+Four places select x86 intrinsics by listing every non-x86 architecture
+Paddle knows about rather than by testing for x86, so any architecture
+outside that list -- riscv64 here -- falls into the x86 branch and fails
+to compile on <cpuid.h> / <pmmintrin.h> / <immintrin.h>:
+
+ - paddle/phi/backends/cpu/cpu_info.{h,cc}: the __cpuid_count() helper
+   and MayIUse()'s CPUID feature probe.
+ - paddle/phi/core/platform/denormal.cc: DENORM_USE_INTRINSICS, which
+   pulls in <pmmintrin.h> for _MM_SET_FLUSH_ZERO_MODE.
+ - paddle/phi/kernels/funcs/search_compute.h: the <immintrin.h> include,
+   the AVX/SSE helper macros, and axpy()/axpy_noadd()'s architecture
+   cascade, whose non-x86 branch raises Unimplemented.
+
+Add PADDLE_WITH_RISCV to each list, in the same form the existing
+entries use. The x86 intrinsics files that are *not* touched here are
+already correct: paddle/phi/common/float16.h and both spin_lock.h copies
+test __x86_64__/__i386__ directly, and the three
+kernels/fusion/cpu/*avx* sources are dropped from the build when
+AVX512F_FOUND is false.
+
+Upstream-Status: To upstream
+
+Same reason as patch 1/2: no riscv64 CI upstream to validate against
+yet.
+
+Signed-off-by: RISE Project CI <ci@riseproject.dev>
+---
+ paddle/phi/backends/cpu/cpu_info.cc       |  6 +++---
+ paddle/phi/backends/cpu/cpu_info.h        |  6 +++---
+ paddle/phi/core/platform/denormal.cc      |  3 ++-
+ paddle/phi/kernels/funcs/search_compute.h | 20 ++++++++++++--------
+ 4 files changed, 20 insertions(+), 15 deletions(-)
+
+diff --git a/paddle/phi/backends/cpu/cpu_info.cc b/paddle/phi/backends/cpu/cpu_info.cc
+index 3c492aa..ee93824 100644
+--- a/paddle/phi/backends/cpu/cpu_info.cc
++++ b/paddle/phi/backends/cpu/cpu_info.cc
+@@ -149,9 +149,9 @@ bool MayIUse(const cpu_isa_t cpu_isa) {
+   if (cpu_isa == isa_any) {
+     return true;
+   } else {
+-#if !defined(WITH_NV_JETSON) && !defined(PADDLE_WITH_ARM) &&  \
+-    !defined(PADDLE_WITH_SW) && !defined(PADDLE_WITH_MIPS) && \
+-    !defined(PADDLE_WITH_LOONGARCH)
++#if !defined(WITH_NV_JETSON) && !defined(PADDLE_WITH_ARM) &&      \
++    !defined(PADDLE_WITH_SW) && !defined(PADDLE_WITH_MIPS) &&     \
++    !defined(PADDLE_WITH_LOONGARCH) && !defined(PADDLE_WITH_RISCV)
+     std::array<int, 4> reg;
+     cpuid(reg.data(), 0);
+     int nIds = reg[0];
+diff --git a/paddle/phi/backends/cpu/cpu_info.h b/paddle/phi/backends/cpu/cpu_info.h
+index 2feb294..4c2567e 100644
+--- a/paddle/phi/backends/cpu/cpu_info.h
++++ b/paddle/phi/backends/cpu/cpu_info.h
+@@ -40,9 +40,9 @@
+ #ifdef _WIN32
+ #define cpuid(reg, x) __cpuidex(reg, x, 0)
+ #else
+-#if !defined(WITH_NV_JETSON) && !defined(PADDLE_WITH_ARM) &&  \
+-    !defined(PADDLE_WITH_SW) && !defined(PADDLE_WITH_MIPS) && \
+-    !defined(PADDLE_WITH_LOONGARCH)
++#if !defined(WITH_NV_JETSON) && !defined(PADDLE_WITH_ARM) &&      \
++    !defined(PADDLE_WITH_SW) && !defined(PADDLE_WITH_MIPS) &&     \
++    !defined(PADDLE_WITH_LOONGARCH) && !defined(PADDLE_WITH_RISCV)
+ #include <cpuid.h>
+ inline void cpuid(int reg[4], int x) {
+   __cpuid_count(x, 0, reg[0], reg[1], reg[2], reg[3]);
+diff --git a/paddle/phi/core/platform/denormal.cc b/paddle/phi/core/platform/denormal.cc
+index 93c55e8..7b9e79c 100644
+--- a/paddle/phi/core/platform/denormal.cc
++++ b/paddle/phi/core/platform/denormal.cc
+@@ -30,7 +30,8 @@
+ 
+ #if !defined(GCC_WITHOUT_INTRINSICS) && !defined(PADDLE_WITH_ARM) && \
+     !defined(PADDLE_WITH_SW) && !defined(PADDLE_WITH_MIPS) &&        \
+-    !defined(_WIN32) && !defined(PADDLE_WITH_LOONGARCH)
++    !defined(_WIN32) && !defined(PADDLE_WITH_LOONGARCH) &&           \
++    !defined(PADDLE_WITH_RISCV)
+ #define DENORM_USE_INTRINSICS
+ #endif
+ 
+diff --git a/paddle/phi/kernels/funcs/search_compute.h b/paddle/phi/kernels/funcs/search_compute.h
+index dbbd42c..3906dc0 100644
+--- a/paddle/phi/kernels/funcs/search_compute.h
++++ b/paddle/phi/kernels/funcs/search_compute.h
+@@ -14,8 +14,9 @@
+ 
+ #pragma once
+ 
+-#if !defined(PADDLE_WITH_ARM) && !defined(PADDLE_WITH_SW) && \
+-    !defined(PADDLE_WITH_MIPS) && !defined(PADDLE_WITH_LOONGARCH)
++#if !defined(PADDLE_WITH_ARM) && !defined(PADDLE_WITH_SW) &&       \
++    !defined(PADDLE_WITH_MIPS) && !defined(PADDLE_WITH_LOONGARCH) && \
++    !defined(PADDLE_WITH_RISCV)
+ #include <immintrin.h>
+ #endif
+ #include <cfloat>
+@@ -100,8 +101,9 @@ void call_gemm_batched(const Context& dev_ctx,
+   }
+ }
+ 
+-#if !defined(PADDLE_WITH_ARM) && !defined(PADDLE_WITH_SW) && \
+-    !defined(PADDLE_WITH_MIPS) && !defined(PADDLE_WITH_LOONGARCH)
++#if !defined(PADDLE_WITH_ARM) && !defined(PADDLE_WITH_SW) &&       \
++    !defined(PADDLE_WITH_MIPS) && !defined(PADDLE_WITH_LOONGARCH) && \
++    !defined(PADDLE_WITH_RISCV)
+ 
+ #define __m256x __m256
+ 
+@@ -141,8 +143,9 @@ inline void axpy(const T* x, T* y, size_t len, const T alpha) {
+         _mm256_add_px(_mm256_load_px(y + jjj),
+                       _mm256_mul_px(mm_alpha, _mm256_load_px(x + jjj))));
+   }
+-#elif defined(PADDLE_WITH_ARM) || defined(PADDLE_WITH_SW) || \
+-    defined(PADDLE_WITH_MIPS) || defined(PADDLE_WITH_LOONGARCH)
++#elif defined(PADDLE_WITH_ARM) || defined(PADDLE_WITH_SW) ||      \
++    defined(PADDLE_WITH_MIPS) || defined(PADDLE_WITH_LOONGARCH) || \
++    defined(PADDLE_WITH_RISCV)
+   PADDLE_THROW(common::errors::Unimplemented("axpy is not supported"));
+ #else
+   lll = len & ~SSE_CUT_LEN_MASK;
+@@ -171,8 +174,9 @@ inline void axpy_noadd(const T* x, T* y, size_t len, const T alpha) {
+   for (jjj = 0; jjj < lll; jjj += AVX_STEP_SIZE) {
+     _mm256_store_px(y + jjj, _mm256_mul_px(mm_alpha, _mm256_load_px(x + jjj)));
+   }
+-#elif defined(PADDLE_WITH_ARM) || defined(PADDLE_WITH_SW) || \
+-    defined(PADDLE_WITH_MIPS) || defined(PADDLE_WITH_LOONGARCH)
++#elif defined(PADDLE_WITH_ARM) || defined(PADDLE_WITH_SW) ||      \
++    defined(PADDLE_WITH_MIPS) || defined(PADDLE_WITH_LOONGARCH) || \
++    defined(PADDLE_WITH_RISCV)
+   PADDLE_THROW(common::errors::Unimplemented("axpy_noadd is not supported"));
+ #else
+   lll = len & ~SSE_CUT_LEN_MASK;
+-- 
+2.51.0

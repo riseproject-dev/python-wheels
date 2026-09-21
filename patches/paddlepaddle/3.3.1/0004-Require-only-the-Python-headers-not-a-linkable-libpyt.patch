@@ -1,0 +1,124 @@
+From 0000000000000000000000000000000000000004 Mon Sep 17 00:00:00 2001
+From: RISE Project CI <ci@riseproject.dev>
+Date: Sun, 20 Sep 2026 00:00:00 +0000
+Subject: [PATCH 4/5] Require only the Python headers, not a linkable libpython
+
+cmake/external/python.cmake asks for a linkable libpython on every
+platform:
+
+  find_package(PythonLibs ${PY_VERSION} REQUIRED)
+
+but no non-Windows target ever links one. cmake/generic.cmake's
+cc_library() removes `python` from the dependency list, keeps it only as
+an add_dependencies() ordering edge, and links
+"-Wl,-undefined,dynamic_lookup" in its place, citing pybind11's own
+"Building manually" notes: libpaddle.so is an extension module, so the
+interpreter that loads it is what resolves the CPython symbols. Outside
+the cc_test() executables, which do embed an interpreter, nothing on
+Linux consumes PYTHON_LIBRARIES at all.
+
+The REQUIRED therefore fails builds that would otherwise work. A CPython
+configured --disable-shared installs no libpythonX.Y.so for
+FindPythonLibs to find, and the module does not accept the
+libpythonX.Y.a it does install, so configure stops at
+
+  Could NOT find PythonLibs (missing: PYTHON_LIBRARIES PYTHON_INCLUDE_DIRS)
+  (Required is at least version "3.13")
+
+before a single file compiles. Every manylinux image builds its
+interpreters that way -- pypa/manylinux's build_scripts/build-cpython.sh
+passes --disable-shared unconditionally -- and those images are where
+release wheels get built. Pointing PYTHON_LIBRARY at the static archive
+instead would only move the failure to the end of the build: CPython's
+configure adds CFLAGSFORSHARED, i.e. -fPIC, only when LIBRARY differs
+from LDLIBRARY, which a --disable-shared build never does, so
+libpythonX.Y.a holds no position-independent code and cannot be linked
+into libpaddle.so at all.
+
+Keep the REQUIRED lookup on Windows, where PYTHON_LIBRARIES really is
+linked, and elsewhere take the include directory from the interpreter
+being built against -- sysconfig's INCLUDEPY, which keeps pointing at the
+real installation from inside a virtualenv -- and let the library lookup
+fail harmlessly. `python` becomes a link-nothing INTERFACE target when no
+library was found, because a SHARED IMPORTED target with an empty
+IMPORTED_LOCATION is not valid.
+
+Taking the headers from PYTHON_EXECUTABLE also stops FindPythonLibs, a
+module CMake 4.0 removes (policy CMP0148), from deciding which Python a
+build compiles against independently of PYTHON_EXECUTABLE.
+
+Upstream-Status: To upstream
+
+Not riscv64-specific, and not specific to any one image either: manylinux
+configures CPython with --disable-shared on every architecture it builds,
+so the same configure failure stops an x86-64 or aarch64 build of this
+release in the same place.
+
+Signed-off-by: RISE Project CI <ci@riseproject.dev>
+---
+ cmake/external/python.cmake | 45 +++++++++++++++++++++++++++++++++++---
+ 1 file changed, 42 insertions(+), 3 deletions(-)
+
+diff --git a/cmake/external/python.cmake b/cmake/external/python.cmake
+index 488540b..7e80fbb 100644
+--- a/cmake/external/python.cmake
++++ b/cmake/external/python.cmake
+@@ -18,7 +18,40 @@
+ 
+ # Find Python with minimum PY_VERSION specified or will raise error!
+ find_package(PythonInterp ${PY_VERSION} REQUIRED)
+-find_package(PythonLibs ${PY_VERSION} REQUIRED)
++
++if(WIN32)
++  find_package(PythonLibs ${PY_VERSION} REQUIRED)
++else()
++  # cc_library() drops `python` from the link line of every non-Windows target
++  # and lets the interpreter resolve the CPython symbols when it loads the
++  # extension module (see cmake/generic.cmake), so a linkable libpython is only
++  # ever needed by the cc_test() executables that embed one -- never to build
++  # libpaddle.so. Requiring one regardless breaks the build against any CPython
++  # configured --disable-shared, as the manylinux wheel-building images are:
++  # those install no libpythonX.Y.so at all, and the libpythonX.Y.a they do
++  # install is compiled without -fPIC (configure adds CFLAGSFORSHARED only when
++  # LIBRARY differs from LDLIBRARY), so no shared object could link it either
++  # way. Take the headers from the interpreter being built against and leave the
++  # library itself optional.
++  if(NOT PYTHON_INCLUDE_DIR OR NOT EXISTS "${PYTHON_INCLUDE_DIR}/Python.h")
++    execute_process(
++      COMMAND "${PYTHON_EXECUTABLE}" "-c"
++              "import sysconfig; print(sysconfig.get_config_var('INCLUDEPY'))"
++      RESULT_VARIABLE _PYTHON_INCLUDEPY_SUCCESS
++      OUTPUT_VARIABLE _PYTHON_INCLUDEPY
++      OUTPUT_STRIP_TRAILING_WHITESPACE)
++    if(NOT _PYTHON_INCLUDEPY_SUCCESS EQUAL 0 OR NOT EXISTS
++                                                "${_PYTHON_INCLUDEPY}/Python.h")
++      message(FATAL_ERROR "Found no Python.h for ${PYTHON_EXECUTABLE}, looked "
++                          "in '${_PYTHON_INCLUDEPY}'")
++    endif()
++    set(PYTHON_INCLUDE_DIR
++        "${_PYTHON_INCLUDEPY}"
++        CACHE PATH "Path to where Python.h is found" FORCE)
++  endif()
++  find_package(PythonLibs ${PY_VERSION})
++  set(PYTHON_INCLUDE_DIRS "${PYTHON_INCLUDE_DIR}")
++endif()
+ 
+ if(WIN32)
+   execute_process(
+@@ -64,8 +97,14 @@
+ endif(WIN32)
+ 
+ # Fixme: Maybe find a static library. Get SHARED/STATIC by FIND_PACKAGE.
+-add_library(python SHARED IMPORTED GLOBAL)
+-set_property(TARGET python PROPERTY IMPORTED_LOCATION ${PYTHON_LIBRARIES})
++if(PYTHON_LIBRARIES)
++  add_library(python SHARED IMPORTED GLOBAL)
++  set_property(TARGET python PROPERTY IMPORTED_LOCATION ${PYTHON_LIBRARIES})
++else()
++  # No linkable libpython: keep `python` as the link-nothing placeholder that
++  # cc_library() only ever takes an add_dependencies() ordering edge on.
++  add_library(python INTERFACE IMPORTED GLOBAL)
++endif()
+ 
+ set(py_env "")
+ if(PYTHONINTERP_FOUND)
