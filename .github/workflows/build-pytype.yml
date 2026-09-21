@@ -1,0 +1,137 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `manylinux_wheels` job of
+# https://github.com/google/pytype/blob/2024.10.11/.github/workflows/build.yml
+name: Build pytype wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pytype.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pytype.yml'
+      - 'docs/packages/pytype.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pytype.yml'
+      - 'docs/packages/pytype.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pytype
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pytype ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # pytype rejects any interpreter past 3.12 ("Python versions > 3.12 are
+        # not yet supported"), which is why upstream ships cp310-cp312 only.
+        python: ["cp312"]
+
+    env:
+      PYTYPE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pytype ${{ env.PYTYPE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: google/pytype
+          ref: ${{ env.PYTYPE_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # libcst and msgspec have no riscv64 wheels on public PyPI.
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Without this pip takes the newest libcst, whose riscv64 form is an
+          # sdist needing Rust, over our registry's wheel for an older release.
+          CIBW_TEST_ENVIRONMENT: "PIP_ONLY_BINARY=:all:"
+          CIBW_TEST_REQUIRES: pytest pytest-xdist
+          # The wheel carries pytype's unit tests but not the pytype.tests
+          # helpers a third of them import, so those are copied in beside it.
+          CIBW_TEST_SOURCES: pytype/tests/__init__.py pytype/tests/test_base.py pytype/tests/test_utils.py
+          # Deselected: the helpers themselves; main_test.py and test_error_doc,
+          # which run files that exist only in a git checkout; the two typeshed
+          # tests reading typeshed/tests/, excluded from the wheel; test_die,
+          # which needs a mkdir to fail and the container runs as root; and the
+          # two serialize_ast tests, which fail the same way on an x86 checkout.
+          CIBW_TEST_COMMAND: >-
+            cp -r pytype/tests "$(python -c 'import pytype, os; print(os.path.dirname(pytype.__file__))')"
+            && printf 'def f(x: int) -> str:\n  return str(x)\n' > ok.py
+            && pytype ok.py
+            && python -m pytest --pyargs pytype -n auto
+            --deselect tests/test_base.py
+            --deselect tests/test_utils.py
+            --deselect main_test.py
+            --deselect errors/errors_test.py::ErrorDocTest::test_error_doc
+            --deselect imports/typeshed_test.py::TestTypeshedLoading::test_blacklisted_modules
+            --deselect imports/typeshed_test.py::TestTypeshedLoading::test_read_blacklist
+            --deselect tools/tool_utils_test.py::TestMakeDirsOrDie::test_die
+            --deselect pytd/serialize_ast_test.py::SerializeAstTest::test_node_index_visitor_usage
+            --deselect pytd/serialize_ast_test.py::SerializeAstTest::test_unrestorable_child
+
+      - name: Check the extension module made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              found = {n.split(".", 1)[0] for n in names if n.endswith(".so")}
+              assert found == {"pytype/typegraph/cfg"}, (whl, found)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pytype-${{ env.PYTYPE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pytype ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pytype-${{ matrix.version }}-*-manylinux_riscv64
