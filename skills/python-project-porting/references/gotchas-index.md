@@ -1089,6 +1089,10 @@ The porting gotchas (518 of them) live in [`references/gotchas/`](gotchas/), spl
 - **533** — A GitLab `-/archive/` tarball is not byte-stable, so gotcha 162's pinned-SHA-256
   source collection flakes at random (dav1d/x264 returned three different digests before one
   matched); retry the download rather than relaxing the check (the decord2/pyav-ffmpeg case).
+- **538** — scikit-build-core reads every setting from `SKBUILD_<SECTION>_<KEY>` too (lists split
+  on `;`), so a project whose `wheel.license-files = ["LICENSE"]` leaves its statically linked
+  fmt/pybind11 and vendored headers unnotified needs a `CIBW_ENVIRONMENT` entry, not a patch —
+  the env source outranks `pyproject.toml` and the override replaces the list (the pyslang case).
 
 ### Local validation & the aarch64/QEMU rehearsal — [`gotchas/local-validation-and-rehearsal.md`](gotchas/local-validation-and-rehearsal.md)
 

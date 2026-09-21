@@ -33,6 +33,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
   three failure modes
 - **533** — A GitLab `-/archive/` tarball is not byte-stable, so gotcha 162's pinned-SHA-256
   source collection flakes at random — retry, don't relax the check.
+- **538** — scikit-build-core's `wheel.license-files` is overridable from the environment, so
+  an explicit list that leaves the vendored notices out needs no patch.
 
 ---
 
@@ -679,3 +681,28 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
       mismatch as a tampered or truncated download.
     - **Every workflow that copies gotcha 162's collector inherits this**, so a green run of
       the port you copied from is no evidence that the fetch is stable.
+
+538. **scikit-build-core's `wheel.license-files` is overridable from the environment, so
+    gotcha 105's "an explicit list has no default glob behind it" costs no patch there (the
+    pyslang case).** A project that hardcodes `[tool.scikit-build] wheel.license-files =
+    ["LICENSE"]` ships its own notice and nothing else, while the extension statically links
+    a FetchContent'd fmt (MIT) and pybind11 (BSD-3-Clause) and compiles vendored
+    `BS_thread_pool.hpp` (MIT) and `boost_unordered.hpp`/`expected.hpp` (BSL-1.0) headers.
+    Every scikit-build-core setting is also read from `SKBUILD_<SECTION>_<KEY>`, and
+    list-valued ones split on `;`, so
+    `CIBW_ENVIRONMENT: 'SKBUILD_WHEEL_LICENSE_FILES="LICENSE;LICENSE.fmt;..."'` replaces the
+    list for the wheel build alone — no patch, nothing to rebase on the next version bump.
+    - **The env source outranks `pyproject.toml`** (scikit-build-core chains its `EnvSource`
+      ahead of the TOML one) and the entries are glob patterns, so `LICENSE.<dep>` files
+      staged at the checkout root land in `dist-info/licenses/` exactly as gotcha 44's
+      setuptools default glob would. Naming the project's own `LICENSE` first is mandatory —
+      the override *replaces* the list, it does not extend it.
+    - **Confirm the semicolons survive cibuildwheel's `bashlex` parser off-CI**, in one line:
+      `python -c "from cibuildwheel.environment import parse_environment;
+      print(parse_environment('X=\"a;b\"').as_dictionary(prev_environment={}))"`. A
+      double-quoted value keeps them; an unquoted one would not.
+    - **BSL-1.0 exempts object-code-only redistribution** ("unless such copies ... are solely
+      in the form of machine-executable object code"), so a Boost-licensed *header* compiled
+      into the extension does not strictly require its text in the wheel. Shipping it costs
+      nothing and matches what the rest of the repo does; the MIT and BSD-3-Clause ones are
+      the mandatory half.
