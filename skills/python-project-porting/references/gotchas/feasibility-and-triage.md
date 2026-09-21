@@ -200,6 +200,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **518** — A commercial vendor's package with a complete, buildable sdist but *no licence
   declared anywhere* is a licensing question for the maintainer, not a feasibility verdict —
   keep the two axes separate and port it with the gap flagged.
+- **522** — Gotcha 35's prebuilt payload can be *committed to a separate packaging repo* rather
+  than downloaded, so there is no fetch to grep: `file` the committed binary and match its
+  `BuildID` against the released wheel's, then build the sibling C++ repo at the same tag
+  (the lib3mf case).
 
 ---
 
@@ -3980,3 +3984,38 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       settles the arch question outright. A maintainer answering "may we redistribute this?"
       wants to know the build works; "unknown licence, and also unknown whether it builds" is
       an answer nobody can act on.
+
+522. **Gotcha 35's prebuilt payload can be *committed to a separate packaging repo* instead of
+    downloaded at build time, which makes the port an ordinary from-source build of the sibling
+    C++ repo plus a two-table patch (the lib3mf case; see `build-lib3mf.yml`).** lib3mf 2.5.0
+    ships one Linux wheel, `py3-none-manylinux2014_x86_64`, holding a 725 KB ACT-generated
+    ctypes wrapper and a 5.3 MB `lib3mf.so` — gotcha 81's xgboost shape, so the platform half is
+    load-bearing and riscv64 needs a real build. What is new is where the binary comes from and
+    what that costs to triage.
+    - **No `project_urls` at all is not a dead end — probe `<org>/<pkg>_python`.** The PyPI
+      metadata names no repository, and the obvious `3MFConsortium/lib3mf` holds the BSD-3-Clause
+      C++ library but no `setup.py`, no `pyproject.toml` and no PyPI job. `git ls-remote` against
+      a handful of guessed names (`<pkg>-python`, `py<pkg>`, `<pkg>_python`, …) costs seconds and
+      found `3MFConsortium/lib3mf_python`, a packaging repo the source tree never references —
+      gotcha 391's shape, reached without a code search.
+    - **A committed binary has no fetch to grep.** Gotcha 35 settles the platform table with two
+      greps of the download script; here `lib3mf/lib3mf.{so,dll,dylib}` are simply *in git*.
+      `file` them, then compare the `.so`'s `BuildID` with the one in the released wheel: equal
+      means the packaging repo is the release pipeline, and the script that put them there
+      (`prepare_pypi_release.py`) names the upstream artifact — `lib3mf_sdk_v<ver>.zip`, an
+      x86_64-Linux-only release asset. Because that asset is built from the sibling repo at the
+      same tag, gotcha 77 applies and the fix is to build it, not to hunt for another arch's blob.
+    - **cibuildwheel is the wrong tool for this shape.** The platform tag is applied by the
+      packaging repo's own wrapper (`build_wheels.py` → `setup.py bdist_wheel --python-tag py3
+      --plat-name <tag>`), and a PEP 517 frontend discards those flags, so a cibuildwheel build
+      yields `py3-none-any`. The same wrapper writes the per-platform `MANIFEST.in` that is the
+      only reason the binary is packaged at all, so bypassing it also drops the payload. Drive
+      the manylinux container yourself and call upstream's script — gotcha 15's driver shape
+      without the heavy part, exactly as `build-glfw.yml` already does.
+    - **`EXCLUDE_FROM_ALL` on an `add_subdirectory` does not keep that code out of `all`.**
+      lib3mf's `Tests/CMakeLists.txt` adds `Libraries/libressl` with `EXCLUDE_FROM_ALL`, yet a
+      plain `cmake --build build` compiles most of libressl anyway, because the test targets —
+      which *are* in `all` — link it. That is thousands of translation units that never reach
+      the wheel. Look for the project's own `<PROJ>_TESTS`/`BUILD_TESTING` switch and pass it to
+      the configure step. A local rehearsal that builds only the library target (`ninja lib3mf`)
+      hides this completely: rehearse the exact command the workflow runs.

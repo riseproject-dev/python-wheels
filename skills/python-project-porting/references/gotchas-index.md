@@ -310,6 +310,12 @@ The porting gotchas (502 of them) live in [`references/gotchas/`](gotchas/), spl
   resolve the asset name the *consumer's* cargo features produce (`_ptrcomp_sandbox`), and in a
   Bazel build read `SUPPORTED_EXECS`, not just `SUPPORTED_TARGETS` (the openai-codex-cli-bin/
   rusty_v8 case).
+- **522** — Gotcha 35's prebuilt payload can be *committed to a separate packaging repo* rather
+  than downloaded at build time, which leaves no fetch to grep: `file` the committed binary and
+  match its `BuildID` against the released wheel's, build the sibling C++ repo at the same tag,
+  and drive the container yourself because a PEP 517 frontend discards the wrapper script's
+  `--plat-name`; also, `EXCLUDE_FROM_ALL` does not keep a vendored library out of `all` when an
+  `all` target links it (the lib3mf case).
 - **516** — Link-time *stub* shared libraries let a vendor-SDK package build with the SDK
   absent, so a clean local build proves nothing: the released wheel's `DT_NEEDED` read against
   `setup.py`'s `auditwheel --exclude` list is the real test, and the toolkit's arch axis comes

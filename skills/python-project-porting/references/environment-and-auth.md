@@ -76,6 +76,15 @@
   person named Claude as an upstream byline, and there is no way to tell that apart from an
   AI attribution trailer from content alone.
 
+- **The docker daemon is shared with every other agent on this host.** Never stop or kill
+  containers by an image filter — `docker ps -q --filter ancestor=quay.io/pypa/manylinux_2_39_riscv64
+  | xargs docker kill` matches *every* concurrent port's local rehearsal, because they all run in
+  the same handful of manylinux/musllinux images. One such sweep killed a sibling agent's
+  `cibuildwheel-*` container mid-rehearsal, and there is no way to restart someone else's job.
+  Start your own with an explicit `--name <pkg>-<what>`, stop only that name, and read
+  `docker ps --format '{{.Names}}'` before any cleanup. The same applies to `docker system prune`
+  and to pulling: an image another agent is mid-pull on is shared state too.
+
 - **Pushing workflow files needs `workflow` scope** on the gh token, else the push is
   rejected ("refusing to allow an OAuth App to create or update workflow … without
   `workflow` scope"). Fix: `gh auth refresh -h github.com -s workflow` (interactive).
