@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 21 Sep 2026 00:00:00 +0000
+Subject: [PATCH] build-wheel: ship the licence files in the wheel
+
+The wheels ship the austin and austinp binaries, and austin is GPL-3.0, but
+no copy of the licence travels with them: the only trace of it is the
+"License: GPLv3+" metadata field. Section 4 of the GPL asks whoever
+distributes the program to hand out the licence text with it, and the
+binaries also carry statically linked third-party code (libunwind, and
+binutils' libbfd, libiberty and libsframe for austinp) whose licences belong
+in the wheel too.
+
+Write every file named by the new --licenses option into
+<dist-info>/licenses/ and declare it with License-File, which needs
+Metadata-Version 2.4 (PEP 639). The default keeps the project's own
+LICENSE.md in every wheel.
+
+Upstream-Status: To upstream [not yet submitted]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/scripts/build-wheel.py b/scripts/build-wheel.py
+--- a/scripts/build-wheel.py
++++ b/scripts/build-wheel.py
+@@ -80,7 +80,7 @@ def make_message(headers, payload=None):
+     return message.getvalue().encode("utf-8")
+ 
+ 
+-def write_austin_wheel(out_dir, *, version, platform, austin_bin_data):
++def write_austin_wheel(out_dir, *, version, platform, austin_bin_data, license_files):
+     package_name = "austin-dist"
+     python = "py3"
+     dist_name = package_name.replace("-", "_")
+@@ -99,10 +99,11 @@ def write_austin_wheel(out_dir, *, version, platform, austin_bin_data):
+ 
+     contents[f"{dist_info}/METADATA"] = make_message(
+         {
+-            "Metadata-Version": "2.1",
++            "Metadata-Version": "2.4",
+             "Name": package_name,
+             "Version": version,
+             **METADATA,
++            "License-File": [_.name for _ in license_files],
+         },
+         Path("README.md")
+         .read_text("utf-8")
+@@ -111,6 +112,9 @@ def write_austin_wheel(out_dir, *, version, platform, austin_bin_data):
+             'img src="https://raw.githubusercontent.com/P403n1x87/austin/refs/heads/master/art',
+         ),
+     )
++    for license_file in license_files:
++        contents[f"{dist_info}/licenses/{license_file.name}"] = license_file.read_bytes()
++
+     contents[f"{dist_info}/WHEEL"] = make_message(
+         {
+             "Wheel-Version": "1.0",
+@@ -179,6 +183,14 @@ if __name__ == "__main__":
+         default=None,
+     )
+ 
++    argp.add_argument(
++        "--licenses",
++        help="Licence files to ship in the wheel",
++        nargs="+",
++        type=Path,
++        default=[Path("LICENSE.md")],
++    )
++
+     argp.add_argument(
+         "--files",
+         help="The variant to binary file mapping (e.g. austin:src/austin)",
+@@ -215,4 +227,5 @@ if __name__ == "__main__":
+             version=version,
+             platform=platform,
+             austin_bin_data=bin_data,
++            license_files=args.licenses,
+         )

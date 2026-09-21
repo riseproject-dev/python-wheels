@@ -1,0 +1,250 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/P403n1x87/austin/blob/v4.0.0/.github/workflows/release_arch.yml
+# and https://github.com/P403n1x87/austin/blob/v4.0.0/.github/workflows/tests.yml
+name: Build austin-dist wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/austin-dist.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-austin-dist.yml'
+      - 'docs/packages/austin-dist.yaml'
+      - 'patches/austin-dist/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-austin-dist.yml'
+      - 'docs/packages/austin-dist.yaml'
+      - 'patches/austin-dist/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  # austin-python pins protobuf~=3.12 and our registry only carries 7.x, which
+  # first-index resolution stops at.
+  UV_INDEX_STRATEGY: unsafe-best-match
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: austin-dist
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build austin-dist ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+
+    env:
+      AUSTIN_DIST_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout austin v${{ matrix.version }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: P403n1x87/austin
+          ref: v${{ env.AUSTIN_DIST_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply -v python-wheels/patches/austin-dist/${{ env.AUSTIN_DIST_VERSION }}/*.patch
+
+      # The wheel carries austin alone, the way upstream's musl wheels do:
+      # austinp's native unwinding segfaults on riscv64, in austin's own MOJO
+      # emitter and inside libunwind's riscv64 symbol lookup.
+      - name: Build austin and package the wheel
+        run: |
+          docker run --rm \
+            -v "$(pwd)":/workspace \
+            --workdir /workspace \
+            -e AUSTIN_DIST_VERSION \
+            "${{ env.MANYLINUX_RISCV64_IMAGE }}" \
+            bash -c '
+              set -euxo pipefail
+              dnf -y --disablerepo=extras install autoconf automake
+              autoreconf --install
+              ./configure
+              make -j"$(nproc)"
+              /opt/python/cp312-cp312/bin/python -m pip install -q wheel
+              /opt/python/cp312-cp312/bin/python scripts/build-wheel.py \
+                --version "$AUSTIN_DIST_VERSION" \
+                --platform manylinux_2_39_riscv64 \
+                --files austin:src/austin
+            '
+
+      - name: Verify the wheel ships the riscv64 binary
+        run: |
+          python3 - dist/*.whl <<'EOF'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as zf:
+              names = zf.namelist()
+              print("\n".join(names))
+              scripts = sorted(n.rsplit("/", 1)[-1] for n in names if ".data/scripts/" in n)
+              assert scripts == ["austin"], scripts
+              licenses = sorted(n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n)
+              assert licenses == ["LICENSE.md"], licenses
+              header = zf.read(next(n for n in names if ".data/scripts/" in n))[:20]
+              assert header[:4] == b"\x7fELF", header
+              assert header[18] == 0xF3, header
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: austin-dist-${{ env.AUSTIN_DIST_VERSION }}-py3-none-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test austin-dist ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream tests 3.9 to 3.14; trimmed to the interpreters this registry targets.
+        python-version: ['3.12', '3.13', '3.14']
+
+    env:
+      AUSTIN_DIST_VERSION: ${{ matrix.version }}
+      AUSTIN_TESTS_PYTHON_VERSIONS: ${{ matrix.python-version }}
+
+    steps:
+      - name: Checkout austin v${{ matrix.version }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: P403n1x87/austin
+          ref: v${{ env.AUSTIN_DIST_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply -v python-wheels/patches/austin-dist/${{ env.AUSTIN_DIST_VERSION }}/*.patch
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: austin-dist-${{ env.AUSTIN_DIST_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install the wheel and upstream's test dependencies
+        run: uv pip install -r test/requirements.txt wheelhouse/*.whl
+
+      # The suite runs the binary from src/, which is where upstream's own test
+      # jobs download it to; here it comes out of the installed wheel.
+      - name: Stage the wheel's binary
+        run: cp "$(command -v austin)" src/
+
+      # Upstream's own test jobs do this so that the suite can print a
+      # backtrace of a crashed austin process.
+      - name: Enable crash diagnostics
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends gdb
+          echo "core.%p" | sudo tee /proc/sys/kernel/core_pattern
+
+      - name: Run upstream's tests
+        run: |
+          ulimit -c unlimited
+          python -m pytest -svr a test/functional test/integrity
+
+      # test_where_multiprocess asserts that a single -w snapshot catches both
+      # children inside fact(); upstream marks it flaky and these runners are
+      # slow enough to lose that race on every attempt.
+      - name: Run upstream's tests as root
+        run: |
+          ulimit -c unlimited
+          sudo -E env PATH="$PATH" python -m pytest -svr a test/functional test/integrity \
+            --deselect test/functional/test_attach.py::test_where_multiprocess
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources for austin-dist ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      AUSTIN_DIST_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: austin-dist-${{ env.AUSTIN_DIST_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish austin-dist ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: austin-dist-${{ matrix.version }}-py3-none-manylinux_riscv64
+      gpl-sources-artifact: austin-dist-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
