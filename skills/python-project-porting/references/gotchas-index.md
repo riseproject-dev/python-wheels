@@ -264,6 +264,9 @@ The porting gotchas (438 of them) live in [`references/gotchas/`](gotchas/), spl
 - **406** — Gotcha 103's byte-for-byte sdist proof cannot come out clean when upstream cuts
   releases from a non-public tree: a `[tool.cibuildwheel]`-only difference is not a wrong pin,
   and the released sdist's `test-command` can name a script that never existed (the nvtx case).
+- **466** — Gotcha 2's counter-case: an sdist can omit `CMakeLists.txt` and the C sources
+  entirely, and `pip wheel` on it still exits 0 — producing a `py3-none-any` wheel with no
+  extension that imports fine and dies on first use (the piper-tts case).
 
 ### cibuildwheel mechanics, the matrix & abi3 — [`gotchas/cibuildwheel-matrix-and-abi3.md`](gotchas/cibuildwheel-matrix-and-abi3.md)
 

@@ -34,6 +34,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
 - **406** — Gotcha 103's byte-for-byte sdist proof cannot come out clean when upstream cuts
   releases from a non-public tree — judge it on the content that builds, and never inherit a
   `test-command` from the released sdist (the nvtx case).
+- **466** — Gotcha 2's counter-case: an sdist can omit the build system entirely and still
+  build "successfully" — into a `py3-none-any` wheel with no extension in it.
 
 ---
 
@@ -619,3 +621,33 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
     - Together those two make build-from-checkout the right shape for a monorepo-subdirectory
       package like this, not sdist→bdist: the checkout supplies the headers the `setup.py`
       reaches for *and* the test helpers the sdist drops.
+
+466. **Gotcha 2's counter-case: an sdist can omit the build system entirely and still
+    build "successfully" — into a `py3-none-any` wheel with no extension in it (the
+    piper-tts case).** The playbook's step-2 smoke test (`pip wheel <sdist>`) is meant to
+    prove the sdist is self-contained. It cannot: `piper_tts-1.7.0.tar.gz` is 24 MB, looks
+    substantial, and ships `setup.py`, `pyproject.toml`, `MANIFEST.in`, the full `src/piper`
+    tree and `tests/` — but **no `CMakeLists.txt`, no `src/piper/espeakbridge.c` and no
+    `src/piper/espeak-ng-data/`**, the three things the wheel's native content comes from.
+    `pip wheel` on it exits **0** and writes `piper_tts-1.7.0-py3-none-any.whl` (24 MB of
+    ONNX model data, 57 entries, zero `.so`), because `skbuild.setup()` with no
+    `CMakeLists.txt` quietly degrades to a plain setuptools build and `include_package_data`
+    finds no data directory to include.
+    - **`import <pkg>` is not the check.** The broken wheel installs and
+      `import piper` *succeeds* — `piper/__init__.py` imports only pure-Python modules. It
+      dies on first real use, `ImportError: cannot import name 'espeakbridge' from 'piper'`,
+      raised from `phonemize_espeak.py`. A smoke test that imports the top-level package and
+      prints `__version__` (the shape most of these workflows use) would have shipped it.
+    - **What actually settles it, before any build:** list the sdist and look for the
+      *compiled* inputs by name, not for size —
+      `tar tzf <sdist> | grep -iE 'CMakeLists|\.(c|cc|cpp|pyx|rs)$'`. Empty output against a
+      project whose released wheels carry a `.so` means the sdist is not the build input,
+      whatever `pip wheel` says. Cross-check the real wheel's file list (gotcha 27/81's
+      habit) against what the sdist could possibly produce.
+    - **The fix is the shape, not a flag:** build from the upstream git checkout at the
+      release tag. That is also what makes the GPL side work here — the tree the wheel is
+      actually built from is the Corresponding Source, and the released sdist would not have
+      been (it contains neither the C source nor the CMake rules).
+    - Distinct from gotcha 1 (the *checkout* can't produce an sdist) and from gotcha 406's
+      partial-copy trap (sdist drops test helpers). Here the sdist drops the **build system**,
+      and fails open rather than erroring.
