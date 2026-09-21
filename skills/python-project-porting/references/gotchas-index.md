@@ -310,6 +310,10 @@ The porting gotchas (500 of them) live in [`references/gotchas/`](gotchas/), spl
   resolve the asset name the *consumer's* cargo features produce (`_ptrcomp_sandbox`), and in a
   Bazel build read `SUPPORTED_EXECS`, not just `SUPPORTED_TARGETS` (the openai-codex-cli-bin/
   rusty_v8 case).
+- **516** — Link-time *stub* shared libraries let a vendor-SDK package build with the SDK
+  absent, so a clean local build proves nothing: the released wheel's `DT_NEEDED` read against
+  `setup.py`'s `auditwheel --exclude` list is the real test, and the toolkit's arch axis comes
+  from the vendor's image registry (the torch-npu / Huawei CANN case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

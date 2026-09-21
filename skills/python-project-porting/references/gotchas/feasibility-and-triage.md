@@ -193,6 +193,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **509** — A riscv64 prebuilt of the blocking crate can exist and still not unblock the port:
   vendor prebuilts are keyed by *feature profile*, and a hermetic cross-toolchain's riscv64 can
   be a target-only platform (the openai-codex-cli-bin/rusty_v8 case).
+- **516** — Link-time *stub* shared libraries let a vendor-SDK package build with the SDK
+  absent, so the build test passes and proves nothing: read the released wheel's `DT_NEEDED`
+  against `setup.py`'s `auditwheel --exclude` list, and get the toolkit's arch axis from the
+  vendor's image registry (the torch-npu / Huawei CANN case).
 
 ---
 
@@ -3887,3 +3891,57 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       find `PK\x05\x06`, and walk the central directory: names and uncompressed sizes are
       enough to see "222 MB `bin/codex` + 53 MB `bin/codex-code-mode-host` + `rg` + `bwrap` +
       `zsh`" and to know this is gotcha 35's vendored-bundle shape before any checkout.
+
+516. **Link-time *stub* shared libraries let a vendor-SDK package compile with the SDK
+    completely absent, so "does the build need the toolkit?" is the wrong triage question —
+    the released wheel's `DT_NEEDED` plus the `auditwheel --exclude` list is the right one
+    (the torch-npu / Huawei CANN case).** Gotcha 480 is the same vendor family one repo over
+    and teaches the `dlopen` tell; torch-npu is the opposite mechanism with the same verdict,
+    and the naive build-requirement test *passes* here.
+    - **The stub trick.** `third_party/acl/libs/build_stub.sh` is nine `gcc -fPIC -shared`
+      lines that compile in-tree `acl.cpp`/`hccl.cpp`/`ge_api.cpp`/… into empty
+      `libascendcl.so`, `libhccl.so`, `libge_runner.so`, `libgraph.so`,
+      `libacl_op_compiler.so`, `libacl_tdt_channel.so`, `libascend_ml.so`; `setup.py` calls it
+      unconditionally (`build_stub(BASE_DIR)`) and `CMakeLists.txt` links those exact paths.
+      The CANN *headers* are vendored too (`third_party/acl/inc`, `third_party/hccl/inc`). So
+      `pip wheel` needs no toolkit — and proves nothing.
+    - **Read `readelf -d` on the *released* wheel, then the `--exclude` list that produced
+      it.** `BdistWheelBuild.run` passes `auditwheel repair --exclude` for nine
+      `cann_dependencies` plus `libatb.so`, so the stubs are stripped back out and
+      `torch_npu.libs/` ships as an **empty directory**. `libtorch_npu.so` and
+      `_C.cpython-3XX-*.so` keep `NEEDED libascendcl.so / libhccl.so / libge_runner.so /
+      libgraph.so / libacl_op_compiler.so / libacl_tdt_channel.so / libfmk_parser.so /
+      libascend_protobuf.so` with `RPATH $ORIGIN/lib`, resolved only from the vendor's
+      `/usr/local/Ascend/ascend-toolkit` install. `import <pkg>` therefore dies in the dynamic
+      loader on a toolkit-less host — a *harder* gate than gotcha 452's driver probe or 480's
+      `dlopen`, and one that `readelf -d` alone shows. An empty `<pkg>.libs/` beside a long
+      `--exclude` list in `setup.py` is the signature.
+    - **Machine-check the toolkit's arch axis even when the vendor has no redistrib manifest.**
+      Gotcha 471 reads NVIDIA's `redistrib_*.json`; Huawei publishes images instead, and
+      `https://hub.docker.com/v2/repositories/ascendai/cann/tags?page_size=100` paginates
+      cleanly: all **706** tags are `linux/arm64` + `linux/amd64`, zero riscv64. (Use the
+      `hub.docker.com/v2` API, not `registry-1.docker.io`, which rate-limits unauthenticated
+      manifest reads.) Confirmed by the README's own axis — CANN 8.5.0 for 2.12.0, `source
+      /usr/local/Ascend/ascend-toolkit/set_env.sh`, Atlas 800/900/300T hardware — and by
+      `ci/docker/` holding exactly two Dockerfiles, `X86/` and `ARM/`, both
+      `quay.io/pypa/manylinux_2_28_<arch>`.
+    - **No backend selector at all is a cleaner stop than a fake one.** Where 480 had to
+      disprove `XPU_TYPE=NONE`, grepping every `os.getenv`/`os.environ.get` in `setup.py` here
+      returns only `DISABLE_INSTALL_TORCHAIR`, `DISABLE_RPC_FRAMEWORK`, `ENABLE_LTO`,
+      `PGO_MODE`, `_GLIBCXX_USE_CXX11_ABI`, `DEBUG`, `TORCH_VERSION`, `AUDITWHEEL_PLAT` and
+      `TORCH_NPU_PACKAGE_NAME`, and `CMakeLists.txt` declares no `option()` at all. Run that
+      grep early: it is two seconds and it settles the "is there a CPU mode?" branch.
+    - **A framework *plugin* carries a second, independent version block.** `install_requires`
+      is computed at build time from the installed torch (`torch=="+"`-stripped
+      `torch.__version__`), i.e. an exact `torch==2.12.0` pin, and upstream's own build images
+      install `torch==2.12.0+cpu` from `download.pytorch.org/whl/cpu`, which has no riscv64
+      leg; our registry carries riscv64 torch only as `2.13.0+cpu`/`2.14.0+cpu`. Even with the
+      accelerator question waived, the pinned base framework does not exist for the arch at
+      that version (gotcha 503's version-level blocker, applied to the plugin's host).
+    - **`grep -ri riscv` hitting once is not a signal — read the hit.** The only match in the
+      whole tree is `march=rv64gc` inside `torch_npu/_inductor/cpp_builder.py`, a monkeypatch
+      of `torch._inductor.cpp_builder`'s *CPU* codegen flags inherited verbatim from PyTorch.
+    - **Vendor release trains rename the tag.** `v2.12.0` is a moving *branch* (its
+      `version.txt` already read `2.12.0.post3`); the release is tagged
+      `v26.1.0-pytorch2.12.0` — vendor train first, framework version second. `git ls-remote
+      <url>` before assuming gotcha 3's tag shape, and check `version.txt` at the tag.
