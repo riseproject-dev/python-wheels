@@ -97,6 +97,27 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
       Heads-up: the `manylinux_2_39_riscv64` image ships cp39–cp315 incl. cp314t/cp315t
       but **no cp313t**, so cp314t is the only free-threaded target even when upstream
       also publishes cp313t.
+    - **The `publish` job's dry run is where you catch a missed abi3 tag — read the wheel
+      filename it prints, not the artifact name you chose.** `_publish-wheel.yml` echoes the
+      real `dist/<pkg>-<ver>-<tag>-<plat>.whl` and the `docs/packages/` diff it would write, so
+      a run that is otherwise green still tells you whether you shipped `cpNN-abi3` or
+      `cpNN-cpNN`. The vllm CPU port went green with `cp312-cp312` while its PR body and its
+      `upload-artifact` name both said "abi3" — neither is evidence, and nothing else in the
+      log mentions the tag. Compare it against upstream's own published tag on
+      `pypi.org/pypi/<pkg>/json` before calling a port done.
+    - **For a project whose only wheel build is a Dockerfile, the flag lives in that
+      Dockerfile's `bdist_wheel` line** (gotcha 460's point, applied to the tag rather than to
+      a system package): vllm's `docker/Dockerfile.cpu` runs `setup.py bdist_wheel
+      --dist-dir=dist --py-limited-api=cp38`, which is the *only* place the abi3 intent is
+      recorded — `setup.py` merely sets `py_limited_api` on each extension, and the PyO3 half
+      declares `features=["pyo3/abi3-py38"]`. Grep upstream's Dockerfiles for
+      `py-limited-api` whenever a project's `.so` files come out named `*.abi3.so` but the
+      wheel does not.
+    - **Pick the `cpNN` from your own build floor, not from upstream's flag**, or you
+      reintroduce gotcha 96: upstream tags `cp38`, but `torch==2.13.0` has no riscv64 wheel
+      below cp312, so cp312 is the oldest interpreter the wheel can *ever* be compiled on here
+      and a `cp38` tag would claim eight releases it was never built against. Diverging from
+      upstream's literal flag is correct in that case — say so in the PR.
 
 12. **Scope an env var to one phase with the right knob.** `CIBW_ENVIRONMENT` applies to
     **both** build and test; `CIBW_TEST_ENVIRONMENT` is test-only. This bites with
