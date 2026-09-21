@@ -4191,9 +4191,54 @@ packages:
   version: 3.0.3
   home: https://github.com/cmake-wheel/coal
   repo: https://github.com/cmake-wheel/coal
-  status: queued
+  status: blocked-on-dependency
   pr: null
-  notes: '10 Linux wheels upstream (abi: 0); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: '10 Linux wheels upstream (abi: 0); no riscv64 on PyPI or pypi.riseproject.dev.
+    coal is the renamed successor of hpp-fcl (collision detection / distance computation)
+    and cmake-wheel/coal is the cmeel packaging fork of coal-library/coal, same shape as
+    the rest of this family: build-backend = "cmeel", and the note''s "abi: 0" is PEP 427''s
+    build number, not an ABI tag (gotcha 470) -- the real filenames are
+    coal-3.0.3-0-cp312-cp312-manylinux_2_28_x86_64.whl, ordinary per-interpreter compiled
+    wheels for cp310-cp314. UNLIKE the cmeel-<lib> leaves, this one has REAL Python
+    bindings: pyproject does not set [tool.cmeel] has-sitelib explicitly, but configure-args
+    is -DCOAL_HAS_QHULL=ON -DCOAL_BACKWARD_COMPATIBILITY_WITH_HPP_FCL=ON
+    -DBUILD_PYTHON_INTERFACE=ON -DBUILD_STANDALONE_PYTHON_INTERFACE=ON and the released
+    wheel carries cmeel.prefix/lib/python3.12/site-packages/coal/coal_pywrap.cpython-312-*.so
+    (13MB) plus a hppfcl/ backward-compat package, so a port needs the per-interpreter
+    matrix shape of build-cmeel-boost.yml, not the single-job shape of cmeel-qhull/octomap.
+    Bindings are Boost.Python via eigenpy, not pybind11. BLOCKER IS THE DEPENDENCY CHAIN,
+    not the code. readelf -d on that .so (gotcha 470''s one-shot dependency map; nothing is
+    bundled, RUNPATH $ORIGIN/../../../../lib into the shared cmeel prefix) gives NEEDED
+    libcoal.so (libcoal), libeigenpy.so (eigenpy), liboctomap/liboctomath.so.1.10
+    (cmeel-octomap) and libboost_{python312,serialization,filesystem,atomic,container,graph}.so.1.90.0
+    (cmeel-boost). requires_dist with extras dropped is cmeel, cmeel-assimp >= 6.0.2 < 7,
+    cmeel-boost ~= 1.90.0, cmeel-octomap >= 1.9.8.2 < 2, cmeel-qhull >= 8.0.2.1 < 8.0.3,
+    eigenpy >= 3.13 < 4, libcoal == 3.0.3; [build-system] requires adds only cmeel[build],
+    cmeel-eigen and jrl-cmakemodules (all three py3-none-any off public PyPI) on top of the
+    same set, so the build-time list adds no blocker the runtime list did not already have.
+    SATISFIED: cmeel/cmeel-eigen/jrl-cmakemodules (py3-none-any) and cmeel-boost 1.90.0
+    (registry, cp312/313/314). MISSING on both indexes: libcoal 3.0.3 (queued, py3-none-<plat>
+    C++ payload), eigenpy 3.13.0 (blocked-on-dependency, now actionable since cmeel-boost
+    landed) and cmeel-assimp 6.0.5 (blocked-on-dependency, itself needs cmeel-zlib);
+    cmeel-octomap 1.10.0 (#2159) and cmeel-qhull 8.0.2.1 (#2160) are merged but their
+    publish has not reached the registry yet (both still 404). Repo oracle agrees:
+    ci_scripts/check_riscv64_deps.py --python 312 313 314 over the seven runtime
+    requirements reports cp312/cp313/cp314 all UNRESOLVABLE (first failure cmeel-assimp,
+    "from versions: none"), i.e. the wheel could be neither installed nor smoke-tested.
+    Blocking set for coal, a subset of gotcha 470''s 11-package pin chain: cmeel-zlib ->
+    cmeel-assimp, cmeel-octomap, cmeel-qhull, eigenpy -> libcoal -> coal. coal does NOT
+    need the cmeel-tinyxml2 / cmeel-console-bridge / cmeel-urdfdom branch, which pin does.
+    PORTABILITY IS OTHERWISE FINE: upstream tag is v3.0.3.c0 (the only .cN for 3.0.3,
+    checked per gotcha 505); CMakeLists cmake_minimum_required(VERSION 3.22), above CMake
+    4''s 3.5 floor, so no CMAKE_POLICY_VERSION_MINIMUM=3.5 as cmeel-console-bridge needed;
+    the sdist has no -march/-mavx/SSE/AVX/NEON string (only three "TODO: vectorize"
+    comments) and no CUDA/nvcc reference, Eigen arrives header-only via cmeel-eigen and
+    degrades to scalar on riscv64, so no -DEIGEN_DONT_VECTORIZE is called for. Interpreter
+    ceiling for the whole chain stays cmeel-boost''s riscv64 coverage: cp312/313/314,
+    although upstream coal ships cp310-cp314. 3.0.3 is still the latest release (gotcha 388).
+    No branch/worktree/PR: resolved read-only via PyPI JSON, the published aarch64 wheel
+    and the sdist, no CI cycle burned. Revisit once libcoal, eigenpy and cmeel-assimp are
+    on the registry.'
 - pkg: pymavlink
   version: 2.4.49
   home: https://github.com/ArduPilot/pymavlink/
