@@ -77,16 +77,23 @@ jobs:
       - name: Apply lancedb patches
         run: git apply -v python-wheels/patches/lancedb/${{ env.LANCEDB_VERSION }}/0001*.patch
 
+      # lancedb pins lance-core/lance-linalg to a different exact version per
+      # release (10.0.0 for v0.37.1, 11.0.0 for v0.38.0, 12.0.0 for v0.39.0),
+      # so the sibling checkout below must track whatever this lancedb tag's
+      # own Cargo.toml pins rather than a fixed tag.
+      - name: Determine the lance-core/lance-linalg version lancedb pins
+        run: echo "LANCE_VERSION=$(grep -m1 '^lance-core = ' Cargo.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')" >> "$GITHUB_ENV"
+
       # lance-core's SIMD_SUPPORT static and lance-linalg's f32x8/f32x16/
       # i32x8/f64x4/f64x8 SIMD types compile only for x86_64/aarch64/
       # loongarch64 upstream; the 0002 patch adds a portable riscv64 fallback
       # to this checkout, and Cargo.toml's `[patch.crates-io]` (0001) redirects
       # both crates here.
-      - name: Checkout lance v10.0.0 and add a riscv64 SIMD fallback
+      - name: Checkout lance v${{ env.LANCE_VERSION }} and add a riscv64 SIMD fallback
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: lancedb/lance
-          ref: v10.0.0
+          ref: v${{ env.LANCE_VERSION }}
           path: lance
           persist-credentials: false
 
@@ -144,18 +151,38 @@ jobs:
             CARGO_BUILD_JOBS=2
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
           # Without this pip prefers PyPI's releases, which have no riscv64
-          # wheel for these, and source-builds them in the container.
-          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,pandas,pyarrow,duckdb,pydantic-core
-          CIBW_TEST_REQUIRES: pytest pytest-asyncio numpy pandas pyarrow duckdb
+          # wheel for these, and source-builds them in the container. pylance
+          # is pinned to our registry's exact published version (not just
+          # named) per gotcha 30: with PIP_EXTRA_INDEX_URL alone pip picks the
+          # highest version across both indexes, and PyPI's latest pylance is
+          # newer than what pypi.riseproject.dev hosts, so an unpinned
+          # `pylance` would resolve to a PyPI release with no riscv64 wheel
+          # and source-build the whole lance Rust workspace here.
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,pandas,pyarrow,duckdb,pydantic-core,pylance
+          CIBW_TEST_REQUIRES: pytest pytest-asyncio numpy pandas pyarrow duckdb pylance==11.0.0
           CIBW_TEST_SOURCES: python/pyproject.toml python/python/tests
           # test_table.py, test_util.py, test_embeddings.py and
           # test_namespace_integration.py import `polars` and/or `lance`
-          # (pylance) unconditionally at module scope, as do
-          # docs/test_guide_tables.py and docs/test_python.py; neither package
-          # has a riscv64 wheel and both are large enough Rust projects in
-          # their own right that building them from source here is out of
-          # scope, so those six files fail collection and are excluded rather
-          # than left to error. Otherwise mirrors run_tests/action.yml's
+          # (pylance) and/or `lance_namespace` unconditionally at module
+          # scope, as do docs/test_guide_tables.py and docs/test_python.py;
+          # polars has no riscv64 wheel and is a large enough Rust project in
+          # its own right that building it from source here is out of scope,
+          # so those six files fail collection and stay excluded. This was
+          # not re-checked file-by-file against pylance's newer availability
+          # below -- only test_blob.py, the one file CI actually reported
+          # failing here, was fixed rather than excluded.
+          #
+          # test_blob.py imports `lance` (the pylance package) unconditionally
+          # at module scope too, but is new in 0.38.0/0.39.0 (not present in
+          # 0.37.1, when the six-file exclusion above was established) so it
+          # was never checked against pylance's availability until now. It
+          # isn't excluded because pypi.riseproject.dev already hosts a
+          # pylance riscv64 wheel (see docs/packages/pylance.yaml, added to
+          # CIBW_TEST_REQUIRES above) and lance's python/python/lance/blob.py
+          # is unchanged between the v9.0.0 pylance/lance release lancedb's
+          # own pyproject.toml `tests` extra pins and the v11.0.0 this repo
+          # publishes, aside from an added BlobFile.read_ranges method
+          # test_blob.py doesn't use. Otherwise mirrors run_tests/action.yml's
           # non-integration path (`-m "not slow and not s3_test"`, no docker
           # compose/localstack).
           #
@@ -179,6 +206,19 @@ jobs:
           # identically either way) and the tests run and fail anyway, as seen
           # in CI run 33843581031. `cd python` first puts pyproject.toml back
           # in the search path so --deselect (and the -m marker filter) work.
+          #
+          # test_first_class_function_slice1.py/slice2.py are new (0.38.0/
+          # 0.39.0) and hit the exact same class of trap as
+          # test_pyo3_abi_matches_minimum_supported_python above: they read
+          # golden fixtures from outside the CIBW_TEST_SOURCES tree --
+          # docs/src/python/python.md and rust/lancedb/tests/fixtures/
+          # first_class_functions/v1/*.json, both siblings of python/ in the
+          # full checkout but not copied into the isolated test dir (only
+          # pyproject.toml and python/tests are) -- and fail with the same
+          # FileNotFoundError regardless of platform. They assert Python/Rust
+          # golden-contract and docs consistency, not installed-wheel runtime
+          # behavior, so ignore both files rather than widen
+          # CIBW_TEST_SOURCES to mirror docs/ and rust/'s layout.
           CIBW_TEST_COMMAND: >-
             cd python &&
             python -m pytest python/tests -vv --durations=30
@@ -189,6 +229,8 @@ jobs:
             --ignore=python/tests/test_namespace_integration.py
             --ignore=python/tests/docs/test_guide_tables.py
             --ignore=python/tests/docs/test_python.py
+            --ignore=python/tests/test_first_class_function_slice1.py
+            --ignore=python/tests/test_first_class_function_slice2.py
             --deselect=python/tests/test_db.py::test_create_table_stable_row_ids_via_storage_options
             --deselect=python/tests/test_db.py::test_create_table_stable_row_ids_via_storage_options_sync
             --deselect=python/tests/test_db.py::test_create_table_stable_row_ids_table_level_override
