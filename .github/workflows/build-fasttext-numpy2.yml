@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Upstream ships no CI workflow; this mirrors its manylinux recipe in
+# https://github.com/simon-ging/fasttext-numpy2/blob/main/pypibuild.md
+name: Build fasttext-numpy2 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/fasttext-numpy2.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fasttext-numpy2.yml'
+      - 'docs/packages/fasttext-numpy2.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fasttext-numpy2.yml'
+      - 'docs/packages/fasttext-numpy2.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # simon-ging/fasttext-numpy2 ships no git tags; this is the commit the 0.10.4
+  # sdist was cut from, verified byte-identical against it. Move together with
+  # FASTTEXT_NUMPY2_VERSION.
+  FASTTEXT_NUMPY2_REF: '11468883b68fd193a9f6efff71471b34c006b103'
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: fasttext-numpy2
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build fasttext-numpy2 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Per-interpreter (not abi3): the pybind11 extension links the version-specific ABI.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    env:
+      FASTTEXT_NUMPY2_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout fasttext-numpy2 ${{ env.FASTTEXT_NUMPY2_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: simon-ging/fasttext-numpy2
+          ref: ${{ env.FASTTEXT_NUMPY2_REF }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Upstream's own unit tests diverge to NaN during training on any
+          # architecture, including with the released x86_64 wheel, so exercise
+          # the inference path this fork exists for instead.
+          CIBW_BEFORE_TEST_LINUX: >-
+            curl -sL -o /tmp/lid.176.ftz https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.ftz
+          CIBW_TEST_COMMAND: >-
+            python -c "import numpy as np, fasttext;
+            assert fasttext.FastText.fasttext.__file__.endswith('.so'), fasttext.FastText.fasttext.__file__;
+            model = fasttext.load_model('/tmp/lid.176.ftz');
+            labels, probs = model.predict('Fondant au chocolat et tarte aux myrtilles');
+            assert labels == ('__label__fr',), labels;
+            assert isinstance(probs, np.ndarray) and probs[0] > 0.9, probs;
+            vec = model.get_sentence_vector('Fondant au chocolat');
+            assert vec.shape == (16,) and abs(float(np.linalg.norm(vec)) - 4.16875) < 1e-4, vec;
+            print('fasttext-numpy2 OK')"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fasttext-numpy2-${{ env.FASTTEXT_NUMPY2_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish fasttext-numpy2 ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: fasttext-numpy2-${{ matrix.version }}-*-manylinux_riscv64
