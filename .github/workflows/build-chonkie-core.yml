@@ -1,0 +1,126 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-wheels` job of
+# https://github.com/chonkie-inc/chunk/blob/v0.10.2/.github/workflows/release.yml
+name: Build chonkie-core wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/chonkie-core.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-chonkie-core.yml'
+      - 'docs/packages/chonkie-core.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-chonkie-core.yml'
+      - 'docs/packages/chonkie-core.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: chonkie-core
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build chonkie-core ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # PyO3 extension built per interpreter (upstream ships cp3x-cp3x
+        # wheels, no abi3). cp314t is excluded: upstream publishes no
+        # free-threaded wheel and the module does not declare
+        # `gil_used(false)`, so it would re-enable the GIL on import.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      CHONKIE_CORE_VERSION: ${{ matrix.version }}
+
+    steps:
+      # Checked out at the workspace root: packages/python is a member of the
+      # chunk Cargo workspace and builds against the root `chunk` crate.
+      - name: Checkout chunk v${{ env.CHONKIE_CORE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: chonkie-inc/chunk
+          ref: v${{ env.CHONKIE_CORE_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: packages/python
+          output-dir: wheelhouse/
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # chunk ships no [tool.cibuildwheel], so the Rust toolchain its
+          # maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+            sh -s -- -y --profile minimal
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$PATH:$HOME/.cargo/bin"'
+          CIBW_TEST_REQUIRES: pytest numpy
+          # test-sources resolves against the checkout root, not package-dir.
+          CIBW_TEST_SOURCES: packages/python/tests
+          CIBW_TEST_ENVIRONMENT_LINUX: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+          # Upstream's suite never calls the four numpy-gated functions, so the
+          # last check covers the half of the module its tests leave out.
+          CIBW_TEST_COMMAND: >-
+            cd packages/python &&
+            python -c "import chonkie_core._chunk as m;
+            assert m.__file__.endswith('.so'), m.__file__" &&
+            python -m pytest tests -v &&
+            python -c "import numpy as np, chonkie_core;
+            d = np.array([0., 1., 2., 3., 4., 3., 2., 1., 0.]);
+            assert chonkie_core.savgol_filter(d, window_length=5, poly_order=2).shape == (9,);
+            assert chonkie_core.windowed_cross_similarity(np.eye(8, 4), 3).shape == (7,)"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: chonkie_core-${{ env.CHONKIE_CORE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish chonkie-core ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: chonkie_core-${{ matrix.version }}-*-manylinux_riscv64
