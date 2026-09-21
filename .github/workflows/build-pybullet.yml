@@ -1,0 +1,134 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on upstream's own wheel recipe,
+# https://github.com/bulletphysics/bullet3/blob/6c888f4abd7b46f572587360cc214985f02e5c6b/wheel.sh
+name: Build pybullet wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pybullet.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pybullet.yml'
+      - 'docs/packages/pybullet.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pybullet.yml'
+      - 'docs/packages/pybullet.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # 3.2.7 was released to PyPI without a git tag; pin the commit that bumped
+  # setup.py's version to 3.2.7, byte-identical to the PyPI sdist (gotcha 103).
+  # Update alongside PYBULLET_VERSION.
+  PYBULLET_REF: 6c888f4abd7b46f572587360cc214985f02e5c6b
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pybullet
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pybullet ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    env:
+      PYBULLET_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout bullet3 for pybullet ${{ env.PYBULLET_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: bulletphysics/bullet3
+          ref: ${{ env.PYBULLET_REF }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # setup.py enables the numpy code paths from a plain `import numpy`,
+          # which a PEP 517 build-isolation overlay is invisible to, so numpy is
+          # preinstalled with isolation disabled (upstream's wheel.sh installs
+          # requirements.txt into the interpreter it then builds with).
+          # pybullet.c hands PyObject* to numpy's PyArrayObject* accessors, which
+          # GCC 14 rejects outright where upstream's older image only warned.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+            CFLAGS=-Wno-error=incompatible-pointer-types
+          CIBW_BEFORE_BUILD: pip install setuptools wheel -r {package}/requirements.txt
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          CIBW_TEST_REQUIRES: numpy
+          # The unittests resolve `r2d2.urdf` & co through bullet's own relative
+          # `../../../data/` search path, so `data/` is staged beside them.
+          CIBW_TEST_SOURCES: data examples/pybullet/unittests
+          CIBW_TEST_COMMAND: >-
+            cd examples/pybullet/unittests &&
+            python unittests.py &&
+            python userDataTest.py &&
+            python saveRestoreStateTest.py
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          exts = {n.split("/")[-1].split(".")[0] for n in names if n.endswith(".so")}
+          assert exts == {"pybullet", "eglRenderer"}, exts
+          EOF
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pybullet-${{ env.PYBULLET_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pybullet ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pybullet-${{ matrix.version }}-*-manylinux_riscv64
