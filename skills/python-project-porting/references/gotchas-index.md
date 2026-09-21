@@ -350,6 +350,11 @@ The porting gotchas (517 of them) live in [`references/gotchas/`](gotchas/), spl
   + fzf 0.67.0, the first fzf release carrying `linux_riscv64`); the port is then the two
   platform-table rows the packaging backend is missing, plus a warning not to adopt upstream's
   wheel smoke test without running it (the iterfzf case).
+- **530** — A `setuptools-golang`/cgo extension is an ordinary port, not a vendored-binary
+  case: the per-interpreter tags are honest (a real `PyInit_*` extension), and feasibility is
+  a Go question — check the toolchain's own arch-support table for the buildmode used, confirm
+  go.dev ships the target tarball, and cross-build the import graph with `GOOS`/`GOARCH` set on
+  x86 rather than assuming a wall (the certbot-dns-multi case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

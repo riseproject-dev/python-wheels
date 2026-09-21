@@ -213,10 +213,17 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   unversionable, the vendor's own package manifest is the platform table, and the pure-Python
   sdist already serves the arch (the adbutils/Android platform-tools case).
 - **528** — An open upstream and a permissive licence do not rescue a vendor runtime wheel: read
-- **529** — The vendored-binary triage's happy ending: the vendor can already publish our
   the build tree out of the unstripped `.so`'s debug paths (an internal release branch, not a
   public ref), diff the loader's `dlopen` backend list against the adapters the wheel actually
   ships, and check that any consumer could exist on our arch (the intel-cmplr-lib-ur case).
+- **529** — The vendored-binary triage's happy ending: the vendor can already publish our arch,
+  and the version string names the release to check — iterfzf's `1.9.0.67.0` names bundled fzf
+  0.67.0, whose own asset list already carries `linux_riscv64` (the iterfzf case).
+- **530** — A `setuptools-golang`/cgo extension is an ordinary port, not a vendored-binary case:
+  the per-interpreter tags are honest (a real `PyInit_*` extension), and feasibility is a Go
+  question — check the toolchain's own arch-support table for the buildmode used, confirm
+  go.dev ships the target tarball, and cross-build the import graph with `GOOS`/`GOARCH` set on
+  x86 rather than assuming a wall (the certbot-dns-multi case).
 
 ---
 
@@ -4218,3 +4225,22 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       (`py3-none-any` → `py3-none-manylinux_2_39_riscv64`); `dist-info/WHEEL` still says
       `Tag: py3-none-any`. pip and uv both install it, so leave it alone rather than "fixing"
       an upstream artifact shape.
+
+530. **A `setuptools-golang`/cgo extension is an ordinary port, not a vendored-binary case
+    (the certbot-dns-multi shape) — check Go's own arch table before assuming a wall.** The
+    per-interpreter wheel tags (`cp311`-`cp314`, one per Python) are honest here, not
+    cosmetic (gotcha 27/464's tell doesn't apply): `Extension(..., ["bridge/main.go"])` with
+    `build_golang` runs `go build -buildmode=c-shared`, producing a real `PyInit_*`/
+    `PyModuleDef` extension whose `.so` links the interpreter's C API, confirmed by the
+    installed wheel shipping one `<name>.cpython-3XX-<arch>-linux-gnu.so` and nothing
+    `py3-none`. Feasibility is then a Go question, not a Python one: check
+    `internal/platform/supported.go` in the Go toolchain source for the target `GOOS`/`GOARCH`
+    pair under the buildmode the extension uses (`c-shared`), confirm go.dev actually ships a
+    `linux-riscv64` release tarball for upstream's pinned Go version, and cross-build the
+    package's own import graph with `GOOS=linux GOARCH=riscv64 CGO_ENABLED=0 go build ./...`
+    on x86 — a clean build proves no dependency is arch-gated without needing an emulated
+    compile. `setuptools-golang` itself carries no architecture table (it only shells out to
+    `go build`), so there is nothing in the Python packaging layer to check. If the embedded
+    Go project is a CLI-shaped tool (here, go-acme/lego's DNS providers), its own offline
+    exec-mode entry point often doubles as a free end-to-end test with no network and no
+    checked-out fixtures.
