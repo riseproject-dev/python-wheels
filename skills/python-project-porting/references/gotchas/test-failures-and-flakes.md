@@ -976,3 +976,66 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       collection error**, so this shape recurs for every wheel whose test suite has a
       `conftest.py` doing `from <pkg> import ...` — the failure looks like a test-harness
       problem and is really a link-time one.
+
+472. **A project's own test runner can swallow the identity of a hanging or crashing
+    test: it buffers each module's output and prints it only when the module ends, so a
+    hang or a SIGSEGV loses everything the module had produced (the pygame-ce case).**
+    `pygame.tests`' runner captures each module into an `io.StringIO()` and prints the
+    block once the module finishes, and it defaults to single-process mode
+    (`usesubprocess=False`) where its own `--time_out` option is never applied. A test
+    that never returns therefore ran three matrix legs into `timeout-minutes` with no
+    output naming a module, and once that hang was skipped a segfault in the *same*
+    module produced a bare `Segmentation fault` and nothing else.
+    - **`python -u` buys you the module name and nothing more.** Unbuffering stdout makes
+      the runner's own `loading <module>` line appear before the stall, which is what
+      localises the failure to one module — but the per-test lines are inside the
+      `StringIO`, so `-u` cannot name the test.
+    - **Bypass the project runner to get the test.** `python -u -X faulthandler -m
+      unittest -v <module>` prints each test id as it starts and, on a fault, the
+      faulthandler traceback with the exact source line. For pygame-ce that turned
+      `Segmentation fault` into `draw_test.py:7313 in test_arc__surface_clip` in one run.
+    - **Then sweep every test id in its own interpreter** — load the module with
+      `unittest.TestLoader().loadTestsFromName()`, flatten the suite to ids, and
+      `subprocess.run([sys.executable, "-m", "unittest", "-q", id], timeout=N)` each one,
+      printing the non-zero ones. 252 tests took under three minutes and proved exactly
+      two were bad, which is what makes a two-test skip defensible instead of a guess.
+    - **Do all of this from `CIBW_TEST_COMMAND` in a `run:` heredoc** (gotcha 7, gotcha
+      168): one job, one 30-minute window, no committed helper script.
+
+473. **A per-test watchdog that kills the process on the first hang tells you nothing
+    about the tests defined *after* it, so "everything else in the module passes" is
+    unproven — and the next run finds the second bug in the same module.**
+    `faulthandler.dump_traceback_later(N, exit=True)` aborts the interpreter, so a loop
+    that arms it around each test in turn stops at the first offender. Reading that run as
+    a clean bill of health for the rest of the module cost a full CI cycle here: the arc
+    test that hung was skipped, and the very next run segfaulted in a *different* test of
+    the same class, which the watchdog run had never reached.
+    - **Prefer a subprocess-per-test sweep** (gotcha 472) whenever the question is "which
+      tests are bad", not "why is this one bad": a crash confined to a child process lets
+      the sweep continue and enumerate *all* of them in one job.
+    - **When two failures land in the same C entry point, say so in one patch** rather
+      than shipping two unrelated-looking skips. A hang and an out-of-bounds write in the
+      same rasteriser are one defect with two symptoms, and describing it that way is what
+      tells a reviewer the skip set is complete.
+
+474. **Before patching out tests that fail because your build omits an optional backend,
+    grep upstream's test suite for the marker it already uses for system-dependency
+    builds — it usually exists, and using it is a far smaller divergence than a skip.**
+    pygame-ce honours `PG_DEPS_FROM_SYSTEM`, which its own `run-ubuntu-checks.yml`,
+    `build-ubuntu-sdist.yml`, `dev-check.yml` and `build-sdl3.yml` set, and which its
+    tests consult to skip the wavpack music cases and the PNG-saving cases whose backend
+    it cannot assume. Setting that one variable in `CIBW_ENVIRONMENT` is exactly what a
+    from-source SDL stack linked against distro libraries should do, and it only ever
+    *adds* skips — nothing in the build reads it.
+    - **Look for the marker by name, not by grepping for `skipIf`**: `grep -rn
+      '<PROJECT>_.*FROM_SYSTEM\|SYSTEM_DEPS\|USE_SYSTEM' test/ .github/` finds it, and the
+      project's own system-deps CI workflow is the other place it always appears.
+    - **The marker is usually incomplete**, because upstream added it for the one backend
+      that bit them. pygame-ce guards `house_lo.wv` with it but leaves `house_lo.opus` and
+      `surfonasinewave.xm` unguarded two lines above, in the same list. Extending an
+      existing marker to its siblings is a genuinely upstreamable three-line patch;
+      inventing a new skip condition is not.
+    - **Check which tests the marker costs you.** Here it also skips three PNG-saving
+      tests that were passing, because upstream cannot assume libpng is the backend. That
+      is the right trade when the alternative is asserting a capability the wheel does not
+      have, but it should be a decision, not a surprise.

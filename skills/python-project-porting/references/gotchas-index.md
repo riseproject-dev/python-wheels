@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (438 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (459 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -805,6 +805,14 @@ The porting gotchas (438 of them) live in [`references/gotchas/`](gotchas/), spl
 - **414** — A stochastic test whose native RNG is seeded from `time(NULL)` is a wall-clock
   lottery, not an arch or libc difference — replay consecutive epoch seconds through the
   library's own seed setter to measure the real failure rate.
+- **472** — A project's own runner buffers each module's output, so a hang or SIGSEGV
+  loses the test's identity — `python -u` names the module, `python -X faulthandler -m
+  unittest -v <module>` names the test, and a subprocess-per-test sweep names them all.
+- **473** — A `faulthandler.dump_traceback_later(..., exit=True)` watchdog stops at the
+  first bad test, so it never proves the rest of the module is clean.
+- **474** — Before skipping tests your build's missing backends fail, look for the
+  system-dependency marker upstream already honours (`PG_DEPS_FROM_SYSTEM` and friends) —
+  it usually exists, and usually needs extending to its siblings rather than replacing.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 

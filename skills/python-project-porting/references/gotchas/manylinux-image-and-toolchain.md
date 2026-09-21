@@ -619,14 +619,24 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       project's own `docs/licenses/` folder** (gotcha 137's warning generalizes past
       auditwheel-vendored *distro* libraries): pygame's own reference licences cover
       SDL2/SDL2_image/SDL2_mixer/portmidi/freetype/libpng/libjpeg/etc., but building
-      SDL2_ttf pulls in its bundled `external/harfbuzz` (MIT, its own `COPYING`, no
-      riscv64 harfbuzz-devel to link instead) as a *separate* vendored `.so`, and
+      SDL2_ttf pulls in its bundled `external/harfbuzz` (MIT, its own `COPYING`) as a
+      *separate* vendored `.so`, and
       `libtiff-devel`/`libwebp-devel` transitively pull in `liblerc` (Apache-2.0),
       `libzstd`, `jbigkit-libs` (GPL-2.0-or-later) and `brotli` — none of which
       upstream's own docs folder ships a licence text for, because upstream never
       builds this exact dependency graph. Verify the final vendored set with
       `auditwheel show`/`unzip -l` before trusting a project's own bundled licence
       folder is complete for *your* build.
+    - **Rocky 10 riscv64 *does* ship `harfbuzz-devel` (appstream, 8.4.0) and
+      `wavpack-devel` (crb) — verified in the image, correcting an earlier claim here that
+      no riscv64 `harfbuzz-devel` exists.** Using SDL_ttf's vendored harfbuzz is still the
+      better choice, but for a licence reason rather than an availability one: the
+      distro's `libharfbuzz.so.0` links `libglib-2.0`, `libgraphite2` and `libpcre2-8`, so
+      `-DSDL2TTF_HARFBUZZ=1 -DSDL2TTF_VENDORED=0` hands auditwheel two more copyleft
+      libraries to vendor and the `gpl_sources` job two more source archives to carry.
+      `dnf --enablerepo=crb list --available <pkg>` inside the image settles any such
+      "does riscv64 have it?" question in about a minute; do that rather than trust a
+      note (this one, or gotcha 51's EPEL rule, which only covers EPEL-only packages).
 
 289. **A CMake `ExternalProject_Add` patch step can shell out to `wget`, which the
     manylinux image doesn't ship (only `curl`) — and a parallel `make -j` build hides
