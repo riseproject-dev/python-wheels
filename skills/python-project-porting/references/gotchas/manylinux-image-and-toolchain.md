@@ -106,6 +106,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
   suppress any of them — OpenBLAS's own `linktest.c` is the one you will hit first.
 - **526** — An asymmetry between two upstream invocations of the same command is load-bearing
   until proven otherwise — normalising it is a self-inflicted bug.
+- **548** — `-Wcast-align` under `-Werror` is a riscv64-only wall for wire-protocol casts;
+  GCC emits it only on strict-alignment targets.
 ---
 
 26. **The riscv64 runners ship GCC 13; some packages need GCC 14 or later.** The compiler
@@ -1681,3 +1683,28 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       header rather than reading one fixed path is exposed to the same ordering trap whenever
       a distro package and a from-source build of the same library coexist in one include
       directory.
+
+548. **`-Wcast-align` under `-Werror` is a latent riscv64-only wall for any C++ project that
+     decodes a wire protocol out of a byte buffer: GCC emits it only on strict-alignment
+     targets, so upstream's own x86_64 and aarch64 CI never sees it (the couchbase case).**
+     couchbase-cxx-client's warning set (`cmake/CompilerWarnings.cmake`, the cppbestpractices
+     list) enables `-Wall -Wextra … -Wcast-align` plus `-Werror`, and
+     `core/io/mcbp_session.cxx` casts a `std::array<std::byte, 24>::const_pointer` to a
+     memcached header layout inside an fmt formatter. That is silent on x86_64 and on aarch64 —
+     GCC only warns where the target is strict-alignment — and a hard error on riscv64:
+     `error: cast from 'const std::byte*' to 'const mcbp_header_layout*' increases required
+     alignment of target type [-Werror=cast-align]`. It cost a full 38-minute build leg to
+     discover, after an unrelated `#error` gate had already cost one.
+     - **Fix in the project's own idiom.** That same file already demotes four warnings asio
+       trips (`-Wno-error=null-dereference`, `-Wno-error=array-bounds`, …), so adding
+       `-Wno-error=cast-align` beside `-Werror` matches the surrounding style and keeps every
+       other warning fatal — better than `-DWARNINGS_AS_ERRORS=OFF`, which the project also
+       offers but which would switch off diagnostics that do hold on riscv64.
+     - **`CXXFLAGS`/`CMAKE_CXX_FLAGS` cannot fix it.** Those land *before* the target's
+       `COMPILE_OPTIONS`, so the project's later `-Werror` re-arms every warning; and a project
+       whose `setup.py` rebuilds `CMAKE_COMMON_VARIABLES` from scratch (couchbase's
+       `pycbc_build_setup.py` does) gives no way to inject a `-D` either. The patch has to reach
+       the CMake file.
+     - **Predicting the next one is cheap**: `-Wcast-align` is the only alignment-sensitive
+       entry in that warning list, so demoting it closes the class — every other warning there
+       is architecture-independent and already passes on the arches upstream builds.

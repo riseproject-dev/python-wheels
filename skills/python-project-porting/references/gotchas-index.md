@@ -421,6 +421,11 @@ The porting gotchas (520 of them) live in [`references/gotchas/`](gotchas/), spl
   generated wrapper lives only in upstream's `make dist` tarball: mirror upstream's own
   tarball job (SWIG from source, `autogen.sh && configure && make dist` on both the library and
   the bindings repo) on x86 and hand the pair to the riscv job (the quantlib case).
+- **546** — A project can ship its C++ dependency-manager (CPM) cache inside the sdist, so the
+  from-sdist build is hermetic where a from-checkout build is not: run the project's own
+  cache-populating step on `ubuntu-latest` and hand the tarball to the riscv job, and patch the
+  extracted sdist rather than the checkout when a target sits inside a submodule
+  (the couchbase case).
 
 ### cibuildwheel mechanics, the matrix & abi3 — [`gotchas/cibuildwheel-matrix-and-abi3.md`](gotchas/cibuildwheel-matrix-and-abi3.md)
 
@@ -812,6 +817,10 @@ The porting gotchas (520 of them) live in [`references/gotchas/`](gotchas/), spl
   `libjpeg-turbo-devel`) can leave a stale multilib `jconfig-64.h` that CMake's `FindJPEG` glob
   reads before a from-source libjpeg-turbo's own `jconfig.h`, silently reporting the distro's
   older `JPEG_LIB_VERSION` (the rawpy case); `rm -f jconfig-{32,64}.h` after the custom install.
+- **548** — `-Wcast-align` under `-Werror` is a latent riscv64-only wall for any C++ project
+  that decodes a wire protocol out of a byte buffer, because GCC emits it only on
+  strict-alignment targets and upstream's x86_64/aarch64 CI never sees it; `CXXFLAGS` cannot
+  undo it, so demote it in the project's own warning CMake (the couchbase case).
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
@@ -848,6 +857,11 @@ The porting gotchas (520 of them) live in [`references/gotchas/`](gotchas/), spl
 - **486** — Legacy TBB 2020.x (the hand-written makefile build, not oneTBB's CMake one) needs no
   riscv64 patch — `uname -m` fallback, `findstring 64` export prefix, generic GCC atomics — so
   do not switch a project to `--onetbb` on suspicion (the usd-core case).
+- **547** — A vendored BoringSSL produced by `generate_build_files.py` needs no
+  `OPENSSL_NO_ASM` on an architecture its CMake does not list: every generated `.S` is
+  self-guarded on `OPENSSL_X86_64`/`OPENSSL_AARCH64` and `crypto/` picks its portable C off the
+  same macros — check `target.h` for `OPENSSL_RISCV64`, then assert the backend from the built
+  wheel (the couchbase case).
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 

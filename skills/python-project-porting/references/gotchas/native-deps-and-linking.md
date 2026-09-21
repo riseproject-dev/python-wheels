@@ -39,6 +39,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
 - **486** — Legacy TBB 2020.x (the hand-written makefile build, not oneTBB's CMake one) needs
   no riscv64 patch, so don't switch a project to `--onetbb` on suspicion — settle it with one
   QEMU `make` (the usd-core/OpenUSD case).
+- **547** — A vendored BoringSSL's generated assembly is self-guarded, so an architecture it
+  does not list needs no `OPENSSL_NO_ASM`.
 ---
 
 16. **All-static BUNDLED build + a dep the project can't bundle = link failure.**
@@ -702,3 +704,21 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
       `--onetbb` "to be safe" would have been an unexplainable divergence in a file meant to be
       handed to upstream, and it changes the library the wheel vendors (`libtbb.so.2` vs
       oneTBB's) for no gain.
+
+547. **A vendored BoringSSL produced by `generate_build_files.py` needs no `OPENSSL_NO_ASM` on
+     an architecture it does not list — the generated assembly is self-guarded, and the C
+     fallbacks are selected by the same macros (the couchbase case).** The generated
+     `CMakeLists.txt` puts *every* platform's assembly in one `CRYPTO_SOURCES_ASM` list
+     (`linux-x86_64/`, `linux-aarch64/`, `apple-*`, `win-*`) and appends the whole list whenever
+     `OPENSSL_ASM` is on, which reads like a hard x86/ARM dependency. It is not: each generated
+     `.S` opens with `#if !defined(OPENSSL_NO_ASM) && defined(OPENSSL_X86_64) && defined(__ELF__)`
+     (or the `OPENSSL_AARCH64` equivalent), so on riscv64 they preprocess to empty objects, and
+     `crypto/` picks its portable C paths off the same `OPENSSL_<ARCH>` macros. Forcing
+     `OPENSSL_NO_ASM` would be a needless divergence.
+     - **The one-line check is `src/include/openssl/target.h`**: a revision that maps
+       `defined(__riscv) && __SIZEOF_POINTER__ == 8` to `OPENSSL_RISCV64` knows the architecture
+       at all. Absent that macro, nothing selects a fallback and the port is a real question.
+     - **Confirm from the built wheel, not the configure log.** couchbase's C++ core exposes its
+       TLS backend through `couchbase.get_metadata()['openssl_runtime']`; asserting `BoringSSL`
+       there in the test command proves the static library is genuinely linked in rather than
+       the build having quietly fallen back to the image's OpenSSL.

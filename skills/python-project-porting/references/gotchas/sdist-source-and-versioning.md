@@ -38,6 +38,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
   build "successfully" — into a `py3-none-any` wheel with no extension in it.
 - **521** — A SWIG binding can publish wheels and no sdist because its build input is
   upstream's `make dist` tarball *pair*, not its git tree.
+- **546** — A project can ship its C++ dependency-manager cache inside the sdist, making the
+  from-sdist build hermetic where a from-checkout build is not.
 
 ---
 
@@ -684,3 +686,31 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
        naming the file `<Name>-${VERSION}.tar.gz` explicitly makes the job fail loudly if
        `configure.ac`'s version ever disagrees with `docs/packages/<pkg>.yaml`, which is the
        one thing `update_doc.py` cannot recover from later.
+
+546. **A project can ship its C++ dependency-manager *cache* inside the sdist, which makes the
+     from-sdist build hermetic where a from-checkout build is not — so populate the cache on
+     `ubuntu-latest` with the project's own step and hand the tarball to the riscv job (the
+     couchbase case).** couchbase-python-client's git tree carries `deps/couchbase-cxx-client`
+     as a submodule but *not* its CPM (CMake Package Manager) cache, so a build-from-checkout
+     would have every riscv64 job download asio, BoringSSL, snappy, spdlog, taocpp/json,
+     llhttp, GSL, hdr_histogram and a Mozilla CA bundle from inside the container. The project's
+     own documented step — `PYCBC_SET_CPM_CACHE=ON PYCBC_USE_OPENSSL=OFF python setup.py
+     configure_ext` — runs a cmake configure whose only job is to fill
+     `deps/couchbase-cxx-cache`, and `MANIFEST.in` then globs exactly the files the build needs
+     out of it (660 MB of checkouts becomes 34 MB in the sdist). One `ubuntu-latest` job
+     (gotcha 4) therefore buys every riscv64 leg a tree that needs no network, no submodules
+     and no git.
+     - **The tell is a cache-populating target in the build docs**, not in `setup.py`'s default
+       path: `BUILDING.md`'s "Set CPM Cache" section, a `*_SET_CPM_CACHE`/`FETCHCONTENT_BASE_DIR`
+       env var, or `MANIFEST.in` lines that reach into a directory the checkout does not have.
+       Grep `MANIFEST.in` for a path that `git ls-files` does not know about.
+     - **Rebuilding the sdist is the correctness check.** Ours came out within 620 bytes of the
+       released one (the only difference being the generated `_version.py` header), which proves
+       the recipe is upstream's and not an invention.
+     - **Patch the extracted sdist, not the checkout, when a patch target is inside a
+       submodule.** `git apply` refuses a path under a gitlink (`error: Path '<sub>/...' is in
+       submodule`), and a second patch may target the cache, which only exists post-configure.
+       Extracting the sdist in the riscv job gives one plain directory holding both, so a single
+       `git apply --directory=<dir> patches/<pkg>/<ver>/00*.patch` covers them — and `git apply`
+       works outside a repository, which the workspace root is once `actions/checkout` has gone
+       into a subdirectory.
