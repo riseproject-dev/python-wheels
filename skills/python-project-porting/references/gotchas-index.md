@@ -228,6 +228,14 @@ The porting gotchas (438 of them) live in [`references/gotchas/`](gotchas/), spl
   inside the accelerator: the registered `LLVMInitialize*Target` set, the device-side proto
   paths and the Bazel `k8-fastbuild` builder path tell host support apart from a device target
   (the libtpu case).
+- **467** — Gotcha 341's foreign-ecosystem code generator, one step harder: a generator that
+  runs at *runtime* over arbitrary user input has no "pre-generate the output on x86_64 and
+  vendor it as a patch" escape hatch, so it is `blocked-on-dependency` however portable the
+  rest of the C++ is; also, an exact compiler-version pin (`ocaml {= "4.14.1"}`) stops the
+  distro's own newer package from short-circuiting the bootstrap, and a `.so`-presence check
+  can pass on a vendored library while no extension module is shipped at all; also, a
+  `--platform linux/riscv64` container on an x86_64 host runs an x86_64 bundled binary
+  *natively*, so it cannot demonstrate an arch mismatch (the httpstan/stanc3 case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

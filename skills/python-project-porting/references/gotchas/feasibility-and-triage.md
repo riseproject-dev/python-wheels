@@ -138,6 +138,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   LLVM RISC-V backend while shipping x86_64-only wheels, because the ISA runs on cores inside
   the accelerator; registered LLVM targets and device-side proto paths tell the two apart (the
   libtpu case).
+- **467** — Gotcha 341's foreign-ecosystem code generator, one step harder: when the generator
+  runs at *runtime* over arbitrary user input rather than at build time over fixed input, the
+  "pre-generate the output on x86_64 and vendor it as a patch" escape hatch cannot exist at
+  all (the httpstan/stanc3 case).
 
 ---
 
@@ -3077,3 +3081,90 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       Google Cloud Platform", i.e. cloud.google.com/terms, whose §3.3 bars copying, derivative
       works and distribution of the Services. No source, no non-x86_64 vendor build, and no
       right to republish the bytes even if one appeared — three independent parks.
+
+467. **Gotcha 341's foreign-ecosystem code generator, one step harder: a generator that runs at
+    *runtime* over arbitrary user input has no "pre-generate it on x86_64 and vendor the output"
+    escape hatch (the httpstan/stanc3 case).** httpstan 4.17.0 is the Stan REST server PyStan
+    3.x drives, and it hits the same `stan-dev/stanc3` wall gotcha 341 found through
+    prophet/CmdStan — but the shape of the wall differs in the one way that matters. prophet
+    transpiles *one fixed* `prophet.stan` at wheel-build time, so 341 could at least name a
+    hypothetical bypass (run `stanc` on x86_64 once, carry the generated `.hpp` as a patch,
+    leave riscv64 compiling only portable C++). httpstan's entire product is
+    `POST /v1/models` with a caller-supplied Stan program: `httpstan/compile.py` shells out to
+    the bundled binary per request — `subprocess.run([stanc_binary, "--name", …,
+    "--print-cpp", filepath], timeout=1)` — and that is the only path to C++ in the package
+    (no endpoint, flag or env var accepts pre-generated code; `httpstan/models.py` then feeds
+    the result to `setuptools.Extension` and links it against the shipped `stan_services.o`).
+    The transpiler therefore has to be a *native executable inside the wheel*, and no amount
+    of ahead-of-time generation substitutes for it. So: **when a package embeds a code
+    generator from another language ecosystem, classify it by when it runs before costing the
+    port** — build time with a fixed input set is a maybe (pre-generation is expressible as a
+    patch); runtime over arbitrary input is `blocked-on-dependency` with no patch-shaped fix,
+    however portable the rest of the C++ is. Four supporting reads, each cheap:
+    - **Probe the generator's release assets by URL, not just its docs, and probe the moving
+      tag too.** `curl -sS -o /dev/null -w '%{http_code}' -L -r 0-0
+      https://github.com/stan-dev/stanc3/releases/download/<tag>/linux-riscv64-stanc` returns
+      404 for `v2.39.0` (httpstan's pinned `STANC_VERSION`), `v2.40.0`, `v2.41.0` and
+      `nightly`, while `linux-stanc`, `linux-arm64-stanc`, `linux-armhf-stanc`,
+      `linux-ppc64el-stanc`, `linux-s390x-stanc` and `mac-stanc` all answer 206 — a one-command
+      check that works even when the GitHub API is unreachable for that org.
+    - **Read the generator's own CI matrix: it names the upstream ask and the right repo to
+      file it against.** stanc3's `Jenkinsfile` has a literal
+      `values 'arm64', 'ppc64el', 's390x', 'armhf', 'armel'` axis fed to a
+      `qemuArchFlag()` → `--platform=linux/<arch>` Docker build over
+      `scripts/docker/static-builder/Dockerfile`. riscv64 is a missing *matrix entry* in a
+      mechanism that already exists, so the actionable request is on `stan-dev/stanc3`, not on
+      the package being ported — worth recording in the queue note, because it is a far
+      cheaper ask than it looks from the consumer side.
+    - **"The image packages the language" is not "the image packages the pinned toolchain."**
+      `quay.io/pypa/manylinux_2_39_riscv64` (Rocky Linux 10.2) does have `ocaml 5.2.0-4.el10`
+      and `ocaml-dune 3.16.0-4.el10` in **crb**, which looks like clearance — but stanc3
+      2.39.0's `stanc.opam` pins `ocaml {= "4.14.1"}` and `scripts/install_build_deps.sh` pins
+      `core.v0.16.0 menhir.20230608 ppx_deriving.5.2.1 fmt.0.11.0 yojson.2.1.0 cmdliner.2.1.0`,
+      and `dnf list --available` finds **no** `opam`, `ocaml-menhir*`, `ocaml-core*`,
+      `ocaml-ppx*`, `ocaml-yojson*`, `ocaml-fmt*` or `ocaml-cmdliner*` for riscv64, and no
+      EPEL 10 riscv64 to reach for. Upstream's own recipe is
+      `apk add opam && opam switch create 4.14.1 && bash install_build_deps.sh`, i.e. compile
+      the pinned compiler and ~40 opam packages (the Jane Street `core` ppx graph) from source
+      — a second, never-exercised-on-riscv64 toolchain bootstrap for *another project's*
+      release artifact, which we would then ship as our own binary. That is 341's "novel
+      cross-ecosystem bootstrap", and the exact-version pin is what stops the distro packages
+      from short-circuiting it. (OCaml itself is fine: 4.14.1's `configure.ac` maps
+      `riscv64-*-linux*` to `arch=riscv; model=riscv64` with `natdynlink=true`, and
+      `asmcomp/riscv/` exists — the language is not the blocker, the pinned dependency graph's
+      zero riscv64 history is.)
+    - **Confirm the rest of the build really is portable, so the report names one wall and not
+      a vague "big C++ port".** Everything in httpstan except `stanc` checks out on riscv64:
+      Stan Math 5.3.0's `make/compiler_flags` branches only on `__aarch64__` and Windows (no
+      `-march`/`-msse`/`-mavx` anywhere), its vendored classic TBB 2020.3 takes the portable
+      `machine/gcc_generic.h` atomics path at `tbb_machine.h`'s `__linux__` branch *before* any
+      architecture `#elif` (341's point) and its `build/linux.inc` falls through to
+      `arch := $(uname_m)` with `def_prefix = lin64` via `findstring 64`, and `libtbb.so.2`
+      plus the sundials 6.1.1 static libs build clean under
+      `docker run --platform linux/riscv64 quay.io/pypa/manylinux_2_39_riscv64` with GCC
+      14.3.1. The wheel's compiled payload is not even an extension module: poetry's `build.py`
+      adds `Extension("httpstan.empty", …)` purely to force a platform tag (gotcha 383's fake
+      `Extension`, and `httpstan/empty.*.so` is not in poetry's `include` list, so it is absent
+      from the shipped wheel) — the real content is a 44 MB `httpstan/stan_services.o`, four
+      `libsundials_*.a`, a vendored `libtbb.so`, ~13 900 headers and the `stanc` executable
+      (`e_machine` 62 = `EM_X86_64` in the published wheels). **A `.so`-presence check passes
+      here for the wrong reason** — the only `.so` is the vendored TBB — so don't let it stand
+      in for "the compiled part builds".
+    - **Do not try to *demonstrate* the mismatch inside an emulated container — that test
+      gives a false green.** Extracting the published wheel's `stanc` and running it in
+      `docker run --platform linux/riscv64 quay.io/pypa/manylinux_2_39_riscv64` prints
+      `stanc3 v2.39.0 (Unix)` and `exit=0`, even though `uname -m` says `riscv64` and
+      `readelf -h /bin/bash` says `Machine: RISC-V` in the same shell. The container really is
+      riscv64; the *host* kernel is x86_64, and `binfmt_misc` only redirects **foreign** ELFs
+      to `qemu-riscv64` — an x86_64 ELF is simply executed natively, so this is the one setup
+      where an x86_64-only bundled binary silently works. Prove the mismatch from the bytes
+      (`readelf -h` → `Machine: Advanced Micro Devices X86-64`, or `e_machine` 62 = `EM_X86_64`
+      read straight out of the wheel member) and treat any local QEMU rehearsal of a wheel that
+      *executes a bundled binary* as unable to catch that class of failure at all; it only
+      shows up on a real riscv64 runner as `Exec format error`.
+    - **Needing a host C++ compiler at *install-and-use* time is not a riscv64 gap.**
+      httpstan compiles every model on the user's machine via `setuptools.Extension`, so a
+      toolchain must exist at runtime — but that is equally true of upstream's own x86_64 and
+      macOS wheels, so it is a property of the package, not something a riscv64 port has to
+      solve. Separate "this package needs a compiler at runtime" from "this package needs a
+      *binary we cannot produce* at runtime"; only the second blocks.
