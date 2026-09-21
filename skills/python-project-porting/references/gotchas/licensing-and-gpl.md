@@ -31,6 +31,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
   musllinux policy does not allowlist the GCC runtime.
 - **491** — Collecting the licences of auditwheel-grafted system libraries from RPMs has
   three failure modes
+- **533** — A GitLab `-/archive/` tarball is not byte-stable, so gotcha 162's pinned-SHA-256
+  source collection flakes at random — retry, don't relax the check.
 
 ---
 
@@ -657,3 +659,23 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
       repaired wheel just to `patchelf --add-rpath '$ORIGIN' <pkg>.libs/*`; auditwheel 6.x sets
       it itself, which is why the released wheels read `RUNPATH [$ORIGIN:$ORIGIN]`. Skipping
       that re-zip keeps a valid `RECORD` instead.
+
+533. **A GitLab `-/archive/` tarball is not byte-stable, so gotcha 162's pinned-SHA-256
+    source collection flakes on a schedule nobody controls (the decord2/pyav-ffmpeg case).**
+    Two of pyav-ffmpeg's seventeen pinned dependencies — dav1d and x264 — come from
+    `code.videolan.org/videolan/<p>/-/archive/<ref>/<p>-<ref>.tar.bz2`, which GitLab
+    *generates on request*. When the cached artifact has expired the bytes differ from the
+    copy the pin was taken against, and the collector dies on the first offender:
+    `dav1d: sha256 mismatch … expected e099f532… got de41d4a3…`. It is the server, not the
+    transfer: three attempts produced three different digests (`cc5358fd…`, `de41d4a3…`,
+    `c7d5a813…`) before one matched the pin, and an immediately repeated `curl` of the same
+    URL then returned the pinned bytes twice in a row.
+    - **Retry on the mismatch; never relax the check.** Re-download up to five times with a
+      short sleep and fail only if every attempt disagrees — one retry sufficed every time it
+      was seen, locally and in CI. `curl --retry` does not help: the bad response is an
+      ordinary HTTP 200.
+    - **It reproduces off CI in seconds on any host** — `curl` the archive URL twice and
+      compare `sha256sum`. Do not spend a CI cycle confirming it, and do not read the first
+      mismatch as a tampered or truncated download.
+    - **Every workflow that copies gotcha 162's collector inherits this**, so a green run of
+      the port you copied from is no evidence that the fetch is stable.

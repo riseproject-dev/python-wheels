@@ -1064,6 +1064,9 @@ The porting gotchas (517 of them) live in [`references/gotchas/`](gotchas/), spl
   three failure modes — a runtime subpackage with no `%license` file, a text that lives in a
   different subpackage of the same source RPM, and a licence directory holding the wrong text
   for the bundled `.so` — and the same SBOM sizes the `gpl_sources` job (the eckitlib case).
+- **533** — A GitLab `-/archive/` tarball is not byte-stable, so gotcha 162's pinned-SHA-256
+  source collection flakes at random (dav1d/x264 returned three different digests before one
+  matched); retry the download rather than relaxing the check (the decord2/pyav-ffmpeg case).
 
 ### Local validation & the aarch64/QEMU rehearsal — [`gotchas/local-validation-and-rehearsal.md`](gotchas/local-validation-and-rehearsal.md)
 
