@@ -73,7 +73,19 @@ jobs:
       - name: Patch stpyv8 source
         run: git apply python-wheels/patches/stpyv8/${{ env.STPYV8_VERSION }}/*.patch
 
+      - name: Restore v8
+        id: v8-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            v8/include
+            v8/out.gn/x64.release.sample/obj/libv8_monolith.a
+            v8/out.gn/x64.release.sample/icudtl.dat
+          # Upstream keys this on hashFiles('v8/src/**'); that tree only exists once the build has run, so key on what pins it instead -- the version and the patches.
+          key: stpyv8-v8-${{ env.STPYV8_VERSION }}-riscv64-${{ hashFiles('python-wheels/patches/stpyv8/**') }}
+
       - name: Provide a riscv64-linux-gnu- prefixed toolchain
+        if: steps.v8-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p "${RUNNER_TEMP}/riscv64-toolchain/bin"
           for tool in gcc g++ ar as ld nm objcopy objdump ranlib readelf strip; do
@@ -83,6 +95,7 @@ jobs:
           echo "${RUNNER_TEMP}/riscv64-toolchain/bin" >> "${GITHUB_PATH}"
 
       - name: Clone depot_tools
+        if: steps.v8-cache.outputs.cache-hit != 'true'
         # setup.py bootstraps depot_tools' hermetic python only for a checkout that already exists, and `fetch` refuses to run without it.
         run: |
           git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git depot_tools
@@ -90,6 +103,7 @@ jobs:
           "${PWD}/depot_tools/gclient" --version
 
       - name: Build v8
+        if: steps.v8-cache.outputs.cache-hit != 'true'
         run: |
           /opt/python/cp312-cp312/bin/pip install setuptools wheel
           /opt/python/cp312-cp312/bin/python setup.py v8
@@ -130,6 +144,15 @@ jobs:
           repository: cloudflare/stpyv8
           ref: v${{ env.STPYV8_VERSION }}
           persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch stpyv8 source
+        run: git apply python-wheels/patches/stpyv8/${{ env.STPYV8_VERSION }}/*.patch
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
