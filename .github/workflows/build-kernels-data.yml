@@ -1,0 +1,143 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/huggingface/kernels/blob/v0.16.1/.github/workflows/kernels_data_python_release.yaml
+# and the test steps of its test_python.yaml.
+name: Build kernels-data wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/kernels-data.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-kernels-data.yml'
+      - 'docs/packages/kernels-data.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-kernels-data.yml'
+      - 'docs/packages/kernels-data.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: kernels-data
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build kernels-data ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # `tag` is a real matrix dimension, not an include-only key: two includes
+        # that add the same new key collapse into one job (gotcha 402).
+        tag: [cp38-abi3, cp314t]
+        include:
+          # kernels-data/bindings/python/Cargo.toml declares pyo3 with the
+          # abi3/abi3-py38 features unconditionally, so one abi3 wheel serves
+          # every GIL-ful interpreter; pyo3 disables abi3 under Py_GIL_DISABLED,
+          # giving the free-threaded build its own wheel, which is why upstream
+          # runs a second `-i python3.14t` maturin step.
+          - tag: cp38-abi3
+            # 3.8 only names the tag's floor and is absent from the manylinux
+            # image, so the wheel is built on this repo's cp312 floor and
+            # re-tested on the newer interpreters.
+            build: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+
+    env:
+      KERNELS_DATA_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout kernels v${{ env.KERNELS_DATA_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: huggingface/kernels
+          ref: v${{ env.KERNELS_DATA_VERSION }}
+          persist-credentials: false
+
+      - name: Stage the licence beside kernels-data's pyproject.toml
+        # maturin globs LICEN[CS]E* relative to the pyproject directory, which
+        # is kernels-data/bindings/python/ in this workspace, and ignores the
+        # `include ../../../LICENSE` in the MANIFEST.in next to it -- so
+        # upstream's own wheels carry no licence file at all.
+        run: cp LICENSE kernels-data/bindings/python/
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: kernels-data/bindings/python
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # kernels-data ships no [tool.cibuildwheel], so the Rust toolchain
+          # its maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          # mypy, which upstream's stubtest check needs, publishes no riscv64
+          # wheel on public PyPI; ours does.
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest mypy
+          CIBW_TEST_SOURCES: >-
+            kernels-data/bindings/python/tests
+            kernels-data/bindings/python/stubtest-allowlist.txt
+          # maturin synthesises kernels_data/__init__.py as a re-export shim, so
+          # the compiled module is the kernels_data.kernels_data submodule.
+          CIBW_TEST_COMMAND: >-
+            python -c "import kernels_data.kernels_data as m, importlib.metadata as md;
+            assert m.__file__.endswith('.so'), m.__file__;
+            files = md.files('kernels-data');
+            assert any(str(p).endswith('licenses/LICENSE') for p in files), files" &&
+            cd kernels-data/bindings/python &&
+            python -m pytest -v tests &&
+            python -m mypy.stubtest kernels_data --allowlist stubtest-allowlist.txt
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: kernels-data-${{ env.KERNELS_DATA_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish kernels-data ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: kernels-data-${{ matrix.version }}-*-manylinux_riscv64
