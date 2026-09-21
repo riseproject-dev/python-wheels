@@ -42,6 +42,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
   still be ported to riscv64 by routing its x86-only path through SIMDe.
 - **332** — A SIMDe SSE-emulation port can compile clean, pass its own project's
   per-primitive unit tests, and still produce wrong full-pipeline results on riscv64.
+- **543** — A distro `-devel` package pulled in as another package's dependency can leave a
+  stale multilib `jconfig-64.h` that shadows a from-source libjpeg-turbo's own `jconfig.h` in
+  CMake's `FindJPEG` glob.
 - **333** — A vendored C++ library's architecture-fallback stub (unlike gotcha 267's
   dead `#warning` branch) can have a genuinely correct no-op body that still trips
   `-Werror=unused-parameter` on any architecture outside its named x86/ARM/PPC set.
@@ -1650,3 +1653,31 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
     - **The general shape**: a flag that selects *what gets built* often also selects *what
       gets installed*. Before dropping or adding one on an `install` line, grep the project's
       install makefile for that flag and for whatever it implies.
+
+543. **A distro `-devel` package pulled in as another package's dependency can leave a stale
+    multilib `jconfig-64.h` that shadows a from-source libjpeg-turbo's own `jconfig.h` in
+    CMake's `FindJPEG` glob (the rawpy case).** rawpy's setup.py builds LibRaw with CMake,
+    which calls `find_package(JPEG)` to detect libjpeg's `JPEG_LIB_VERSION` and gate the DNG
+    lossy codec on `>= 80`. Rocky/Fedora's libjpeg-turbo splits that macro out of `jpeglib.h`
+    into a separate `jconfig.h` (and, on a multilib-capable RPM, an arch-specific
+    `jconfig-64.h`/`jconfig-32.h` that the *generic* `jconfig.h` is generated from) — so CMake
+    4.4's `FindJPEG.cmake` globs `jconfig*.h` in `JPEG_INCLUDE_DIR` and reads whichever one
+    sorts first. Installing `jasper-devel` (needed for the RedCine codec) pulls in the distro's
+    own `libjpeg-turbo-devel` as a hard dependency, which drops a `jconfig-64.h` reporting the
+    distro's plain `JPEG_LIB_VERSION 62`; building libjpeg-turbo from source afterwards with
+    `-DWITH_JPEG8=ON` (to get the `>= 80` ABI upstream's own wheels use) only replaces
+    `jconfig.h`, not `jconfig-64.h`. ASCII sorts `-` (0x2D) before `.` (0x2E), so
+    `jconfig-64.h` glob-matches first and the loop `break`s there — `JPEG_VERSION` resolves to
+    the stale `62` even though `/usr/include/jconfig.h` correctly says `80`, and the feature
+    silently downgrades with no error, just a quieter wheel.
+    - **Fix**: `rm -f /usr/include/jconfig-32.h /usr/include/jconfig-64.h` right after
+      installing the custom libjpeg-turbo build, before the project's own CMake configure runs.
+    - **Diagnose it in two commands, no wheel rebuild needed**: `rpm -qf
+      /usr/include/jconfig-64.h` names the distro package that dropped it, and a throwaway
+      `find_package(JPEG)` in a scratch `CMakeLists.txt` (or reading the real build's
+      `CMakeCache.txt` for `JPEG_INCLUDE_DIR`/`JPEG_LIBRARY_RELEASE`, then re-deriving
+      `JPEG_VERSION` by hand from each `jconfig*.h` in that directory) shows which file won.
+    - **Generalizes past libjpeg**: any project whose CMake version probe globs a config
+      header rather than reading one fixed path is exposed to the same ordering trap whenever
+      a distro package and a from-source build of the same library coexist in one include
+      directory.

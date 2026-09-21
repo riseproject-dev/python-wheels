@@ -808,6 +808,10 @@ The porting gotchas (520 of them) live in [`references/gotchas/`](gotchas/), spl
 - **526** — An asymmetry between two upstream invocations of the same command is load-bearing
   until proven otherwise: vosk's `ONLY_CBLAS=1` on `all` but not `install` is what installs
   `lapacke.h`, and normalising the two lines broke Kaldi eleven minutes in (the vosk case).
+- **543** — A distro `-devel` package pulled in as a dependency (e.g. `jasper-devel` needing
+  `libjpeg-turbo-devel`) can leave a stale multilib `jconfig-64.h` that CMake's `FindJPEG` glob
+  reads before a from-source libjpeg-turbo's own `jconfig.h`, silently reporting the distro's
+  older `JPEG_LIB_VERSION` (the rawpy case); `rm -f jconfig-{32,64}.h` after the custom install.
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
