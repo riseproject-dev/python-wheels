@@ -234,6 +234,11 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   released wheel carries catalogs a from-sdist install silently drops — and a wandering
   interpreter/glibc tag across the release history proves the tag follows the publishing
   runner (the reuse case).
+- **534** — A vendor artifact bucket can answer `403 AccessDenied`, not `404`, for a key that
+  was never published, so the riscv64 probe needs a bogus control name — and the spelling to
+  probe with is in the payload's own `RPATH`/builder path; plus a FLEXlm gate as a second
+  closed vendor, a licence that lives only behind a URL, and the vendor's retired packaging
+  repo naming the download-and-repack method (the mosek case).
 
 ---
 
@@ -4343,3 +4348,66 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       (`ci_scripts/check_riscv64_deps.py`; `markupsafe` from our own registry, the rest
       `py3-none-any`), and in a real riscv64 manylinux container the sdist installs in 66 s
       under QEMU with `reuse --version` and `reuse lint` both working. `parked`.
+
+534. **A vendor's artifact bucket can answer `403 AccessDenied` — not `404` — for a key that
+    was never published, so a riscv64 probe needs a deliberately bogus control name; and the
+    spelling to probe with is sitting in the shipped payload's own `RPATH` (the mosek case).**
+    mosek 11.2.3 is gotcha 453's gurobipy shape once more — `Project-URL: HOME,
+    https://mosek.com` as the only link (gotcha 372's marketing-page tell), **2052 files
+    across 183 releases and not one sdist ever** (gotcha 431, so the wheel is the whole
+    evidence base), `mosek/__init__.py` doing `from . import _msk` at line 7 against an
+    extension whose `readelf -d` says `NEEDED libmosek64.so.11.2` (hard link, not `dlopen`),
+    and a per-arch closed math kernel: 29.9 MB vs 16.9 MB for the same `libmosek64.so.11.2`,
+    `.text` 24.0 vs 12.3 MB, **1432 MKL symbols in the x86_64 symtab against 1 on aarch64**
+    (`mkl_blas_avx2_dgemm_copyan`, `Intel oneMKL FATAL ERROR: Cannot load %s`), and **zero
+    `riscv`/`rv64` strings in either** (0 hits in 293k/71k). Note which way round that runs:
+    here the *aarch64* engine is the MKL-free one, so the vendor demonstrably maintains a
+    non-MKL build — and it still is not a port we can do, because there is no source at any
+    layer. A missing MKL on one arch is not evidence that a generic build exists for ours.
+    Five things are new and reusable:
+    - **Calibrate the artifact-index probe with a name you know is absent.** Gotcha 453 read
+      `206` vs `404` off `packages.gurobi.com`. `download.mosek.com` is an S3 bucket without
+      `ListBucket`, so a missing key is `403 <Error><Code>AccessDenied</Code>`, exactly like a
+      key you are not allowed to read: `mosektools{linux64x86,linuxaarch64,osxaarch64}.tar.bz2`
+      and `mosektoolswin64x86.zip` answer `206` to `curl -r 0-1`, while every riscv64 spelling,
+      `definitely-not-a-real-file.tar.bz2`, **and** the discontinued `mosektoolsosx64x86.tar.bz2`
+      all answer `403`. Treat a non-2xx as "absent" only once the bogus control returns the
+      same code — and a platform the vendor *dropped* (Intel macOS, corroborated by PyPI
+      shipping only `macosx_11_0_arm64`) is a free second positive control proving the bucket
+      really does forget platforms. This is gotcha 42's count-don't-trust-the-status one layer
+      down, at the object store.
+    - **The builder path hands you the vendor's own platform identifier.** `readelf -d` on
+      `mosek/_msk.cpython-312-x86_64-linux-gnu.so` leaks `RPATH /var/jenkins/workspace/11.2/bin:$ORIGIN`,
+      and `strings -a` on the engine gives the full pipeline path —
+      `/var/jenkins/workspace/11.2/Distro-pipeline/linux64x86/bld/docker-rockylinux-8/final/default/bldflexlm/x64_linux`
+      and its twin `…/Distro-pipeline/linuxaarch64/bld/docker-rockylinux-aarch64-8/…/arm64_linux`.
+      That is gotcha 431's builder-path provenance used *forward*: it names `linux64x86` /
+      `linuxaarch64`, which is precisely the spelling `download.mosek.com/stable/<ver>/mosektools<platform>.tar.bz2`
+      uses, so the riscv64 probe is built from the vendor's own naming instead of guesswork.
+    - **The licence gate can be a second closed vendor underneath the first.** `bldflexlm` in
+      that path, plus `lmgrd`, `*** A FLEXlm error occurred`, `.flexlmrc` and `Error in
+      communication with the FlexNet Licensing Service` in the strings, say the enforcement is
+      Revenera FlexNet Publisher — itself proprietary, with its own platform list. A riscv64
+      build would need *two* vendors to port, not one; grep a licence-gated payload for
+      `flexlm`/`flexnet`/`lmgrd` before assuming the gate is the vendor's own code.
+    - **No bundled LICENSE file does not mean no terms — go fetch the PDF.** Unlike hdbcli
+      (gotcha 372) and gurobipy (453), mosek's `dist-info/` holds only `METADATA`, `WHEEL`,
+      `top_level.txt`, `RECORD`, and `License:` is the bare URL
+      `https://mosek.com/products/license-agreement`. The EULA behind it
+      (`docs.mosek.com/license/license.pdf`) closes the same independent second door: §6.1
+      grants "the right to use the delivered downloaded object code copy of THE SOFTWARE only",
+      §6.2 says the licensee "shall be prohibited from sublicensing and otherwise letting third
+      parties use THE SOFTWARE", §10 "shall not be entitled to modify, reverse engineer,
+      disassemble or decompile", and §11 withholds the trademark. §14.6 is the one to quote in
+      a park: the vendor *warrants* that "THE SOFTWARE does not comprise any third party open
+      source software, free software or the like" — closedness asserted contractually, not
+      merely inferred from a wheel.
+    - **A vendor's retired packaging repo can state the method in its own words.** With no
+      sdist to read, `github.com/MOSEK/Mosek.pip` (archived 2020) still opens its `setup.py`
+      with "the 'build' action effectively builds both python source and binary libraries (by
+      downloading and unpacking the binary distribution)" over a `libs = {'win64x86': …}`
+      platform table — gotcha 35/157's fetch-in-the-build-script, found in a sibling repo the
+      vendor abandoned rather than in the distribution itself. Worth a look whenever the org's
+      public repos are all wrappers (MOSEK's 15 are Julia/Rust/Go/JS bindings, tutorials and
+      Dockerfiles; the engine is in none of them) — that listing simultaneously answers "is
+      there a community edition?" in the negative.
