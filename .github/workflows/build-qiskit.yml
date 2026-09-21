@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `wheels-linux-s390x` job of
+# https://github.com/Qiskit/qiskit/blob/2.5.2/.github/workflows/wheels-build.yml
+name: Build qiskit wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/qiskit.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-qiskit.yml'
+      - 'docs/packages/qiskit.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-qiskit.yml'
+      - 'docs/packages/qiskit.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: qiskit
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build qiskit ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      QISKIT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout qiskit ${{ env.QISKIT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Qiskit/qiskit
+          ref: ${{ env.QISKIT_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # setup.py's py_limited_api="cp310" makes cp310 both the wheel's tag and
+          # the interpreter it must be built on; upstream's extra cp311-cp315
+          # entries only re-run the whole stestr suite, hours of it on riscv64.
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: cp310-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Replaces (not merges into) upstream's own [tool.cibuildwheel.linux]
+          # environment table, so its four variables are repeated here alongside
+          # our registry.
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            CARGO_NET_GIT_FETCH_WITH_CLI="true"
+            RUSTUP_TOOLCHAIN="stable"
+            QISKIT_BUILD_WITH_MIMALLOC=1
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Upstream's own repair-wheel-command also runs abi3audit via pipx,
+          # which the riscv64 image doesn't carry; cibuildwheel's own default
+          # audit-command already abi3audits every abi3-tagged wheel natively
+          # after this repair step runs, so drop the pipx layer here.
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: auditwheel repair -w {dest_dir} {wheel}
+
+      - name: Check wheel contains the compiled extension
+        run: |
+          set -eu
+          for whl in wheelhouse/*.whl; do
+            echo "$whl"
+            unzip -l "$whl" | grep '\.so$'
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: qiskit-${{ env.QISKIT_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish qiskit ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: qiskit-${{ matrix.version }}-*-manylinux_riscv64
