@@ -168,6 +168,11 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **481** — A `[tool.poetry.build] script` makes poetry-core stamp a full
   `cpXY-cpXY-<platform>` tag whatever the script does, and compiling gettext catalogs is the
   commonest reason — the release history dates the fabricated tag (the jsonschema2md case).
+- **483** — Gotcha 125's "the dependency builds from sdist, so it is not a blocker" has to be
+  *executed*, and the bar is the end user's `pip install`, not a green CI job: a sibling whose
+  vendored `CMakeLists.txt` is below CMake 4's floor fails from sdist, and the environment
+  variable that rescues it in CI does not travel with the published wheel (the cmeel-urdfdom
+  case).
 
 ---
 
@@ -3579,3 +3584,40 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       `locales/*/LC_MESSAGES/messages.mo`, so the released x86_64 wheel silently has no
       translations where a from-sdist riscv64 install does. Check what the script's output
       actually contributes to the wheel before crediting the tag with meaning.
+483. **Gotcha 125's "a dependency with no riscv64 wheel is only a blocker if it cannot build
+    from its sdist" has to be *executed*, and the bar is `pip install <pkg>` on a clean
+    riscv64 box — not a green CI job (the cmeel-urdfdom case).** Everything about the
+    dependency looked like gotcha 125's preshed/cymem profile and one command disproved it.
+    - **Read the closure per package: a member of a blocked family can be two leaves deep,
+      not eleven.** cmeel-urdfdom 6.0.0 is one of the 11 unported distributions gotcha 470
+      counted under pin, but its own closure is tiny: `[project] dependencies` and
+      `[build-system] requires` both name only `cmeel-console-bridge` and `cmeel-tinyxml2`
+      (plus `cmeel` and `cmeel-urdfdom-headers`, `py3-none-any` off public PyPI), and
+      `readelf -d` on the released aarch64 wheel confirms it — `liburdfdom_{model,world,
+      sensor}.so.6` NEED `libconsole_bridge.so.1.0` and `libtinyxml2.so.11` with
+      `RUNPATH $ORIGIN`, nothing bundled. Triage the member, not the family.
+    - **Both siblings have gotcha 125's exact profile — and one of them still fails.** Each
+      sdist vendors its upstream source (no download) and declares `requires =
+      ["cmeel[build]"]` alone, i.e. seconds of C++ with no external toolchain question. Run
+      it anyway: `pip wheel <sibling>.tar.gz --no-deps` builds cmeel-tinyxml2 11.0.0 clean,
+      and **fails** on cmeel-console-bridge 1.0.2.3 with "Compatibility with CMake < 3.5 has
+      been removed from CMake" — console_bridge 1.0.2's `cmake_minimum_required(VERSION
+      3.0.2)` against the CMake 4 that `cmeel[build]` resolves (`cmake` 4.4.3 has riscv64
+      wheels on public PyPI) and that the manylinux images put first on `PATH` anyway
+      (gotchas 207/257/358). A package can be simultaneously trivial to compile and
+      unbuildable from its published sdist.
+    - **An env-var workaround in `CIBW_ENVIRONMENT` is not a rescue, because it does not ship
+      with the wheel.** `CMAKE_POLICY_VERSION_MINIMUM=3.5` does make the whole chain build —
+      verified end to end on an x86 host, `PIP_NO_BINARY=cmeel-console-bridge,cmeel-tinyxml2
+      pip wheel cmeel_urdfdom-6.0.0.tar.gz --no-deps` produces
+      `cmeel_urdfdom-6.0.0-0-py3-none-manylinux_2_39_x86_64.whl` in about a minute — so CI
+      *could* be made green. The user who then runs `pip install cmeel-urdfdom` on riscv64
+      gets the same configure error, because the missing sibling is still resolved from
+      sdist on their machine. Publishing that wheel would put an entry on the index that the
+      index cannot install (structural goal 1), so the port is sequenced behind the sibling's
+      own port — which is where the fix belongs, the sibling being outside this port's commit
+      scope in any case.
+    - **The one-line test.** For a shared-prefix family, ask "does `pip install <pkg>` succeed
+      on riscv64 with only public PyPI plus our index, no extra environment?", and answer it
+      by actually building each unported dependency's sdist. "Can I get CI green?" is the
+      wrong question and has a more generous answer.

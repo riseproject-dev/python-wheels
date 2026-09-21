@@ -279,6 +279,14 @@ The porting gotchas (472 of them) live in [`references/gotchas/`](gotchas/), spl
   `.po` into `.mo` — so the wheel holds zero `.so`, the tag halves are whatever runner
   published it, and the release history dates the flip to the release that added i18n
   (the jsonschema2md case).
+- **483** — Gotcha 125's "a dependency with no riscv64 wheel is only a blocker if it cannot
+  build from its sdist" must be executed, per package and against the end user's
+  `pip install`: a member of a blocked shared-prefix family can be two leaves deep rather than
+  eleven, and a sibling that looks trivially compilable (vendored source, `cmeel[build]` its
+  only build requirement) can still fail from sdist because its vendored
+  `cmake_minimum_required` is below CMake 4's floor — and the `CMAKE_POLICY_VERSION_MINIMUM`
+  that fixes that in `CIBW_ENVIRONMENT` does not ship with the wheel, so a green CI run would
+  publish an index entry the index cannot install (the cmeel-urdfdom case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
