@@ -1,0 +1,268 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# chalkpy-rs has no public source repository and no public CI: Chalk AI publishes
+# only the PyPI sdist, which carries the whole Cargo workspace, so the sdist is the
+# upstream tree and is fetched here. Everything else mirrors upstream's packaging:
+# setuptools-rust over the root Cargo.toml with the `python` feature, PyO3 without
+# abi3, one wheel per interpreter.
+name: Build chalkpy-rs wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/chalkpy-rs.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-chalkpy-rs.yml'
+      - 'docs/packages/chalkpy-rs.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-chalkpy-rs.yml'
+      - 'docs/packages/chalkpy-rs.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: chalkpy-rs
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build chalkpy-rs ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # No cp314t: upstream ships cp310-cp314 only, all cp3x-cp3x.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      CHALKPY_RS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Fetch chalkpy-rs ${{ env.CHALKPY_RS_VERSION }} sdist
+        run: |
+          url="$(curl -sSfL "https://pypi.org/pypi/chalkpy-rs/${CHALKPY_RS_VERSION}/json" \
+            | python3 -c 'import json,sys; print(next(u["url"] for u in json.load(sys.stdin)["urls"] if u["packagetype"] == "sdist"))')"
+          curl -sSfL -o sdist.tar.gz "$url"
+          # Extracted rather than passed to cibuildwheel as a tarball: for a
+          # tarball package-dir cibuildwheel chdirs into its own extraction temp
+          # dir, and CIBW_TEST_SOURCES resolves against that cwd, so the staged
+          # tests below would be invisible.
+          tar xzf sdist.tar.gz
+          test -f "chalkpy_rs-${CHALKPY_RS_VERSION}/pyproject.toml"
+
+      - name: Stage smoke tests
+        run: |
+          mkdir -p tests
+          cat > tests/test_chalk_rs.py <<'PYTEST'
+          """Smoke tests for the riscv64 chalkpy-rs wheel.
+
+          Upstream ships no Python test suite, so these exercise the compiled PyO3
+          extension end to end: the duration/ISO-8601 helpers, the naming helpers and
+          the ruff-backed Python AST indexer that is the bulk of the extension.
+          """
+
+          import datetime
+          import textwrap
+
+          import pytest
+
+          import chalk_rs
+
+          FEATURES_SOURCE = textwrap.dedent(
+              '''
+              from chalk.features import features, feature
+              from chalk import online
+
+
+              @features
+              class User:
+                  id: str
+                  email: str = feature(description="primary email", owner="team@example.com", tags=["pii"])
+                  age: int
+
+
+              @online
+              def get_age(uid: User.id) -> User.age:
+                  return 42
+              '''
+          ).lstrip()
+
+
+          @pytest.fixture
+          def project(tmp_path):
+              path = tmp_path / "features.py"
+              path.write_text(FEATURES_SOURCE)
+              return str(tmp_path), [str(path)]
+
+
+          def test_extension_module_is_compiled():
+              assert chalk_rs.__file__.endswith(".so"), chalk_rs.__file__
+
+
+          def test_parse_duration():
+              assert chalk_rs.parse_duration_ms("1h") == 3_600_000
+              assert chalk_rs.parse_duration_ms("1h30m") == 5_400_000
+              assert chalk_rs.parse_duration_s("1d") == 86_400
+              with pytest.raises(ValueError):
+                  chalk_rs.parse_duration_s("not a duration")
+
+
+          def test_seconds_to_duration_string():
+              assert chalk_rs.seconds_to_duration_string(3661.0) == "1h1m1s"
+              assert chalk_rs.seconds_to_duration_string(90.0) == "1m30s"
+
+
+          def test_parse_iso_date_time():
+              assert chalk_rs.parse_iso_date("2026-09-21") == datetime.date(2026, 9, 21)
+              assert chalk_rs.parse_iso_time("13:45:06") == datetime.time(13, 45, 6)
+              assert chalk_rs.parse_datetime("2026-09-21T13:45:06") == datetime.datetime(2026, 9, 21, 13, 45, 6)
+              aware = chalk_rs.parse_datetime("2026-09-21T13:45:06+00:00")
+              assert aware.utcoffset() == datetime.timedelta(0)
+              with pytest.raises(ValueError):
+                  chalk_rs.parse_iso_date("not a date")
+
+
+          def test_iso_duration_round_trip():
+              delta = datetime.timedelta(days=1, hours=2, minutes=3, seconds=4)
+              assert chalk_rs.parse_iso_duration("P1DT2H3M4S") == delta
+              assert chalk_rs.duration_isoformat(delta) == "P1DT2H3M4S"
+              with pytest.raises(TypeError):
+                  chalk_rs.duration_isoformat(123)
+
+
+          def test_timezone_from_name():
+              assert chalk_rs.timezone_from_name("UTC") is not None
+              assert chalk_rs.timezone_from_name("Not/AZone") is None
+              assert datetime.datetime(
+                  2026, 9, 21, tzinfo=chalk_rs.timezone_from_name("UTC")
+              ).utcoffset() == datetime.timedelta(0)
+
+
+          def test_naming_helpers():
+              assert chalk_rs.to_snake_case("FooBarBaz") == "foo_bar_baz"
+              assert chalk_rs.to_snake_case("HTTPResponse") == "http_response"
+              assert chalk_rs.build_namespaced_name("user", "email") == "user::email"
+              assert chalk_rs.build_namespaced_name(None, "email") == "email"
+
+
+          def test_file_system_and_parser_cache(project):
+              root, files = project
+              filesystem = chalk_rs.StdAstFileSystem(files)
+              assert filesystem.all_files() == files
+              assert filesystem.read_to_string(files[0]) == FEATURES_SOURCE
+
+              cache = chalk_rs.AstFileParserCache(files, root)
+              path, source, imports = cache.get_parsed_file(files[0])
+              assert path == files[0]
+              assert source == FEATURES_SOURCE
+              assert imports["chalk.features"]["feature"] == ["feature"]
+              assert imports["chalk"]["online"] == ["online"]
+
+
+          def test_feature_class_ast(project):
+              root, files = project
+              index = chalk_rs.AstProjectIndex(files, root)
+              index.nonblocking_start_index()
+
+              feature_class = index.feature_class_ast_in_file(files[0], "User")
+              assert feature_class is not None
+              assert feature_class.class_name == "User"
+              assert feature_class.namespace == "user"
+              assert feature_class.module == "features"
+              assert sorted(feature_class.fields) == ["age", "email", "id"]
+
+              email = feature_class.fields["email"]
+              assert email.field_name == "email"
+              assert sorted(email.kwarg_names) == ["description", "owner", "tags"]
+              line, start, end_line, end = email.field_name_location
+              assert line == end_line
+              assert FEATURES_SOURCE.splitlines()[line][start:end] == "email"
+
+
+          def test_resolver_ast(project):
+              root, files = project
+              index = chalk_rs.AstProjectIndex(files, root)
+              resolver = index.resolver_ast_in_file(files[0], "get_age")
+              assert resolver is not None
+              assert resolver.resolver_name == "get_age"
+              assert resolver.module == "features"
+              assert resolver.args_in_order == ["uid"]
+              assert resolver.return_annotation is not None
+              assert resolver.missing_return_annotation is None
+              assert index.resolver_ast_in_file(files[0], "does_not_exist") is None
+          PYTEST
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          package-dir: chalkpy_rs-${{ env.CHALKPY_RS_VERSION }}
+          # musllinux is dropped: rustup.rs ships no riscv64 musl host toolchain.
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # No [tool.cibuildwheel] table upstream, so the Rust toolchain
+          # setuptools-rust needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: python -m pytest -v tests
+
+      - name: Check the wheel ships the compiled extension
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = [n for n in names if n.endswith(".so")]
+          assert len(sos) == 1, names
+          print("extension:", sos[0])
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: chalkpy-rs-${{ env.CHALKPY_RS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish chalkpy-rs ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: chalkpy-rs-${{ matrix.version }}-*-manylinux_riscv64
