@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (493 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (495 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -300,6 +300,8 @@ The porting gotchas (493 of them) live in [`references/gotchas/`](gotchas/), spl
   exact `==` pin makes an already-ported package a blocker at the *version* level,
   `--only-binary` resolvers false-positive on sdist-only pure Python, and an sdist with no
   native sources can still be unbuildable (the angr case).
+- **505** — A cmeel note's build number need not be `0`, and `abi: 4,5` means one wheel
+  version was packaged twice: build the highest `.cN` tag, never an assumed `.c0`.
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -921,6 +923,9 @@ The porting gotchas (493 of them) live in [`references/gotchas/`](gotchas/), spl
   everything: austinp segfaults on riscv64 in austin's own MOJO emitter and inside
   libunwind's riscv64 symbol lookup, so the wheel ships `austin` alone — the shape
   upstream's own musllinux wheels already have (the austin-dist case).
+- **504** — A discrete wrong count, not a last-ULP value, can still be floating point:
+  `-ffp-contract=fast` fuses `a*b+c` into an FMA on riscv64 and moves quantised coordinates
+  into other buckets; reproduce it on x86 with `-march=haswell` (the cmeel-octomap case).
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 

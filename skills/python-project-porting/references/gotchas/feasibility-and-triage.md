@@ -184,6 +184,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   block, an exact `==` pin makes an already-ported package a blocker at the *version* level,
   `--only-binary` resolvers false-positive on sdist-only pure Python, and an sdist with zero
   native sources can still be unbuildable (the angr case).
+- **505** — A cmeel note's build number need not be `0`, and `abi: 4,5` means one version was
+  packaged twice: build the highest `.cN` tag, never an assumed `.c0`.
 
 ---
 
@@ -3745,3 +3747,26 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       second, build-only gap while you are there (`grpcio-tools~=1.80.0` here against 1.83.1
       on the registry) and record whether it is patchable, so the next agent knows which
       items are hard and which are a pin relaxation.
+
+505. **A cmeel queue note's build number is not always `0`, and one listing *several*
+    (`abi: 4,5`) means a single wheel version was packaged more than once — build the
+    highest `.cN` tag (the cmeel-octomap case).** Gotcha 470 established that a cmeel note's
+    `abi:` field is PEP 427's build number rather than an ABI tag; every cmeel package
+    ported before this one happened to read `abi: 0`, which made the field look constant.
+    - cmeel-octomap 1.10.0 publishes nine Linux wheels split across two build numbers,
+      because `[tool.cmeel] build-number` was bumped 4 -> 5 and both packaging passes are
+      still on PyPI under the same `1.10.0`. The scanner reports the set it saw, `4,5`,
+      which reads like an ABI list and is not one. It still says nothing about the wheel
+      shape — that is `has-sitelib` (gotcha 487), here `false`, one `py3-none` wheel.
+    - **Tag, key and wheel agree, so checking one checks all three.**
+      `git ls-remote --tags` shows `v1.10.0.c0 … v1.10.0.c5`; `pyproject.toml` at
+      `v1.10.0.c5` reads `build-number = 5`; the released
+      `cmeel_octomap-1.10.0-5-py3-none-*.whl` carries `Build: 5` in `dist-info/WHEEL`.
+      Checking out the **highest** `.cN` is what reproduces the current release. The
+      sibling ports' hardcoded `.c0` is simply their own highest, not a convention — never
+      assume `.c0` and never guess the suffix, since the `.cN` series is per package and
+      skips nothing.
+    - The wheel *version* is untouched by any of this (`1.10.0`), so
+      `docs/packages/<pkg>.yaml` still carries one plain `- version:` entry, and
+      `_publish-wheel.yml` — which reads `Name`/`Version` out of `METADATA` — never sees
+      the build tag at all.

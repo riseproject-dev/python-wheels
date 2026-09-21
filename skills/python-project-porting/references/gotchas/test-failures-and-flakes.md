@@ -42,6 +42,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **502** — One binary of a multi-binary wheel can be unshippable while the others are
   perfect: price the variant, not the package, and let upstream's own reduced builds be the
   precedent.
+- **504** — A discrete wrong count, not a ULP, can still be float: `-ffp-contract=fast`
+  fuses `a*b+c` into an FMA on riscv64 and shifts quantised coordinates into other buckets;
+  reproduce it on x86 with `-march=haswell`.
 
 ---
 
@@ -1065,3 +1068,38 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
     (libunwind from source, binutils archives, two toolchain patches), so the port gets
     smaller rather than more special; record the crashes in the PR and the version's
     `warning:` so the gap is documented rather than silent.
+
+504. **A test failing on riscv64 with a *discrete* wrong count — not a last-ULP value — can
+    still be pure floating point: GCC's default `-ffp-contract=fast` fuses `a*b+c` into one
+    FMA on every ISA that has one, and riscv64's baseline `rv64gc` does (the
+    cmeel-octomap/octomap case).** octomap 1.10.0's `test_color_tree` builds a `ColorOcTree`
+    from points computed as `(float) x*0.05f+0.01f` and asserts
+    `EXPECT_EQ(initialSize, 1034)` on the pruned node count. On riscv64 it gets **3431** —
+    a 3x difference in an integer, which reads like a broken build rather than rounding.
+    It is rounding: the contracted multiply-add keeps more precision than the two rounded
+    operations, so a handful of endpoints land in a different voxel, and `prune()` then
+    collapses a different number of leaves.
+    - **Reproduce it on x86 before blaming the architecture — one compiler flag does it.**
+      Rebuild just the failing test translation unit (octomap's coordinate-to-key math is
+      inline in the headers, so it compiles into the test) with
+      `g++ -O3 -march=haswell -ffp-contract=fast`, linking the library you already built:
+      x86 then prints the *identical* `test failed: 3431!=1034`. Plain `-O3` on x86 prints
+      1034 because baseline SSE2 has no FMA to contract into. Seconds, no riscv64 hardware,
+      no QEMU cycle — and it converts "riscv64 miscompiles this" into "this assertion is
+      not portable to any FMA target", which is a different conversation with upstream.
+    - **Distinct from gotcha 304**, where the divergence is a few ULP *in the asserted value
+      itself*. Here the float is never compared: it is bucketed into an integer voxel key,
+      so an arbitrarily small difference is amplified into a large discrete one. Treat "the
+      number is wildly wrong" as compatible with a rounding cause whenever the quantity is a
+      count, a bucket index, or anything else derived by quantising float coordinates.
+    - **Fix scope: whatever upstream already does, and here it already does something.**
+      cmeel-octomap's `release.yml` sets `CMEEL_RUN_TESTS="false"` in `CIBW_ENVIRONMENT` for
+      every platform it ships, so the port inherits that rather than deselecting one test or
+      forcing `-ffp-contract=off`. The flag is the tempting fix and the wrong one: it would
+      make the riscv64 wheel's own code differ from the wheel every other architecture gets,
+      to satisfy an assertion upstream runs nowhere.
+    - **A cmeel `run-tests` knob is load-bearing, not cosmetic.** cmeel runs the project's
+      `ctest` suite during `build_wheel` unless `[tool.cmeel] run-tests = false` or
+      `CMEEL_RUN_TESTS=false` says otherwise, and a failing test aborts the *build* inside
+      `prepare_metadata_for_build_wheel` — no wheel, a PEP 517 traceback, and nothing that
+      looks like a test report. Copy that env var across with the rest of the recipe.
