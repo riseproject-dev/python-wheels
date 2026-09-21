@@ -82,6 +82,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
   `maturin-version:`, and the fix is to delete the input, not override it.
 - **539** — A workspace's root `Cargo.lock` can be mostly a sibling crate's *dev*-dependencies:
   filter `dep_kinds`, not just `--filter-platform`.
+- **541** — `rustls` does not imply `aws-lc-sys` — when the tree resolves `ring`, riscv64 needs
+  no asm, no `cmake` and no perl; plus `pcre2-sys` keeps a real riscv64 JIT.
 
 ---
 
@@ -1327,3 +1329,42 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       greps. Checking the exit code of the *piped* form (`<cmd> | head`) hides this: the
       pipeline reports `head`'s status, so the trap only surfaces once the step runs for
       real in CI.
+
+541. **`rustls` does not imply `aws-lc-sys`: when the tree resolves `ring`, riscv64 needs no
+     asm, no `cmake` and no perl — and `pcre2-sys` keeps a *real* riscv64 JIT (the fastokens
+     case).** Gotcha 182 and the manylinux gotcha both price a rustls-bearing Rust port off
+     `aws-lc-sys` (rustls' default provider), whose riscv64 story is "it ships prebuilt
+     `src/riscv64gc_unknown_linux_gnu_crypto.rs` bindings, and `cmake` in the image is
+     load-bearing". A crate that selects the other provider is a different, cheaper question,
+     and `cargo tree -p rustls -e features --target riscv64gc-unknown-linux-gnu` answers it in
+     seconds — `ring feature "default"` under `rustls` plus zero `aws-lc-*` rows anywhere means
+     no `cmake` dependency at all.
+     - **`ring` has no riscv64 assembly and does not want any.** Its `build.rs` `ASM_TARGETS`
+       table lists only aarch64/arm/x86/x86_64, so a riscv64 target matches nothing and the
+       perlasm step never runs (hence no perl either). The arch gate that decides whether that
+       is fatal is `include/ring-core/target.h`: riscv64 defines none of
+       `__x86_64`/`__AARCH64EL__`/`__ARMEL__`, falls through to the `__LP64__` branch — which
+       is reached only because GCC defines `__BYTE_ORDER__` — and lands on `OPENSSL_64_BIT`
+       with no arch macro, so the trailing `#error "Unknown target CPU"` is never reached and
+       `OPENSSL_SMALL` selects the portable C implementations. Read that header rather than
+       grepping the crate for `riscv`: ring 0.17.14 contains the string nowhere, which looks
+       like "unsupported" and is actually "supported by fallthrough".
+     - **`pcre2-sys` enables JIT on riscv64, and the JIT is genuine.** Its `enable_jit()` is a
+       deny-list — `aarch64-linux-android`, `armv7-linux-androideabi`,
+       `aarch64-unknown-linux-musl`, `*musleabi*`, `*apple-ios*`, `*apple-tvos*` — so every
+       other target gets `SUPPORT_JIT=1`, riscv64 included, and the bundled
+       `upstream/deps/sljit/sljit_src/` carries `sljitNativeRISCV_64.c`. That is the opposite
+       of gotcha 366/442's SIMD story: no scalar-only fallback, nothing to gate on. Also note
+       the repo-root `.cargo/config.toml` `[env] PCRE2_SYS_STATIC = "1"` some consumers ship is
+       belt-and-braces — with it unset the `pkg_config::probe_library("libpcre2-8")` probe just
+       fails in the manylinux image and the static build happens anyway.
+     - **This is the other half of gotcha 539.** There, `ring` in the graph was a false alarm
+       because it was only a dev-dependency; here it survives the `dep_kinds` filter — hf-hub's
+       `rustls-tls` pulls it for real — and is *still* not a blocker. So finding `ring` after
+       the filter is not the end of the triage either: read `target.h`, not the crate's arch
+       list. fastokens' graph goes 215 nodes → 164 once `{"dev"}`-only edges are dropped
+       (shedding `onig`/`esaxx-rs`/`tokenizers`), and exactly two of the 164 compile C, both
+       cleared above. `readelf -d` on the locally built `.so` then showed `libgcc_s`, `libm`,
+       `libc` and nothing else — which is also what lets you drop an upstream
+       `before-script-linux` that installs `libssl-dev`/`openssl-devel` for an OpenSSL the tree
+       never links.

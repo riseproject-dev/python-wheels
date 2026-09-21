@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (518 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (519 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -485,6 +485,9 @@ The porting gotchas (518 of them) live in [`references/gotchas/`](gotchas/), spl
   tag carries it, `cibuildwheel --print-build-identifiers --only <id> .` catches it on any
   host, and the fix is a one-line patch rather than a `config-file:` override
   (the spacy-pkuseg case).
+- **541** — A `setup.py` that itself `raise SystemExit`s above a hardcoded max Python minor
+  version blocks the *build*, not just runtime behavior — trim the matrix to match rather
+  than exporting the documented override env var (the cocotb case).
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
@@ -585,6 +588,14 @@ The porting gotchas (518 of them) live in [`references/gotchas/`](gotchas/), spl
   riscv64 assets; plus a `bindings = "bin"` crate in a workspace subdirectory usually wants
   `working-directory:` rather than gotcha 312's write-a-pyproject-at-root step, and a linter
   CLI exits non-zero under its JSON reporter too (the squawk-cli case).
+- **541** — `rustls` does not imply `aws-lc-sys`: when the tree resolves `ring` instead, riscv64
+  needs no asm, no `cmake` and no perl — ring's `ASM_TARGETS` matches nothing and
+  `include/ring-core/target.h` falls through `__LP64__` to `OPENSSL_64_BIT`/`OPENSSL_SMALL`
+  portable C without reaching its `#error`, so grepping the crate for `riscv` (zero hits) reads
+  as unsupported when it is supported by fallthrough; plus `pcre2-sys`'s `enable_jit()` is a
+  deny-list that keeps a genuine riscv64 JIT (`sljitNativeRISCV_64.c`) on. The other half of
+  gotcha 539: there `ring` was only a dev-dependency, here it survives the filter and is still
+  not a blocker (the fastokens case).
 - **539** — A Cargo workspace's root `Cargo.lock` can be dominated by a sibling crate's
   *dev*-dependencies (176 crates resolved for riscv64, 30 actually compiled), so gotcha 78's
   `cargo metadata --filter-platform` must also drop `{"dev"}`-only `dep_kinds` edges before the
