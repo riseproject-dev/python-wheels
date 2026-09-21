@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (517 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (518 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -366,6 +366,11 @@ The porting gotchas (517 of them) live in [`references/gotchas/`](gotchas/), spl
   released wheel carries catalogs a from-sdist install silently drops — and a wandering
   interpreter/glibc tag across the release history proves the tag follows the publishing
   runner (the reuse case).
+- **534** — A vendor artifact bucket can answer `403 AccessDenied`, not `404`, for a key that
+  was never published, so the riscv64 probe needs a bogus control name — and the spelling to
+  probe with is in the payload's own `RPATH`/builder path; plus a FLEXlm gate as a second
+  closed vendor, a licence that lives only behind a URL, and the vendor's retired packaging
+  repo naming the download-and-repack method (the mosek case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -1030,6 +1035,10 @@ The porting gotchas (517 of them) live in [`references/gotchas/`](gotchas/), spl
   vendor's own released x86_64 wheel fails the same suite: prove it with one
   `pip install --only-binary :all: <pkg>==<ver>`, bisect across sibling distributions, then
   ship a functional smoke test instead of a half-suite deselect list (the fasttext-numpy2 case).
+- **535** — A release tag can ship tests its own source does not satisfy: diff the failing
+  test against upstream's post-release `master`, and `git cherry-pick -x` the fix that
+  landed after the tag was cut into an `Upstream-Status: Backport` patch (the
+  scylla-driver 3.29.11 case).
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 

@@ -50,6 +50,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **519** — A mass test failure is upstream's, not the port's, when the vendor's own
   released x86_64 wheel fails the same suite — prove it with one `pip install`, then ship a
   functional smoke test instead of a half-suite deselect list.
+- **535** — A release tag can ship tests its own source does not satisfy — diff the failing
+  test against upstream's post-release `master` and cherry-pick the fix as a `Backport`
+  patch, before blaming the architecture.
 
 ---
 
@@ -1149,3 +1152,36 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       the arch-specific code while you are there: comparing a deliberately scalar-only
       local build against the SIMD one showed the riscv64 fallback path is bit-identical,
       which is the assertion worth writing into the test command.
+
+535. **A release *tag* can ship tests its own source does not satisfy — before blaming the
+    architecture, diff the failing test against upstream's post-release `master` and look
+    for the fix that landed after the tag was cut (the scylla-driver 3.29.11 case).** Two
+    unit tests failed on all four riscv64 legs (`test_set_keyspace_for_all_pools_reports_all_errors`,
+    `test_wait_for_schema_agreement_rejects_unknown_scope`) with assertion errors that read
+    like environment sensitivity — a callback receiving `[]` instead of a dict, a
+    `DID NOT RAISE ValueError` — the exact shape that invites "mock ordering under QEMU" or
+    "thread scheduling". Neither was: `Session._set_keyspace_for_all_pools()` called back
+    with the last pool's error list instead of the accumulated dict, and
+    `Session.wait_for_schema_agreement()` documented `ValueError` for an unknown `scope`
+    but never validated it. Both are plain logic bugs in `cassandra/cluster.py`, failing
+    identically on x86_64.
+    - **The tests and the source disagree *inside the same tag*, which is why this is not
+      a `CIBW_TEST_SOURCES` shadowing problem (gotcha 18's family) and not a version skew
+      between wheel and checkout.** A feature merged with its tests, a follow-up commit
+      fixed the implementation, and the release was cut in between — here the tag is
+      15 June and the two fixes are 18 and 29 June. Upstream's own CI is green on `master`,
+      so nobody upstream sees it; only a port that builds *the tag* does.
+    - **Two cheap commands settle it.** `git log --oneline -S '<the exact buggy line>'
+      origin/master -- <file>` finds the fix commit, and `git merge-base --is-ancestor
+      <fix> <tag>` proves it is not in what you are building. If both land, the patch
+      writes itself: `git cherry-pick -x` each fix onto the tag and `git format-patch`,
+      which gives you `Upstream-Status: Backport [<commit url>]` with upstream's authorship
+      and a `(cherry picked from commit ...)` trailer intact — a far better artefact than a
+      hand-rolled diff or a deselect.
+    - **Reproduce on x86_64 first, but force the event loop.** Here the whole `SessionTest`
+      class `SkipTest`s itself when libev is absent, so a naive local run reports
+      `2 skipped` and looks like it disproves the hypothesis. `EVENT_LOOP_MANAGER=asyncio`
+      (plus `CASS_DRIVER_NO_EXTENSIONS=1`) selects a reactor that needs no C extension and
+      reproduces both failures in 0.1s. A suite that gates its tests on an optional native
+      dependency will do this to you: check the skip *count* against CI's, not just the
+      pass count.
