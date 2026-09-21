@@ -39,6 +39,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
   the whole package invents failures; run each file as its own absltest script.
 - **489** — An upstream test-data tree of hundreds of MB can be left out of the checkout
   entirely, and the suite selected as the complement of the modules that read it.
+- **512** — `--ignore`/`--ignore-glob` do nothing under `pytest --pyargs <pkg>`; cut tests with
+  `--deselect`, whose nodeids are relative to the package dir, not the printed rootdir.
 
 ---
 
@@ -760,3 +762,27 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
     - Rehearse the complement off-target first (gotcha 52): the two modules that needed the
       tree failed identically on x86_64, which is how the split was found without spending a
       riscv64 cycle on it.
+
+
+512. **`--ignore`/`--ignore-glob` do nothing under `pytest --pyargs <pkg>` — cut tests with
+    `--deselect`, and count what it removed (the pytype case).** When the test command runs an
+    installed package's own tests with `--pyargs <pkg>`, the usual "don't collect this file"
+    knobs are silently inert: pytest applies `--ignore`/`--ignore-glob` while recursing into
+    *directory* arguments, and a `--pyargs` argument is resolved straight to the imported
+    package's path instead. It fails quietly — the collection count is identical with and
+    without the flag (`--co -q` printed `1820 tests collected` for
+    `--ignore-glob='*/pytype/main_test.py'`, `'*main_test.py'` and
+    `'*site-packages/pytype/main_test.py'` alike) — and you find out when the tests you thought
+    you had removed fail in CI.
+    - **`--deselect` does work, and takes a plain file path as well as a
+      `file.py::Class::test` nodeid**, so dropping a whole module is one flag.
+    - **Its paths are relative to the collected package's own directory, not to the `rootdir`
+      pytest prints.** Running `--pyargs pytype` from a `test-sources` staging dir, pytest
+      reports `rootdir: <staging dir>` while the nodeids are `main_test.py` and
+      `pytd/serialize_ast_test.py::SerializeAstTest::test_unrestorable_child` — relative to
+      `site-packages/pytype`. An absolute `--deselect /…/site-packages/pytype/main_test.py`
+      matches nothing, and site-packages sits at a different absolute path in the container
+      anyway, so the relative form is also the portable one.
+    - **Verify with `--co -q` before pushing.** It prints `1768/1820 tests collected (52
+      deselected)`; a typo'd nodeid is ignored without a warning, so that count is the only
+      proof the deselection did anything.

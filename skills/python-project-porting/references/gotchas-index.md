@@ -409,6 +409,9 @@ The porting gotchas (500 of them) live in [`references/gotchas/`](gotchas/), spl
   matrix: `false` means one `py3-none-<platform>` wheel and a single cibuildwheel job,
   bindings mean a real per-interpreter matrix; the queue note's `abi: 0` cannot tell them
   apart.
+- **514** — A tool that models a *target* Python version caps the matrix itself — the extension
+  compiles and imports on every interpreter, so run the tool's CLI, not `import`, to find the
+  ceiling (the pytype case).
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
@@ -846,6 +849,9 @@ The porting gotchas (500 of them) live in [`references/gotchas/`](gotchas/), spl
 - **501** — A separate test job checks the upstream tree out again and needs the same
   `git apply` the build job has; the tell is a failure returning byte-for-byte after you
   fixed it (the austin-dist case).
+- **513** — The wheel ships the tests but not the `<pkg>.tests` helpers they import: stage the
+  helper modules with `test-sources` and copy them into the installed package from
+  `test-command` (the pytype case).
 
 ### Testing: pytest config, servers & test selection — [`gotchas/pytest-config-servers-and-selection.md`](gotchas/pytest-config-servers-and-selection.md)
 
@@ -883,6 +889,9 @@ The porting gotchas (500 of them) live in [`references/gotchas/`](gotchas/), spl
 - **489** — A hundreds-of-MB upstream test-data tree can be left out of the checkout with
   non-cone sparse-checkout (which also switches `actions/checkout` to a `blob:none` clone),
   and the suite selected as the complement of the modules that grep for the data constant.
+- **512** — `--ignore`/`--ignore-glob` are silently inert under `pytest --pyargs <pkg>`; cut
+  tests with `--deselect`, whose nodeids are relative to the package directory rather than the
+  rootdir pytest prints, and confirm the count with `--co -q`.
 
 ### Test failures, flakes & arch-specific bugs — [`gotchas/test-failures-and-flakes.md`](gotchas/test-failures-and-flakes.md)
 

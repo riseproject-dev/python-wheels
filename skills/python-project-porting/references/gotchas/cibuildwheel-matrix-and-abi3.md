@@ -54,6 +54,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
   newer-Python-only API fails our CI while upstream's own CI stays green.
 - **487** — `[tool.cmeel] has-sitelib` decides whether a cmeel port needs an interpreter
   matrix at all.
+- **514** — A tool that models a *target* Python version caps the matrix itself; its extension
+  compiles on every interpreter, so only running the tool shows it.
 
 ---
 
@@ -1033,3 +1035,17 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
     - `CIBW_REPAIR_WHEEL_COMMAND: ""` still applies to both: cmeel links its libraries with
       an `$ORIGIN` RUNPATH into the shared cmeel prefix, and auditwheel would only re-tag
       them, which is why upstream's own release workflow disables repair.
+
+
+514. **A tool that models a *target* Python version caps the matrix by itself — its extension
+    still compiles everywhere, so only running the tool shows it (the pytype case).** pytype
+    2024.10.11 builds and installs cleanly on cp313: its pybind11 typegraph extension uses no
+    version-specific C API, and `pytype --version` prints. The first real analysis then raises
+    `UsageError: Python versions > 3.12 are not yet supported` from `validate_version` in
+    `pytype/utils.py`, because the target version defaults to the host's and the opcode tables
+    stop at 3.12. Upstream's cp310-cp312-only wheel set is the tell, and the matrix has to
+    follow it (`python: ["cp312"]` here) even though cp313/cp314 wheels would build and pass
+    an import check. Exercise the tool's front door — the CLI on a two-line file, not
+    `import <pkg>` — on the newest interpreter of the default matrix before committing to it.
+    Applies to anything that consumes the bytecode or AST details of the interpreter it runs
+    on: type checkers, bytecode rewriters, coverage/debug tooling.

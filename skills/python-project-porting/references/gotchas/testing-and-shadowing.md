@@ -31,6 +31,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
   portion and does not shadow the wheel.
 - **501** — A separate test job checks the upstream tree out again, so it needs the same
   `git apply` the build job has, or the failure you just fixed comes back unchanged.
+- **513** — The wheel ships the tests but not the test *helpers* they import — copy the helper
+  package into the installed package from `test-command`.
 
 ---
 
@@ -559,3 +561,36 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
       log. Check which job the failing step is in before re-reading the patch.
     - Keep the two steps identical (checkout with `path: python-wheels`, then the same glob)
       so the next person sees one pattern rather than two.
+
+
+513. **The wheel ships the tests but not the test *helpers* they import — copy the helper
+    package into the installed package from `test-command` (the pytype case).** pytype's
+    `setup.cfg` excludes `pytype.tests` from `packages.find`, yet 36 of the 96 `*_test.py`
+    modules that *are* in the wheel open with `from pytype.tests import test_base`, so
+    `pytest --pyargs pytype` dies at collection with `ModuleNotFoundError: No module named
+    'pytype.tests'`. This is the mirror image of gotcha 148: there the suite sits inside the
+    importable package and shadows it, here the suite is inside the *wheel* and its helpers
+    are missing. Staging them in the test cwd cannot fix it — they have to be importable as a
+    subpackage of the *installed* package:
+    ```yaml
+    CIBW_TEST_SOURCES: pytype/tests/__init__.py pytype/tests/test_base.py pytype/tests/test_utils.py
+    CIBW_TEST_COMMAND: >-
+      cp -r pytype/tests "$(python -c 'import pytype, os; print(os.path.dirname(pytype.__file__))')"
+      && python -m pytest --pyargs pytype ...
+    ```
+    - **Stage the helper modules only, never the whole suite directory.** Copying upstream's
+      full `<pkg>/tests/` in makes `--pyargs` collect the entire integration suite as well
+      (142 files for pytype, hours on a riscv64 runner) on top of the unit tests you wanted.
+    - **The helpers are themselves named `test_*.py`, so pytest collects them as tests**
+      (`tests/test_utils.py::test_data_file` then errors on a missing fixture); deselect them
+      (gotcha 512) rather than renaming, since the imports name them.
+    - **Diff against a source checkout before blaming the wheel or the arch.** Of the failures
+      left under `--pyargs`, `test_error_doc` and two typeshed ones read `docs/errors.md` and
+      `typeshed/tests/`, which are in neither the wheel nor the sdist, while two
+      `serialize_ast` tests fail identically in a pristine x86 `git clone --branch <tag>`
+      under plain `unittest`. Cloning the tag and dropping the built `.so` into it separates
+      "not in the wheel", "broken upstream" and "riscv64" in five minutes.
+    - **A test that asserts an operation *fails* for lack of privilege only passes as a
+      non-root user.** `tool_utils_test.TestMakeDirsOrDie.test_die` expects
+      `makedirs_or_die('/nonexistent/path')` to raise `SystemExit`; the build container runs
+      as root, where it simply creates the directory.
