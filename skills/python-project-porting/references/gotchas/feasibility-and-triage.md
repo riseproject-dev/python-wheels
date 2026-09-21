@@ -224,6 +224,11 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   question — check the toolchain's own arch-support table for the buildmode used, confirm
   go.dev ships the target tarball, and cross-build the import graph with `GOOS`/`GOARCH` set on
   x86 rather than assuming a wall (the certbot-dns-multi case).
+- **531** — Inside an already-parked vendor family, the *next* package is often settled by its
+  dependency list before any source is read: an `install_requires` on a parked sibling plus an
+  unconditional top-level `from <sibling> import …` is a complete stop, and the sibling is
+  usually a *build* input too (submodule + header globs + `LD_LIBRARY_PATH` for auditwheel)
+  (the memcache-hybrid / Ascend case).
 
 ---
 
@@ -4244,3 +4249,58 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     Go project is a CLI-shaped tool (here, go-acme/lego's DNS providers), its own offline
     exec-mode entry point often doubles as a free end-to-end test with no network and no
     checked-out fixtures.
+
+531. **Inside an already-parked accelerator-vendor family, the *next* package's verdict is
+    usually in its dependency list, not in its source — start with `requires_dist` and the
+    registry, not with the vendor's C++ (the memcache-hybrid / Huawei Ascend case).** Gotchas
+    480 (memfabric-hybrid) and 516 (torch-npu) each cost a deep source dive to reach a park;
+    this one is settled in two commands, and the source reading afterwards only corroborates.
+    - **The two-command short circuit.** `info.requires_dist` in the PyPI JSON is the whole
+      answer when it names a sibling this queue has already parked (here the single entry
+      `memfabric_hybrid>=1.2.0`), and `ci_scripts/check_riscv64_deps.py '<that requirement>'`
+      confirms it is UNRESOLVABLE on every interpreter because neither PyPI nor
+      pypi.riseproject.dev has a riscv64 build of it. Run both *before* cloning anything:
+      a package whose only runtime dependency cannot exist on riscv64 cannot be ported at
+      this version whatever its own code does.
+    - **Then check whether the import is conditional — usually it isn't.** The dependency is
+      only fatal at import time if nothing guards it. Read the wheel's `__init__.py`: here the
+      first executable line is `from memfabric_hybrid import bm`, followed by module-level
+      `bm.BmCopyType.*` constant bindings, so `import memcache_hybrid` raises `ImportError`
+      immediately on a host without the parked sibling. That is gotcha 516's "dead on arrival"
+      one layer up — Python, not the dynamic loader — and it means even a perfectly compiled
+      riscv64 wheel would be unimportable.
+    - **The parked sibling is normally a *build* input as well, which closes the "vendor it
+      ourselves" escape.** Don't stop at `install_requires`: `.gitmodules` pinned
+      `3rdparty/memfabric_hybrid` → `gitcode.com/Ascend/memfabric_hybrid`, the top-level
+      `CMakeLists.txt` glob-includes every header under that submodule's `src/`, and
+      `build.sh` puts the sibling's `output/smem/lib64` and `output/hybm/lib64` on
+      `LD_LIBRARY_PATH` so `auditwheel repair` can resolve. So porting this package requires
+      first porting the parked one — gotcha 523's "the missing sibling is a build requirement"
+      split, applied to a park rather than to a queue gap.
+    - **Corroboration is cheap once you know the verdict; run it anyway, and report what is
+      *not* blocking.** `strings` finds `libascendcl.so` where `readelf -d` is clean on all 20
+      shipped `.so` (gotcha 480's dlopen tell), and the source names it outright in
+      `csrc/client/dl_acl_api.cpp` (`gAscendAclLibName = "libascendcl.so"`, wrapping
+      `aclrtMalloc`/`Memcpy`/`SetDevice`). There is no backend selector among the 12
+      `option()`s and no version-stamping env var in `setup.py`, so unlike gotcha 480 there is
+      not even a fake CPU mode to disprove (gotcha 516's cleaner stop). But an `__x86_64__`/
+      `__aarch64__` header split is **not** automatically a wall — here `mmc_montotonic.h`'s
+      `__rdtsc`/`cntvct` paths sit under a `USE_PROCESS_MONOTONIC` that the default
+      `ENABLE_CPU_MONOTONIC=OFF` leaves undefined, and the `#else` is portable
+      `clock_gettime`. Saying so keeps the evidence honest.
+    - **A family's negated-x86 switch recurs one dependency down.** Gotcha 480 found
+      `else → -msse4.2` in ubs-comm; the SSD backend this package `FetchContent`s
+      (`cmake/config_ubsio.cmake` → `gitcode.com/openeuler/ubs-io`, and `build.sh` defaults
+      `BUILD_UBSIO=ON`, which is why the released wheel carries `libubsio_kvc`/`libbio_*`)
+      repeats it in `ubsio-boostio/src/disk/CMakeLists.txt`: `arm|aarch64` selects `arm/`,
+      `else()` selects `x86/`, whose `cpu_vendor_checker.h` is `__asm__ __volatile__("cpuid")`
+      — riscv64 takes the x86 branch and dies on the instruction. When one member of a vendor
+      family shows this shape, grep its siblings' `FetchContent`/submodule deps for the same
+      `else()` rather than assuming each is independent.
+    - **Upstream may state its arch axis by delegation.** The README's hardware section is one
+      line — "MemCache depends on MemFabric; the supporting matrix is the same as MemFabric's"
+      — which inherits the parked sibling's Atlas/CANN/`aarch64,x86` axis without restating
+      it. Follow the pointer instead of recording "upstream documents no requirements", and
+      back it with the mechanical checks: `grep -rin riscv` over both trees returned zero, and
+      the packaging/installer scripts (`script/run_pkg_maker/make_run.sh`, `install.sh`) are
+      explicit `uname -m` allowlists ending in `exit 1`.

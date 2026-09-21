@@ -355,6 +355,12 @@ The porting gotchas (517 of them) live in [`references/gotchas/`](gotchas/), spl
   a Go question — check the toolchain's own arch-support table for the buildmode used, confirm
   go.dev ships the target tarball, and cross-build the import graph with `GOOS`/`GOARCH` set on
   x86 rather than assuming a wall (the certbot-dns-multi case).
+- **531** — Inside an already-parked accelerator-vendor family, the next package's verdict is
+  usually in its dependency list, not its source: `requires_dist` naming a parked sibling plus
+  an unconditional top-level import of it is a complete stop, and the sibling is normally a
+  build input too (submodule, header globs, `LD_LIBRARY_PATH` for auditwheel) — corroborate
+  with the family's recurring negated-x86 `else()` one dependency down (the memcache-hybrid
+  case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
