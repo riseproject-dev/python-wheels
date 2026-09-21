@@ -3500,9 +3500,62 @@ packages:
   version: 6.0.0
   home: https://github.com/cmake-wheel/cmeel-urdfdom
   repo: https://github.com/cmake-wheel/cmeel-urdfdom
-  status: queued
+  status: blocked-on-dependency
   pr: null
-  notes: '2 Linux wheels upstream (abi: 0); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: '2 Linux wheels upstream (abi: 0); no riscv64 on PyPI or pypi.riseproject.dev.
+    The "abi: 0" is PEP 427''s optional build number, not an ABI tag (gotcha 470):
+    the real filenames are cmeel_urdfdom-6.0.0-0-py3-none-manylinux_2_28_{x86_64,aarch64}.whl,
+    i.e. ONE interpreter-independent wheel per platform -- [tool.cmeel] has-sitelib =
+    false, so the wheel holds no Python extension at all, just cmeel.prefix/lib/liburdfdom_{model,world,sensor}.so.6
+    plus headers and the check_urdf/urdf_to_graphviz/urdf_mem_test binaries (gotcha
+    35 shape, not gotcha 27). PORTABILITY IS FINE: urdfdom is ~10 .cpp of XML parsing
+    over tinyxml2; the sdist vendors the whole urdfdom tree (git submodule archived
+    in) plus a 2-hunk cmeel.patch that only sets INSTALL_RPATH to $ORIGIN/@loader_path;
+    no -march/SSE/NEON/RVV string, no CUDA, no assembly, cmake_minimum_required(VERSION
+    3.10) so CMake 4 is fine. Built the whole chain locally on x86 from the real sdist
+    in about a minute (gotcha 9/125 rehearsal): cmeel_urdfdom-6.0.0-0-py3-none-manylinux_2_39_x86_64.whl.
+    BLOCKED ON EXACTLY TWO SIBLINGS, both already their own queued .queue.yml entries
+    and both leaves of gotcha 470''s pin closure (deps = cmeel only): cmeel-console-bridge
+    1.0.2.3 and cmeel-tinyxml2 11.0.0. Evidence rather than inference: (a) pyproject.toml
+    names both twice -- [project] dependencies = ["cmeel-console-bridge", "cmeel-tinyxml2"]
+    and [build-system] requires = the same two plus cmeel-urdfdom-headers and cmeel[build]
+    -- so they are link targets and header sources, not just runtime metadata; (b)
+    readelf -d on the released 6.0.0 aarch64 wheel shows all three liburdfdom_*.so.6
+    NEEDing libconsole_bridge.so.1.0 and libtinyxml2.so.11 with RUNPATH $ORIGIN,
+    i.e. cmeel''s shared-prefix contract with nothing bundled; (c) https://pypi.riseproject.dev/simple/
+    has no cmeel-console-bridge and no cmeel-tinyxml2 at all (cmeel-boost is the
+    only cmeel package on the registry so far, cp312/313/314), and neither publishes
+    a riscv64 wheel on public PyPI; ci_scripts/riscv64_resolve.py ''cmeel-urdfdom==6.0.0''
+    reports UNRESOLVABLE on cp312/cp313/cp314/cp314t. Nothing else in the closure
+    is missing: cmeel 0.61.0 and cmeel-urdfdom-headers 3.0.0 are py3-none-any on
+    public PyPI, and cmake (cmeel[build]''s only heavy build input) has riscv64 wheels
+    on public PyPI at 4.4.3. WHY GOTCHA 125 DOES NOT RESCUE THIS (new gotcha 483):
+    both sibling sdists vendor their upstream source and require only cmeel[build],
+    which is exactly gotcha 125''s "cheap from sdist" profile -- but running it disproves
+    it. pip wheel cmeel_tinyxml2-11.0.0.tar.gz --no-deps builds clean; pip wheel
+    cmeel_console_bridge-1.0.2.3.tar.gz --no-deps FAILS with "CMake Error at CMakeLists.txt:1
+    (cmake_minimum_required): Compatibility with CMake < 3.5 has been removed from
+    CMake", because console_bridge 1.0.2 declares cmake_minimum_required(VERSION
+    3.0.2) and cmeel[build] resolves cmake >= 4 (gotchas 207/257/358). CMAKE_POLICY_VERSION_MINIMUM=3.5
+    in the environment does fix it (verified: that is how the full local chain build
+    above succeeded), so a build-cmeel-urdfdom.yml with it in CIBW_ENVIRONMENT could
+    be made green -- but the variable does not ship with the wheel, so pip install
+    cmeel-urdfdom on riscv64 would still fail in the user''s own cmeel-console-bridge
+    sdist build, and publishing it would put an entry on the index that the index
+    cannot install. The fix belongs in cmeel-console-bridge''s own port (which needs
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5 or an equivalent patch), and that package is
+    outside this port''s commit scope anyway. FOR WHOEVER TAKES THE SIBLINGS: both
+    are single-.cpp builds of seconds, cmeel-tinyxml2 needs no workaround, and build-cmeel-boost.yml
+    is the working template -- cibuildwheel with only: cp312-manylinux_riscv64, CIBW_REPAIR_WHEEL_COMMAND:
+    "" (cmeel sets INSTALL_RPATH itself), CIBW_ENVIRONMENT carrying PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/,
+    and the upstream tag pattern v<version>.c<n> (cmeel-urdfdom''s is v6.0.0.c0, confirmed
+    via git ls-remote). Because these wheels are py3-none-<plat>, one cibuildwheel
+    job covers every interpreter -- there is no per-interpreter ceiling to inherit
+    from cmeel-boost, unlike pin. Landing these two unblocks cmeel-urdfdom, which
+    is itself one of pin''s 11. No branch/worktree or PR opened, no CI cycle burned;
+    resolved via PyPI JSON, readelf -d on the published wheel, the sdists, and local
+    sdist builds. Revisit once cmeel-console-bridge and cmeel-tinyxml2 are on the
+    registry.'
 - pkg: mpi4py
   version: 4.1.2
   home: https://mpi4py.github.io/mpi4py/
