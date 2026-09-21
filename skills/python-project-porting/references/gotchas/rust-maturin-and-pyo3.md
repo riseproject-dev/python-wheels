@@ -74,6 +74,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
 - **425** — An aya/eBPF crate cannot build its BPF half on the riscv64 runner at all:
   `bpf-linker` reaches LLVM through the *Rust toolchain's* shared library, which only the
   x86_64 and aarch64 dists ship — cross-compile the object on an x86_64 job instead.
+- **479** — maturin `bindings = "cffi"` is a fourth `py3-none-<platform>` shape, and one
+  `CIBW_BUILD` list builds it once and re-tests it on every interpreter, cp314t included.
 
 ---
 
@@ -1189,3 +1191,42 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       cross-compile is the last thing the build script does, so a rehearsal that is still
       compiling host crates when it is cut short (empty `dist/`) has proven nothing about
       the half that fails — check for the artifact, not for the absence of errors.
+
+479. **maturin `bindings = "cffi"` is a fourth `py3-none-<platform>` shape — a real Rust
+    cdylib that cffi's ABI mode `dlopen`s — and one `CIBW_BUILD` list builds it once and
+    re-tests it on every interpreter, free-threaded included (the cmsis-pack-manager case;
+    see `build-cmsis-pack-manager.yml`).** Gotchas 27/35 read an all-`py3-none-*` wheel set
+    as a stop sign, 81 adds the ctypes-loaded C++ library and 145 the `bindings = "bin"`
+    CLI. This is the fourth branch and, like 81/145, an ordinary port: the wheel holds
+    `<pkg>/<pkg>/lib<crate>.so` beside a maturin-generated `ffi.py`, and the package's
+    `__init__.py` is one `lib = ffi.dlopen(os.path.join(os.path.dirname(__file__), …))`
+    line. Nothing is imported as an extension module, so there is no ABI tag to carry and
+    `py3-none-manylinux_riscv64` is the honest tag, not a hand-set `--plat-name`.
+    - **Three reads identify the shape before any triage guess**: `[tool.maturin] bindings
+      = "cffi"` in `pyproject.toml`, `cffi` in **both** `[build-system] requires` (to
+      generate `ffi.py` at build time) and `[project] dependencies` (to load it at run
+      time), and `unzip -p <whl> '*/WHEEL'` showing `Generator: maturin` with
+      `Root-Is-Purelib: false`.
+    - **Spend one build, not four, and still exercise every interpreter.** List the whole
+      set in `CIBW_BUILD` (`cp312-manylinux_riscv64 cp313-… cp314-… cp314t-…`) instead of a
+      `python:` matrix with `only:`, which cannot express reuse (gotcha 155 makes the same
+      point for abi3). cibuildwheel's `find_compatible_wheel` matches a wheel whose
+      `tag.abi == "none"` for any interpreter carrying its `py3` tag and — unlike the abi3
+      branch, which it skips under free threading — for `cp314t` too, so the log reads
+      `Found previously built wheel …, that's compatible with cp314t-manylinux_riscv64.
+      Skipping build step...` and the suite runs four times against the single artifact.
+      Name the job and the artifact `py3-none-manylinux_riscv64` rather than after the
+      interpreter that happened to build it (gotcha 34).
+    - **Each re-test leg still installs the test dependencies, so gotcha 210 bites the
+      free-threaded one — and an old pinned Rust toolchain disguises it.** A port that
+      installs upstream's own `rust-toolchain` pin (here 1.71.1) leaves that cargo on
+      `PATH` for the test phase too, so a test dependency that falls back to its sdist
+      fails with `error: failed to parse lock file … lock file version 4 was found, but
+      this version of Cargo does not understand this lock file` instead of 210's
+      `Target triple not supported by rustup`. It reads like our own crate's toolchain is
+      wrong; it is the dependency's source build. `CIBW_TEST_ENVIRONMENT:
+      PIP_ONLY_BINARY=<dep>` is the fix either way (gotcha 12: test phase only, so the
+      build backend keeps its sdists), and `pip download --only-binary=:all:` cannot
+      predict it — the check that would have caught it is the same resolution run *without*
+      `--only-binary`, where pip prefers the newest version over the newest one with a
+      wheel.

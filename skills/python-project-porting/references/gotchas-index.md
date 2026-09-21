@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (468 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (469 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -446,6 +446,11 @@ The porting gotchas (468 of them) live in [`references/gotchas/`](gotchas/), spl
   dists ship (riscv64 hides it inside `librustc_driver`), and no system LLVM new enough for
   a current toolchain's bitcode exists for riscv64 — cross-compile the object on an x86_64
   job (gotcha 4) and patch the build script to embed a staged one.
+- **479** — maturin `bindings = "cffi"` is a fourth `py3-none-<platform>` shape (a real Rust
+  cdylib that cffi's ABI mode `dlopen`s, gotchas 27/35/81/145's missing branch), and one
+  `CIBW_BUILD` list — not a `python:` matrix with `only:` — builds it once and re-tests it on
+  every interpreter, free-threaded included, because cibuildwheel reuses an `abi == "none"`
+  wheel where it refuses an abi3 one.
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
