@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (496 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (498 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -930,6 +930,9 @@ The porting gotchas (496 of them) live in [`references/gotchas/`](gotchas/), spl
 - **504** — A discrete wrong count, not a last-ULP value, can still be floating point:
   `-ffp-contract=fast` fuses `a*b+c` into an FMA on riscv64 and moves quantised coordinates
   into other buckets; reproduce it on x86 with `-march=haswell` (the cmeel-octomap case).
+- **507** — A SIGSEGV out of a hand-written `ctypes` smoke test is usually the test's own
+  declaration — `c_char_p.in_dll` on a C char array dereferences the string's first bytes as
+  a pointer, and a call with no `restype`/`argtypes` returns garbage; reproduce on x86 first.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
@@ -1040,3 +1043,6 @@ The porting gotchas (496 of them) live in [`references/gotchas/`](gotchas/), spl
   `in_progress` is a dead runner, not a failed build; the check-run annotations endpoint
   still holds the dying process's message. Correlate the shape across packages, then
   `rerun-failed-jobs` rather than pushing a fix.
+- **508** — A job is not hung because your own sense of elapsed time says so: an agent's
+  `sleep` does not track the runners' clock, so compare the job's `started_at` with
+  `date -u`, let `timeout-minutes` do the killing, and re-run a run rather than cancel it.

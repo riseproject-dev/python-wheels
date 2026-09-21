@@ -22,6 +22,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
 - **370** — `.queue.yml` lives on `main` in a checkout shared by every concurrently
 - **413** — `git -C <dir> apply <glob>` hands git the *literal* glob — the shell expands
 - **458** — A failed job with no log at all and its steps still `in_progress` is a dead
+- **508** — A job is not hung because *you* think it has been long: compare its `started_at`
 
 ---
 
@@ -446,3 +447,28 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
       wall".** When there is no log to read, the annotation plus the unfinished steps are
       the substitute — and reaching for a source fix, a parallelism cap or a parked entry
       without checking them costs a full build cycle to disprove.
+
+508. **Never call a running CI job hung from your own sense of elapsed time — read the
+    job's `started_at` next to `date -u` before cancelling anything (the cmeel-qhull
+    cancel).** An agent session's clock and its `sleep` do not track the wall clock the
+    runners live on: a long background sleep can return in a small fraction of the time it
+    asked for, so "this has been building for two hours" can be two minutes of real time.
+    Cancelling on that belief throws away a healthy build plus its queue wait, and leaves a
+    `cancelled` run on the PR that reads as flakiness to whoever looks next.
+    - **One comparison settles it:** `date -u` beside
+      `/repos/<repo>/actions/jobs/<id>` (`status`, `started_at`, per-step `status`). If the
+      delta is smaller than the build's plausible runtime, keep waiting. The cancelled
+      cmeel-qhull job's own log proved it afterwards — `##[error]The operation was canceled`
+      stamped 2m19s after the step it was in had started.
+    - **Let `timeout-minutes` do the killing.** Every `build-<pkg>.yml` carries one (120 by
+      convention) and it is enforced by the runner, so a job that genuinely wedges fails by
+      itself with a message that says so. That is a better signal than a cancel you have to
+      explain, and gotcha 458 covers the one shape that does need a human: a dead runner,
+      recognisable by a missing log and steps still `in_progress`.
+    - **Wait on a poll loop that prints on change**, not on blind sleeps — one request a
+      minute against the job endpoint, emitting only when `status` or the in-progress step
+      name changes, keeps the elapsed time honest and the output small.
+    - **Recovery is cheap but not free:** `POST /repos/<repo>/actions/runs/<id>/rerun`
+      replays the whole run as attempt 2 against the same merge ref, so the PR's checks
+      follow the new attempt with no push (gotcha 80's no-push rule still holds). Say in
+      the report that you cancelled and why.

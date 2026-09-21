@@ -45,6 +45,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **504** — A discrete wrong count, not a ULP, can still be float: `-ffp-contract=fast`
   fuses `a*b+c` into an FMA on riscv64 and shifts quantised coordinates into other buckets;
   reproduce it on x86 with `-march=haswell`.
+- **507** — A segfault from a hand-written `ctypes` smoke test is usually the test's own
+  declaration (`c_char_p.in_dll` on a char array, missing `restype`), not the wheel.
 
 ---
 
@@ -1103,3 +1105,23 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       `CMEEL_RUN_TESTS=false` says otherwise, and a failing test aborts the *build* inside
       `prepare_metadata_for_build_wheel` — no wheel, a PEP 517 traceback, and nothing that
       looks like a test report. Copy that env var across with the rest of the recipe.
+
+507. **A SIGSEGV out of a hand-written `ctypes` smoke test is almost always the test's own
+    declaration, not the wheel — reproduce the same line against the local x86 build before
+    believing riscv64 broke (the cmeel-qhull case).** A `has-sitelib = false` cmeel/CMake
+    distribution ships a `.so` and no Python at all, so the smoke test has to be written by
+    hand, and `ctypes` will happily misread a symbol rather than refuse.
+    - `ctypes.c_char_p.in_dll(lib, "qh_version")` on a C `const char qh_version[] = "…"`
+      takes the *array's first eight bytes as a pointer* and dereferences it: an immediate
+      segfault, identically in QEMU and on the runner, on a library that is perfectly fine.
+      The correct read of a char array is
+      `ctypes.string_at(ctypes.addressof(ctypes.c_char.in_dll(lib, "qh_version")))`.
+    - **Declare `restype`/`argtypes` for every function the test calls.** Without them
+      `ctypes` assumes `int` and passes unconverted objects, so a
+      `coordT qh_pointdist(pointT *, pointT *, int)` that returns `13.0` reads back as
+      garbage — which looks like gotcha 170's arch-specific numeric divergence and is not.
+    - The rehearsal is where this costs seconds instead of a CI cycle: the same three lines
+      against the locally built x86 wheel say whether the *test* or the *port* is wrong.
+      Prefer a real computation over a bare `CDLL()` load — loading proves linkage, not that
+      the library computes — and keep it to context-free entry points so no opaque handle
+      has to be faked.
