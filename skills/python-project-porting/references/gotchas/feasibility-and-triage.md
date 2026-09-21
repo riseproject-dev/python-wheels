@@ -213,6 +213,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   unversionable, the vendor's own package manifest is the platform table, and the pure-Python
   sdist already serves the arch (the adbutils/Android platform-tools case).
 - **528** — An open upstream and a permissive licence do not rescue a vendor runtime wheel: read
+- **529** — The vendored-binary triage's happy ending: the vendor can already publish our
   the build tree out of the unstripped `.so`'s debug paths (an internal release branch, not a
   public ref), diff the loader's `dlopen` backend list against the adapters the wheel actually
   ships, and check that any consumer could exist on our arch (the intel-cmplr-lib-ur case).
@@ -4180,3 +4181,40 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
        `strings -a libur_loader.so | grep -ci riscv` is 1015 (`R_RISCV_*`, `RISCVISAInfo.cpp`,
        `DW_CC_LLVM_RISCVVectorCall`) from bundled LLVM tables, while the ELF is x86-64, no
        `LLVMInitialize*Target` symbol exists at all, and the adapters have zero riscv strings.
+
+529. **The vendored-binary triage's happy ending: the vendor can already publish our arch,
+    and the version string names the release to check (the iterfzf case).** Gotcha 524 parked
+    adbutils over a vendored blob with no riscv64 upstream; this is the same shape with the
+    opposite answer, settled by one asset list. iterfzf's version `1.9.0.67.0` is
+    `<wrapper>.<bundled tool version>` — the tail is fzf 0.67.0 — so the release to interrogate
+    is named by the version itself. `fzf-0.67.0-linux_riscv64.tar.gz` is in it, and 0.67.0 is
+    the *first* fzf release that has it (0.66.0 and every earlier tag 404 for that name):
+    query the bundled version's own asset list, not the vendor's latest and not a "since when"
+    assumption.
+    - **The sdist can carry the asset list offline.** `iterfzf/fzf-<ver>-release.json` is the
+      cached GitHub release payload the PEP 517 backend resolves downloads from, so one
+      `pip download --no-binary :all:` enumerates every platform the vendor publishes with no
+      API call and no rate limit.
+    - **Then the port is the platform table, twice.** `build_dist.py` keys the asset off
+      `(GOOS, GOARCH)` and the wheel's platform tag off the same pair, with a second table
+      mapping `(sys.platform, platform.machine())` onto it. A missing row is
+      `KeyError: ('linux', 'riscv64')` under an explicit `GOOS`/`GOARCH` and
+      `RuntimeError: unsupported platform` natively — patch both, because the native table is
+      the path a user's `pip install` from the sdist takes on riscv64.
+    - **Verify the bytes against the vendor's checksums, not just the tag.** The wheel's
+      `iterfzf/fzf` is byte-identical to the release tarball's member, and that tarball's
+      sha256 is in `fzf_<ver>_checksums.txt`; an ELF with `e_machine` 243, `statically linked`
+      and a double-float ABI is also the answer to gotcha 449's "which riscv64?".
+    - **Don't adopt upstream's wheel smoke test without running it first.** iterfzf's `tox.ini`
+      asserts `iterfzf([]) is None` in two of its four commands; at this tag that raises
+      `AttributeError` on every platform (the subprocess is spawned only on the first item, so
+      an empty iterable leaves `stdin` as `None`), reproducible against upstream's own
+      published x86_64 wheel. Run the commands against an existing wheel before making them the
+      test job, and take the real suite instead — here `iterfzf/test_iterfzf.py` ships *inside*
+      the wheel, so `pytest --pyargs iterfzf.test_iterfzf` tests the installed artifact with no
+      checkout to shadow it (11 of its 14 cases run the real binary; the other three open the
+      full-screen picker and need a terminal — giving them a pty makes them hang, not pass).
+    - **A renamed wheel is not a retagged one.** This backend only rewrites the *filename*
+      (`py3-none-any` → `py3-none-manylinux_2_39_riscv64`); `dist-info/WHEEL` still says
+      `Tag: py3-none-any`. pip and uv both install it, so leave it alone rather than "fixing"
+      an upstream artifact shape.

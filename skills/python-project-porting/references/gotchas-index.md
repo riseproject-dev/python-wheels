@@ -345,6 +345,11 @@ The porting gotchas (517 of them) live in [`references/gotchas/`](gotchas/), spl
   declared anywhere — not in its own metadata, not in the parent distribution's — is a
   licensing question for the maintainer, not a feasibility verdict: record `license: Unknown`,
   flag it in the PR, and port it (the chalkpy-rs case).
+- **529** — Gotcha 524 with the opposite answer: a vendored prebuilt binary whose upstream
+  already publishes riscv64, named by the wrapper's own version string (`1.9.0.67.0` = wrapper
+  + fzf 0.67.0, the first fzf release carrying `linux_riscv64`); the port is then the two
+  platform-table rows the packaging backend is missing, plus a warning not to adopt upstream's
+  wheel smoke test without running it (the iterfzf case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
