@@ -1,0 +1,98 @@
+From: Ludovic Henry <git@ludovic.dev>
+Subject: [PATCH] tests: extend PG_DEPS_FROM_SYSTEM to the opus, MOD and HarfBuzz cases
+
+Upstream already has a marker for "this pygame was built against system SDL
+dependencies rather than our own curated set": PG_DEPS_FROM_SYSTEM, which its
+own build-ubuntu-sdist.yml, run-ubuntu-checks.yml, dev-check.yml and
+build-sdl3.yml all set, and which mixer_music_test and image_test already use
+to skip the cases such a build cannot satisfy. It is missing in three places
+that this port's SDL stack hits:
+
+  * test_load_object and test_object_namehint walk a list of music files that
+    unconditionally includes house_lo.opus and surfonasinewave.xm, while the
+    sibling house_lo.wv entry right below them is already guarded. opus
+    playback needs libopusfile and MOD playback needs libxmp, exactly as
+    wavpack needs libwavpack, so the same guard belongs on all three. The
+    single-format tests next to them (test_load_opus and friends) are already
+    tagged |tags:music| and so are excluded separately; only these two
+    list-driven ones are unguarded.
+
+  * test_font_set_script and test_font_set_direction call
+    Font.set_script()/set_direction(), which raise pygame.error unless SDL_ttf
+    was built with HarfBuzz (SDL2TTF_HARFBUZZ, off by default in SDL_ttf
+    2.24.0). The tests already special-case SDL_ttf older than 2.20.0, but not
+    a 2.24.0 built without the optional shaper.
+
+This is a build-configuration guard, not an architecture one: nothing here is
+riscv64-specific, and the same four tests fail for anyone building pygame-ce
+against a system SDL_mixer/SDL_ttf that omits those optional backends.
+
+Upstream-Status: To upstream [not yet submitted; this port only opens PRs against riseproject-dev/python-wheels, and extending a marker upstream defined is a maintainer's call about which backends PG_DEPS_FROM_SYSTEM is meant to cover, not a drive-by change]
+
+--- a/test/font_test.py
++++ b/test/font_test.py
+@@ -12,6 +12,8 @@ from pygame import font as pygame_font  # So font can be replaced with ftfont
+ 
+ FONTDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "fonts")
+ 
++PG_DEPS_FROM_SYSTEM = "PG_DEPS_FROM_SYSTEM" in os.environ
++
+ 
+ def equal_images(s1, s2):
+     size = s1.get_size()
+@@ -829,6 +831,11 @@ class FontTypeTest(unittest.TestCase):
+             font = pygame_font.Font(fpath, size)
+             font.render("WHERE", True, "black")
+ 
++    # system installed SDL_ttf may be built without HarfBuzz
++    @unittest.skipIf(
++        PG_DEPS_FROM_SYSTEM,
++        "set_script()/set_direction() need SDL_ttf built with HarfBuzz",
++    )
+     def test_font_set_script(self):
+         if pygame_font.__name__ == "pygame.ftfont":
+             return  # this ain't a pygame.ftfont thing!
+@@ -851,6 +858,11 @@ class FontTypeTest(unittest.TestCase):
+         else:
+             self.assertRaises(pygame.error, font.set_script, "Deva")
+ 
++    # system installed SDL_ttf may be built without HarfBuzz
++    @unittest.skipIf(
++        PG_DEPS_FROM_SYSTEM,
++        "set_script()/set_direction() need SDL_ttf built with HarfBuzz",
++    )
+     def test_font_set_direction(self):
+         if pygame_font.__name__ == "pygame.ftfont":
+             return  # not a pygame.ftfont thing
+--- a/test/mixer_music_test.py
++++ b/test/mixer_music_test.py
+@@ -82,9 +82,12 @@ class MixerMusicModuleTest(unittest.TestCase):
+             "house_lo.ogg",
+             "house_lo.wav",
+             "house_lo.flac",
+-            "house_lo.opus",
+-            "surfonasinewave.xm",
+         ]
++
++        # a system installed SDL_mixer may lack the opus and MOD backends too
++        if "PG_DEPS_FROM_SYSTEM" not in os.environ:
++            filenames += ["house_lo.opus", "surfonasinewave.xm"]
++
+         if pygame.mixer.get_sdl_mixer_version() >= (2, 6, 0):
+             filenames.append("house_lo.mp3")
+ 
+@@ -113,9 +116,12 @@ class MixerMusicModuleTest(unittest.TestCase):
+             "house_lo.ogg",
+             "house_lo.wav",
+             "house_lo.flac",
+-            "house_lo.opus",
+-            "surfonasinewave.xm",
+         ]
++
++        # a system installed SDL_mixer may lack the opus and MOD backends too
++        if "PG_DEPS_FROM_SYSTEM" not in os.environ:
++            filenames += ["house_lo.opus", "surfonasinewave.xm"]
++
+         if pygame.mixer.get_sdl_mixer_version() >= (2, 6, 0):
+             filenames.append("house_lo.mp3")
+ 
