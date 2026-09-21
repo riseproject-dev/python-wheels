@@ -4130,9 +4130,45 @@ packages:
   version: 2.5.8
   home: https://pyga.me
   repo: https://github.com/pygame-community/pygame-ce
-  status: ci-running
+  status: ci-green
   pr: 1819
-  notes: '21 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp315,pp311); no riscv64 on PyPI or pypi.riseproject.dev. Builds SDL2/SDL2_image/SDL2_ttf/SDL2_mixer/portmidi from source (no riscv64 SDL2-devel, same gap as build-pygame.yml/gotcha 288); drops libxmp/fluidsynth/wavpack/harfbuzz (EPEL-only or no riscv64 devel package) and the pp311 row (no PyPy riscv64 support). PR #1819. The PR sat 8 days with every CI leg reading "cancelled"; that was never an eviction or a cancel-in-progress race - the jobs were hitting the workflow''s own timeout-minutes: 600, which GitHub records as "cancelled", and the maintainer had been manually cancelling and re-dispatching on top. Rebased onto main and modernized the old-style scaffolding (added docs/packages/pygame-ce.yaml, wired _setup.yml with package:/version:, added the push trigger and branches: [main] on pull_request, iterated every job over matrix.version, passed RISEPROJECT_APP_PRIVATE_KEY to _publish-wheel.yml, dropped the dead /project/pgce-ci-diag.log tee - cibuildwheel copies the project into the container rather than bind-mounting it, so that file never came back). Matrix trimmed 6 -> 3 legs (cp312-cp314: numpy ships riscv64 wheels for those only) and timeout-minutes 600 -> 180. Real blocker found with python -u added to the test command (pygame''s runner prints a module''s results only once the module is done, so buffered stdout hid this): all three interpreters stall deterministically inside pygame.tests.draw_test - run 35538919447, last line "loading pygame.tests.draw_test" on cp312/cp313/cp314, docs_test just before it completing "OK (skipped=2)". Not a resource wall: no Killed/OOM/No space/signal 9 in any leg (the only "oom" greps are rotozoom.c.o and boom.wav). Not a bad test command either - the identical command (python -m pygame.tests -v --exclude opengl,music,timing --time_out 300, upstream''s own) runs 2385 tests in 18s against upstream''s x86_64 pygame-ce 2.5.8 wheel, same SDL 2.32.10, so the hang is riscv64-specific and in pygame-ce''s C drawing code (draw_test.py itself contains no loops). Note --time_out only applies in subprocess mode, which pygame''s runner does not use by default, so nothing bounds a hung module. Bisecting draw_test per-test under a faulthandler watchdog (run 35548285219); PR temporarily set to draft while that diagnostic is on the branch (gotcha 168 / #481: a maintainer can merge mid-experiment).'
+  notes: '21 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp315,pp311); no riscv64 on PyPI
+    or pypi.riseproject.dev. CI green on PR #1819 (run 35554793349, commit 25cc84add4): all three legs
+    build and the full upstream test command runs 2385 tests per interpreter, OK, and the publish job
+    dry-runs clean. Ready for review, not merged - left to the maintainer.
+
+    Workflow: builds SDL2 2.32.10/SDL2_image 2.8.12/SDL2_ttf 2.24.0/SDL2_mixer 2.8.2/portmidi 2.0.7 from
+    source (Rocky 10 dropped SDL2-devel on every arch for sdl2-compat, gotcha 288); drops SDL2_mixer''s
+    MOD/fluidsynth backends (EPEL-only, EPEL empty on riscv64, gotcha 51), opus file decoding (needs libopusfile,
+    no Rocky 10 package) and wavpack with them; drops SDL_ttf HarfBuzz. Matrix cp312-cp314 (numpy ships
+    riscv64 wheels for those only); pp311 dropped for lack of riscv64 PyPy.
+
+    The 8-day stall was self-inflicted, not runner eviction and not a cancel-in-progress race: the legs
+    were hitting the workflow''s own timeout-minutes: 600, which GitHub records as "cancelled". Rebased
+    onto main and modernized the scaffolding (added docs/packages/pygame-ce.yaml, wired _setup.yml with
+    package:/version:, added the push trigger and branches: [main] on pull_request, iterated every job
+    over matrix.version, passed RISEPROJECT_APP_PRIVATE_KEY to _publish-wheel.yml, dropped the dead /project/pgce-ci-diag.log
+    tee - cibuildwheel copies the project into the container rather than bind-mounting it). Matrix 6 ->
+    3 legs, timeout-minutes 600 -> 180.
+
+    Two real defects, both found by bypassing pygame''s own test runner (it buffers each module into a
+    StringIO and prints it only when the module ends, and defaults to single-process mode where its --time_out
+    never applies, so both failures were invisible - new gotchas 472/473). (1) pygame.draw.arc() is broken
+    on riscv64: test_arc__correct_drawing never returns (run 35538919447) and test_arc__surface_clip segfaults
+    (run 35550328498), both on a bare draw_arc() call in the C rasteriser. python -X faulthandler -m unittest
+    named the segfault at draw_test.py:7313, and running each of draw_test''s 252 tests in its own interpreter
+    (run 35551432208) left exactly those two failing - patch 0001 skips just them on riscv64. The first
+    watchdog run had used exit=True, which stops at the first offender, which is why the segfault only
+    surfaced after the hang was skipped. (2) Four tests failed because this build omits optional SDL backends,
+    not because of riscv64: patch 0002 extends PG_DEPS_FROM_SYSTEM - upstream''s own marker for a system-deps
+    build, set by its run-ubuntu-checks.yml/build-ubuntu-sdist.yml/dev-check.yml/build-sdl3.yml - to the
+    house_lo.opus and surfonasinewave.xm entries that sit unguarded next to an already-guarded house_lo.wv,
+    and to test_font_set_script/test_font_set_direction, which need SDL_ttf built with HarfBuzz; the workflow
+    sets PG_DEPS_FROM_SYSTEM=1 (gotcha 474).
+
+    Verified in the manylinux_2_39_riscv64 image that Rocky 10 riscv64 does ship harfbuzz-devel (appstream
+    8.4.0) and wavpack-devel (crb), correcting gotcha 288; harfbuzz is still left off because libharfbuzz
+    links libglib-2.0/libgraphite2, which auditwheel would vendor and gpl_sources would then have to archive.'
 - pkg: nixl-cu13
   version: 1.4.0
   home: ''
