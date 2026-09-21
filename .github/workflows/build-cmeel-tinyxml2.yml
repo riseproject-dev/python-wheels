@@ -1,0 +1,107 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/cmake-wheel/cmeel-tinyxml2/blob/v11.0.0.c0/.github/workflows/release.yml
+name: Build cmeel-tinyxml2 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cmeel-tinyxml2.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cmeel-tinyxml2.yml'
+      - 'docs/packages/cmeel-tinyxml2.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cmeel-tinyxml2.yml'
+      - 'docs/packages/cmeel-tinyxml2.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cmeel-tinyxml2
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cmeel-tinyxml2 ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      CMEEL_TINYXML2_VERSION: ${{ matrix.version }}
+
+    steps:
+      # cmeel-tinyxml2's own release tags carry a trailing packaging-revision
+      # suffix (.c0) that isn't part of the wheel's own version.
+      - name: Checkout cmeel-tinyxml2 v${{ env.CMEEL_TINYXML2_VERSION }}.c0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: cmake-wheel/cmeel-tinyxml2
+          ref: v${{ env.CMEEL_TINYXML2_VERSION }}.c0
+          submodules: true
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # has-sitelib = false: the wheel holds no Python extension, so one
+          # py3-none wheel covers every interpreter.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: CMEEL_LOG_LEVEL=DEBUG PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # cmeel links libtinyxml2.so with an $ORIGIN RUNPATH into the shared
+          # cmeel prefix; repair would only re-tag it, as upstream's own
+          # release.yml assumes.
+          CIBW_REPAIR_WHEEL_COMMAND: ""
+          CIBW_TEST_COMMAND: >-
+            python -c "import ctypes, pathlib, sysconfig;
+            lib = pathlib.Path(sysconfig.get_paths()['purelib']) / 'cmeel.prefix/lib/libtinyxml2.so';
+            ctypes.CDLL(str(lib))"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cmeel-tinyxml2-${{ env.CMEEL_TINYXML2_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cmeel-tinyxml2 ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: cmeel-tinyxml2-${{ matrix.version }}-py3-none-manylinux_riscv64
