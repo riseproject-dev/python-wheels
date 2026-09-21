@@ -204,6 +204,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   than downloaded, so there is no fetch to grep: `file` the committed binary and match its
   `BuildID` against the released wheel's, then build the sibling C++ repo at the same tag
   (the lib3mf case).
+- **523** — Clearing a layered ecosystem's leaf tier does not make the next-named package
+  actionable: recompute the frontier per candidate, split "the missing sibling is a *build*
+  requirement" (nothing to attempt) from "runtime only" (buildable ahead of it), and run the
+  resolver oracle twice because it stops at the first failure (the libpinocchio case).
 
 ---
 
@@ -4019,3 +4023,45 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       the wheel. Look for the project's own `<PROJ>_TESTS`/`BUILD_TESTING` switch and pass it to
       the configure step. A local rehearsal that builds only the library target (`ninja lib3mf`)
       hides this completely: rehearse the exact command the workflow runs.
+
+523. **Clearing a layered ecosystem's leaf tier does not make the next-named package
+    actionable — recompute the frontier from each candidate's own metadata, and separate
+    "the missing sibling is a *build* requirement" from "it is only a runtime one" (the
+    libpinocchio case).** A campaign that lands several siblings of a co-installed-prefix
+    ecosystem (gotcha 470's cmeel chain) builds momentum that reads like progress up the
+    chain. It is not: the frontier advances one tier per round, and which entries just
+    became reachable has to be derived, not inferred from what was merged.
+    - **Queue notes cannot tell the tiers apart.** Every `cmake-wheel`/cmeel entry reads
+      `N Linux wheels upstream (abi: 0)` for gotcha 470's reason, so a mid-tier package's
+      note is textually indistinguishable from a leaf's. libpinocchio 4.1.0 was picked as
+      "one more of pin's blockers cleared" after five leaves merged; it is two tiers up,
+      blocked on `cmeel-urdfdom >= 6` and `libcoal >= 3.0.3, < 4`, neither of which had a
+      port even in flight. Checking `[build-system] requires` and the registry index costs
+      one minute and reorders the queue correctly — the packages that actually became
+      actionable were the *other* entries whose own deps are now all published.
+    - **`[build-system] requires` vs `[project] dependencies` decides whether you can port
+      ahead of the dependency at all.** A sibling missing only from `[project] dependencies`
+      still permits a green build and a publish; the wheel simply will not install until the
+      dep lands, which can be a deliberate choice. A sibling missing from
+      `[build-system] requires` — cmeel spells these `dep[build]` — means pip fails before
+      any compiler runs, so there is no build to attempt and no CI cycle worth spending.
+      Read both lists; a package can have the dep in one, the other, or both.
+    - **`readelf -d` on the candidate's *own* released wheel, not just the chain's top
+      package.** Gotcha 470 mapped the whole chain from pin's binding `.so`; applied to
+      libpinocchio's own aarch64 wheel it shows a third and harder form of the same block —
+      nothing bundled, `RUNPATH $ORIGIN`, and `libpinocchio_{collision,parsers,visualizers}.so`
+      carrying `NEEDED libcoal.so` with `libpinocchio_parsers.so` additionally needing
+      `liburdfdom_{model,world,sensor}.so.6`. The missing siblings are *link inputs*, so even
+      a hypothetically installable build environment would fail at link.
+    - **Run the resolver oracle twice.** `ci_scripts/check_riscv64_deps.py` stops at the first
+      unsatisfiable requirement, so a single `UNRESOLVABLE` run names one blocker and hides
+      every other one behind it. Re-run with the known-missing requirements removed: that is
+      what turns "at least cmeel-urdfdom is missing" into "cmeel-urdfdom and libcoal are the
+      only two", and it is the evidence a revisit needs to be a single check rather than a
+      re-triage.
+    - **Switching off the feature that pulls the dependency is not a shortcut.** Dropping
+      libpinocchio's `-DBUILD_WITH_COLLISION_SUPPORT=ON` (and the parsers) would remove two of
+      the four `.so` the wheel exists to ship — and the consumer, pin, `NEEDED`s both — while
+      cmeel still writes `Requires-Dist` from the unchanged `[project] dependencies`. The
+      result is an unusable wheel that also diverges from the upstream recipe the port exists
+      to mirror, which is goal 2's definition of a defect.
