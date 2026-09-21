@@ -46,6 +46,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
 - **482** — The registry's simple index is case-sensitive, so gotcha 30/353's `curl` check
   and `queue_triage.py --deps` both report "not on RISE" for a package we do publish
   whenever the dependency's PyPI spelling is not already PEP 503-normalized.
+- **488** — `PIP_ONLY_BINARY=:all:` in the test environment can silently *downgrade* a
+  pure-Python dependency whose newer releases are sdist-only, and the symptom is a failing
+  test rather than a resolution error.
 
 ---
 
@@ -814,3 +817,33 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       and cp313, because pip normalizes names itself. Treat `queue_triage.py`'s RISE column
       as advisory (its docstring already warns about `py3-none-any` facades) and never park
       a package or trim a matrix on a bare 404 from a name you did not normalize.
+
+488. **`PIP_ONLY_BINARY=:all:` in `CIBW_TEST_ENVIRONMENT` can silently *downgrade* a
+    pure-Python dependency, and you learn about it as a test failure, not a resolution
+    error (the pymatgen-core/bibtexparser case).** Gotcha 12 recommends exactly this —
+    keep index URLs in `CIBW_ENVIRONMENT`, put `only-binary` in `CIBW_TEST_ENVIRONMENT`
+    alone — and `:all:` is the convenient spelling because it needs no list of names and
+    `ci_scripts/riscv64_resolve.py` proves the whole set resolves binary-only before you
+    push. The gap: `--only-binary :all:` does not only stop *compilation*, it removes
+    every release that has no wheel **from the candidate set**, so a dependency that
+    publishes an sdist and no wheel for its recent versions is quietly pinned back to
+    its last wheel-bearing release. pymatgen-core requires `bibtexparser>=1,<2`; 1.3.0 is
+    the newest 1.x with a wheel and 1.4.0-1.4.4 are sdist-only, so the test venv got
+    1.3.0 and four `tests/util/test_provenance.py` cases died on
+    `ValueError: Invalid format for SNL reference! Should be BibTeX string.` from
+    pymatgen's own `is_valid_bibtex`. The build and the wheels were perfect; nothing in
+    the log mentioned bibtexparser.
+    - **Tell it apart from a real riscv64 problem in one step, off-target**: install the
+      version the CI log's `Successfully installed …` line names on an x86_64 host and
+      run the failing file. Here `bibtexparser==1.3.0` fails 4 and `1.4.4` passes all —
+      arch-independent, so it is a resolution artefact, not a port defect.
+    - **Fix by naming the compiled distributions instead of `:all:`.** The list is not
+      guesswork: `riscv64_resolve.py`'s output already shows which requirements resolved
+      to a `manylinux_*_riscv64` wheel (for pymatgen-core, twelve of forty), and that set
+      *is* the set that needs forcing. Everything else is pure Python and builds from an
+      sdist in seconds.
+    - **Do not reach for `PIP_ONLY_BINARY=:all: PIP_NO_BINARY=<pkg>` as the escape hatch.**
+      A per-name entry does beat `:all:` in `FormatControl.get_allowed_formats`, but
+      `fmt_ctl_handle_mutual_exclude` *clears the other set* when it sees `:all:`, so
+      whichever of the two environment variables pip happens to process second wins. Two
+      env vars whose outcome depends on `os.environ` ordering is not a fix.

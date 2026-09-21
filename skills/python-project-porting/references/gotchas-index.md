@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (476 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (478 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -747,6 +747,10 @@ The porting gotchas (476 of them) live in [`references/gotchas/`](gotchas/), spl
   `queue_triage.py --deps` both report "not on RISE" for a package we publish whenever the
   dependency's PyPI spelling is not normalized — `PyYAML` 404s where `pyyaml` 200s; settle
   it with `check_riscv64_deps.py`, which drives pip.
+- **488** — `PIP_ONLY_BINARY=:all:` in the test environment can silently *downgrade* a
+  pure-Python dependency whose newer releases are sdist-only; the symptom is a failing test,
+  not a resolution error, and the `:all:` + `PIP_NO_BINARY=<pkg>` escape hatch is
+  order-dependent.
 
 ### Build-tool drift & pins — [`gotchas/build-tool-drift-and-pins.md`](gotchas/build-tool-drift-and-pins.md)
 
@@ -830,6 +834,9 @@ The porting gotchas (476 of them) live in [`references/gotchas/`](gotchas/), spl
 - **439** — A Bazel project runs one process per `py_test` target, so one `pytest --pyargs`
   over the whole package invents failures: run each file as its own absltest script, and take
   the `env`/`args` from the `py_test` rules (per-target, not globally).
+- **489** — A hundreds-of-MB upstream test-data tree can be left out of the checkout with
+  non-cone sparse-checkout (which also switches `actions/checkout` to a `blob:none` clone),
+  and the suite selected as the complement of the modules that grep for the data constant.
 
 ### Test failures, flakes & arch-specific bugs — [`gotchas/test-failures-and-flakes.md`](gotchas/test-failures-and-flakes.md)
 

@@ -37,6 +37,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
   blame the wrong codec.
 - **439** — A Bazel project runs one process per `py_test` target — one `pytest --pyargs` over
   the whole package invents failures; run each file as its own absltest script.
+- **489** — An upstream test-data tree of hundreds of MB can be left out of the checkout
+  entirely, and the suite selected as the complement of the modules that read it.
 
 ---
 
@@ -725,3 +727,36 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
     cases do `sys.modules["jax"]` and its `py_test` declares
     `"@pypi//jax:pkg",  # buildcleaner: keep` — grep `sys.modules[` and the BUILD `deps` as
     well as the imports.
+
+489. **A hundreds-of-MB upstream test-data tree can be left out of the checkout, and the
+    suite selected as the complement of the modules that read it (the pymatgen-core
+    case).** A scientific project's git tree is often mostly reference outputs: for
+    pymatgen-core, 514 MB of the 545 MB checkout is `test-files/`, reached only through
+    `PMG_TEST_FILES_DIR` / `pymatgen.util.testing.TEST_FILES_DIR`. None of it is needed to
+    *build* — the sdist's `MANIFEST.in` prunes it outright — and staging it through
+    `test-sources` into the container per interpreter is not worth it either. Both halves
+    of the answer are mechanical:
+    - **Drop it at checkout with non-cone sparse-checkout**, which takes gitignore-style
+      negations that cone mode cannot express:
+      ```yaml
+      sparse-checkout: |
+        /*
+        !/test-files
+      sparse-checkout-cone-mode: false
+      ```
+      Enabling sparse-checkout also makes `actions/checkout` fetch with
+      `--filter=blob:none`, so the excluded blobs are never transferred at all: 9 seconds
+      instead of minutes on a self-hosted riscv64 runner, where the clone is the job's
+      first real cost. Verify the pattern locally with `git sparse-checkout set --no-cone`
+      before pushing — `du -sh` the result.
+    - **Pick the tests by grepping for the data constant**, not by guessing:
+      `grep -l 'TEST_FILES_DIR\|VASP_IN_DIR' tests/**/*.py` names every module that needs
+      the tree, and its complement runs green with nothing staged but `tests/` itself
+      (`CIBW_TEST_SOURCES: tests`, then the complement as explicit paths plus `--ignore=`
+      for the two stragglers inside an otherwise-clean directory). A compiled-extension
+      package's *own* extension tests are almost always in the complement, because they
+      take arrays and not files — pymatgen-core's three Cython modules are covered by
+      `tests/optimization` and `tests/util/test_coord.py`, none of which opens a data file.
+    - Rehearse the complement off-target first (gotcha 52): the two modules that needed the
+      tree failed identically on x86_64, which is how the split was found without spending a
+      riscv64 cycle on it.
