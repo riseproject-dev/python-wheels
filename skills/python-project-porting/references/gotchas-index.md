@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (495 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (496 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -302,6 +302,10 @@ The porting gotchas (495 of them) live in [`references/gotchas/`](gotchas/), spl
   native sources can still be unbuildable (the angr case).
 - **505** — A cmeel note's build number need not be `0`, and `abi: 4,5` means one wheel
   version was packaged twice: build the highest `.cN` tag, never an assumed `.c0`.
+- **506** — Gotcha 263's "closed wheel, open project inside" rescue is per package, not per
+  vendor: a version that is a release-train number rather than an open tag, and a largest
+  payload whose `DT_NEEDED` names the vendor's own closed runtimes, mean there is nothing to
+  rebuild — plus the vendor's apt index and EULA as independent stops (the intel-openmp case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

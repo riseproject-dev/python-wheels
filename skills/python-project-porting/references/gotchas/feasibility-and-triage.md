@@ -186,6 +186,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   native sources can still be unbuildable (the angr case).
 - **505** — A cmeel note's build number need not be `0`, and `abi: 4,5` means one version was
   packaged twice: build the highest `.cN` tag, never an assumed `.c0`.
+- **506** — Gotcha 263's "closed wheel, open project inside" rescue is per *package*, not per
+  vendor: before reusing it on another Intel oneAPI wheel, check that the version maps to an open
+  tag and that the *largest* payload's `DT_NEEDED` list stays inside that open project (the
+  intel-openmp case).
 
 ---
 
@@ -3770,3 +3774,59 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       `docs/packages/<pkg>.yaml` still carries one plain `- version:` entry, and
       `_publish-wheel.yml` — which reads `Name`/`Version` out of `METADATA` — never sees
       the build tag at all.
+
+506. **Gotcha 263's "closed wheel, open project inside" rescue is per *package*, not per vendor —
+    before reusing it on another wheel from the same vendor, check that the version maps to an
+    open tag and that the *largest* payload's `DT_NEEDED` list stays inside that open project
+    (the intel-openmp case).** tbb (gotcha 263) is the standing precedent that an Intel-built,
+    sdist-less, EULA-covered wheel can still be portable, because its `2023.1.0` was Apache-2.0
+    oneTBB `v2023.1.0` rebuilt. With nine more Intel oneAPI distributions on the queue
+    (`intel-cmplr-lib-{ur,rt}`, `intel-cmplr-lic-rt`, `intel-sycl-rt`, `intel-opencl-rt`,
+    `dpcpp-cpp-rt`, `mkl`, `mkl-static`, `mkl-include`) that precedent is the expensive wrong
+    turn to take by analogy. Two checks separate a repackaged open project from a compiler
+    vendor's own output:
+    - **A version that is a *release train* number, not a project tag, is the first tell.**
+      intel-openmp's `2026.1.1` is a oneAPI compiler release; no `llvm-project` `openmp` tag
+      carries it, unlike tbb's exact tag match. The payload's own banner says who built it:
+      `strings -a libiomp5.so | grep '@(#)'` gives `build compiler: Intel(R) oneAPI DPC++/C++
+      Compiler 2024.2.0`, `build time 2026-02-13`, i.e. Intel's closed toolchain on Intel's
+      machine — gotcha 431's builder-path tell in banner form.
+    - **`readelf -d` the biggest file in the wheel, not the eponymous one.** `libiomp5.so` — the
+      part with an open ancestor — is 2.8 MB of the 141 MB unpacked (2%); `libomptarget.so` is
+      131.8 MB (93%) and needs `libimf.so`, `libsvml.so`, `libirng.so`, `libintlc.so.5` (Intel's
+      proprietary compiler runtimes, published only as x86_64 binaries through the equally
+      x86_64-only `intel-cmplr-lib-rt`) plus `libur_loader.so.0` from the hard-pinned
+      `Requires-Dist: intel-cmplr-lib-ur==2026.1.1`. SVML is an x86 SIMD vector-math library by
+      construction, and none of the four has public source anywhere. So "build the open part"
+      reproduces LLVM's `libomp` under a different name, not this distribution — and LLVM's
+      openmp runtime *does* build on riscv64 (`openmp/runtime/cmake/LibompGetArchitecture.cmake`
+      has a `__riscv && __riscv_xlen == 64` arm), which is exactly what makes the analogy
+      tempting and wrong. riscv64 manylinux already ships GCC's `libgomp`; a renamed second
+      OpenMP runtime is not the package anyone declared a dependency on.
+    - **A wheel that is 100% `.data/data/` with an empty `top_level.txt` has no port surface at
+      all.** intel-openmp ships zero Python modules — prebuilt `.so`/`.a`/`.o`/`.bc`, `omp.h`
+      and a `pkgconfig` file under `.data/data/{lib,opt/compiler}`, no build system, `readelf
+      -h` → `Advanced Micro Devices X86-64` throughout. Same "the binary *is* the source" shape
+      as 453/465, reached without `strings`.
+    - **Gotcha 465's inverted riscv tell repeats, one LLVM further out.** `strings -a
+      libomptarget.so | grep -ci riscv` → 1106 (`R_RISCV_*`, `EF_RISCV_*`, `RISCVISAInfo.cpp`),
+      all of it LLVM `BinaryFormat`/`TargetParser` tables linked in with the offload JIT: the
+      only registered target is `LLVMInitializeNVPTX*`, and `libiomp5.so` itself has **0** riscv
+      strings. The offload backends are Intel GPU ones (`level_zero`, OpenCL, `spir64`).
+    - **The vendor's non-PyPI index settles the arch question in one line** (gotcha 453's second
+      table): `apt.repos.intel.com/oneapi/dists/all/Release` says `Architectures: all amd64 i386
+      i686`. Intel builds oneAPI for no non-x86 architecture at all — not even aarch64, which
+      makes "they'd have to add riscv64" a two-step ask, not one.
+    - **The EULA blocks the rehost independently, and its redistribution clause is the one to
+      read.** The Intel End User License Agreement for Developer Tools §3.1 forbids
+      distributing or publicly displaying the Materials, modifying/adapting/translating them and
+      reverse engineering them; the lone grant (§2.1.D) covers "Redistributables" in Executable
+      Code "only as part of Your Product" under a downstream licence that itself bars reverse
+      engineering. Publishing the bytes on an index is not "as part of Your Product" — gotcha
+      453/465's licence stop, in Intel's wording.
+    - **Check who would even load it before writing the note.** intel-openmp's only PyPI consumer
+      is `mkl` (itself an x86_64-only Intel blob), and every OpenMP/MKL consumer already ported
+      here takes the non-Intel path on riscv64 anyway: ctranslate2 builds `WITH_MKL=OFF` with
+      `OPENMP_RUNTIME=COMP`, clarabel swaps the mkl-backed pardiso, scs links OpenBLAS. A park
+      with no downstream cost is worth stating as such — it closes the "but numpy/torch might
+      want it" question the family's name invites.
