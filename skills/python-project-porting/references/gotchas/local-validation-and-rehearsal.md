@@ -44,6 +44,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
 - **498** — The manylinux image's `curl`/`pip` ignore the trust store gotcha 384 fixes, a
   sampling profiler cannot be rehearsed under QEMU at all, and the way to see where one
   crashes is a throwaway unstripped CI build.
+- **520** — A giant generated translation unit is rarely the dominant cost — time it on
+  x86 before copying upstream's constrained-arch `-O0`.
 
 ---
 
@@ -632,3 +634,32 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
     What it bought: four `error: passing argument 1 of 'PyArray_DATA' from incompatible
     pointer type` in `pybullet.c` — gotcha 226's GCC-14 class, invisible on a GCC 13 host,
     and otherwise a wasted ~1h CI cycle on every interpreter.
+520. **A giant generated translation unit is rarely the dominant cost — compile it once on
+     x86 before copying upstream's constrained-arch `-O0` (the quantlib case).** A SWIG/Cython
+     binding whose wrapper is one enormous machine-generated `.cpp` invites a reflex: upstream's
+     own wheel workflow already lowers the optimization level for its slowest target, so lower it
+     for riscv64 too. That is a real divergence — it has to be justified in the PR, it ships
+     slower glue forever, and it is usually based on nothing but the file's size. Measure it
+     instead; it needs no CI and no QEMU, because compile *time* extrapolates across arches far
+     better than it guesses.
+     - **The measurement is one `g++ -c`, not a build.** You do not need the C++ library the
+       binding links against — only its headers. For QuantLib-SWIG 1.43: run the library
+       tarball's `./configure` (that is what generates `ql/config.hpp`), extract just the
+       header subtree of the third-party dep (`tar xzf boost.tar.gz boost_1_90_0/boost`, 185 MB
+       instead of 1.2 GB), then
+       `g++ -std=c++17 -O3 -g0 -fPIC -c quantlib_wrap.cpp -o /dev/null -I/usr/include/python3.N
+       -I<ql> -isystem <boost> -DNDEBUG -DPy_LIMITED_API=0x03090000 -Wno-unused`.
+     - **The numbers refuted the reflex.** 35 MB / 791k lines: **588 s at `-O3`, 152 s at
+       `-O0`** on a 4-core x86 box — a 4x ratio, not the 20x the file size suggests, because
+       most of the cost is front-end template instantiation that `-O0` does not avoid. The
+       `-O3` object was also *smaller* (54 MB vs 80 MB). Scaled to a 4-core riscv64 runner
+       that is roughly an extra 40-60 min, against a whole-library build that dominates the
+       job anyway — the real run took 2 h for the entire abi3 leg. Upstream's `-O3 -g0` was
+       kept verbatim and the workflow carries no flag divergence at all.
+     - **Never invent a third value.** When upstream's matrix has exactly two settings for a
+       flag (here `-O3` everywhere, `-O0` for i686), the honest choices are those two. Picking
+       `-O1` "as a compromise" is a number nobody upstream has ever tested.
+     - **The same command is the cheapest portability pre-flight there is.** A clean compile
+       proves the dep's header version, the project's headers and `Py_LIMITED_API` all agree
+       before a scarce riscv64 runner is booked — the generated-wrapper equivalent of gotcha
+       517's `-fsyntax-only` sweep, and it costs ten minutes on any host.

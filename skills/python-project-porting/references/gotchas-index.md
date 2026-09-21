@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (500 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (502 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -357,6 +357,11 @@ The porting gotchas (500 of them) live in [`references/gotchas/`](gotchas/), spl
 - **466** — Gotcha 2's counter-case: an sdist can omit `CMakeLists.txt` and the C sources
   entirely, and `pip wheel` on it still exits 0 — producing a `py3-none-any` wheel with no
   extension that imports fine and dies on first use (the piper-tts case).
+
+- **521** — A SWIG/autotools binding can publish wheels and no sdist at all because the
+  generated wrapper lives only in upstream's `make dist` tarball: mirror upstream's own
+  tarball job (SWIG from source, `autogen.sh && configure && make dist` on both the library and
+  the bindings repo) on x86 and hand the pair to the riscv job (the quantlib case).
 
 ### cibuildwheel mechanics, the matrix & abi3 — [`gotchas/cibuildwheel-matrix-and-abi3.md`](gotchas/cibuildwheel-matrix-and-abi3.md)
 
@@ -1049,6 +1054,11 @@ The porting gotchas (500 of them) live in [`references/gotchas/`](gotchas/), spl
   384's trust-store fix reaches `dnf` and not `curl`/`pip`; a sampling profiler cannot be
   rehearsed under QEMU (an emulated process's `/proc/<pid>/exe` is the host `qemu-<arch>`);
   and a throwaway unstripped CI run with core dumps buys the backtrace (the austin-dist case).
+
+- **520** — A giant generated translation unit is rarely the dominant cost: time it on x86
+  (a SWIG wrapper of 35 MB / 791k lines cost 588 s at `-O3` vs 152 s at `-O0`, a 4x ratio, and
+  the `-O3` object was smaller) before copying upstream's constrained-arch `-O0` and shipping a
+  divergence nobody needed (the quantlib case).
 
 ### PR, CI, triggers, publishing & maintainer signals — [`gotchas/pr-ci-and-maintainer.md`](gotchas/pr-ci-and-maintainer.md)
 
