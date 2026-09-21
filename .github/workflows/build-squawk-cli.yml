@@ -1,0 +1,171 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/sbdchd/squawk/blob/v2.63.0/.github/workflows/python.yml
+name: Build squawk-cli wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/squawk-cli.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-squawk-cli.yml'
+      - 'docs/packages/squawk-cli.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-squawk-cli.yml'
+      - 'docs/packages/squawk-cli.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: squawk-cli
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build squawk-cli ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+
+    env:
+      SQUAWK_CLI_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout squawk v${{ env.SQUAWK_CLI_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: sbdchd/squawk
+          ref: v${{ env.SQUAWK_CLI_VERSION }}
+          persist-credentials: false
+
+      # `[tool.maturin] bindings = "bin"`: the wheel is one compiled executable
+      # with no ABI tag, so a single native build covers every interpreter.
+      # `maturin-version` left unset because upstream's v1.7.1 pin predates
+      # maturin's riscv64 release assets (gotcha 344).
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          working-directory: crates/squawk
+          args: --release --locked --out dist
+          manylinux: '2_39'
+          # `perl-core` replaces upstream's `perl-IPC-Cmd`: Rocky 10 also lacks
+          # FindBin, which openssl-src's vendored OpenSSL build needs.
+          before-script-linux: |
+            git config --global --add safe.directory "*"
+            dnf -y install perl-core
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: squawk-cli-${{ env.SQUAWK_CLI_VERSION }}-manylinux_riscv64
+          path: crates/squawk/dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test squawk-cli ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    env:
+      SQUAWK_CLI_VERSION: ${{ matrix.version }}
+      # Without this uv would reuse the runner image's system CPython for 3.12
+      # and download a standalone build for the others.
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # This repo's default interpreter matrix; the wheel is
+        # interpreter-agnostic (bindings = "bin"), so every interpreter --
+        # including free-threaded -- exercises the same binary.
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: squawk-cli-${{ env.SQUAWK_CLI_VERSION }}-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . squawk-cli
+
+      # Upstream ships no wheel-level test suite (its Rust suite is not packaged,
+      # gotcha 187), and the wheel carries only the .data/scripts/squawk binary
+      # with no importable module, so there is no `python -m squawk` either.
+      # Drive the linter against a migration that trips known rules instead.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          squawk --version
+          squawk --help >/dev/null
+          squawk upload-to-github --help >/dev/null
+          file "$(command -v squawk)" | grep -q ELF
+
+          work=$(mktemp -d)
+          printf 'ALTER TABLE "core_recipe" ADD COLUMN "foo" integer NOT NULL;\n' > "$work/bad.sql"
+          printf 'SELECT 1;\n' > "$work/ok.sql"
+
+          squawk "$work/ok.sql"
+
+          rc=0
+          squawk "$work/bad.sql" || rc=$?
+          [ "$rc" -eq 1 ]
+
+          rc=0
+          squawk --reporter json "$work/bad.sql" > "$work/all.json" || rc=$?
+          [ "$rc" -eq 1 ]
+          grep -q '"rule_name":"adding-required-field"' "$work/all.json"
+          grep -q '"rule_name":"prefer-bigint-over-int"' "$work/all.json"
+
+          rc=0
+          squawk --exclude=prefer-bigint-over-int --reporter json "$work/bad.sql" > "$work/fewer.json" || rc=$?
+          [ "$rc" -eq 1 ]
+          grep -q '"rule_name":"adding-required-field"' "$work/fewer.json"
+          ! grep -q '"rule_name":"prefer-bigint-over-int"' "$work/fewer.json"
+
+  publish:
+    name: Publish squawk-cli ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: squawk-cli-${{ matrix.version }}-manylinux_riscv64
