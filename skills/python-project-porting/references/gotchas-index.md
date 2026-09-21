@@ -579,6 +579,12 @@ The porting gotchas (518 of them) live in [`references/gotchas/`](gotchas/), spl
   interpreter and pyo3's `not(Py_LIMITED_API)` conversion modules — chrono among them —
   are cfg-removed, breaking the build on interpreters that never needed the flag; the
   failure impersonates gotcha 10's dependency drift (the pyvrl case).
+- **536** — Gotcha 344 inverted: the stale maturin pin can live in upstream's own workflow
+  step (`maturin-version: v1.7.1`) while `[build-system] requires` carries a harmless range,
+  and the fix is to drop the input so `findReleaseFromManifest` resolves a release that ships
+  riscv64 assets; plus a `bindings = "bin"` crate in a workspace subdirectory usually wants
+  `working-directory:` rather than gotcha 312's write-a-pyproject-at-root step, and a linter
+  CLI exits non-zero under its JSON reporter too (the squawk-cli case).
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 

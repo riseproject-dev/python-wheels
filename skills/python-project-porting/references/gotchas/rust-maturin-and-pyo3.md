@@ -78,6 +78,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
   `CIBW_BUILD` list builds it once and re-tests it on every interpreter, cp314t included.
 - **527** — `PYO3_USE_ABI3_FORWARD_COMPATIBILITY` sets `Py_LIMITED_API` on every
   interpreter, which cfg-removes pyo3's `not(Py_LIMITED_API)` conversions (chrono).
+- **536** — Gotcha 344 inverted: upstream's own workflow can pin a pre-riscv64
+  `maturin-version:`, and the fix is to delete the input, not override it.
 
 ---
 
@@ -1262,3 +1264,37 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       the interpreter instead.
     - Generalises past chrono: grep the pinned pyo3 release's `src/conversions/` for
       `not(Py_LIMITED_API)` before assuming the flag costs nothing.
+
+536. **Gotcha 344 inverted: the stale maturin pin can live in upstream's own *workflow*,
+    and the fix is to delete it rather than add one (the squawk-cli case; see
+    `build-squawk-cli.yml`).** 344 covers a `maturin==X.Y.Z` exact pin in the target
+    crate's `[build-system] requires` that `maturin-action`'s `findVersion()` reads
+    literally, resolving a pre-riscv64 release whose asset 404s; its fix is to override
+    with `maturin-version:`. The mirror image is commoner in a project whose release job
+    calls the action directly: `pyproject.toml` carries a harmless *range*
+    (`maturin>=1.7,<2.0`) while the workflow step pins `maturin-version: v1.7.1`, and
+    copying that step is what breaks the riscv64 build. Settle it with two `curl -o
+    /dev/null -w '%{http_code}'` probes against
+    `github.com/PyO3/maturin/releases/download/v<pinned>/maturin-riscv64gc-unknown-linux-gnu.tar.gz`
+    — 404 for squawk's pinned v1.7.1, 200 for a current 1.9.x — then **drop the input
+    entirely**: `findVersion()` falls through to `findReleaseFromManifest`, which resolves
+    the range against the live release list and logs its choice as `Found maturin release
+    from manifest: v1.15.0`. Overriding with a hardcoded version instead is the redundant
+    divergence gotcha 49 warns about whenever `requires` is a range.
+    - **A `bindings = "bin"` crate in a workspace subdirectory usually needs
+      `working-directory:`, not taplo's write-a-pyproject-at-root step.** Gotcha 312's
+      "no `pyproject.toml` anywhere in the checkout" is the rarer half of gotcha 239: check
+      `find . -name pyproject.toml` first, because the file commonly *does* exist beside
+      the crate's `Cargo.toml` (squawk: `crates/squawk/pyproject.toml`), identical to the
+      sdist's copy except for the `manifest-path` key `maturin sdist` synthesizes when it
+      hoists the file to the sdist root — a key that is root-relative and wrong in the
+      checkout. Point the action at the subdirectory as upstream's own job does, and
+      remember `--out dist` then lands in `<subdir>/dist`, which the upload step's `path:`
+      must match.
+    - **A linter CLI exits non-zero under *every* reporter, machine-readable ones
+      included.** `squawk --reporter json bad.sql` prints a well-formed JSON array and
+      exits 1, exactly like the tty reporter, so a `set -euo pipefail` test step must use
+      `rc=0; <cmd> || rc=$?` on each invocation — including the ones whose output it only
+      greps. Checking the exit code of the *piped* form (`<cmd> | head`) hides this: the
+      pipeline reports `head`'s status, so the trap only surfaces once the step runs for
+      real in CI.
