@@ -95,12 +95,15 @@ jobs:
       - name: Pull manylinux_riscv64 image
         run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
 
+      # LIB3MF_TESTS=OFF because the default target also builds the C++ test
+      # suite and the vendored libressl it links, neither of which reaches the
+      # wheel; the wheel's own tests cover the library below.
       - name: Build lib3mf.so and the wheel
         run: |
           docker run --rm -v "$(pwd):/work" -w /work "${MANYLINUX_RISCV64_IMAGE}" bash -c '
             set -euxo pipefail
             cd /work/lib3mf-src
-            sh cmake/GenerateMake.sh
+            sh cmake/GenerateMake.sh -DLIB3MF_TESTS=OFF
             cmake --build build -j"$(nproc)"
             readelf -hd build/lib3mf.so
             cd /work
@@ -112,6 +115,17 @@ jobs:
             cd /tmp
             python -c "from lib3mf import get_wrapper; print(get_wrapper().GetLibraryVersion())"
             python /work/examples/create_cube_example_complete.py
+            python - <<PYEOF
+          import lib3mf
+
+          model = lib3mf.get_wrapper().CreateModel()
+          model.QueryReader("3mf").ReadFromFile("cube.3mf")
+          meshes = model.GetMeshObjects()
+          assert meshes.MoveNext()
+          cube = meshes.GetCurrentMeshObject()
+          assert (cube.GetVertexCount(), cube.GetTriangleCount()) == (8, 12)
+          assert not meshes.MoveNext()
+          PYEOF
             python /work/tests/lib3mf_py313_exception.py
           '
 
