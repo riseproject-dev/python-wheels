@@ -1,0 +1,145 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/BoundaryML/baml/blob/0.226.1/.github/workflows/build-python-release.reusable.yaml
+name: Build baml-py wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/baml-py.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-baml-py.yml'
+      - 'docs/packages/baml-py.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-baml-py.yml'
+      - 'docs/packages/baml-py.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  # engine/Cargo.toml's release profile sets `lto = true`; fat LTO over this
+  # workspace is more than the 4-core riscv64 runners can carry, and limiting
+  # parallel rustc invocations keeps them from exhausting memory.
+  CARGO_PROFILE_RELEASE_LTO: thin
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+  CARGO_BUILD_JOBS: '2'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: baml-py
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build baml-py ${{ matrix.version }} cp38-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+
+    env:
+      BAML_PY_VERSION: ${{ matrix.version }}
+
+    steps:
+      # Checked out at the workspace root: language_client_python is a member
+      # of the baml Cargo workspace and builds against its sibling crates.
+      - name: Checkout baml v${{ env.BAML_PY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: BoundaryML/baml
+          ref: v${{ env.BAML_PY_VERSION }}
+          persist-credentials: false
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 16
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          # Upstream builds from engine/ so cargo picks up engine/.cargo/config.toml,
+          # whose `--cfg tracing_unstable` rustflag tracing-subscriber's `valuable`
+          # feature needs.
+          working-directory: engine
+          args: --release -i python3.12 --manifest-path language_client_python/Cargo.toml --out language_client_python/dist
+          manylinux: '2_39'
+          before-script-linux: |
+            git config --global --add safe.directory "*"
+            yum install -y perl-core pkgconfig libatomic
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      # baml-py has no wheel-level test suite of its own (upstream's integ-tests
+      # all call live LLM providers), so the wheel is exercised through the CLI
+      # it ships: compile the project `baml-cli init` writes, generate its
+      # pydantic client and import it back through the runtime.
+      - name: Test wheel
+        run: |
+          uv pip install pydantic==2.12.5 engine/language_client_python/dist/*.whl
+          python -c "import baml_py.baml_py as m; assert m.__file__.endswith('.so'), m.__file__"
+          baml-cli --version
+          cd "$RUNNER_TEMP"
+          baml-cli init --dest proj --client-type python/pydantic
+          cd proj
+          baml-cli check --from baml_src
+          baml-cli generate --from baml_src
+          python -c "import sys; sys.path.insert(0, '.'); from baml_client import b; assert 'ExtractResume' in dir(b)"
+        env:
+          UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+          UV_INDEX_STRATEGY: unsafe-best-match
+          UV_ONLY_BINARY: pydantic-core
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: baml-py-${{ env.BAML_PY_VERSION }}-cp38-abi3-manylinux_riscv64
+          path: engine/language_client_python/dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish baml-py ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: baml-py-${{ matrix.version }}-*-manylinux_riscv64
