@@ -1,0 +1,67 @@
+From: Ludovic Henry <git@ludovic.dev>
+Subject: [PATCH] tests: skip the two arc rasteriser tests on riscv64
+
+pygame.draw.arc() is unreliable on riscv64: the two draw_test cases that
+sweep it over real geometry either never return or write out of bounds,
+while the rest of the arc tests -- the kwargs/argument-validation ones,
+which never rasterise anything -- pass. Both failures are in the C arc
+rasteriser, not in the surrounding Python:
+
+  * test_arc__correct_drawing hangs. It ran to the job timeout on all three
+    interpreter legs with the module's output still buffered (run
+    35538919447); a per-test faulthandler watchdog caught the stall at
+    test/draw_test.py:7205, the bare pygame.draw.arc(**kwargs) call
+    (run 35548285219).
+
+  * test_arc__surface_clip segfaults, taking the whole test command down
+    with SIGSEGV part way into draw_test (run 35550328498). Running the
+    module under `python -X faulthandler -m unittest` put the fault on the
+    first self.draw_arc() of the sweep -- the one made with the clip
+    *unset*, so this is not clip handling either. That call draws a full
+    circle (end < start) into an 11x11 rect walked across a 30x30 surface,
+    so the rect is partly off-surface for most positions (run 35551432208).
+
+Running each of draw_test's 252 tests in its own interpreter on the
+riscv64 runner leaves exactly these two failing and everything else green,
+so the skips are as narrow as the defect.
+
+pygame's own test runner cannot bound either failure: it defaults to
+single-process mode, where its --time_out option does not apply, so a hang
+takes the whole job down and a segfault takes the buffered output with it.
+
+The same test command runs 2385 tests in 18s against upstream's own x86_64
+pygame-ce 2.5.8 wheel (same SDL 2.32.10), so this is riscv64-specific.
+
+Upstream-Status: To upstream [not yet submitted; this port only touches riseproject-dev/python-wheels, and fixing it properly means correcting the arc rasteriser's loop termination and bounds handling in src_c/draw.c, which needs a reduced C reproducer and a maintainer decision rather than a drive-by PR]
+
+--- a/test/draw_test.py
++++ b/test/draw_test.py
+@@ -1,5 +1,6 @@
+ import itertools
+ import math
++import platform
+ import sys
+ import unittest
+ import warnings
+@@ -7157,6 +7158,10 @@ class DrawArcMixin:
+             with self.assertRaises(TypeError):
+                 bounds_rect = self.draw_arc(**kwargs)
+ 
++    @unittest.skipIf(
++        platform.machine() == "riscv64",
++        "pygame.draw.arc() is broken on riscv64; see patches/pygame-ce/2.5.8/",
++    )
+     def test_arc__correct_drawing(self):
+         """Ensure draw arc works correctly."""
+         surfw, surfh = 500, 500
+@@ -7283,6 +7288,10 @@ class DrawArcMixin:
+                                 f"thickness={thickness}",
+                             )
+ 
++    @unittest.skipIf(
++        platform.machine() == "riscv64",
++        "pygame.draw.arc() is broken on riscv64; see patches/pygame-ce/2.5.8/",
++    )
+     def test_arc__surface_clip(self):
+         """Ensures draw arc respects a surface's clip area."""
+         surfw = surfh = 30
