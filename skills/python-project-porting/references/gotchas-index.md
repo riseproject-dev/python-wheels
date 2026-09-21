@@ -261,6 +261,12 @@ The porting gotchas (468 of them) live in [`references/gotchas/`](gotchas/), spl
   platform: `open.cdash.org/api/v1/index.php?project=<p>&date=<d>` gives configure/compile/test
   seconds per submission, the release-tag rows are the full builds, and the per-language rows
   say whether the interpreter leg is cheap (the simpleitk/ITK case).
+- **478** — Gotcha 343's "revisit once `<dep>` has a riscv64 build" is wrong for an *archived*
+  dependent: a read-only upstream can never widen its pin, so the port is blocked on a
+  historical version of the dep (TF 2.15, not this repo's 2.21.0), the pin window's own
+  interpreter coverage can miss the default matrix entirely, CUDA is not the blocker in a TF
+  custom-ops package, and a negated-x86 arch allowlist mis-classifies riscv64 into `-mavx`
+  (the tensorflow-addons case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

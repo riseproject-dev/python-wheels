@@ -157,6 +157,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **476** — A CMake project whose CI submits to CDash publishes its own build cost per
   platform, so a from-source C++ port can be priced before booking a runner — and the
   per-language rows say whether the interpreter leg is cheap (the simpleitk/ITK case).
+- **478** — Gotcha 343's "revisit once `<dep>` is ported" escape hatch does not apply when
+  the blocked project is *archived*: its dependency pin is frozen on a historical window,
+  so unblocking needs an old version of the dep nobody would port, and that window's own
+  interpreter coverage can miss this repo's matrix entirely (the tensorflow-addons case).
 
 ---
 
@@ -3390,3 +3394,90 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       CMake itself) submits to `open.cdash.org`, `&date=` walks history, and the same JSON
       carries the test counts, so the "how long, and how much of it is per-interpreter"
       question is answerable for them without a single CI minute of ours.
+
+478. **Gotcha 343's parting advice — "revisit once `<dep>` has a riscv64 build" — is wrong
+    for an *archived* project: an upstream that is read-only can never widen its dependency
+    pin, so the port is blocked on a **historical** version of that dependency, not on the
+    version anyone would ever port (the tensorflow-addons case).** tensorflow-addons is
+    structurally the same wall as tensorflow-text and tensorflow-io-gcs-filesystem — a
+    TensorFlow custom-ops package whose Bazel build links every kernel `.so` against the
+    `libtensorflow_framework.so` taken out of a *pip-installed* `tensorflow` wheel. The
+    mechanism is a third variant to grep for: `configure.py` does a module-level `import
+    tensorflow`, reads `tf.sysconfig.get_compile_flags()`/`get_link_flags()`, and writes
+    `TF_HEADER_DIR`/`TF_SHARED_LIBRARY_DIR`/`TF_SHARED_LIBRARY_NAME` as
+    `build --action_env` lines into a generated `.bazelrc`; `WORKSPACE`'s `tf_configure`
+    (`build_deps/tf_dependency/tf_configure.bzl`) `cp -f`s that directory's real `.so` into
+    `@local_config_tf`, whose `BUILD.tpl` wraps it as
+    `cc_library(name = "libtensorflow_framework", srcs = ["%{TF_SHARED_LIBRARY_NAME}"])`,
+    and `custom_op_library()` in `tensorflow_addons/tensorflow_addons.bzl` appends that
+    target to the `deps` of *every* op library unconditionally. `readelf -d` on the shipped
+    x86_64 wheel confirms it end to end: all 8 custom-op `.so`s carry
+    `NEEDED libtensorflow_framework.so.2`. So far, gotcha 343.
+    - **What changes the verdict from "blocked, revisit later" to "permanently blocked" is
+      the archive status plus the pin window.** `github.com/tensorflow/addons` is
+      `"archived": true` (one `/repos/<owner>/<repo>` read), 0.23.0 is the last of 35
+      releases (Nov 2023), and `tensorflow_addons/version.py` pins
+      `INCLUSIVE_MIN_TF_VERSION = "2.13.0"` / `EXCLUSIVE_MAX_TF_VERSION = "2.16.0"`, with
+      `resource_loader.py` narrowing the *ABI* window for the compiled ops to
+      `[2.15.0, 2.16.0)` and `WORKSPACE` pinning `org_tensorflow` to the 2.15.0 tarball.
+      A read-only repo will never raise those numbers, so this port does not need "a riscv64
+      tensorflow", it needs **a riscv64 tensorflow 2.15** — a 2023 release. This repo's
+      `tensorflow` entry is 2.21.0, six minors outside the window, so unparking it would not
+      unblock this. **For an archived dependent, resolve the pin to a concrete version before
+      writing "revisit once the dep lands"** — otherwise the note promises an unblocking that
+      the named work cannot deliver.
+    - **Intersect the pinned dependency window's own *interpreter* coverage with this
+      repo's default matrix; an empty intersection settles the port on its own.** TF
+      2.13.1/2.14.0/2.15.0 ship `cp38`-`cp311` wheels and nothing later, while this repo
+      builds cp312/cp313/cp314/cp314t — zero overlap, so no matrix row could be valid even
+      with a riscv64 TF 2.15 in hand. This is a cheap PyPI-JSON check (`{f['filename']}`
+      tags for the pinned dep), and unlike gotcha 248's it needs no build attempt.
+    - **A dependency available on another non-x86 arch, still unused by upstream, is
+      evidence there is no recipe to narrow (goal 2).** TF itself publishes
+      `manylinux_2_17_aarch64` wheels for 2.13-2.15, yet tensorflow-addons shipped **zero**
+      aarch64 Linux wheels across its entire 35-release history (macOS `arm64` only), and no
+      sdist ever. Its `release.yml` builds `ubuntu-20.04` + `macos-12` only, via
+      `tools/docker/build_wheel.Dockerfile` — `FROM tensorflow/build:2.15-python$PY_VERSION`
+      with `TF_NEED_CUDA=1` and a hardcoded
+      `--crosstool_top=@ubuntu20.04-gcc9_manylinux2014-cuda11.8-cudnn8.6-tensorrt8.4_config_cuda//crosstool:toolchain`,
+      plus `install_bazelisk.sh` that hardcodes `bazelisk-linux-amd64`. There is no non-x86
+      Linux path to mirror.
+    - **CUDA is not the blocker in a TF custom-ops package** — don't stop there. Every
+      `cuda_srcs` in `custom_op_library` sits behind `if_cuda`/`if_cuda_is_configured`, and
+      `configure.py` only calls `configure_cuda()` when `TF_NEED_CUDA=1`, so the CPU-only
+      build is a first-class upstream configuration. The wall is the CPU link against
+      `libtensorflow_framework.so`, which CUDA-free builds need just as much.
+    - **`configure.py`'s arch branches are a second, independent riscv64 gap worth
+      recording even when the port is blocked upstream of them.** Its Linux branch writes
+      `build --copt=-mavx` for everything that is not `ppc64le`/`arm`/`aarch64`
+      (`is_linux_x86_64`, `is_linux_s390x`, `is_linux_ppc64le`, `is_linux_arm`,
+      `is_linux_aarch64` — no riscv64 predicate exists), so riscv64 falls into the x86
+      default and a riscv64 GCC rejects the flag. Same shape as gotcha 426's
+      `release_cpu_linux`/`-mavx` finding in TF core: **an "is this arch excluded?" allowlist
+      written as a negated x86-adjacent set silently mis-classifies riscv64.**
+    - **`install_requires` can be clean while the import is not.** `setup.py` sets
+      `install_requires` from `requirements.txt` (`typeguard>=2.7,<3.0.0`, `packaging`) and
+      keeps `tensorflow` in `extras_require` only, so a wheel would *install* on riscv64 —
+      but `tensorflow_addons/__init__.py` imports `ensure_tf_install`, which does
+      `import tensorflow`, so there is nothing to smoke-test. Gotcha 343's tensorflow-text
+      case fails the install; this one fails one line later, and both are untestable.
+    - **`platform`-specific stub extensions explain a stray `.so` in the wheel**, not a
+      packaging bug: `get_ext_modules()` returns `[Extension("_foo", ["stub.cc"])]` on Linux
+      purely so `BinaryDistribution.has_ext_modules()` forces a platform wheel tag, which is
+      why the released wheel carries a top-level `_foo.cpython-310-x86_64-linux-gnu.so`
+      beside the 8 real op libraries.
+    - **Also confirmed absent as an escape hatch**: Google's standalone libtensorflow
+      C-library tarball has no riscv64 build at the pinned version either —
+      `storage.googleapis.com/tensorflow/libtensorflow/libtensorflow-cpu-linux-riscv64-2.15.0.tar.gz`
+      → 404 against `…-x86_64-2.15.0.tar.gz` → 206, and the newer
+      `versions/2.16.1/libtensorflow-cpu-linux-{x86_64,riscv64}.tar.gz` pair is 206/404.
+      Note the two URL layouts: the `versions/<ver>/` path only exists for newer releases, so
+      re-test the legacy `libtensorflow/<name>-<ver>.tar.gz` form before reading a 404 as
+      "no build" (at 2.15.0 the `versions/` path 404s for x86_64 too).
+    - **Marked `blocked-on-dependency`, matching its two siblings** rather than `parked`:
+      the scope is small (8 op libraries, a few thousand lines of C++), so the note has to
+      say the blocker is a missing target-architecture ELF and a frozen pin, not build size.
+      No worktree, branch, workflow or patch — the whole verdict came from the PyPI JSON, one
+      GitHub repo-metadata read, `raw.githubusercontent.com` reads of `setup.py`,
+      `configure.py`, `WORKSPACE`, `tf_configure.bzl`, `BUILD.tpl`, `tensorflow_addons.bzl`
+      and `release.yml`, and `readelf -d` on the released x86_64 wheel.
