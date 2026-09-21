@@ -1,0 +1,41 @@
+From ad54ddf761910e54d651b3398cd69abbce3bfb14 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 21 Sep 2026 16:46:54 +0000
+Subject: [PATCH] Restart the libev prepare watcher after the cleanup test
+
+LibevLoop._cleanup() stops the shared prepare watcher ("Stop the prepare
+watcher first to prevent race conditions"), and nothing ever starts it again.
+test_watchers_are_finished calls that cleanup on the process-wide _global_loop
+and then only resets _shutdown, so the loop it hands to the rest of the session
+has no prepare watcher: LibevLoop._loop_will_run - and with it _update_timer,
+the only caller that arms _loop_timer - never runs again, and TimerManager
+timeouts are never serviced.
+
+Every timer created afterwards therefore stays pending forever, and the next
+test, LibevTimerTest.test_multi_timer_validation, spins in
+submit_and_wait_for_completion's unbounded wait loop until the job is killed.
+Restart the watcher alongside the _shutdown reset so the loop is whole again.
+
+Upstream-Status: To upstream [not yet submitted; this port may only touch riseproject-dev/python-wheels]
+---
+ tests/unit/io/test_libevreactor.py | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/tests/unit/io/test_libevreactor.py b/tests/unit/io/test_libevreactor.py
+index cf7e7ca..6804290 100644
+--- a/tests/unit/io/test_libevreactor.py
++++ b/tests/unit/io/test_libevreactor.py
+@@ -87,6 +87,10 @@ class LibevConnectionTest(ReactorTestMixin, unittest.TestCase):
+                 assert conn._read_watcher.stop.mock_calls
+ 
+         _global_loop._shutdown = False
++        # _cleanup() stops the loop's prepare watcher and nothing restarts it, so
++        # LibevLoop._update_timer never runs again and no timer created later in
++        # this process is ever serviced. The timer tests below then wait forever.
++        _global_loop._preparer.start()
+ 
+ 
+ class LibevTimerPatcher(unittest.TestCase):
+-- 
+2.43.0
+
