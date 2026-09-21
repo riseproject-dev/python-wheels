@@ -4166,9 +4166,9 @@ packages:
   version: 3.29.11
   home: https://github.com/scylladb/python-driver
   repo: https://github.com/scylladb/python-driver/
-  status: ci-running
+  status: ci-green
   pr: 2165
-  notes: '11 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,pp311); no riscv64 on PyPI or pypi.riseproject.dev. Four patches. 0001 ships the bundled libev licence, 0002 restarts the libev prepare watcher that test_watchers_are_finished leaves stopped (without it every later timer test waits forever and the job hits its timeout). 0003/0004 backport 26c201a and 03c4c96: the 3.29.11 tag ships two tests its own cassandra/cluster.py does not satisfy - _set_keyspace_for_all_pools() calls back with the last pool''s error list instead of the accumulated dict, and wait_for_schema_agreement() never validates its scope argument despite documenting ValueError for an unknown one. Both reproduce identically on x86_64 (verified locally), so neither is riscv64-specific; upstream fixed both on master 3 days and 2 weeks after the release was cut. Also listed patches/scylla-driver/** in the workflow path triggers, without which a patch-only commit produces no run (gotcha 413).'
+  notes: '11 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,pp311); no riscv64 on PyPI or pypi.riseproject.dev. Four patches. 0001 ships the bundled libev licence, 0002 restarts the libev prepare watcher that test_watchers_are_finished leaves stopped (without it every later timer test waits forever and the job hits its timeout). 0003/0004 backport 26c201a and 03c4c96: the 3.29.11 tag ships two tests its own cassandra/cluster.py does not satisfy - _set_keyspace_for_all_pools() calls back with the last pool''s error list instead of the accumulated dict, and wait_for_schema_agreement() never validates its scope argument despite documenting ValueError for an unknown one. Both reproduce identically on x86_64 (verified locally), so neither is riscv64-specific; upstream fixed both on master 3 days and 2 weeks after the release was cut. Also listed patches/scylla-driver/** in the workflow path triggers, without which a patch-only commit produces no run (gotcha 413). CI green on run 35634589516: all four legs (cp312/cp313/cp314/cp314t) built and passed the full unit suite plus the gevent reactor test, publish dry-run clean. Learning recorded as gotcha 535.'
 - pkg: adbc-driver-sqlite
   version: 1.12.0
   home: https://arrow.apache.org/adbc/
@@ -4756,11 +4756,83 @@ packages:
   notes: '20 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp39); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: mosek
   version: 11.2.3
-  home: ''
-  repo: ''
-  status: queued
+  home: https://www.mosek.com
+  repo: https://www.mosek.com
+  status: parked
   pr: null
-  notes: '2 Linux wheels upstream (abi: cp39); no riscv64 on PyPI or pypi.riseproject.dev. PyPI records no project URL; locate upstream during research.'
+  notes: 'Not feasible: mosek is MOSEK ApS''s proprietary optimization engine, delivered as object
+    code only -- no source at any layer, no riscv64 build from the vendor, and an EULA that
+    independently bars redistribution (new gotcha 534, feasibility-and-triage.md; the
+    gurobipy/gotcha 453 shape, same closed-payload family as 372/376/431/450). Verified against the
+    real artifacts, not inferred. PYPI: 11.2.3 publishes exactly 4 wheels, all cp39-abi3
+    (macosx_11_0_arm64, manylinux2014_x86_64, manylinux_2_27_aarch64, win_amd64), and the project
+    has published 2052 files across 183 releases with ZERO sdists ever, so per gotcha 431 the wheel
+    is the only evidence; the sole Project-URL is the marketing page HOME=https://mosek.com (gotcha
+    372''s hdbcli tell) and License: is the bare URL https://mosek.com/products/license-agreement.
+    11.2.4 shipped since the queue snapshot with the identical 4-wheel shape, so the gap has not
+    moved. WHAT IS IN THE WHEEL: unzipping mosek-11.2.3-cp39-abi3-manylinux2014_x86_64.whl (15.4 MB)
+    gives 24 files -- one payload, mosek/libmosek64.so.11.2 at 29.9 MB = 63% of the unpacked wheel,
+    plus a vendored oneTBB 2021.12.0 (libtbb.so.12), six per-interpreter
+    _msk.cpython-3{9,10,11,12,13,14}-*.so and six fusion/impl/fragments.*.so, and 3.5 MB of
+    generated Python glue (__init__.py, fusion/impl/_implementation.py). No .c/.h/.pyx/.cpp anywhere
+    in either Linux wheel, so even the binding layer ships no source. readelf -d on
+    mosek/_msk.cpython-312-x86_64-linux-gnu.so shows NEEDED libmosek64.so.11.2 plus RPATH
+    /var/jenkins/workspace/11.2/bin:$ORIGIN -- a hard link, not a dlopen -- and mosek/__init__.py
+    does "from . import _msk" at line 7, so with no riscv64 engine there is no importable wheel at
+    all (the gurobipy/saxonche shape, gotcha 450). PER-ARCH CLOSED MATH KERNEL (gotcha 453 confirmed
+    on a second vendor): the same libmosek64.so.11.2 is 29.9 MB on x86_64 against 16.9 MB on
+    aarch64, .text 24.0 MB against 12.3 MB, and the gap is Intel oneMKL statically linked into the
+    x86_64 engine only -- 1432 MKL symbols in its symtab (mkl_blas_avx2_dgemm_copyan,
+    mkl_blas__dgemm, "Intel oneMKL FATAL ERROR: Cannot load %s", a full
+    AVX2/AVX512{F,BW,CD,DQ,VL,VNNI,BF16} dispatch table) against 1 on aarch64, which carries its own
+    cblas_*/ src/math/sparseblas.c path and SVE. Neither engine contains a single riscv/rv64 string
+    (0 hits in 293k/71k). Both are built on a closed vendor Jenkins whose path names the vendor''s
+    platform id --
+    /var/jenkins/workspace/11.2/Distro-pipeline/linux64x86/bld/docker-rockylinux-8/final/default/bldflexlm/x64_linux
+    and .../Distro-pipeline/linuxaarch64/bld/docker-rockylinux-aarch64-8/.../arm64_linux (gotcha
+    431''s builder-path tell, used forward to get the exact spelling to probe with). FOUR
+    INDEPENDENT VENDOR PLATFORM TABLES, all riscv64-negative: (1)
+    mosek.com/products/supported-platforms lists exactly Linux 64 bit x86, Windows 64 bit x86, Linux
+    64 bit ARM and OSX 64 bit ARM, no RISC-V; (2) the docs.mosek.com installation guide gives the
+    same four ids linux64x86/linuxaarch64/osxaarch64/win64x86 and says "decide if you are running on
+    a 64bit x86 ... or an ARM64 architecture"; (3)
+    download.mosek.com/stable/11.2.3/mosektools{linux64x86,linuxaarch64,osxaarch64}.tar.bz2 and
+    mosektoolswin64x86.zip all answer 206 to a 2-byte range request while every riscv64 spelling
+    answers 403 AccessDenied -- and, per the new gotcha 534, that 403 was calibrated against a
+    deliberately bogus key and against the discontinued mosektoolsosx64x86.tar.bz2, both of which
+    403 identically, because the bucket has no ListBucket and returns 403 rather than 404 for a
+    missing key; (4) the vendor''s own conda channel has 1271/696/552/1268 packages in
+    linux-64/linux-aarch64/osx-arm64/win-64 against 0 in linux-riscv64, which still returns 200 with
+    a synthesised empty index (gotcha 42 -- count the packages, do not trust the status). NO
+    OPEN-SOURCE OR CPU-GENERIC BUILD PATH: the MOSEK GitHub org''s 15 public repos are all
+    Julia/Rust/Go/JS/Octave bindings, tutorials, course material and Dockerfiles -- the engine is in
+    none of them -- and the one that is closest, MOSEK/Mosek.pip, was archived in 2020 and its
+    setup.py says in its own words that "the ''build'' action effectively builds both python source
+    and binary libraries (by downloading and unpacking the binary distribution)" over a libs =
+    {''win64x86'': ...} platform table, i.e. even the vendor''s own packaging repo only ever
+    downloaded a closed distro. The aarch64 engine being MKL-free shows MOSEK does maintain a
+    non-MKL build, but that is not a recompile anyone outside MOSEK ApS can do, because there is no
+    source to recompile. THE LICENCE CLOSES A SECOND, INDEPENDENT DOOR: the wheel ships NO licence
+    text at all (dist-info holds only METADATA/WHEEL/top_level.txt/RECORD), so the terms have to be
+    fetched from docs.mosek.com/license/license.pdf; its 6.1 grants "the right to use the delivered
+    downloaded object code copy of THE SOFTWARE only and does not acquire any rights of ownership",
+    6.2 says the licensee "shall be prohibited from sublicensing and otherwise letting third parties
+    use THE SOFTWARE without prior written consent", 10 ("No Modifying, Reverse Engineering etc.")
+    says the licensee "shall not be entitled to modify, reverse engineer, disassemble or decompile
+    THE SOFTWARE" and may copy it "for backup purposes" only, 11 withholds the MOSEK(R) trademark,
+    and 14.6 has MOSEK warranting that "THE SOFTWARE does not comprise any third party open source
+    software, free software or the like" -- so publishing any mosek wheel on pypi.riseproject.dev
+    would not be permitted even if a riscv64 engine existed. The METADATA itself states "MOSEK
+    requires a license" (free trial and non-commercial academic licences exist, neither of which
+    grants redistribution), and there is no swap-in escape hatch of the gotcha 35 kind: the engine
+    is gated by Revenera FlexNet Publisher, not by vendor code we could stub (bldflexlm in the build
+    path; lmgrd, "*** A FLEXlm error occurred", .flexlmrc, "Error in communication with the FlexNet
+    Licensing Service", MSK_checkoutlicense/MSK_putlicensecode in the strings), so a riscv64 MOSEK
+    would need two separate proprietary vendors to port, not one. Revisit only if MOSEK ApS itself
+    ships a riscv64 Optimizer (a mosektoolslinuxriscv64-style tarball on download.mosek.com, a
+    linux-riscv64 conda subdir, or a riscv64 wheel on PyPI) AND grants redistribution; nothing in a
+    build-mosek.yml can close either gap. No worktree/branch/PR created -- settled before any YAML
+    was written.'
 - pkg: treelite
   version: 4.7.2
   home: https://treelite.readthedocs.io/en/latest/
