@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (479 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (483 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -558,6 +558,12 @@ The porting gotchas (479 of them) live in [`references/gotchas/`](gotchas/), spl
   child, so a cmeel distribution that delegates its whole build to one ships into
   `cmeel.prefix/lib64/` rather than `lib/`; read the released wheel's namelist, not the sibling
   workflow (the cmeel-zlib case, and the mechanism behind gotcha 492).
+- **494** — A hermetic Python predating riscv64 is a *two*-repository problem — Python headers
+  and numpy headers both come from it — and in a WORKSPACE tree `--override_repository` over two
+  run-time-written repos settles it with no patch (the tflite-runtime/TensorFlow 2.14 case).
+- **497** — Drive an upstream build script through the env hooks it already exposes
+  (`CUSTOM_BAZEL_FLAGS`, `BAZEL_STARTUP_OPTIONS`), and use the fact that the later flag wins to
+  cancel one it hardcodes, such as `-s`.
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
@@ -658,6 +664,9 @@ The porting gotchas (479 of them) live in [`references/gotchas/`](gotchas/), spl
 - **485** — CMake's `find_package(Python3 COMPONENTS Development)` cannot configure in the
   manylinux image because PEP 513 forbids shipping `libpython`; the fix is a zero-byte file at
   the path FindPython validates, and upstream probably already carries it (the usd-core case).
+- **496** — Gotcha 420's XNNPACK fp16 define does not belong in an older tree: at a 2023 pin the
+  riscv64 *production* microkernels are scalar-only and every RVV gate sits in a bench/test
+  target, so attribute each `riscv` line to its target before adding a define.
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
@@ -967,6 +976,9 @@ The porting gotchas (479 of them) live in [`references/gotchas/`](gotchas/), spl
   wheel hands you a byte-comparable feature oracle: configure once under QEMU and diff it
   against the released wheel's before compiling anything; also where an ECMWF binary-wrapper
   distribution's real build recipe lives when its wheel job is private (the eckitlib case).
+- **495** — A Bazel port's loading phase rehearses on x86_64 in minutes: check the project's
+  `.bazelrc` flags against the bazel you bootstrap in an empty workspace, then evaluate the real
+  WORKSPACE with the real overrides — blocked egress only stops it at the first archive fetch.
 
 ### PR, CI, triggers, publishing & maintainer signals — [`gotchas/pr-ci-and-maintainer.md`](gotchas/pr-ci-and-maintainer.md)
 

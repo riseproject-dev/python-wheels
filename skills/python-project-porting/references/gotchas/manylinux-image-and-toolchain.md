@@ -91,6 +91,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
   nothing else in the tree declares: translate its `-dev` packages to Rocky names before the
   first run, or the image's missing header stops the compile (the vllm `numa.h` case).
 - **485** — CMake's `find_package(Python3 COMPONENTS Development)` fails inside the manylinux
+- **496** — Before copying gotcha 420's XNNPACK fp16 define into an older tree, check which
+  target the gate sits in — an old pin may compile no vector kernels at all.
   image because PEP 513 forbids shipping `libpython`, and the fix is a zero-byte file, not a
   build-flag change (the usd-core/OpenUSD case).
 ---
@@ -1522,3 +1524,23 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       linux/riscv64 $MANYLINUX_RISCV64_IMAGE` and print `os.path.exists(LIBDIR/LDLIBRARY)` for
       each interpreter you plan to build. `False` everywhere means this gotcha applies to any
       `Development`-requiring configure in that image.
+
+496. **Before copying gotcha 420's `--define=xnn_enable_riscv_fp16_vector=false` into an
+    older tree, check which XNNPACK *target* the gate sits in — an old pin may compile no
+    vector kernels at all.** At the commit TensorFlow 2.14 pins (`b9d4073a`, mid-2023) the
+    riscv64 production library is scalar-only: `riscv_srcs` is
+    `src/amalgam/gen/scalar-riscv.c` / `PROD_SCALAR_RISCV_MICROKERNEL_SRCS`, while
+    `ALL_RVV_MICROKERNEL_SRCS`, the `-march=rv64gcv` copts and the `XNN_ENABLE_RISCV_VECTOR`
+    define appear only in `bench_microkernels` and `test_microkernels`, and `rvvfp16arith`
+    is not in the tree at all. Neither the `zvfh`-vs-binutils-2.41 trap (420) nor the
+    pre-0.12 RVV intrinsic spellings GCC 14 no longer accepts can fire, so the define would
+    be a deviation with nothing behind it — the build was green without it.
+    - **Attribute each `riscv` hit to its target before concluding anything**:
+      `grep -n riscv BUILD.bazel` then, per line, `awk 'NR<=<line> && /    name = /'
+      BUILD.bazel | tail -1`. A gate inside a benchmark or test library never reaches a
+      wheel.
+    - **Read `:riscv_vector_enabled` twice**: its `explicit_false` branch resolves to the
+      *explicit_true* config_setting, which looks like a bug and is not — with
+      `--define xnn_enable_riscv_vector=false` that setting no longer matches, so the select
+      falls through to its default and RVV is off. The off-switch works; the indirection
+      just does not read like one.

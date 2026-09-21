@@ -36,6 +36,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
 - **444** — Verify a hand-edited `.patch` with `git apply --check`, never with `patch`:
   a wrong `@@` line count makes GNU `patch` silently swallow the *next* hunk and exit 0.
 - **490** — An ecbuild/CMake project that installs its generated config header into the
+- **495** — A Bazel port's loading phase rehearses on x86_64 in minutes, even in a sandbox
+  that cannot fetch the dependencies.
   wheel hands you a byte-comparable feature oracle
 
 ---
@@ -545,3 +547,26 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
       be dropped (keeping it also means cython in the container). The per-interpreter wheel
       list is a mirage for the same reason — cp310..cp314 differ only in tag, nothing links the
       Python C API — so build one `py3-none` wheel, as `build-eccodeslib.yml` already does.
+
+495. **A Bazel port's loading phase rehearses on x86_64 in minutes, even in a sandbox that
+    cannot fetch the dependencies.** Two checks, both arch-independent, both cheaper than the
+    hours-long riscv64 cycle they replace:
+    - **The project's `.bazelrc` against the bazel version you actually bootstrap.** Copy it
+      into an empty workspace (`touch WORKSPACE`) and run `bazel build --nobuild` with the
+      same `--config`s the upstream script passes. An old tree pinned to bazel 6 may name
+      flags a newer bazel deleted, and an unknown one is a startup failure, not a warning —
+      `--experimental_cc_shared_library`, `--experimental_link_static_libraries_once` and
+      `--incompatible_enforce_config_setting_visibility` all still parse in 7.5.0, which is
+      one reason these trees want 7.x and not 8 (which also dropped WORKSPACE `bind()`).
+      With no targets bazel exits 0 on "requested an empty set of targets", so the run is
+      purely a flag check.
+    - **WORKSPACE evaluation on the real checkout, with the real repository overrides.**
+      Everything up to the first `http_archive` fetch is host-independent: it proves the
+      overrides resolve, every `load()` finds its symbols, and no repository rule shells out
+      to an interpreter that isn't there (gotcha 494's failure mode lands here). Where egress
+      blocks `codeload.github.com` the run dies on the first archive with a 403 — *after* that
+      whole block, which is the part worth testing; read the traceback's `WORKSPACE:<line>` to
+      confirm how far it got.
+    - Point `--output_user_root` at `.git/pw-scratch/<pkg>/` and delete it afterwards: a
+      bazel install base plus a shallow clone of a monorepo is ~700MB on a disk other agents
+      share.

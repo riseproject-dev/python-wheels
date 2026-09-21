@@ -54,6 +54,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
   ExternalProjects, so a vendored dependency's option can be silently unreachable from the
   top-level command line (the simpleitk/ITK/zlib-ng `WITH_RVV` case).
 - **493** — cmeel's own `-DCMAKE_INSTALL_LIBDIR=lib` does not reach an `ExternalProject_Add`
+- **494** — A hermetic Python that predates riscv64 is a *two*-repository problem, and in a
+  WORKSPACE tree `--override_repository` settles it without a patch.
+- **497** — Drive an upstream build script through the env hooks it already exposes, and
+  remember that the later flag wins.
   child, so such a cmeel distribution installs into `cmeel.prefix/lib64/`, not `lib/`.
 
 ---
@@ -945,3 +949,59 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       with `CMEEL_CMAKE_ARGS=-DCMAKE_INSTALL_LIBDIR=lib`: that appends to the *outer* configure
       line, the same dead end, and a patch that changed it would desync the riscv64 wheel from
       the same distribution on every other arch.
+
+494. **A hermetic Python that predates riscv64 is a *two*-repository problem, and in a
+    WORKSPACE tree `--override_repository` settles it without a patch (the tflite-runtime
+    2.14.0 case).** Gotcha 47's last bullet warns that the project's own hermetic Python is
+    the trap one level below the bazel bootstrap; TensorFlow 2.14 shows its full shape.
+    Nothing there reads the container's interpreter: `//third_party/python_runtime:headers`
+    aliases `@local_config_python//:python_headers`, which the generated `BUILD.tpl` aliases
+    again to `@python//:python_headers` (rules_python's `toolchain_aliases` hub), while
+    `//third_party/py/numpy:headers` aliases `@pypi_numpy//:numpy_headers` out of
+    `pip_parse`. Both must be replaced, and the `.so` is built against whichever headers win.
+    - **It aborts during WORKSPACE evaluation, before any target is even analysed.** The
+      WORKSPACE does `load("@python//:defs.bzl", "interpreter")`, so the hub is fetched
+      eagerly and its impl calls `get_host_platform()` — gotcha 47's
+      `No platform declared for host OS linux on arch riscv64`, one repo further along.
+      `--override_module` is not available here: this is WORKSPACE, not bzlmod.
+    - **Do not reach for the bootstrap's `sed`.** Standing in `x86_64-unknown-linux-gnu`
+      makes the fetch succeed and then compiles the extension against a
+      python-build-standalone x86_64 `pyconfig.h`, of a different patch version than the
+      interpreter the wheel is for. Right for bazel's own bootstrap, wrong for the wheel.
+    - **Write the two repositories in the job and override them.** Each is an empty
+      `WORKSPACE`, an `include/` copied from `sysconfig.get_paths()["include"]` and
+      `numpy.get_include()`, and a `BUILD` with
+      `cc_library(name = "python_headers"/"numpy_headers", hdrs = glob(["include/**/*.h"]),
+      includes = ["include"])`; the python one also needs a `defs.bzl` defining `interpreter`,
+      because the WORKSPACE `load()` wants the symbol (its value is never analysed — point it
+      at an `exports_files`d symlink to the real interpreter). Then
+      `--override_repository=python=… --override_repository=pypi_numpy=…`.
+    - **What stays lazy is why this works.** `pip_parse`/`install_deps` are only fetched if
+      something references `@pypi_*`, and overriding the one numpy reference removes the last
+      one — so no pip runs, and the hash-pinned `requirements_lock_3_*.txt` never has to be
+      rewritten the way a newer TF's `HERMETIC_REQUIREMENTS_LOCK` does. The registered
+      `@python_toolchains` are likewise only *loaded*, never selected.
+    - **Build against the newest numpy the registry has, not a 1.x to match the tree's age.**
+      An extension compiled against numpy 2 headers still imports under numpy 1.x; the reverse
+      raises `A module compiled using NumPy 1.x cannot be run in NumPy 2.x` on every install
+      that resolves a 2.x. Grep the sources for the APIs numpy 2 removed first — `descr->elsize`
+      above all — and only pin 1.x if one shows up.
+
+497. **Drive an upstream build script through the env hooks it already exposes, and
+    remember that the later flag wins.** `build_pip_package_with_bazel.sh` reads
+    `CI_BUILD_PYTHON`, `TENSORFLOW_TARGET`, `WHEEL_PLATFORM_NAME`, `BAZEL_STARTUP_OPTIONS`
+    and `CUSTOM_BAZEL_FLAGS`, and interpolates the last of those *after* its own flags on the
+    `bazel build` line. The whole riscv64 delta then fits in one exported variable — repo
+    overrides, `--java_runtime_version=local_jdk`, `--noenable_bzlmod` — with no patch and no
+    `.bazelrc` mutation, which is exactly the "mirror upstream" shape a reviewer wants to see.
+    - **A hook that lands last can also cancel a flag the script hardcodes.** That script
+      builds with `-s`, which prints every compile command: hundreds of MB through `tee` and
+      an unreadable build-log artifact. `--nosubcommands` in `CUSTOM_BAZEL_FLAGS` turns it
+      back off, because bazel applies command-line flags left to right (rc-file flags lose to
+      both). Check the negation parses — `--nosubcommands` does, though `--subcommands` is not
+      a plain boolean.
+    - **Prefer `PATH`-prepending the target interpreter over `CI_BUILD_PYTHON=/abs/path`.**
+      Scripts of this family interpolate `${PYTHON}` into a build *directory* path
+      (`gen/tflite_pip/${PYTHON}`), so an absolute path buries the wheel under a nested
+      mirror of `/opt/python/...`; leaving it as `python3` keeps the output where upstream's
+      own documentation says it is.
