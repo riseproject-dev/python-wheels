@@ -1,0 +1,98 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's wheel builder:
+#   https://github.com/SystemRDL/systemrdl-compiler/blob/v1.32.2/.github/workflows/build.yml
+name: Build systemrdl-compiler wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/systemrdl-compiler.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-systemrdl-compiler.yml'
+      - 'docs/packages/systemrdl-compiler.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-systemrdl-compiler.yml'
+      - 'docs/packages/systemrdl-compiler.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: systemrdl-compiler
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build systemrdl-compiler ${{ matrix.version }} cp37-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+
+    env:
+      SYSTEMRDL_COMPILER_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout systemrdl-compiler v${{ env.SYSTEMRDL_COMPILER_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: SystemRDL/systemrdl-compiler
+          ref: v${{ env.SYSTEMRDL_COMPILER_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+          # Upstream passes this as a step env, which never reaches a Linux build container.
+          CIBW_ENVIRONMENT: SYSTEMRDL_REQUIRE_BINARY_BUILD=1
+          # The RDL Perl preprocessor needs Safe.pm, absent from the image's minimal perl.
+          CIBW_BEFORE_TEST: dnf -y install perl-Safe
+          CIBW_TEST_REQUIRES: pytest parameterized
+          CIBW_TEST_SOURCES: test
+          CIBW_TEST_COMMAND: >-
+            python -c "import systemrdl.parser.sa_systemrdl_cpp_parser as m; assert m.__file__.endswith('.so'), m.__file__"
+            && cd test && python -m pytest
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: systemrdl-compiler-${{ env.SYSTEMRDL_COMPILER_VERSION }}-cp37-abi3-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish systemrdl-compiler ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: systemrdl-compiler-${{ matrix.version }}-*-manylinux_riscv64
