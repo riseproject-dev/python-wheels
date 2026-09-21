@@ -1,0 +1,137 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/materialsproject/pymatgen-core/blob/v2026.8.13/.github/workflows/release.yml
+name: Build pymatgen-core wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pymatgen-core.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pymatgen-core.yml'
+      - 'docs/packages/pymatgen-core.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pymatgen-core.yml'
+      - 'docs/packages/pymatgen-core.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pymatgen-core
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pymatgen-core ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # orjson and pandas are hard runtime requirements with no free-threaded
+        # riscv64 wheel on any index, and upstream ships no cp314t wheel either.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      PYMATGEN_CORE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pymatgen-core v${{ env.PYMATGEN_CORE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: materialsproject/pymatgen-core
+          ref: v${{ env.PYMATGEN_CORE_VERSION }}
+          persist-credentials: false
+          # test-files/ is a 514 MB tree of reference calculation outputs that
+          # neither the build nor the tests selected below read.
+          sparse-checkout: |
+            /*
+            !/test-files
+          sparse-checkout-cone-mode: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # cython and numpy have riscv64 wheels only on our registry; the pretend
+          # version stands in for setuptools-scm, which gets no git in the container.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=cython,numpy
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PYMATGEN_CORE=${{ env.PYMATGEN_CORE_VERSION }}
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests
+          # Everything left out reads the test-files tree dropped from the checkout.
+          CIBW_TEST_COMMAND: >-
+            pytest tests/optimization tests/util tests/core/test_lattice.py
+            tests/core/test_sites.py tests/core/test_composition.py
+            tests/core/test_periodic_table.py tests/core/test_operations.py
+            --ignore=tests/util/test_io.py --ignore=tests/util/test_testing.py
+          # These have riscv64 wheels only on our registry; only-binary keeps a newer
+          # PyPI release from winning the resolution and then compiling from sdist.
+          # Named individually rather than :all:, which holds bibtexparser at 1.3.0
+          # (1.4 onwards ships no wheel) and that release fails pymatgen's own BibTeX
+          # validation on every architecture.
+          CIBW_TEST_ENVIRONMENT: >-
+            MPLBACKEND=Agg
+            PIP_ONLY_BINARY=charset-normalizer,contourpy,fonttools,kiwisolver,lxml,matplotlib,numpy,orjson,pandas,pillow,scipy,spglib
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          exts = {n.rsplit("/", 1)[1].split(".", 1)[0] for n in names if n.endswith(".so")}
+          assert exts == {"coord_cython", "fast_parser", "neighbors"}, exts
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          assert licences == {"LICENSE"}, licences
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pymatgen-core-${{ env.PYMATGEN_CORE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pymatgen-core ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pymatgen-core-${{ matrix.version }}-*-manylinux_riscv64
