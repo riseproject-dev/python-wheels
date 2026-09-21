@@ -35,6 +35,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
   `CIBW_TEST_COMMAND` through `sh -c`.
 - **444** — Verify a hand-edited `.patch` with `git apply --check`, never with `patch`:
   a wrong `@@` line count makes GNU `patch` silently swallow the *next* hunk and exit 0.
+- **490** — An ecbuild/CMake project that installs its generated config header into the
+  wheel hands you a byte-comparable feature oracle
 
 ---
 
@@ -512,3 +514,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
       note that a failed multi-patch `git apply` does not roll the earlier patches back —
       re-checkout the scratch tree before retrying or the next run fails on already-applied
       hunks and sends you chasing the wrong file.
+
+490. **An ecbuild/CMake project that installs its generated config header into the wheel
+    hands you a byte-comparable feature oracle — configure once under QEMU and diff, before
+    compiling anything (the eckitlib/eccodeslib case).** ECMWF publishes a family of "binary
+    wrapper" distributions (`eckitlib`, `eccodeslib`, `odclib`, `fdblib`, ...) whose wheels
+    hold only the compiled C/C++ libraries; the Python bindings are a *separate* distribution
+    (`eckit`, `eccodes`). Three things follow for a port.
+    - **Upstream's real recipe is public even when its wheel job is not.** The release
+      workflow calls `ecmwf/reusable-workflows`' `python-wrapper-wheel.yml` plus a private
+      "wheelmaker" image, but the inputs it consumes sit in the source repo under
+      `python/<pkg>lib/` (older layout: `python_wrapper/`): `buildconfig` carries the exact
+      `CMAKE_PARAMS`, `pre-compile.sh` the extra system dependencies and licence fetches, and
+      `post-build.sh` whether the wheel goes through `auditwheel repair` — eckit's does, and
+      its comment records that eccodes' was replaced with a no-op. Read all three rather than
+      inferring flags from the released wheel.
+    - **The released wheel already carries the answer sheet.** ecbuild installs
+      `include/<pkg>/<pkg>_config.h` and `<pkg>_ecbuild_config.h` into the wheel, and between
+      them they record every `HAVE_*` feature, the build type, the compiler and its flags
+      (`MinSizeRel`, `-Os`, GNU 14.2.1 for eckitlib 2.1.1.26). One `cmake` *configure* in the
+      real `manylinux_2_39_riscv64` image with upstream's `CMAKE_PARAMS` (~4 minutes under
+      QEMU — gotcha 404's cheap ceiling) produced an `eckit_config.h` byte-identical to the
+      released x86_64 wheel's, `HAVE_MPI 0`/`HAVE_EIGEN 0`/`HAVE_LAPACK 0`/`HAVE_ECKIT_SQL 1`
+      included. That settles "does riscv64 get upstream's feature set?" before a 630-file C++
+      build, and where a flag *does* differ the header names the `find_package` that fell
+      through, so the fix is usually one `dnf` package.
+    - **`ENABLE_PYTHON=1` in such a buildconfig is not this wheel's extension.** It builds the
+      Cython module but installs it to a `PYTHONEXT_INSTALL_DIR` aimed at the *sibling*
+      distribution's source tree, so those bytes never reach the wrapper wheel and the flag can
+      be dropped (keeping it also means cython in the container). The per-interpreter wheel
+      list is a mirage for the same reason — cp310..cp314 differ only in tag, nothing links the
+      Python C API — so build one `py3-none` wheel, as `build-eccodeslib.yml` already does.

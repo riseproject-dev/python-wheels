@@ -29,6 +29,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
 - **349** — The legacy `[project.license]` table form (`{file = "..."}`) not only suppresses
 - **409** — The `gpl_sources` trigger can come from the *musllinux* leg alone: auditwheel's
   musllinux policy does not allowlist the GCC runtime.
+- **491** — Collecting the licences of auditwheel-grafted system libraries from RPMs has
+  three failure modes
 
 ---
 
@@ -623,3 +625,35 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
        statically, or whose extension needs no out-of-line C++ symbols, comes back with an
        empty `.libs/` (the published `ruckig-0.19.4-cp312-cp312-musllinux_1_2_riscv64.whl`
        does). So this is a per-wheel check, not an inference from "the project is C++".
+
+491. **Collecting the licences of auditwheel-grafted system libraries from RPMs has three
+    failure modes, and `rpm -ql <pkg>` alone walks into all of them (the eckitlib case).**
+    Driving the collection off `dist-info/sboms/auditwheel.cdx.json` (gotcha 161) gives the
+    exact `pkg:rpm/<distro>/<name>` set — 22 packages for a wheel that links nothing but
+    libcurl and liblz4 — but turning each name into a licence text is not one command.
+    - **A split-out runtime subpackage can ship no `%license` file at all.** `rpm -ql
+      lz4-libs` lists four `.so` paths and nothing else; the text lives in the base `lz4`
+      package, which the manylinux image does not install. Recover it by `dnf install`-ing the
+      name derived from `%{SOURCERPM}` (`sed -E 's/-[^-]+-[^-]+\.src\.rpm$//'`).
+    - **Or the text can sit in a *different* subpackage of the same source RPM.** Rocky's
+      `pcre2` carries no `%license` either, but its already-installed sibling `pcre2-syntax`
+      does (`/usr/share/licenses/pcre2-syntax/{COPYING,LICENCE}`). Scanning every installed
+      package whose `%{SOURCERPM}` matches finds it without installing anything:
+      `rpm -qa --qf '%{SOURCERPM} %{NAME}\n'`.
+    - **And the distro's licence directory can hold the *wrong* text for the library you
+      bundled.** `/usr/share/licenses/lz4/` holds only the GPLv2 `COPYING` covering lz4's CLI
+      tools, while the grafted `liblz4.so.1` is BSD-2-Clause — a text no RPM carries at all.
+      Fetch it from the project (`lz4/lz4/v<version>/lib/LICENSE`), which is exactly why
+      ECMWF's own `pre-compile.sh` downloads it. Read what you copied; a directory named after
+      the package does not promise it describes the `.so` in the wheel.
+    - **The same SBOM sizes the `gpl_sources` job (gotcha 66).** Of those 22 the copyleft ones
+      are `keyutils-libs`, `libcap`, `libidn2`, `libssh`, `libunistring`, `libxcrypt`, `pcre2`
+      and `systemd-libs`; `libselinux` is public domain, `openssl-libs` Apache-2.0, and
+      `krb5-libs`/`libcurl`/`libcom_err`/`libbrotli`/`libnghttp2`/`libpsl`/`libcbor`/
+      `libevent`/`libfido2`/`cyrus-sasl-lib`/`openldap` permissive. `rpm -q --qf '%{LICENSE}'`
+      over the set is the whole audit, and `%{SOURCERPM}` confirms every name resolves to a
+      real source package before the job runs.
+    - **auditwheel's `$ORIGIN` fixup is already done.** ECMWF's `post-build.sh` unzips the
+      repaired wheel just to `patchelf --add-rpath '$ORIGIN' <pkg>.libs/*`; auditwheel 6.x sets
+      it itself, which is why the released wheels read `RUNPATH [$ORIGIN:$ORIGIN]`. Skipping
+      that re-zip keeps a valid `RECORD` instead.

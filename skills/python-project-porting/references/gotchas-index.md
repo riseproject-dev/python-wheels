@@ -915,6 +915,10 @@ The porting gotchas (478 of them) live in [`references/gotchas/`](gotchas/), spl
 - **409** — The `gpl_sources` trigger can come from the *musllinux* leg alone: auditwheel's
   musllinux policy does not allowlist the GCC runtime, so a C++ extension's musl wheel
   vendors `libstdc++`/`libgcc_s` where its manylinux sibling vendors nothing.
+- **491** — Collecting the licences of auditwheel-grafted system libraries from RPMs has
+  three failure modes — a runtime subpackage with no `%license` file, a text that lives in a
+  different subpackage of the same source RPM, and a licence directory holding the wrong text
+  for the bundled `.so` — and the same SBOM sizes the `gpl_sources` job (the eckitlib case).
 
 ### Local validation & the aarch64/QEMU rehearsal — [`gotchas/local-validation-and-rehearsal.md`](gotchas/local-validation-and-rehearsal.md)
 
@@ -951,6 +955,10 @@ The porting gotchas (478 of them) live in [`references/gotchas/`](gotchas/), spl
 - **444** — Validate a hand-edited `.patch` with `git apply --check`, never `patch`: a wrong
   `@@` line count makes GNU `patch` drop every following hunk in that file with no `.rej` and
   exit 0.
+- **490** — An ecbuild/CMake project that installs its generated config header into the
+  wheel hands you a byte-comparable feature oracle: configure once under QEMU and diff it
+  against the released wheel's before compiling anything; also where an ECMWF binary-wrapper
+  distribution's real build recipe lives when its wheel job is private (the eckitlib case).
 
 ### PR, CI, triggers, publishing & maintainer signals — [`gotchas/pr-ci-and-maintainer.md`](gotchas/pr-ci-and-maintainer.md)
 
