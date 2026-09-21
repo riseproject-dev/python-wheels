@@ -1,0 +1,317 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# This workflow is based on:
+# https://github.com/tensorflow/tensorflow/blob/v2.14.0/tensorflow/lite/tools/pip_package/build_pip_package_with_bazel.sh
+---
+name: Build tflite-runtime wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/tflite-runtime.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tflite-runtime.yml'
+      - 'docs/packages/tflite-runtime.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tflite-runtime.yml'
+      - 'docs/packages/tflite-runtime.yaml'
+
+run-name: build-tflite-runtime ${{ inputs.version && format('- {0}', inputs.version) || '' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # No bazel release publishes a riscv64 binary, so it is bootstrapped from source;
+  # 7.5.0 is the version this repo bootstraps, and TensorFlow's only version gate is
+  # workspace2.bzl's versions.check("1.0.0").
+  BAZEL_VERSION: '7.5.0'
+  RULES_PYTHON_VERSION: '0.33.2'
+  RULES_JAVA_VERSION: '7.6.5'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: tflite-runtime
+      version: ${{ inputs.version }}
+
+  bazel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Bootstrap bazel (riscv64)
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+
+    steps:
+      - name: Restore bazel binary
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: bazel-bin
+          key: bazel-${{ env.BAZEL_VERSION }}-manylinux_riscv64
+
+      - name: Bootstrap bazel ${{ env.BAZEL_VERSION }}
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p bazel-bin
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e BAZEL_VERSION \
+            -e RULES_PYTHON_VERSION \
+            -e RULES_JAVA_VERSION \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+
+          # rules_python 0.33.2's PLATFORMS has no riscv64 entry, aborting the bootstrap
+          # (bazelbuild/bazel#23018). Any linux entry is a safe stand-in: the toolchain it names
+          # is never selected on a riscv64 host. Fixed in bazel 8.2.0; the 7.x backport is open.
+          mkdir -p /tmp/rules_python
+          curl -fsSLo /tmp/rules_python.tar.gz "https://github.com/bazel-contrib/rules_python/releases/download/${RULES_PYTHON_VERSION}/rules_python-${RULES_PYTHON_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_python.tar.gz -C /tmp/rules_python --strip-components=1
+          sed -i 's|fail("No platform declared for host OS {} on arch {}".format(os_name, arch))|return "x86_64-unknown-linux-gnu"|' \
+            /tmp/rules_python/python/private/toolchains_repo.bzl
+
+          # rules_java 7.x maps riscv64 to a stray-colon include path, so a JNI library
+          # can't find jni_md.h. Fixed in rules_java 8.x, never backported.
+          mkdir -p /tmp/rules_java
+          curl -fsSLo /tmp/rules_java.tar.gz "https://github.com/bazelbuild/rules_java/releases/download/${RULES_JAVA_VERSION}/rules_java-${RULES_JAVA_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_java.tar.gz -C /tmp/rules_java
+          sed -i 's|\[":include/linux"\]|["include/linux"]|g' /tmp/rules_java/toolchains/BUILD
+
+          mkdir -p /tmp/bazel-src
+          cd /tmp/bazel-src
+          curl -fsSLo dist.zip "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-dist.zip"
+          unzip -q dist.zip
+
+          EXTRA_BAZEL_ARGS="--tool_java_runtime_version=local_jdk \
+            --override_module=rules_python=/tmp/rules_python \
+            --override_module=rules_java=/tmp/rules_java" \
+            bash ./compile.sh
+          install -m 0755 output/bazel /work/bazel-bin/bazel
+          SCRIPT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin/bazel
+          if-no-files-found: error
+
+  build_wheels:
+    name: Build tflite-runtime ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    needs: [setup, bazel]
+    if: needs.setup.outputs.versions != '[]'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream builds 3.8-3.11 and 2.14.0 is the last release; TensorFlow 2.14
+        # pins pybind11 2.10.4, which predates CPython 3.12. 3.8/3.9 are out because
+        # the manylinux riscv64 image ships no interpreter older than 3.10.
+        # tag is a real dimension: legs introduced only through include collapse
+        # into a single job, keeping the last one (gotcha 402).
+        tag: [cp310, cp311]
+        include:
+          - {tag: cp310, python: '3.10'}
+          - {tag: cp311, python: '3.11'}
+
+    env:
+      TFLITE_RUNTIME_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout tensorflow/tensorflow ${{ matrix.version }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: tensorflow/tensorflow
+          ref: v${{ env.TFLITE_RUNTIME_VERSION }}
+          path: tensorflow
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download bazel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin
+
+      - name: Build wheel
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
+          PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+        run: |
+          mkdir -p wheelhouse
+          set -o pipefail
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e PYTHON_VERSION \
+            -e PIP_EXTRA_INDEX_URL \
+            -e TFLITE_RUNTIME_VERSION \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT' 2>&1 | tee build.log
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+          install -m 0755 /work/bazel-bin/bazel /usr/local/bin/bazel
+
+          PYTAG="cp${PYTHON_VERSION/./}"
+          PYTHON_BIN="/opt/python/${PYTAG}-${PYTAG}/bin/python"
+          export PATH="/opt/python/${PYTAG}-${PYTAG}/bin:${PATH}"
+          "${PYTHON_BIN}" -m pip install -q -U --only-binary=:all: pip setuptools wheel auditwheel numpy
+
+          cd /work/tensorflow
+
+          test "$(awk -F"'" '/^_VERSION = /{print $2}' tensorflow/tools/pip_package/setup.py)" \
+            = "${TFLITE_RUNTIME_VERSION}"
+
+          # TensorFlow 2.14 takes both the Python and the numpy headers from rules_python's
+          # hermetic interpreter, which has no riscv64 build at the pinned 0.23.1 (and would
+          # be the wrong interpreter for the wheel anyway). Stand in the container's own
+          # CPython and its numpy for the two repositories that provide them.
+          mkdir -p /tmp/override/python /tmp/override/pypi_numpy
+          cp -r "$("${PYTHON_BIN}" -c 'import sysconfig; print(sysconfig.get_paths()["include"])')" \
+            /tmp/override/python/include
+          cp -r "$("${PYTHON_BIN}" -c 'import numpy; print(numpy.get_include())')" \
+            /tmp/override/pypi_numpy/include
+          : > /tmp/override/python/WORKSPACE
+          : > /tmp/override/pypi_numpy/WORKSPACE
+          ln -s "${PYTHON_BIN}" /tmp/override/python/python3
+          echo 'interpreter = "@python//:python3"' > /tmp/override/python/defs.bzl
+          cat > /tmp/override/python/BUILD <<'BUILD_FILE'
+          package(default_visibility = ["//visibility:public"])
+
+          exports_files(["python3"])
+
+          cc_library(
+              name = "python_headers",
+              hdrs = glob(["include/**/*.h"]),
+              includes = ["include"],
+          )
+          BUILD_FILE
+          cat > /tmp/override/pypi_numpy/BUILD <<'BUILD_FILE'
+          package(default_visibility = ["//visibility:public"])
+
+          filegroup(name = "pkg")
+
+          cc_library(
+              name = "numpy_headers",
+              hdrs = glob(["include/**/*.h"]),
+              includes = ["include"],
+          )
+          BUILD_FILE
+
+          # --nosubcommands undoes the script's -s, which prints every one of the tens of
+          # thousands of compile commands; no remote JDK is published for riscv64.
+          export CUSTOM_BAZEL_FLAGS="--nosubcommands --noenable_bzlmod \
+            --java_runtime_version=local_jdk --tool_java_runtime_version=local_jdk \
+            --override_repository=python=/tmp/override/python \
+            --override_repository=pypi_numpy=/tmp/override/pypi_numpy \
+            --curses=no --show_progress_rate_limit=60"
+          bash tensorflow/lite/tools/pip_package/build_pip_package_with_bazel.sh
+
+          auditwheel repair --plat manylinux_2_39_riscv64 -w /work/wheelhouse \
+            tensorflow/lite/tools/pip_package/gen/tflite_pip/*/dist/*.whl
+          SCRIPT
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tflite-runtime-${{ env.TFLITE_RUNTIME_VERSION }}-${{ matrix.tag }}-build-log
+          path: build.log
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tflite-runtime-${{ env.TFLITE_RUNTIME_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+      - name: Test wheel
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
+          PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+        run: |
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e PYTHON_VERSION \
+            -e PIP_EXTRA_INDEX_URL \
+            -e TFLITE_RUNTIME_VERSION \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          PYTAG="cp${PYTHON_VERSION/./}"
+          PYTHON_BIN="/opt/python/${PYTAG}-${PYTAG}/bin/python"
+          "${PYTHON_BIN}" -m pip install --only-binary=:all: /work/wheelhouse/*.whl
+
+          # /work/tensorflow would shadow the installed package with the checkout
+          cd /tmp
+          MODEL=/work/tensorflow/tensorflow/lite/testdata/add.bin \
+            "${PYTHON_BIN}" - <<'PY'
+          import os
+
+          import numpy as np
+
+          import tflite_runtime
+          from tflite_runtime import interpreter as tflite
+
+          assert tflite_runtime.__version__ == os.environ["TFLITE_RUNTIME_VERSION"]
+          assert tflite._interpreter_wrapper.__file__.endswith(
+              ".so"
+          ), tflite._interpreter_wrapper.__file__
+
+          # add.bin adds its input to itself and then adds the input once more
+          interpreter = tflite.Interpreter(model_path=os.environ["MODEL"], num_threads=2)
+          interpreter.allocate_tensors()
+          inp = interpreter.get_input_details()[0]
+          assert tuple(inp["shape"]) == (1, 8, 8, 3), inp["shape"]
+          assert inp["dtype"] == np.float32, inp["dtype"]
+          data = np.arange(192, dtype=np.float32).reshape(1, 8, 8, 3)
+          interpreter.set_tensor(inp["index"], data)
+          interpreter.invoke()
+          out = interpreter.get_tensor(interpreter.get_output_details()[0]["index"])
+          np.testing.assert_array_equal(out, data * 3.0)
+          PY
+          SCRIPT
+
+  publish:
+    name: Publish tflite-runtime ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: tflite-runtime-${{ matrix.version }}-*-manylinux_riscv64
