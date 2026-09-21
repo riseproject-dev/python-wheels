@@ -229,6 +229,11 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   unconditional top-level `from <sibling> import …` is a complete stop, and the sibling is
   usually a *build* input too (submodule + header globs + `LD_LIBRARY_PATH` for auditwheel)
   (the memcache-hybrid / Ascend case).
+- **532** — Gotcha 481's poetry-core build-script tag with the wrinkle that makes it look
+  port-worthy: the script's output can be conditional on a host tool (`msgfmt`), so the
+  released wheel carries catalogs a from-sdist install silently drops — and a wandering
+  interpreter/glibc tag across the release history proves the tag follows the publishing
+  runner (the reuse case).
 
 ---
 
@@ -4304,3 +4309,37 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       back it with the mechanical checks: `grep -rin riscv` over both trees returned zero, and
       the packaging/installer scripts (`script/run_pkg_maker/make_run.sh`, `install.sh`) are
       explicit `uname -m` allowlists ending in `exit 1`.
+532. **Gotcha 481's poetry-core build-script tag again, with the one wrinkle that makes it
+    look port-worthy and still isn't: the script's output can be *conditional on a host
+    tool*, so the released wheel carries data a from-sdist install silently drops (the reuse
+    case).** reuse 6.2.0 publishes exactly one wheel,
+    `reuse-6.2.0-cp310-cp310-manylinux_2_41_x86_64.whl`, `Generator: poetry-core 2.2.1`,
+    `Root-Is-Purelib: false` — and all 63 entries are `.py`, `.mo`, `.json`, `.txt`, `.rst`
+    and `.jinja2`: `file` finds no ELF anywhere, nothing greps `PyInit_`. The trigger is
+    481's one-liner, `[tool.poetry.build] script = "_build.py"`, and `_build.py` only shells
+    out to `msgfmt` over `po/*.po`.
+    - **When the tag's halves *wander*, you have 481's proof without downloading anything.**
+      481 dated the flip from a single release; a long history says it louder. reuse is
+      `py3-none-any` through 1.0.0, then cp311/glibc 2.36 (1.1.x), cp310/2.35 (2.x),
+      cp311/2.36 (3.x–4.x), cp313/2.40–2.41 (5.x), cp310/2.41 (6.x) — both halves moving
+      across five year-apart release series while the package keeps shipping the same Python
+      files. The flip lands at exactly 1.1.0, the release that added `[tool.poetry.build]`
+      (1.0.0's `pyproject.toml` has neither that stanza nor a build script), with no C source
+      added. `ci_scripts/queue_triage.py <pkg>` prints the table.
+    - **Check what the build script's output *depends on*, not just what it produces.**
+      `_build.py` looks for `msgfmt`/`msgfmt.py`/`msgfmt3.py` with `shutil.which` and, if
+      none is found, does nothing and exits 0 — the build still succeeds, just without
+      catalogs. `quay.io/pypa/manylinux_2_39_riscv64` ships no `msgfmt`, so `pip wheel
+      <sdist>` there yields `reuse-6.2.0-cp312-cp312-linux_riscv64.whl` with **0** `.mo`,
+      while `dnf -y install gettext` first yields the same filename with **17**. That is the
+      mirror image of 481's closing bullet (there the *published wheel* was the impoverished
+      one) and it is the only thing a riscv64 wheel would actually add over today's sdist
+      install.
+    - **It is still not a port.** The missing data is arch-neutral, the honest fixes are a
+      build-time `gettext` or an upstream `py3-none-any` wheel, and a fabricated
+      `cpXY-cpXY-manylinux_2_39_riscv64` tag is not the way to ship arch-neutral bytes.
+      Gotcha 383's sdist check passes outright: every release has an sdist, the seven runtime
+      requirements resolve to riscv64 wheels on cp312/cp313/cp314/cp314t
+      (`ci_scripts/check_riscv64_deps.py`; `markupsafe` from our own registry, the rest
+      `py3-none-any`), and in a real riscv64 manylinux container the sdist installs in 66 s
+      under QEMU with `reuse --version` and `reuse lint` both working. `parked`.
