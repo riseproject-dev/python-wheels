@@ -7495,9 +7495,76 @@ packages:
   version: 9.9.1
   home: https://www.fico.com/en/products/fico-xpress-optimization
   repo: https://www.fico.com/en/products/fico-xpress-optimization
-  status: claimed
+  status: parked
   pr: null
-  notes: '12 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Not feasible: xpress is FICO''s proprietary Xpress Optimizer, split at PyPI into a thin binding
+    package (xpress, ~1.6 MB) and its actual engine shipped as a hard runtime dependency
+    (requires_dist pins xpresslibs==9.9.1 exactly), so there is no source for the engine at any
+    layer, no riscv64 build from the vendor, and FICO''s own Shrinkwrap License Agreement
+    independently bars redistribution even if there were (the gurobipy/gotcha 453 shape -- per-
+    arch closed math kernel -- same closed-payload family as gotchas 372/376/431/450, this time
+    on a fourth vendor). Verified against the real artifacts, not inferred. PYPI: xpress 9.9.1
+    publishes 24 wheels (cp310-cp314 plus a free-threaded cp314t leg, over
+    macosx_11_0_arm64/manylinux1_x86_64/manylinux2014_aarch64/win_amd64) across 49 releases and
+    1086 files with ZERO sdists ever (gotcha 431); its dependency xpresslibs is likewise 0
+    sdists across 30 releases, and its 4 wheels-per-version are tagged
+    py3-none-{macosx_14_0_arm64,manylinux1_x86_64,manylinux2014_aarch64,win_amd64} -- a
+    fabricated py3-none-<platform> tag hiding real per-arch compiled binaries (gotcha
+    27/81/145''s shape). home/repo/Project-URL for both are FICO''s marketing page
+    https://www.fico.com/en/products/fico-xpress-optimization (gotcha 372''s hdbcli tell);
+    xpress''s own METADATA carries no License: field at all, with the real terms only in the
+    bundled LICENSE.txt. WHAT IS IN THE WHEELS:
+    xpress-9.9.1-cp312-cp312-manylinux2014_aarch64.whl (1.6 MB) is genuinely thin -- one real
+    extension, _xpress.cpython-312-aarch64-linux-gnu.so (2.9 MB uncompressed), plus Python glue
+    and example .mps/.cnf/.opb data files; readelf shows it NEEDs libxprs.so.47 with RPATH /home
+    /ec2-user/workspace/nux_aarch64_python_release-9.9.0/Optimizer/xprs.python/build_envs/py-
+    3.12/lib:$ORIGIN/xpresslibs/lib -- a hard link into the sibling xpresslibs package (not a
+    dlopen) and another closed-vendor-builder-path tell (gotcha 431), so with no riscv64
+    xpresslibs wheel there is no importable xpress wheel at all (the gurobipy/saxonche shape,
+    gotcha 450). The engine itself lives entirely in xpresslibs-9.9.1-py3-none-
+    manylinux2014_aarch64.whl (20.8 MB, 19 files): libxprs.so.47 (21 MB, the LP/MIP/QP/MIQCQP
+    simplex+barrier solver), libxpnll.so (12 MB, the nonlinear solver), libxknitro.so (12 MB,
+    the bundled Knitro NLP solver), libxprscuda.so/libxprsws.so/libxprl.so.x9.9, plus vendored
+    thirdparty/{libcrypto,libssl,libcurl,libwebsockets,libzip,libjansson} for its
+    cloud/licensing features; no .c/.h/.pyx anywhere in either wheel. PER-ARCH CLOSED MATH
+    KERNEL (gotcha 453 confirmed on a fourth vendor): the x86_64 build of libxknitro.so is 96 MB
+    against 12 MB on aarch64 (8x), libxprs.so.47 is 25 MB against 21 MB, and the x86_64-only
+    xpresslibs wheel additionally vendors thirdparty/libiomp5.so (Intel OpenMP) with
+    libxprs.so.47 strings showing a real AVX dispatch table ("Using AVX2 support",
+    icom_avx512_vectorlength, "Barrier used AVX2 support") that the stripped aarch64 build
+    carries none of; the whole-wheel size gap is 50.6 MB (x86_64) vs 20.8 MB (aarch64) vs 16.1
+    MB (macOS arm64). Neither libxprs.so.47 build contains a single riscv/rv64gc string (0 hits,
+    both scanned in full). NO OPEN-SOURCE OR CPU-GENERIC ENGINE: FICO''s own fico-xpress GitHub
+    org has 16 public repos, and the one that looks most promising by name -- mosel ("FICO
+    Xpress Mosel Open Source Repository", Apache-2.0) -- is, by its own README, "extension
+    libraries for the Mosel language, not the solver engine itself": its myqxprs/myxprs
+    interface modules explicitly state "Requires Xpress Optimizer libraries", and its own build
+    instructions say to go download "the free Xpress Community Edition" -- i.e. the same closed
+    xpresslibs binary analyzed above -- to build against; every other repo in the org (python-
+    notebooks, xpress-community, XpressAPI.jl, xpress-3rdparty-interfaces, insight-*, vdlx-
+    datagrid, xpress-dockerfiles, ...) is a modeling-layer binding, notebook, or Insight web-app
+    tool, never the LP/MIP engine (the gurobipy-pandas/gurobi-optimods shape, repeated a second
+    time in this same triage session). THE LICENCE CLOSES A SECOND, INDEPENDENT DOOR, NAMING THE
+    EXACT GATE THE QUEUE ENTRY FLAGGED: xpresslibs/bin/community-xpauth.xpr is FICO''s own
+    Community Edition license file, plain-text and unencrypted in the wheel (license
+    expiry="31-jul-2027" features="Community OptLib OptConsole ... Integer Threads=1024 ..."
+    hostid="any" platform="any" sig=<hex>), and libxprs.so.47''s strings confirm the whole
+    enforcement path (XPRSbeginlicensing/XPRSendlicensing/XPAUTH_PATH/"Xpress-NLP has not been
+    licensed for use here"/"Knitro is not licensed to be run from Xpress"). Both xpress''s and
+    xpresslibs'' dist-info/licenses/LICENSE.txt are FICO''s own "SHRINKWRAP LICENSE AGREEMENT
+    FICO(R) Xpress Optimization Suite (On-Premises)" (a real bundled license file, not just a
+    URL): it grants only a "non-exclusive, non-transferable, non-assignable, non-sublicenseable,
+    limited license", separately bars the Licensee from making "derivative works" or attempting
+    to "reverse engineer, decompile, disassemble" the product, and nowhere grants redistribution
+    rights -- so publishing any xpress/xpresslibs wheel on pypi.riseproject.dev would not be
+    permitted even if a riscv64 engine existed. The Community Edition''s
+    "Threads=1024"/"static=uncounted" terms are a reduced-capability free SKU, not a
+    differently-licensed one -- the same distinction as CPLEX''s Community Edition and MOSEK''s
+    academic/trial licenses. Revisit only if FICO itself ships a riscv64 Xpress Optimizer (a
+    manylinux*_riscv64 xpresslibs wheel on PyPI, or a Linux/RISC-V download on FICO''s own
+    distribution channel) AND the Shrinkwrap Agreement is amended to permit redistribution;
+    nothing in a build-xpress.yml can close either gap. No worktree/branch/PR created -- settled
+    before any YAML was written.'
 - pkg: bleak-esphome
   version: 4.1.0
   home: https://bleak-esphome.readthedocs.io
@@ -12240,9 +12307,57 @@ packages:
   version: 22.2.0.1
   home: https://www.ibm.com/products/ilog-cplex-optimization-studio
   repo: https://www.ibm.com/products/ilog-cplex-optimization-studio
-  status: claimed
+  status: parked
   pr: null
-  notes: '15 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Not feasible: cplex is IBM''s proprietary CPLEX Callable Library engine (the Community Edition
+    of ILOG CPLEX Optimization Studio), so there is no source to build from, no riscv64 build
+    from the vendor at any layer, and its own License Information terms independently bar
+    redistribution even if there were (the gurobipy/gotcha 453 shape -- per-arch closed math
+    kernel -- same closed-payload family as gotchas 372/376/431/450, this time on a third
+    vendor). Verified against the real artifacts, not inferred. PYPI: 22.2.0.1 publishes 25
+    wheels (cp310-cp314 x macosx_11_0_arm64/manylinux2014_aarch64/manylinux2014_ppc64le/manylinu
+    x2014_x86_64/win_amd64), and the project has published 273 files across 22 releases with
+    ZERO sdists ever, so per gotcha 431 the wheel is the only evidence; home/repo/Project-URL
+    are all IBM''s marketing page https://www.ibm.com/products/ilog-cplex-optimization-studio
+    (gotcha 372''s hdbcli tell) and METADATA says License: Proprietary. WHAT IS IN THE WHEEL:
+    unzipping cplex-22.2.0.1-cp312-cp312-manylinux2014_x86_64.whl (52.2 MB) gives 41 files, no
+    .c/.h/.pyx anywhere, and three real closed payloads: libcplex2220.so (duplicated at 27 MB
+    each under both cplex-22.2.0.1.data/scripts/ and .data/purelib/cplex/_internal/, ELF x86-64,
+    not stripped), .data/scripts/cpoptimizer (55 MB, the CP Optimizer constraint-programming
+    engine) and .data/scripts/oplcpolpgen (45 MB, the OPL/CPO code generator), plus a 956 KB
+    per-interpreter py312_cplex2220.so Cython glue module and a 284 KB standalone cpxchecklic
+    license-checking executable. cplex/_internal/_pycplex.py imports the Cython extension ->
+    libcplex2220.so at import time, so with no riscv64 engine there is no importable wheel at
+    all (the gurobipy/saxonche shape, gotcha 450). PER-ARCH CLOSED MATH KERNEL (gotcha 453
+    confirmed on a third vendor): the same libcplex2220.so is 27 MB on x86_64 against 18 MB on
+    aarch64 (both cp312) -- strings show why: the x86_64 build statically links Intel oneMKL (an
+    AVX/AVX512_EH/AVX2_E1 dispatch table, "Intel oneMKL INTERNAL ERROR: Insufficient workspace")
+    while the aarch64 build carries no MKL strings at all and instead an arm64-suffixed path
+    (/cplex/bin/arm64_linux); the x86_64 build path is itself a closed-vendor-Jenkins tell
+    (gotcha 431): /SoftwareFactory/hudson_slave_8080/builds/workspace/FP222.cplex_li-
+    distrib.x86-64_linux/.... Neither .so contains a single riscv/rv64gc string (0 hits, both
+    scanned in full). NO OPEN-SOURCE OR CPU-GENERIC ENGINE: IBM''s own IBMDecisionOptimization
+    GitHub org has 52 public repos (docplex, docplex-doc, tutorials, DO-Samples, cpofzn, docker-
+    install, cplex_code_examples, ...) and every one is a Python/Java/C#/R modeling-layer
+    binding, a Jupyter/notebook sample, or a Dockerfile that installs the closed CPLEX binary
+    into a container -- none contains the CPLEX or CP Optimizer solving engine itself (the
+    gurobipy-pandas/gurobi-optimods shape, repeated on a third vendor). THE LICENCE CLOSES A
+    SECOND, INDEPENDENT DOOR: unlike mosek, the wheel ships a real bundled licenses/LI_en.txt
+    (not just a URL) -- IBM''s own International License Agreement for Non-Warranted Programs
+    plus the CPLEX Community Edition License Information; clause 3(e) states the Licensee "does
+    not 1) use, copy, modify, or distribute the Program except as expressly permitted in this
+    Agreement ... or 4) sublicense, rent, or lease the Program", and nothing elsewhere in the
+    748-line agreement grants redistribution rights -- the Community Edition is a free-of-charge
+    SKU with a reduced Authorized Use (problem-size limits on unregistered use), not a
+    differently-licensed one. cpxchecklic (strings: download_license/write_license/"failed to
+    parse license") and a docloud.ibm.com API-key endpoint baked into the x86_64 build show
+    IBM''s own license-key mechanism gates the full (non-Community) tiers -- a second closed-
+    vendor gate on top of the source gap, the same shape as MOSEK''s FlexNet and Gurobi''s PIP
+    license. Revisit only if IBM itself ships a riscv64 CPLEX Callable Library (a
+    manylinux*_riscv64 wheel on PyPI, or a Linux/RISC-V download on IBM''s own distribution
+    channel) AND the Community Edition license is amended to permit redistribution; nothing in a
+    build-cplex.yml can close either gap. No worktree/branch/PR created -- settled before any
+    YAML was written.'
 - pkg: ansys-mapdl-reader
   version: 0.56.0
   home: https://github.com/pyansys/pymapdl-reader
