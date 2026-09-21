@@ -3129,9 +3129,58 @@ packages:
   version: 4.1.0
   home: https://github.com/cmake-wheel/pinocchio
   repo: https://github.com/cmake-wheel/pinocchio
-  status: queued
+  status: blocked-on-dependency
   pr: null
-  notes: '10 Linux wheels upstream (abi: 0); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: '10 Linux wheels upstream (abi: 0); no riscv64 on PyPI or pypi.riseproject.dev.
+    The note''s "abi: 0" is a wheel BUILD TAG, not an ABI tag: the real filenames are
+    pin-4.1.0-0-cp312-cp312-manylinux_2_28_x86_64.whl etc, where the 0 is PEP 427''s
+    optional build number (dist-info/WHEEL says Build: 0, Generator: cmeel 0.60.1).
+    These are ordinary per-interpreter compiled wheels for cp310-cp314, not py3-none
+    and not abi3 -- every cmake-wheel/cmeel distribution reads "abi: 0" for this reason.
+    pin is the PyPI name of the Python bindings of the Pinocchio rigid-body-dynamics
+    C++ library; cmake-wheel/pinocchio is a packaging fork of stack-of-tasks/pinocchio
+    (same shape as the eigenpy case in gotcha 338) whose pyproject.toml sets
+    build-backend = "cmeel" (CMake driven by the cmeel PEP 517 backend). Bindings are
+    Boost.Python via eigenpy, not pybind11 (the built .so NEEDs libboost_python312.so
+    and libeigenpy.so). PORTABILITY IS FINE: [tool.cmeel] configure-args is only
+    -DBUILD_PYTHON_INTERFACE=ON -DBUILD_STANDALONE_PYTHON_INTERFACE=ON
+    -DBUILD_WITH_COLLISION_SUPPORT=ON -DBUILD_WITH_LIBPYTHON=OFF, so the default build
+    excludes the CppAD/CasADi autodiff backends; the sdist has zero CUDA/nvcc references
+    and zero -march/-mavx/SSE strings (Eigen vectorization falls back to scalar); Eigen
+    itself is header-only. BLOCKER IS THE DEPENDENCY CHAIN, not the code. The wheel
+    ships exactly one file of substance, a 47MB pinocchio_pywrap_default.cpython-312-*.so
+    under cmeel.prefix/, with RUNPATH $ORIGIN/../../../../lib into the cmeel prefix
+    SHARED with its sibling wheels -- nothing is bundled, so every readelf -d NEEDED
+    line is another distribution: libpinocchio_{default,parsers,collision}.so
+    (libpinocchio), libcoal.so (libcoal), libeigenpy.so (eigenpy),
+    liburdfdom_{model,world,sensor}.so.6 (cmeel-urdfdom), libconsole_bridge.so.1.0
+    (cmeel-console-bridge), liboctomap/liboctomath.so.1.10 (cmeel-octomap),
+    libboost_*.so.1.90.0 (cmeel-boost). Transitive closure over requires_dist (extras
+    dropped) checked against PyPI and pypi.riseproject.dev: SATISFIED are cmeel and
+    example-robot-data (py3-none-any, installable from public PyPI as-is) plus
+    cmeel-boost 1.90.0 and numpy (riscv64 on our registry). MISSING on both, 11
+    packages, each already its own .queue.yml entry: cmeel-zlib, cmeel-tinyxml2,
+    cmeel-console-bridge, cmeel-octomap, cmeel-qhull (leaves, need only cmeel) ->
+    cmeel-assimp, cmeel-urdfdom, eigenpy -> libcoal -> coal, libpinocchio -> pin.
+    Confirmed with the repo''s own oracle: ci_scripts/check_riscv64_deps.py --python 312
+    -- ''cmeel-boost~=1.90.0'' ''cmeel-urdfdom>=6'' ''coal>=3.0.3,<4''
+    ''libpinocchio==4.1.0'' reports cp312 UNRESOLVABLE (no versions at all for
+    cmeel-urdfdom), i.e. the wheel could be neither installed nor smoke-tested.
+    Per gotcha 40 this is the "the dependency needs its own port" answer, not a hard
+    workflow problem: pin''s own [build-system] requires pins cmeel-urdfdom[build],
+    coal[build] and libpinocchio == 4.1.0, so there is not even a build to attempt
+    until they exist as riscv64 wheels, and a monolithic build-pin.yml that compiled
+    the siblings in-container would rewrite cmeel''s shared-prefix contract, publish
+    none of them (outside the port''s commit scope) and still emit a wheel whose
+    Requires-Dist (cmeel-urdfdom >= 6, coal >= 3.0.3 < 4, libpinocchio == 4.1.0) the
+    index cannot satisfy. Interpreter ceiling for the whole chain is cmeel-boost''s
+    riscv64 coverage, today cp312/313/314, although upstream pin ships cp310-cp314.
+    Note eigenpy (status blocked-on-dependency, "revisit once cmeel-boost lands") is
+    now actionable -- cmeel-boost 1.90.0 riscv64 is on the registry -- but that
+    unblocks eigenpy only, not pin. Filed as gotcha 470 (feasibility-and-triage.md).
+    No branch/worktree opened: resolved read-only via PyPI JSON, the published aarch64
+    wheel (readelf -d) and the sdist, no CI cycle burned. Revisit once libpinocchio,
+    coal and cmeel-urdfdom are on the registry.'
 - pkg: s5cmd
   version: 0.3.3
   home: https://github.com/jcfr/s5cmd-python-distributions

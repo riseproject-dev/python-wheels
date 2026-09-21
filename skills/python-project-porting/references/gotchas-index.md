@@ -236,6 +236,13 @@ The porting gotchas (438 of them) live in [`references/gotchas/`](gotchas/), spl
   can pass on a vendored library while no extension module is shipped at all; also, a
   `--platform linux/riscv64` container on an x86_64 host runs an x86_64 bundled binary
   *natively*, so it cannot demonstrate an arch mismatch (the httpstan/stanc3 case).
+- **470** — A `.queue.yml` note reading `abi: 0` is a wheel *build tag* (PEP 427's build
+  number, stamped by `Generator: cmeel`), not an ABI tag: the wheels are ordinary
+  per-interpreter compiled ones. For a co-installed-prefix ecosystem like cmeel, `readelf -d`
+  on one released wheel of any arch names every sibling distribution that needs its own port,
+  because the shared `cmeel.prefix` `RUNPATH` means nothing is bundled; measure the closure
+  over `requires_dist` + our registry and hand over the tiers (pin: 11 unported packages,
+  leaves first), capped by cmeel-boost's interpreter coverage (the pin/pinocchio case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

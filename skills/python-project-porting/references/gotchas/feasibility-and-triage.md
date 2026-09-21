@@ -142,6 +142,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   runs at *runtime* over arbitrary user input rather than at build time over fixed input, the
   "pre-generate the output on x86_64 and vendor it as a patch" escape hatch cannot exist at
   all (the httpstan/stanc3 case).
+- **470** — A `.queue.yml` note reading `abi: 0` is a wheel *build tag*, not an ABI tag — and
+  for a co-installed-prefix ecosystem one released wheel's `readelf -d` enumerates the whole
+  chain of ports that must land first (the pin/pinocchio case).
 
 ---
 
@@ -3168,3 +3171,55 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       macOS wheels, so it is a property of the package, not something a riscv64 port has to
       solve. Separate "this package needs a compiler at runtime" from "this package needs a
       *binary we cannot produce* at runtime"; only the second blocks.
+
+470. **A `.queue.yml` note reading `abi: 0` is a wheel *build tag*, not an ABI tag — and for a
+    co-installed-prefix ecosystem one released wheel's `readelf -d` enumerates the whole chain
+    of ports that must land first (the pin/pinocchio case).** Two independent traps, both cheap
+    to clear before reading a single build script.
+    - **Check the real filename before believing the note's shorthand.** pin 4.1.0's wheels are
+      `pin-4.1.0-0-cp312-cp312-manylinux_2_28_x86_64.whl`: the `0` between version and
+      interpreter tag is PEP 427's optional *build number* (`Build: 0` in `dist-info/WHEEL`,
+      stamped by `Generator: cmeel`), which a queue scanner reading the tag triple positionally
+      reports as `abi: 0`. It means neither "pure `py3-none`" (gotchas 24/27's skip) nor abi3
+      (gotcha 469's floor-interpreter handling) — these are ordinary per-interpreter compiled
+      wheels, ten of them, cp310–cp314. Every `cmake-wheel`/cmeel distribution shows `abi: 0`
+      for this reason, so the note is accurate about the field it read and worthless as a
+      signal; the same goes for the sibling `py3-none-manylinux_2_28_*` cmeel wheels, which are
+      real compiled C++ with no Python extension (gotcha 35's shape, not gotcha 27's).
+    - **`readelf -d` on one released wheel for *any* arch is the fastest complete dependency
+      map here.** cmeel wheels unpack into `cmeel.prefix/` and link with
+      `RUNPATH $ORIGIN/../../../../lib` into a prefix directory **shared** with their siblings:
+      nothing is bundled, so every `NEEDED` line names another distribution rather than a
+      vendored copy. pin's one 47 MB `pinocchio_pywrap_default.cpython-312-*.so` needs
+      `libpinocchio_{default,parsers,collision}.so` (libpinocchio), `libcoal.so` (libcoal),
+      `libeigenpy.so` (eigenpy), `liburdfdom_{model,world,sensor}.so.6` (cmeel-urdfdom),
+      `libconsole_bridge.so.1.0` (cmeel-console-bridge), `liboctomap/liboctomath.so.1.10`
+      (cmeel-octomap) and `libboost_*.so.1.90.0` (cmeel-boost). One `readelf` gives the
+      sequencing that walking build scripts would not.
+    - **Measure the closure and hand over the tiers, not just "blocked".** Walking
+      `info.requires_dist` (extras dropped) transitively across PyPI and
+      `https://pypi.riseproject.dev/simple/<dep>/` puts 11 unported distributions under pin —
+      leaves first: cmeel-zlib, cmeel-tinyxml2, cmeel-console-bridge, cmeel-octomap,
+      cmeel-qhull → cmeel-assimp, cmeel-urdfdom, eigenpy → libcoal → coal, libpinocchio → pin
+      — against four already satisfied (`cmeel` and `example-robot-data` are `py3-none-any`
+      straight off public PyPI; `cmeel-boost` and `numpy` are on our registry). Gotcha 338
+      parked eigenpy from this same ecosystem one layer down, and the lesson of cmeel-boost
+      landing since is that clearing one leaf unblocks *its* consumer only: read the closure
+      per package rather than assuming the family moved.
+    - **The `[build-system] requires` is the same unported set, so there is no build to
+      attempt** — pin pins `cmeel-urdfdom[build]`, `coal[build]` and `libpinocchio == 4.1.0` as
+      build inputs (they supply headers *and* the link targets), which is gotcha 249 inverted:
+      here the build-time list adds no blocker the runtime list didn't already have.
+    - **Settle portability anyway, and record *sequenced* rather than *infeasible*.** pin's
+      `[tool.cmeel] configure-args` is only
+      `-DBUILD_PYTHON_INTERFACE=ON -DBUILD_STANDALONE_PYTHON_INTERFACE=ON`
+      `-DBUILD_WITH_COLLISION_SUPPORT=ON -DBUILD_WITH_LIBPYTHON=OFF`, i.e. the default build
+      excludes the CppAD/CasADi autodiff backends; the sdist contains no CUDA/nvcc reference
+      and no `-march`/`-mavx`/SSE string (Eigen's vectorization degrades to scalar on its own).
+      A clean portability read must not then tempt a monolithic build that compiles the
+      siblings inside `build-pin.yml`: it would rewrite cmeel's shared-prefix contract, publish
+      none of the siblings (they are outside the port's commit scope), and still ship a wheel
+      with three `Requires-Dist` entries nothing on the index can satisfy.
+    - **Carry the interpreter ceiling down the chain.** Nothing above cmeel-boost can exceed
+      cmeel-boost's own riscv64 coverage — cp312/313/314 today — even though upstream pin ships
+      cp310–cp314. Decide that once, at the bottom of the chain, not per package.
