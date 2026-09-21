@@ -53,6 +53,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **535** — A release tag can ship tests its own source does not satisfy — diff the failing
   test against upstream's post-release `master` and cherry-pick the fix as a `Backport`
   patch, before blaming the architecture.
+- **545** — A raw-byte `memcmp()`/hash cache key over a padded struct (`{0}`-initialised,
+  copied by `=`) is a latent, compiler/arch-dependent bug even when it has passed on x86_64
+  for years — `memset()` and `memcpy()` it instead of trusting `{0}` or `=` to touch padding.
 
 ---
 
@@ -1185,3 +1188,61 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       reproduces both failures in 0.1s. A suite that gates its tests on an optional native
       dependency will do this to you: check the skip *count* against CI's, not just the
       pass count.
+
+545. **A raw-byte `memcmp()`/hash cache key built over a padded struct is a latent,
+    compiler/arch-dependent correctness bug even when it has been green on x86_64 for years
+    — `{0}` and `=` are not guaranteed to touch padding, `memset()`/`memcpy()` are (the umf
+    1.1.0 IPC case).** `test_provider_os_memory`'s ctest failed 8 of 50 gtest cases under
+    `osProviderTest/umfIpcTest.*/disjoint_w_params_0_OS_HostMemoryAccessor` on riscv64,
+    including the *non-concurrent* `BasicFlow`, `AllocFreeAllocTest` and
+    `openInTwoIpcHandlers` — not just the concurrency-stress variants — ruling out a plain
+    timing flake:
+    ```
+    /work/test/ipcFixtures.hpp:543: Failure
+    Expected equality of these values:
+      ret
+        Which is: 3          // UMF_RESULT_ERROR_INVALID_ARGUMENT
+      UMF_RESULT_SUCCESS
+        Which is: 0
+    [FATAL UMF] umfMemoryProviderCloseIPCHandle: UMF check failed: (ptr != NULL)
+    ```
+    - The failing line is the *second* of two `umfOpenIPCHandle()` calls onto the *same*
+      coarse-grain allocation (one handle at the allocation's base, one at
+      `base + size/2`). By design the second open is meant to be served entirely from
+      `provider_tracking.c`'s opened-handle cache (a hash table keyed by
+      `{remote_base_ptr, local_provider, remote_pid}`) with no new provider work — confirmed
+      on x86_64 with `strace`: a single `pidfd_open()`/`pidfd_getfd()` pair for the whole
+      test, the second open a pure cache hit.
+    - The cache key struct is two pointers plus an `int`, which forces 4 bytes of trailing
+      padding on any LP64 target. uthash's `HASH_FIND`/`HASH_ADD` hash and `memcmp()` the
+      key over its full `sizeof()`, padding included. The key is built with
+      `ipc_opened_cache_key_t key = {0};` then named-field assignment, and stored with
+      `entry->key = *key;` — but `= {0}` only guarantees the *named* members are zeroed
+      (padding is left indeterminate by the C standard), and a plain struct assignment only
+      has to copy the *value*, not the object representation, so even a key with reliably
+      zero padding is not guaranteed to land in the persisted entry byte-for-byte. Either
+      gap is enough to turn a lookup that must be a cache hit into a spurious miss — on
+      whichever compiler/architecture combination doesn't happen to zero or preserve the
+      padding, which is unspecified behaviour, not a guarantee, even where it has held for
+      years on x86_64/GCC.
+    - **The fix is mechanical and safe everywhere:** `memset(&key, 0, sizeof(key))` instead
+      of `= {0}` for construction, and `memcpy(&entry->key, key, sizeof(entry->key))`
+      instead of `entry->key = *key;` for persistence — `memset`/`memcpy` are the only
+      constructs the standard actually guarantees touch every byte. This is a no-op
+      everywhere the compiler already zeroed padding (i.e. everywhere the suite was already
+      green), so it carries no regression risk, and it directly targets the *documented*
+      hazard — the code already had a comment above the `= {0}` acknowledging padding was a
+      concern, just not a fix strong enough to guarantee it.
+    - **Validate what you can without the failing architecture, and say plainly what you
+      couldn't.** hwloc/numactl built once and reused from scratch let a local x86_64 build
+      of the *exact* upstream tag confirm no regression (`test_provider_os_memory` 50/50,
+      plus every other IPC-adjacent suite), and `strace` on the unpatched binary proved the
+      cache-hit code path the bug report's own reasoning depends on. Neither proves the fix
+      *closes* the riscv64 failure — that this specific padding/codegen gap could not be
+      reproduced on available x86_64 hardware is a real limit, not a rounding error, and the
+      patch (`Upstream-Status: To upstream`) says so rather than claiming a false-confidence
+      fix; CI on the target architecture is what actually confirms it.
+    - This is the same family as gotcha 519/535 in spirit — read the *exact* failing line
+      and the *exact* code path before reaching for a skip — but the culprit here is neither
+      an upstream test bug nor a stale tag: it is a genuine, if latent-until-now,
+      correctness gap in how upstream's own C code builds a hash key.

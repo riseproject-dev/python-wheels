@@ -1078,6 +1078,10 @@ The porting gotchas (520 of them) live in [`references/gotchas/`](gotchas/), spl
   test against upstream's post-release `master`, and `git cherry-pick -x` the fix that
   landed after the tag was cut into an `Upstream-Status: Backport` patch (the
   scylla-driver 3.29.11 case).
+- **545** — A raw-byte `memcmp()`/hash cache key over a padded struct is a latent,
+  compiler/arch-dependent bug even where it has been green on x86_64 for years: `{0}` and
+  `=` are not guaranteed to touch padding, `memset()`/`memcpy()` are (the umf 1.1.0 IPC
+  opened-handle cache case).
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
