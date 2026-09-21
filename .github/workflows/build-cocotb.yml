@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/cocotb/cocotb/blob/v2.0.1/.github/workflows/build-test-release.yml
+name: Build cocotb wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cocotb.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cocotb.yml'
+      - 'docs/packages/cocotb.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cocotb.yml'
+      - 'docs/packages/cocotb.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cocotb
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cocotb ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # setup.py hard-errors above Python 3.13 for this release (upstream's own
+        # 2.0.1 wheels stop at cp313 too), so cp314/cp314t are skipped rather than
+        # forced with COCOTB_IGNORE_PYTHON_REQUIRES.
+        python: ["cp312", "cp313"]
+
+    env:
+      COCOTB_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout cocotb ${{ env.COCOTB_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: cocotb/cocotb
+          ref: v${{ env.COCOTB_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # cocotb_build_libs.py links -static-libstdc++ on every Linux extension;
+          # the manylinux riscv64 image doesn't ship libstdc++.a (gotcha 77).
+          CIBW_BEFORE_ALL_LINUX: dnf -y install libstdc++-static
+          # No simulator (Icarus/Verilator/GHDL/...) is available in the manylinux
+          # image, so the simulator-driving half of upstream's suite can't run here.
+          # Run the same simulator-agnostic subset upstream's own release process
+          # runs before publishing (noxfile.py release_test_nosim): stage the
+          # pytest suite (gotcha 25/36) and deselect every simulator_required test.
+          CIBW_TEST_REQUIRES: pytest>=6
+          CIBW_TEST_SOURCES: tests/pytest pyproject.toml
+          CIBW_TEST_COMMAND: python -m pytest -v -k "not simulator_required" tests/pytest
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cocotb-${{ env.COCOTB_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cocotb ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: cocotb-${{ matrix.version }}-*-manylinux_riscv64
