@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (502 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (517 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -323,6 +323,20 @@ The porting gotchas (502 of them) live in [`references/gotchas/`](gotchas/), spl
   released wheel for link-time `NEEDED` siblings, and run the resolver oracle a second time with
   the known-missing requirements dropped because it stops at the first failure
   (the libpinocchio case).
+- **524** — A vendored payload that builds fine for riscv64 *elsewhere* (Debian ships `adb` for
+  it) is still a park when this repo would be the one building it: an unpinned `-latest-` fetch
+  URL means a self-built substitute can never be version-matched to the other platforms' wheels
+  of the same release, the vendor's package manifest
+  (`dl.google.com/android/repository/repository2-{1,3}.xml`, no `host-arch` at all) is the
+  platform table when the URL has no arch segment, and the pure-Python sdist plus a
+  `$PATH`/env-var resolver already serves the arch; also gotcha 503's resolver false positive,
+  concretely (the adbutils case).
+- **528** — An open upstream and a permissive licence do not rescue a vendor runtime wheel
+  (the intel-cmplr-lib-ur case): the unstripped `.so`'s debug paths name the vendor's internal
+  release branch rather than a public ref, so gotcha 263's "PyPI version == open tag" premise
+  fails; the loader's `dlopen` backend list minus the adapters actually shipped shows the vendor
+  withholding the arch-neutral ones; and the reverse dependencies (plus a hard-pinned, equally
+  x86-only payload dep) mean nothing on riscv64 could ever pull the rebuilt library in.
 - **516** — Link-time *stub* shared libraries let a vendor-SDK package build with the SDK
   absent, so a clean local build proves nothing: the released wheel's `DT_NEEDED` read against
   `setup.py`'s `auditwheel --exclude` list is the real test, and the toolkit's arch axis comes
@@ -331,6 +345,27 @@ The porting gotchas (502 of them) live in [`references/gotchas/`](gotchas/), spl
   declared anywhere — not in its own metadata, not in the parent distribution's — is a
   licensing question for the maintainer, not a feasibility verdict: record `license: Unknown`,
   flag it in the PR, and port it (the chalkpy-rs case).
+- **529** — Gotcha 524 with the opposite answer: a vendored prebuilt binary whose upstream
+  already publishes riscv64, named by the wrapper's own version string (`1.9.0.67.0` = wrapper
+  + fzf 0.67.0, the first fzf release carrying `linux_riscv64`); the port is then the two
+  platform-table rows the packaging backend is missing, plus a warning not to adopt upstream's
+  wheel smoke test without running it (the iterfzf case).
+- **530** — A `setuptools-golang`/cgo extension is an ordinary port, not a vendored-binary
+  case: the per-interpreter tags are honest (a real `PyInit_*` extension), and feasibility is
+  a Go question — check the toolchain's own arch-support table for the buildmode used, confirm
+  go.dev ships the target tarball, and cross-build the import graph with `GOOS`/`GOARCH` set on
+  x86 rather than assuming a wall (the certbot-dns-multi case).
+- **531** — Inside an already-parked accelerator-vendor family, the next package's verdict is
+  usually in its dependency list, not its source: `requires_dist` naming a parked sibling plus
+  an unconditional top-level import of it is a complete stop, and the sibling is normally a
+  build input too (submodule, header globs, `LD_LIBRARY_PATH` for auditwheel) — corroborate
+  with the family's recurring negated-x86 `else()` one dependency down (the memcache-hybrid
+  case).
+- **532** — Gotcha 481's poetry-core build-script tag with the wrinkle that makes it look
+  port-worthy: the script's output can be conditional on a host tool (`msgfmt`), so the
+  released wheel carries catalogs a from-sdist install silently drops — and a wandering
+  interpreter/glibc tag across the release history proves the tag follows the publishing
+  runner (the reuse case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -527,6 +562,11 @@ The porting gotchas (502 of them) live in [`references/gotchas/`](gotchas/), spl
   `CIBW_BUILD` list — not a `python:` matrix with `only:` — builds it once and re-tests it on
   every interpreter, free-threaded included, because cibuildwheel reuses an `abi == "none"`
   wheel where it refuses an abi3 one.
+- **527** — Gotcha 371's `PYO3_USE_ABI3_FORWARD_COMPATIBILITY` escape hatch is not free:
+  `is_abi3()` reads it with no version condition, so `Py_LIMITED_API` is set on every
+  interpreter and pyo3's `not(Py_LIMITED_API)` conversion modules — chrono among them —
+  are cfg-removed, breaking the build on interpreters that never needed the flag; the
+  failure impersonates gotcha 10's dependency drift (the pyvrl case).
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
@@ -721,6 +761,13 @@ The porting gotchas (502 of them) live in [`references/gotchas/`](gotchas/), spl
 - **515** — Gotcha 46's minimal perl also breaks a package that shells out to perl at
   *runtime*: the wheel builds and the tests then die on a missing `Safe.pm`, so the fix is
   `CIBW_BEFORE_TEST: dnf -y install perl-Safe` (the systemrdl-compiler case).
+- **525** — The image's GCC 14 makes implicit-function-declaration/implicit-int/int-conversion
+  hard errors and `-w` cannot suppress them; OpenBLAS's generated prototype-less `linktest.c` is
+  the usual first casualty, fixed through `COMMON_OPT` (never a command-line `CFLAGS=`), and a
+  `-fsyntax-only` sweep predicts the whole tree in a minute (the vosk case).
+- **526** — An asymmetry between two upstream invocations of the same command is load-bearing
+  until proven otherwise: vosk's `ONLY_CBLAS=1` on `all` but not `install` is what installs
+  `lapacke.h`, and normalising the two lines broke Kaldi eleven minutes in (the vosk case).
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 

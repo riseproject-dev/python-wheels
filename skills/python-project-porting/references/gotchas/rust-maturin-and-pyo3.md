@@ -76,6 +76,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
   x86_64 and aarch64 dists ship — cross-compile the object on an x86_64 job instead.
 - **479** — maturin `bindings = "cffi"` is a fourth `py3-none-<platform>` shape, and one
   `CIBW_BUILD` list builds it once and re-tests it on every interpreter, cp314t included.
+- **527** — `PYO3_USE_ABI3_FORWARD_COMPATIBILITY` sets `Py_LIMITED_API` on every
+  interpreter, which cfg-removes pyo3's `not(Py_LIMITED_API)` conversions (chrono).
 
 ---
 
@@ -1230,3 +1232,33 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       predict it — the check that would have caught it is the same resolution run *without*
       `--only-binary`, where pip prefers the newest version over the newest one with a
       wheel.
+
+527. **`PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1` is not a free lift of pyo3's version
+    ceiling: it makes `is_abi3()` true on *every* interpreter, so `Py_LIMITED_API` is set
+    and each pyo3 conversion module gated `not(Py_LIMITED_API)` — the whole `chrono` one
+    included — disappears (the pyvrl case; see `build-pyvrl.yml`).** Gotcha 371 reaches
+    for the flag to build flpc's pyo3 0.22 crate on cp314 and reports the wheel still
+    comes out `cp314-cp314`, which reads as "harmless, a no-op below the ceiling". It is
+    not a no-op: `pyo3-build-config`'s `is_abi3()` is
+    `cargo_env_var("CARGO_FEATURE_ABI3").is_some() || env_var("PYO3_USE_ABI3_FORWARD_COMPATIBILITY") == "1"`,
+    with no version condition, and `src/conversions/chrono.rs` opens with
+    `#![cfg(all(feature = "chrono", not(Py_LIMITED_API)))]`. A crate that hands a
+    `chrono::DateTime` across the boundary therefore stops compiling the moment the flag
+    is set — pyvrl's `src/value.rs` (`Value::Timestamp(ts) => Ok(ts.into_py(py))`) fails
+    with `the method into_py exists for struct chrono::DateTime<Utc>, but its trait bounds
+    were not satisfied` on **cp312 as well**, an interpreter that never needed the flag.
+    - **The error impersonates gotcha 10's floating-dependency drift.** It names `chrono`
+      and the resolved `chrono-0.4.45` path, so the first instinct is to pin the crate to
+      whatever the released sdist's `Cargo.lock` had. The tell that it is not drift:
+      dropping the flag builds the identical tree clean from the identical lock.
+    - **Price the matrix on what the pinned pyo3 supports natively.** With the flag the
+      port builds nothing at all; without it the ceiling stands (3.12 for pyo3 0.20), so
+      the matrix is cp312 alone. Upstream's own published wheel set is the cross-check —
+      pyvrl ships cp310/cp311/cp312 and no cp313, for this same reason.
+    - **`UNSAFE_PYO3_SKIP_VERSION_CHECK=1` sits in the same `ensure_python_version`
+      (`pyo3-ffi/build.rs`) and does skip the ceiling without turning abi3 on** — but it
+      is pyo3's own undocumented test knob, and taking it means running a frozen struct
+      layout against a CPython the crate predates, which is gotcha 322's segfault. Drop
+      the interpreter instead.
+    - Generalises past chrono: grep the pinned pyo3 release's `src/conversions/` for
+      `not(Py_LIMITED_API)` before assuming the flag costs nothing.

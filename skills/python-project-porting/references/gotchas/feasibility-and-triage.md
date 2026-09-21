@@ -208,6 +208,32 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   actionable: recompute the frontier per candidate, split "the missing sibling is a *build*
   requirement" (nothing to attempt) from "runtime only" (buildable ahead of it), and run the
   resolver oracle twice because it stops at the first failure (the libpinocchio case).
+- **524** — A vendored payload that *does* build for riscv64 elsewhere still parks when this repo
+  would be the one building it: an unpinned `-latest-` fetch URL makes a self-built substitute
+  unversionable, the vendor's own package manifest is the platform table, and the pure-Python
+  sdist already serves the arch (the adbutils/Android platform-tools case).
+- **528** — An open upstream and a permissive licence do not rescue a vendor runtime wheel: read
+  the build tree out of the unstripped `.so`'s debug paths (an internal release branch, not a
+  public ref), diff the loader's `dlopen` backend list against the adapters the wheel actually
+  ships, and check that any consumer could exist on our arch (the intel-cmplr-lib-ur case).
+- **529** — The vendored-binary triage's happy ending: the vendor can already publish our arch,
+  and the version string names the release to check — iterfzf's `1.9.0.67.0` names bundled fzf
+  0.67.0, whose own asset list already carries `linux_riscv64` (the iterfzf case).
+- **530** — A `setuptools-golang`/cgo extension is an ordinary port, not a vendored-binary case:
+  the per-interpreter tags are honest (a real `PyInit_*` extension), and feasibility is a Go
+  question — check the toolchain's own arch-support table for the buildmode used, confirm
+  go.dev ships the target tarball, and cross-build the import graph with `GOOS`/`GOARCH` set on
+  x86 rather than assuming a wall (the certbot-dns-multi case).
+- **531** — Inside an already-parked vendor family, the *next* package is often settled by its
+  dependency list before any source is read: an `install_requires` on a parked sibling plus an
+  unconditional top-level `from <sibling> import …` is a complete stop, and the sibling is
+  usually a *build* input too (submodule + header globs + `LD_LIBRARY_PATH` for auditwheel)
+  (the memcache-hybrid / Ascend case).
+- **532** — Gotcha 481's poetry-core build-script tag with the wrinkle that makes it look
+  port-worthy: the script's output can be conditional on a host tool (`msgfmt`), so the
+  released wheel carries catalogs a from-sdist install silently drops — and a wandering
+  interpreter/glibc tag across the release history proves the tag follows the publishing
+  runner (the reuse case).
 
 ---
 
@@ -4065,3 +4091,255 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       cmeel still writes `Requires-Dist` from the unchanged `[project] dependencies`. The
       result is an unusable wheel that also diverges from the upstream recipe the port exists
       to mirror, which is goal 2's definition of a defect.
+    - **The frontier moves during the campaign, sometimes within hours — re-derive it at the
+      moment you start, not from a sibling entry written the same day (the libcoal case).**
+      libcoal 3.0.3 was recorded a few hours earlier as needing `cmeel-assimp`,
+      `cmeel-octomap` and `cmeel-qhull`, with the latter two's publishes "still in flight"
+      (both `simple/` URLs 404). By the time it was picked up both returned 200, and the
+      two oracle runs above reduced it to a *single* missing name, `cmeel-assimp` — a park
+      note that says "blocked on exactly X, re-run this one command when `simple/X/` is 200"
+      instead of "blocked on three, re-triage later". Checking the registry index and
+      re-running the oracle costs a minute; trusting a note you wrote this morning does not
+      cost less.
+    - **`find_package(<dep> REQUIRED)` in the upstream CMakeLists closes the reduced-build
+      escape hatch before the metadata argument even starts.** Before rejecting "just build
+      it without the feature" on `Requires-Dist` grounds, check whether the dependency is
+      optional at all: libcoal's `CMakeLists.txt` has a bare `find_package(assimp REQUIRED)`
+      with no `option()` guarding it, so unlike `-DBUILD_PYTHON_INTERFACE=OFF` there is no
+      configure-arg that drops it and the configure step fails outright. An `option()`-guarded
+      dep needs the metadata argument; a bare `REQUIRED` one is settled by one grep.
+
+524. **A vendored payload that builds fine for riscv64 *elsewhere* is still a park when this
+    repo would be the one building it — and an unpinned `-latest-` fetch URL is the sharpest
+    reason why (the adbutils case).** Gotcha 183 splits `vendored-binary` by whether the
+    payload's primary function is reachable on riscv64: playwright's browsers are not (park),
+    av's ffmpeg libraries are (port). adbutils is the third position, and it is the same
+    disposition as imageio-ffmpeg and pypandoc-binary for a different reason than playwright's.
+    The payload is Google's prebuilt `adb`: `build_wheel.py` builds one pure wheel, then for
+    each of four hand-written tags (`py3-none-manylinux1_x86_64`, a macOS pair, two Windows)
+    unpacks it, drops the platform's binary into `adbutils/binaries/`, rewrites `WHEEL`'s
+    `Tag:` line and repacks — so `Root-Is-Purelib: true` survives beside a platform tag
+    (gotcha 27's cosmetic-tag tell and gotcha 35's real payload in one wheel: 8.7 MB of x86-64
+    ELF in a 3.5 MB wheel whose sdist is 191 KB). `adb` itself is Apache-2.0 AOSP and Debian
+    builds it for riscv64 (`adb` binary package, riscv64 in trixie/sid/experimental), so the
+    function is reachable — and the port is still not ours to make.
+    - **An unpinned payload URL is a versioning stop, not just a maintenance smell.** The
+      fetch is `platform-tools-**latest**-linux.zip`, so every adbutils wheel carries whatever
+      Google shipped on its build day (r37.0.1 at time of writing) with no record of which.
+      Anything we compiled from source would be a *different* adb, from a different tree
+      (the AOSP build system cannot build the CLI tools alone — nmeum/android-tools exists
+      precisely to work around that, vendoring libusb/PCRE/gtest/protobuf/brotli/zstd/lz4),
+      at a version that cannot be matched to the x86_64 wheel of the same distribution
+      version, and the mismatch re-opens on every bump. Check the payload URL for a rolling
+      pointer (`latest`, `stable`, no version segment) before pricing a from-source rebuild.
+    - **The vendor's package manifest is the platform table when the download URL has no arch
+      segment.** Google's URL scheme is per-OS only, and all three arch-suffixed guesses 404;
+      the authoritative read is the Android SDK manifest the SDK Manager itself consumes,
+      `dl.google.com/android/repository/repository2-{1,3}.xml`, whose `platform-tools`
+      `remotePackage` lists exactly three `<archive>`s (`host-os` linux/macosx/windows) with
+      **no `host-arch` element at all**. Add it to gotcha 157's collection of one-curl
+      platform tables beside `nodejs.org/dist`, NVIDIA's redist index, npm
+      `optionalDependencies` and conda repodata.
+    - **Check what the arch gets *today* before calling it a gap.** No `-none-any` wheel has
+      been published since 0.7.3 (2020), but the sdist is on PyPI and is pure Python:
+      `pip wheel` on it produced a 45 KB `py3-none-any` wheel in seconds with no compiler, and
+      the installed package imports and resolves `adb` through `ADBUTILS_ADB_PATH` →
+      `shutil.which("adb")` → the (empty) bundled `binaries/` dir. riscv64 users are therefore
+      served by their distro's adb exactly as aarch64/ppc64el users are — upstream has never
+      published a non-x86_64 Linux wheel in 131 releases, so riscv64 is not uniquely excluded
+      (gotcha 50's shape one step in).
+    - **Run the resolver oracle on the target version's requirements, not on the distribution
+      name** (gotcha 503's false positive, concretely). `check_riscv64_deps.py adbutils`
+      reports `UNRESOLVABLE` on all four interpreters — because `--only-binary` can only see
+      the one `py3-none-any` wheel in the project's history, 0.7.3 from 2020, whose
+      long-abandoned `apkutils2` dep has no wheel either. Passing 2.12.0's own requirements
+      (`requests`, `deprecation`, `retry2`, `Pillow`) resolves clean on cp312/cp313/cp314/cp314t
+      against PyPI + our registry, which is the answer that matters.
+
+528. **An open upstream and a permissive licence do not rescue a vendor runtime wheel — check
+     that the shipped *version* maps to a public ref, that the vendor ships the *arch-neutral*
+     components, and that any consumer could exist on our arch (the intel-cmplr-lib-ur case).**
+     Gotcha 263 rescues a closed-looking wheel whose contents are an open project; gotcha 506
+     says that rescue is per package, not per vendor. This is the case where the open project
+     really is there and the answer is still park: intel-cmplr-lib-ur's payload is oneAPI
+     Unified Runtime, Apache-2.0 WITH LLVM-exception, `project(unified-runtime VERSION 0.12.0)`
+     in intel/llvm's `unified-runtime/` (oneapi-src/unified-runtime is now only a mirror), and
+     0.12.0 is exactly the wheel's `libur_loader.so.0.12.0` SONAME. Three cheap checks decide
+     it, and each generalises to any plugin-shaped vendor runtime:
+     - **Debug paths beat the licence file: read the *tree* the binary was built from.** The
+       `.so` files ship unstripped, so
+       `strings -a lib*.so | grep -oE '(/[A-Za-z0-9_.+-]+){2,}\.(cpp|hpp)'` prints
+       `/netbatch/<user>/…/xmain-rel/LX/xmainefi2linux_release/ws/icsws/llvm/unified-runtime/source/…`
+       — Intel's build farm and Intel's *internal* release branch, not a public ref. The
+       distribution version `2026.1.1` is a release-train number (intel/llvm's public tags are
+       `nightly-YYYY-MM-DD` and `v7.1.1`), so gotcha 263's "PyPI version == open tag" premise
+       fails even though the source is open, and a rebuild would be a different artifact under
+       the same name. The banner and `readelf -d` close it: all three libraries say
+       `Intel(R) oneAPI DPC++/C++ Compiler 2026.1.1` and need
+       `libimf.so`/`libsvml.so`/`libirng.so`/`libintlc.so.5`, i.e. the published bytes cannot be
+       reproduced with a free toolchain from that source anyway.
+     - **A plugin runtime names every backend it can load; diff that list against what the
+       wheel ships.** `strings` the loader for its `dlopen` table —
+       `libur_adapter_{level_zero,level_zero_v2,opencl,cuda,hip,native_cpu,offload,mock}.so.0` —
+       then list the wheel: only the two Level Zero adapters and OpenCL are in it. The
+       arch-neutral backends the open project has (`native_cpu`, `offload`) are precisely the
+       ones the vendor does not ship, and the shipped ones `dlopen` `libze_loader.so.1`, whose
+       only implementation is Intel's GPU/NPU stack (intel/compute-runtime publishes amd64-only
+       packages; Debian's `libze1` and `intel-opencl-icd` are amd64-only; Debian has no
+       `unified-runtime` source package at any arch). A vendor's *selection* of an open
+       project's plugins is itself platform evidence, and it is one `strings` away.
+     - **Ask who could install it: a runtime shim with no reachable consumer is dead weight even
+       if it builds.** Upward, the only PyPI consumers are `intel-openmp` and `intel-sycl-rt`,
+       both 0-sdist Intel binary wheels tagged `manylinux*_x86_64`/`win_amd64` only; downward
+       the wheel hard-pins `Requires-Dist: umf==1.1.*`, itself 0 sdists, x86_64/win-only and 404
+       on our index (gotcha 40's shape). Intel publishes oneAPI for no non-x86 architecture at
+       all — `apt.repos.intel.com/oneapi dists/all/Release` says
+       `Architectures: all amd64 i386 i686`. Gotcha 465's inverted tell also repeats here:
+       `strings -a libur_loader.so | grep -ci riscv` is 1015 (`R_RISCV_*`, `RISCVISAInfo.cpp`,
+       `DW_CC_LLVM_RISCVVectorCall`) from bundled LLVM tables, while the ELF is x86-64, no
+       `LLVMInitialize*Target` symbol exists at all, and the adapters have zero riscv strings.
+
+529. **The vendored-binary triage's happy ending: the vendor can already publish our arch,
+    and the version string names the release to check (the iterfzf case).** Gotcha 524 parked
+    adbutils over a vendored blob with no riscv64 upstream; this is the same shape with the
+    opposite answer, settled by one asset list. iterfzf's version `1.9.0.67.0` is
+    `<wrapper>.<bundled tool version>` — the tail is fzf 0.67.0 — so the release to interrogate
+    is named by the version itself. `fzf-0.67.0-linux_riscv64.tar.gz` is in it, and 0.67.0 is
+    the *first* fzf release that has it (0.66.0 and every earlier tag 404 for that name):
+    query the bundled version's own asset list, not the vendor's latest and not a "since when"
+    assumption.
+    - **The sdist can carry the asset list offline.** `iterfzf/fzf-<ver>-release.json` is the
+      cached GitHub release payload the PEP 517 backend resolves downloads from, so one
+      `pip download --no-binary :all:` enumerates every platform the vendor publishes with no
+      API call and no rate limit.
+    - **Then the port is the platform table, twice.** `build_dist.py` keys the asset off
+      `(GOOS, GOARCH)` and the wheel's platform tag off the same pair, with a second table
+      mapping `(sys.platform, platform.machine())` onto it. A missing row is
+      `KeyError: ('linux', 'riscv64')` under an explicit `GOOS`/`GOARCH` and
+      `RuntimeError: unsupported platform` natively — patch both, because the native table is
+      the path a user's `pip install` from the sdist takes on riscv64.
+    - **Verify the bytes against the vendor's checksums, not just the tag.** The wheel's
+      `iterfzf/fzf` is byte-identical to the release tarball's member, and that tarball's
+      sha256 is in `fzf_<ver>_checksums.txt`; an ELF with `e_machine` 243, `statically linked`
+      and a double-float ABI is also the answer to gotcha 449's "which riscv64?".
+    - **Don't adopt upstream's wheel smoke test without running it first.** iterfzf's `tox.ini`
+      asserts `iterfzf([]) is None` in two of its four commands; at this tag that raises
+      `AttributeError` on every platform (the subprocess is spawned only on the first item, so
+      an empty iterable leaves `stdin` as `None`), reproducible against upstream's own
+      published x86_64 wheel. Run the commands against an existing wheel before making them the
+      test job, and take the real suite instead — here `iterfzf/test_iterfzf.py` ships *inside*
+      the wheel, so `pytest --pyargs iterfzf.test_iterfzf` tests the installed artifact with no
+      checkout to shadow it (11 of its 14 cases run the real binary; the other three open the
+      full-screen picker and need a terminal — giving them a pty makes them hang, not pass).
+    - **A renamed wheel is not a retagged one.** This backend only rewrites the *filename*
+      (`py3-none-any` → `py3-none-manylinux_2_39_riscv64`); `dist-info/WHEEL` still says
+      `Tag: py3-none-any`. pip and uv both install it, so leave it alone rather than "fixing"
+      an upstream artifact shape.
+
+530. **A `setuptools-golang`/cgo extension is an ordinary port, not a vendored-binary case
+    (the certbot-dns-multi shape) — check Go's own arch table before assuming a wall.** The
+    per-interpreter wheel tags (`cp311`-`cp314`, one per Python) are honest here, not
+    cosmetic (gotcha 27/464's tell doesn't apply): `Extension(..., ["bridge/main.go"])` with
+    `build_golang` runs `go build -buildmode=c-shared`, producing a real `PyInit_*`/
+    `PyModuleDef` extension whose `.so` links the interpreter's C API, confirmed by the
+    installed wheel shipping one `<name>.cpython-3XX-<arch>-linux-gnu.so` and nothing
+    `py3-none`. Feasibility is then a Go question, not a Python one: check
+    `internal/platform/supported.go` in the Go toolchain source for the target `GOOS`/`GOARCH`
+    pair under the buildmode the extension uses (`c-shared`), confirm go.dev actually ships a
+    `linux-riscv64` release tarball for upstream's pinned Go version, and cross-build the
+    package's own import graph with `GOOS=linux GOARCH=riscv64 CGO_ENABLED=0 go build ./...`
+    on x86 — a clean build proves no dependency is arch-gated without needing an emulated
+    compile. `setuptools-golang` itself carries no architecture table (it only shells out to
+    `go build`), so there is nothing in the Python packaging layer to check. If the embedded
+    Go project is a CLI-shaped tool (here, go-acme/lego's DNS providers), its own offline
+    exec-mode entry point often doubles as a free end-to-end test with no network and no
+    checked-out fixtures.
+
+531. **Inside an already-parked accelerator-vendor family, the *next* package's verdict is
+    usually in its dependency list, not in its source — start with `requires_dist` and the
+    registry, not with the vendor's C++ (the memcache-hybrid / Huawei Ascend case).** Gotchas
+    480 (memfabric-hybrid) and 516 (torch-npu) each cost a deep source dive to reach a park;
+    this one is settled in two commands, and the source reading afterwards only corroborates.
+    - **The two-command short circuit.** `info.requires_dist` in the PyPI JSON is the whole
+      answer when it names a sibling this queue has already parked (here the single entry
+      `memfabric_hybrid>=1.2.0`), and `ci_scripts/check_riscv64_deps.py '<that requirement>'`
+      confirms it is UNRESOLVABLE on every interpreter because neither PyPI nor
+      pypi.riseproject.dev has a riscv64 build of it. Run both *before* cloning anything:
+      a package whose only runtime dependency cannot exist on riscv64 cannot be ported at
+      this version whatever its own code does.
+    - **Then check whether the import is conditional — usually it isn't.** The dependency is
+      only fatal at import time if nothing guards it. Read the wheel's `__init__.py`: here the
+      first executable line is `from memfabric_hybrid import bm`, followed by module-level
+      `bm.BmCopyType.*` constant bindings, so `import memcache_hybrid` raises `ImportError`
+      immediately on a host without the parked sibling. That is gotcha 516's "dead on arrival"
+      one layer up — Python, not the dynamic loader — and it means even a perfectly compiled
+      riscv64 wheel would be unimportable.
+    - **The parked sibling is normally a *build* input as well, which closes the "vendor it
+      ourselves" escape.** Don't stop at `install_requires`: `.gitmodules` pinned
+      `3rdparty/memfabric_hybrid` → `gitcode.com/Ascend/memfabric_hybrid`, the top-level
+      `CMakeLists.txt` glob-includes every header under that submodule's `src/`, and
+      `build.sh` puts the sibling's `output/smem/lib64` and `output/hybm/lib64` on
+      `LD_LIBRARY_PATH` so `auditwheel repair` can resolve. So porting this package requires
+      first porting the parked one — gotcha 523's "the missing sibling is a build requirement"
+      split, applied to a park rather than to a queue gap.
+    - **Corroboration is cheap once you know the verdict; run it anyway, and report what is
+      *not* blocking.** `strings` finds `libascendcl.so` where `readelf -d` is clean on all 20
+      shipped `.so` (gotcha 480's dlopen tell), and the source names it outright in
+      `csrc/client/dl_acl_api.cpp` (`gAscendAclLibName = "libascendcl.so"`, wrapping
+      `aclrtMalloc`/`Memcpy`/`SetDevice`). There is no backend selector among the 12
+      `option()`s and no version-stamping env var in `setup.py`, so unlike gotcha 480 there is
+      not even a fake CPU mode to disprove (gotcha 516's cleaner stop). But an `__x86_64__`/
+      `__aarch64__` header split is **not** automatically a wall — here `mmc_montotonic.h`'s
+      `__rdtsc`/`cntvct` paths sit under a `USE_PROCESS_MONOTONIC` that the default
+      `ENABLE_CPU_MONOTONIC=OFF` leaves undefined, and the `#else` is portable
+      `clock_gettime`. Saying so keeps the evidence honest.
+    - **A family's negated-x86 switch recurs one dependency down.** Gotcha 480 found
+      `else → -msse4.2` in ubs-comm; the SSD backend this package `FetchContent`s
+      (`cmake/config_ubsio.cmake` → `gitcode.com/openeuler/ubs-io`, and `build.sh` defaults
+      `BUILD_UBSIO=ON`, which is why the released wheel carries `libubsio_kvc`/`libbio_*`)
+      repeats it in `ubsio-boostio/src/disk/CMakeLists.txt`: `arm|aarch64` selects `arm/`,
+      `else()` selects `x86/`, whose `cpu_vendor_checker.h` is `__asm__ __volatile__("cpuid")`
+      — riscv64 takes the x86 branch and dies on the instruction. When one member of a vendor
+      family shows this shape, grep its siblings' `FetchContent`/submodule deps for the same
+      `else()` rather than assuming each is independent.
+    - **Upstream may state its arch axis by delegation.** The README's hardware section is one
+      line — "MemCache depends on MemFabric; the supporting matrix is the same as MemFabric's"
+      — which inherits the parked sibling's Atlas/CANN/`aarch64,x86` axis without restating
+      it. Follow the pointer instead of recording "upstream documents no requirements", and
+      back it with the mechanical checks: `grep -rin riscv` over both trees returned zero, and
+      the packaging/installer scripts (`script/run_pkg_maker/make_run.sh`, `install.sh`) are
+      explicit `uname -m` allowlists ending in `exit 1`.
+532. **Gotcha 481's poetry-core build-script tag again, with the one wrinkle that makes it
+    look port-worthy and still isn't: the script's output can be *conditional on a host
+    tool*, so the released wheel carries data a from-sdist install silently drops (the reuse
+    case).** reuse 6.2.0 publishes exactly one wheel,
+    `reuse-6.2.0-cp310-cp310-manylinux_2_41_x86_64.whl`, `Generator: poetry-core 2.2.1`,
+    `Root-Is-Purelib: false` — and all 63 entries are `.py`, `.mo`, `.json`, `.txt`, `.rst`
+    and `.jinja2`: `file` finds no ELF anywhere, nothing greps `PyInit_`. The trigger is
+    481's one-liner, `[tool.poetry.build] script = "_build.py"`, and `_build.py` only shells
+    out to `msgfmt` over `po/*.po`.
+    - **When the tag's halves *wander*, you have 481's proof without downloading anything.**
+      481 dated the flip from a single release; a long history says it louder. reuse is
+      `py3-none-any` through 1.0.0, then cp311/glibc 2.36 (1.1.x), cp310/2.35 (2.x),
+      cp311/2.36 (3.x–4.x), cp313/2.40–2.41 (5.x), cp310/2.41 (6.x) — both halves moving
+      across five year-apart release series while the package keeps shipping the same Python
+      files. The flip lands at exactly 1.1.0, the release that added `[tool.poetry.build]`
+      (1.0.0's `pyproject.toml` has neither that stanza nor a build script), with no C source
+      added. `ci_scripts/queue_triage.py <pkg>` prints the table.
+    - **Check what the build script's output *depends on*, not just what it produces.**
+      `_build.py` looks for `msgfmt`/`msgfmt.py`/`msgfmt3.py` with `shutil.which` and, if
+      none is found, does nothing and exits 0 — the build still succeeds, just without
+      catalogs. `quay.io/pypa/manylinux_2_39_riscv64` ships no `msgfmt`, so `pip wheel
+      <sdist>` there yields `reuse-6.2.0-cp312-cp312-linux_riscv64.whl` with **0** `.mo`,
+      while `dnf -y install gettext` first yields the same filename with **17**. That is the
+      mirror image of 481's closing bullet (there the *published wheel* was the impoverished
+      one) and it is the only thing a riscv64 wheel would actually add over today's sdist
+      install.
+    - **It is still not a port.** The missing data is arch-neutral, the honest fixes are a
+      build-time `gettext` or an upstream `py3-none-any` wheel, and a fabricated
+      `cpXY-cpXY-manylinux_2_39_riscv64` tag is not the way to ship arch-neutral bytes.
+      Gotcha 383's sdist check passes outright: every release has an sdist, the seven runtime
+      requirements resolve to riscv64 wheels on cp312/cp313/cp314/cp314t
+      (`ci_scripts/check_riscv64_deps.py`; `markupsafe` from our own registry, the rest
+      `py3-none-any`), and in a real riscv64 manylinux container the sdist installs in 66 s
+      under QEMU with `reuse --version` and `reuse lint` both working. `parked`.
