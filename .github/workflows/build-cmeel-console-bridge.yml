@@ -1,0 +1,128 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/cmake-wheel/cmeel-console-bridge/blob/v1.0.2.3.c0/.github/workflows/release.yml
+name: Build cmeel-console-bridge wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cmeel-console-bridge.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cmeel-console-bridge.yml'
+      - 'docs/packages/cmeel-console-bridge.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cmeel-console-bridge.yml'
+      - 'docs/packages/cmeel-console-bridge.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cmeel-console-bridge
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cmeel-console-bridge ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      CMEEL_CONSOLE_BRIDGE_VERSION: ${{ matrix.version }}
+
+    steps:
+      # The wheel holds no Python extension ([tool.cmeel] has-sitelib = false), so one
+      # py3-none-manylinux_riscv64 wheel covers every interpreter.
+      - name: Checkout cmeel-console-bridge v${{ env.CMEEL_CONSOLE_BRIDGE_VERSION }}.c0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: cmake-wheel/cmeel-console-bridge
+          ref: v${{ env.CMEEL_CONSOLE_BRIDGE_VERSION }}.c0
+          submodules: true
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # console_bridge declares cmake_minimum_required(VERSION 3.0.2) and cmeel[build]
+          # resolves CMake >= 4, which refuses it; the cmeel backend owns the configure
+          # line, so the floor goes in the environment (gotcha 257).
+          CIBW_ENVIRONMENT: CMEEL_LOG_LEVEL=DEBUG CMAKE_POLICY_VERSION_MINIMUM=3.5
+          # cmeel installs into a shared prefix with an $ORIGIN RPATH it sets itself.
+          CIBW_REPAIR_WHEEL_COMMAND: ""
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert "cmeel.prefix/lib/libconsole_bridge.so.1.0" in names, names
+          assert "cmeel.prefix/include/console_bridge/console.h" in names, names
+          EOF
+
+      - name: Smoke-test the built library
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          # gotcha 234: stock Ubuntu 24.04 apt pip (24.0) has zero manylinux_*_riscv64
+          # tags, so it rejects the riscv64 wheel outright without upgrading first.
+          pip install -q --upgrade pip
+          pip install -q wheelhouse/*.whl
+          python3 -c "
+          import ctypes, pathlib, sysconfig
+          lib = pathlib.Path(sysconfig.get_paths()['purelib']) / 'cmeel.prefix/lib/libconsole_bridge.so'
+          ctypes.CDLL(str(lib))
+          print(lib)
+          "
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cmeel-console-bridge-${{ env.CMEEL_CONSOLE_BRIDGE_VERSION }}-py3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cmeel-console-bridge ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: cmeel-console-bridge-${{ matrix.version }}-*-manylinux_riscv64
