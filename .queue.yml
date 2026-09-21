@@ -3612,11 +3612,84 @@ packages:
   notes: '28 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp38,cp39); no riscv64 on PyPI or pypi.riseproject.dev. PyPI records no project URL; upstream is shogo82148/mecab, a monorepo with the MeCab C++ fork and the Python (SWIG) binding under mecab/python, tagged together (not the distinct, already-ported mecab-python3/SamuraiT package). setup.py links libmecab via mecab-config, same shape as mecab-python3''s PR #1117; CIBW_BEFORE_ALL_LINUX builds it from {project}/mecab (the checkout root''s top-level mecab dir -- not doubly nested like mecab-python3''s /tmp clone of taku910/mecab), needing gettext-devel for AM_ICONV''s m4 macros. Patch adds a LICENSE matching setuptools'' default glob, same gap as mecab-python3. Tests via unidic-lite like mecab-python3. PR #1390 green (4 wheels built cp312-cp314t, publish dry-run OK), awaiting review.'
 - pkg: nvshmem4py-cu13
   version: 0.3.1
-  home: ''
-  repo: ''
-  status: queued
+  home: https://developer.nvidia.com/nvshmem
+  repo: https://github.com/NVIDIA/nvshmem
+  status: parked
   pr: null
-  notes: '8 Linux wheels upstream (abi: cp310,cp311,cp312,cp313); no riscv64 on PyPI or pypi.riseproject.dev. PyPI records no project URL; locate upstream during research.'
+  notes: 'Parked after read-only triage; no worktree/branch/PR/workflow/docs-yaml/patches created.
+    The queue entry''s "PyPI records no project URL" was resolved: nvshmem4py is NVIDIA''s
+    first-party Python binding for NVSHMEM and its source is public at github.com/NVIDIA/nvshmem
+    (Apache-2.0), in the nvshmem4py/ subdirectory, tagged per release (v3.7.2-0 matches the
+    nvidia-nvshmem-cu13 3.7.2 runtime). So, like nccl4py, this is not a no-source park
+    (contrast pyqt5-qt5/saxonche) -- it is a hard NVIDIA-GPU/CUDA requirement, the same class as
+    the parked nccl4py, pynvvideocodec, cupy-cuda12x, onnxruntime-gpu and humming-kernels entries
+    (gotchas 386/387/452/471; gotcha 284''s "runtime dlopen or build-time headers?" test comes out
+    on the headers side). Five walls, each read off the real source tree and the real cp312
+    manylinux_2_34 x86_64 wheel rather than inferred:
+    (1) UPSTREAM''S OWN ARCH TABLE SAYS NO (gotcha 386''s first check). nvshmem4py has no
+    standalone pip build: it is a CMake subproject of the NVSHMEM C library, and
+    nvshmem4py/cmake/buildWheel.cmake opens with a CMAKE_SYSTEM_PROCESSOR switch matching only
+    aarch64|ARM64|arm64 and x86_64|amd64|AMD64, else message(FATAL_ERROR "Unsupported
+    architecture: ..."). The same two files hold the whole -cu12/-cu13 axis, i.e. gotcha 387''s
+    selector table with two GPU-toolkit members and no CPU member: set(CUDA_VERSIONS "12" "13")
+    in nvshmem4py/CMakeLists.txt, WHEEL_NAME "nvshmem4py-cu${CUDA_VER}" in buildWheel.cmake, a
+    scripts/generate_pyproject_toml.py that synthesizes pyproject.toml at build time, then
+    sed -i of project.name from "nvshmem4py" to "nvshmem4py-cu13" and of setup.py''s
+    install_requires source from requirements.txt to requirements_cuda13.txt. PyPI agrees: only
+    nvshmem4py-cu12 and nvshmem4py-cu13 exist and plain nvshmem4py is 404, so there is no
+    CPU-shaped sibling of this distribution.
+    (2) BUILD hard-requires CUDA toolkit headers. nvshmem/bindings/cynvshmem.pxd has
+    `cdef extern from "cuda_runtime_api.h"` plus "cuda_fp16.h" and "cuda_bf16.h"; the shipped
+    generated nvshmem.cpp #includes all three; buildWheel.cmake builds with
+    CPPFLAGS=-I${CUDA_HOME}/include/. Reproduced on a CUDA-less x86_64 host:
+    g++ -fsyntax-only nvshmem/bindings/nvshmem.cpp -> "fatal error: cuda_runtime_api.h: No such
+    file or directory". NVIDIA ships no riscv64 CUDA toolkit -- redistrib_13.0.0.json,
+    redistrib_13.2.0.json and redistrib_13.4.2.json list exactly linux-x86_64, linux-sbsa,
+    linux-all, windows-x86_64/arm64 and contain zero riscv strings (gotchas 387/471, same finding
+    as triton/cupy-cuda12x/nccl4py). Building libnvshmem itself first is not an escape hatch: the
+    top-level CMakeLists sets CMAKE_CUDA_COMPILER=${CUDA_HOME}/bin/nvcc with
+    CMAKE_CUDA_ARCHITECTURES 75/80/89/90/100/120 for CUDA 13, and src/CMakeLists.txt links
+    nvshmem_host and every transport against CUDA::cudart_static.
+    (3) INSTALL cannot resolve on riscv64 (gotcha 40). requirements_cuda13.txt is headed "These
+    are the run-time dependencies of nvshmem4py / They are non-negotiables", and the wheel''s
+    Requires-Dist matches it with no markers and no extras: nvidia-nvshmem-cu13,
+    cuda-python>=13.0,<14.0, cuda.core>=0.5.0, cuda.pathfinder>=1.2.3, numpy, Cython>=0.29.24.
+    nvidia-nvshmem-cu13 3.7.2 publishes only two 135 MB py3-none-manylinux_2_17_{x86_64,aarch64}
+    wheels and NO sdist; cuda-core 1.2.0 (pulled in by cuda-python 13.4.1) publishes only
+    manylinux_2_28_{x86_64,aarch64} + win_amd64 and NO sdist. Neither is on the registry
+    (pypi.riseproject.dev/simple/{nvidia-nvshmem-cu13,cuda-core}/ -> 404), and nvshmem4py-cu13 has
+    never published an sdist on any of its six releases (0.1.2 .. 0.3.1), so nothing could be
+    built from PyPI either.
+    (4) RUNTIME needs the proprietary driver and real GPUs, and the readelf check points the wrong
+    way (gotcha 452). The wheel is 53 files / 23 MB: three Cython extensions plus pure Python and
+    no vendored CUDA blob, and readelf -d on all three lists only
+    libstdc++/libm/libgcc_s/libpthread/libc with zero undefined cu*/nvshmem* symbols. The gate is
+    one dlopen string plus pure Python: nvshmem/bindings/_internal/nvshmem_linux.pyx''s
+    load_library() does dlopen("libnvshmem_host.so.3", RTLD_NOW|RTLD_GLOBAL) and raises
+    RuntimeError("Failed to dlopen libnvshmem ...") otherwise, and it is called from
+    _check_or_init_nvshmem() for every one of the hundreds of dlsym''d entry points; separately
+    `import nvshmem.core` unconditionally runs `from cuda.pathfinder import
+    load_nvidia_dynamic_lib`, `from cuda.core import Buffer, Device, Stream, MemoryResource,
+    ObjectCode` and `import cuda.bindings.driver` across init_fini.py, memory.py,
+    nvshmem_types.py, collective.py, rma.py and interop/{torch,cupy,cute}.py, and
+    init()/get_version()/get_unique_id() each call load_nvidia_dynamic_lib("nvshmem_host") before
+    touching a binding. libnvshmem_host.so.3 ships only in nvidia-nvshmem-cu13 (x86_64/aarch64)
+    and needs libcuda from the NVIDIA driver, which has no riscv64 build. There is no CPU-only
+    mode even in principle: NVSHMEM is a PGAS/one-sided-RMA layer for GPU-initiated communication
+    over NVLink/NVSwitch/PCIe P2P/IB between NVIDIA GPUs, and its device-side API is emitted as
+    CUDA kernels through numba-cuda and the CuTe DSL (nvshmem/bindings/device/{numba,cute}).
+    (5) Untestable even if something built (gotcha 6): nvshmem4py/test/run_tests.sh is a Slurm job
+    script requiring NVSHMEM_HOME, CUDA_HOME, MPI, rdma-core/libibverbs, NVSHMEM_HCA_LIST=mlx5_*
+    and >=2 GPU ranks, and the tests import mpi4py plus numba.cuda and launch @cuda.jit kernels.
+    Upstream also has no CI workflow to mirror (.github holds only issue templates), so the repo''s
+    goal-2 "narrow upstream''s own CI" has nothing to start from.
+    Latest release re-checked per gotcha 388: 0.3.1 is current on PyPI (8 wheels, cp310-cp313,
+    manylinux_2_34 x86_64+aarch64 only, no sdist); the repo has a release/v3.8.0 branch whose
+    nvshmem4py would carry the identical shape. Registry checked:
+    pypi.riseproject.dev/simple/nvshmem4py-cu13/ -> 404. No new gotcha number added -- the shape is
+    fully covered by 386, 387, 452, 471, 284 and 40. Revisit only if NVIDIA ships both a riscv64
+    CUDA toolkit and a riscv64 driver, and even then only once riscv64 hosts carry NVIDIA GPUs on
+    an NVLink/IB fabric.'
 - pkg: rfc3161-client
   version: 1.0.8
   home: https://pypi.org/project/rfc3161-client
