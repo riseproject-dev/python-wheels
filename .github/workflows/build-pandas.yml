@@ -1,0 +1,126 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+name: Build pandas wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pandas.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pandas.yml'
+      - 'docs/packages/pandas.yaml'
+      - 'patches/pandas/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pandas.yml'
+      - 'docs/packages/pandas.yaml'
+      - 'patches/pandas/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pandas
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pandas ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp311", "cp312", "cp313", "cp314"]
+
+    env:
+      PANDAS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pandas v${{ env.PANDAS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pandas-dev/pandas
+          ref: v${{ env.PANDAS_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pandas source
+        # pandas uses versioneer (git describe --tags --dirty), which has no
+        # SETUPTOOLS_SCM_PRETEND_VERSION-style override (gotcha 315). Commit the
+        # patch and re-point the tag at it so describe reports the exact tagged
+        # version again, same as build-swiglpk.yml.
+        run: |
+          git apply python-wheels/patches/pandas/${{ env.PANDAS_VERSION }}/00*.patch
+          git -c user.name=ci -c user.email=ci@localhost commit -am "riscv64 patches"
+          git tag -f v${{ env.PANDAS_VERSION }}
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # CIBW_ENVIRONMENT replaces pandas's [tool.cibuildwheel] environment
+          # table wholesale, so its own LDFLAGS has to be restated here.
+          CIBW_ENVIRONMENT: >-
+            LDFLAGS=-Wl,--strip-all
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,hypothesis
+          # cibuildwheel copies the source into a fresh container per build, and
+          # pandas's own before-build (scripts/cibw_before_build.sh) appends
+          # LICENSES/* into LICENSE there, re-dirtying the tree that versioneer's
+          # git describe reads when the meson build resolves the version (gotcha
+          # 315). CIBW_BEFORE_BUILD replaces pandas's [tool.cibuildwheel]
+          # before-build wholesale, so re-run it here, then commit and re-tag in
+          # the same container before the build reads the version.
+          CIBW_BEFORE_BUILD: >-
+            PACKAGE_DIR={package} bash {package}/scripts/cibw_before_build.sh &&
+            git -C {package} -c user.name=ci -c user.email=ci@localhost commit -am "cibw before-build" &&
+            git -C {package} tag -f v${{ env.PANDAS_VERSION }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pandas-${{ env.PANDAS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pandas ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pandas-${{ matrix.version }}-*-manylinux_riscv64
