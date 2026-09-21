@@ -8020,9 +8020,42 @@ packages:
   version: 0.1.3
   home: https://github.com/K0lb3/fmod_toolkit
   repo: https://github.com/K0lb3/fmod_toolkit
-  status: claimed
+  status: parked
   pr: null
-  notes: '14 Linux wheels upstream (abi: cp38); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Not feasible: fmod_toolkit (K0lb3''s MIT-licensed community wrapper, not Firelight''s
+    own repo) is a thin layer over pyfmodex (an open ctypes wrapper) that is only ever useful
+    with Firelight Technologies'' proprietary FMOD Core Engine binary vendored alongside it --
+    same wrapper-vs-engine split as gotcha 453''s gurobipy-pandas/gurobipy. Checked the actual
+    sdist and wheel contents (fmod_toolkit-0.1.3.tar.gz and the cp38-abi3 wheel from PyPI):
+    the sdist itself hard-vendors prebuilt libfmod.{so,dylib}/fmod.dll binaries at
+    fmod_toolkit/libfmod/{Darwin,Linux/{x86,x86_64,arm,arm64},Windows/{x86,x64,arm}}/, 8
+    files total, 1.0-2.4 MB each, checked into the repo/sdist directly (setup.py''s custom
+    SDist.make_distribution walks that tree and force-includes every .so/.dylib/.dll) --
+    not fetched from a URL, so there is no separate download step to swap a riscv64 build into.
+    strings on the Linux x86_64 one confirms it is the genuine Firelight engine, not a
+    reimplementation: FMOD_System_GetVersion, FMOD5_System_GetVersion,
+    _ZN4FMOD6System10getVersionEPj (System::getVersion). The upstream README says so outright:
+    the libraries shipped with the package are FMOD Engine 2.00.10, and that using a
+    different FMOD library via the PYFMODEX_DLL_PATH env var is necessary on platforms this
+    package does not ship FMOD libraries for -- i.e. upstream''s own escape hatch for an
+    unsupported arch is go get a FMOD Engine build for it yourself, and Firelight ships FMOD
+    Engine only for Windows (x86/x64/arm), Linux (x86/x86_64/arm/arm64) and macOS (universal)
+    -- no riscv64 anywhere in Firelight''s own platform matrix, confirmed against the
+    exhaustive vendored-binary list above, which is the same architecture set the README
+    documents. FMOD Engine has no public source release at any version (Firelight distributes
+    it only as signed prebuilt SDKs from fmod.com, gated behind creating a free FMOD account
+    and accepting Firelight''s EULA before any download starts) -- there is no from-scratch
+    reimplementation of the engine to build against, only pyfmodex''s open ctypes bindings to
+    it, which is the wrapper, never the codec/mixer itself. This is also a hard, not optional,
+    dependency: fmod_toolkit/__init__.py imports .fmod unconditionally, which calls
+    importer.import_pyfmodex() at module-import time; that raises ValueError/
+    NotImplementedError immediately for any platform.machine() not in
+    {x64,x86,arm,arm64} unless PYFMODEX_DLL_PATH already points at a working FMOD .so for
+    that platform (which does not exist for riscv64) -- so unlike the dlopen-optional cases
+    elsewhere in this repo, the package cannot even be imported in a degraded/no-op mode
+    without the closed binary, let alone perform its one job (FSB/bank extraction via the
+    FMOD System/Sound API). Parking rather than a from-scratch riscv64 reimplementation of a
+    proprietary audio engine, which is out of scope for this repo.'
 - pkg: nassl
   version: 5.4.0
   home: https://github.com/nabla-c0d3/nassl
@@ -9919,7 +9952,36 @@ packages:
   repo: https://github.com/Dynatrace/OneAgent-SDK-for-Python
   status: claimed
   pr: null
-  notes: '2 Linux wheels upstream (abi: py2.py3); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: '2 Linux wheels upstream (abi: py2.py3); no riscv64 on PyPI or pypi.riseproject.dev.
+    Triage (2026-09-21): looks feasible, not a park candidate -- deferred only because of the
+    CI backlog, not because it is closed. Checked the actual sdist (oneagent_sdk-1.5.2...tar.gz)
+    and wheel (the py2.py3-none-manylinux1_x86_64 one) from PyPI: the wheel does bundle a
+    prebuilt libonesdk_shared.so (237 KB, unstripped, x86_64-only, symbols like
+    onesdk_tracer_get_outgoing_dynatrace_string_tag confirm it is Dynatrace''s real native
+    stub), but that .so is not built from this repo -- setup.py only copies it in from a path
+    given via the DT_PYSDK_CSDK_PATH env var, which is meant to point at a separately
+    downloaded OneAgent SDK for C/C++ (a different, closed Dynatrace repo/download). Critically,
+    setup.py explicitly supports building WITHOUT that env var set: get_dll_input_path() logs
+    a warning and returns None instead of failing, so bdist_wheel simply produces a wheel with
+    no native .so at all (confirmed by reading PostBuildExtCommand.run/get_inputs, which no-ops
+    the copy when the DLL path lookup raises/returns nothing). At runtime, oneagent/__init__.py
+    (initialize()/_try_init_noref()) wraps the whole nativeagent.initialize()/loadsdk() call in
+    a broad except and falls back to SDKNullInterface (a pure-Python stub in
+    _impl/native/sdknulliface.py) on ANY failure to load the native library -- this is
+    documented behaviour, not a workaround: initialize()''s own docstring says "Even if
+    initialization fails, a dummy SDK will be available so that SDK functions can be called
+    but will do nothing." So a riscv64 wheel built without DT_PYSDK_CSDK_PATH set would install
+    and import cleanly and run in permanent no-op mode (InitResult.STATUS_STUB_LOAD_ERROR) until
+    a user supplies their own OneAgent SDK for C/C++ build via DT_PYSDK_CSDK_PATH/sdklibname --
+    same "pure Python + optional runtime dlopen against a component the user''s own agent
+    installation provides" shape as other already-handled packages in this repo. The wheel
+    itself carries License: Apache License 2.0 with no separate EULA in dist-info, and the repo
+    (github.com/Dynatrace/OneAgent-SDK-for-Python) is genuinely Apache-2.0 source, not a stub
+    over a closed repo -- only the optional native accelerator is closed, and it degrades
+    gracefully. Recommend a real port once CI capacity frees up: build with
+    DT_PYSDK_CSDK_PATH unset/omitted so no closed binary is required, verify the resulting
+    wheel installs and `import oneagent; oneagent.initialize()` returns
+    STATUS_STUB_LOAD_ERROR/no-op rather than crashing.'
 - pkg: amplpy
   version: 0.18.0
   home: http://ampl.com/
@@ -11065,9 +11127,9 @@ packages:
   version: 11.8.1
   home: https://www.e-iceblue.com
   repo: https://www.e-iceblue.com
-  status: queued
+  status: parked
   pr: null
-  notes: '2 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: '2 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev. PARKED: same E-iceblue Spire.* family as spire-xls (parked this session with confirmed evidence of a closed, license-gated native engine). Zero sdist across all 20 PyPI releases; classifiers License :: Free To Use But Restricted / License :: Other/Proprietary License, no LICENSE file in dist-info, only a Temporary License purchase link - the standard E-iceblue paid-license-key model. manylinux2014_aarch64 (24.0 MB) and manylinux_2_34_x86_64 (25.3 MB) wheels are differently sized per arch, confirming a real per-arch compiled native engine rather than an arch-neutral payload - same shape spire-xls''s Spire.Xls.Base.so showed (Native-AOT .NET, license calls wired straight into the closed .so). github.com/eiceblue/Spire.Presentation-for-Python (their own examples link) holds only usage-example scripts, not engine source. No community/open-source edition. Genuinely infeasible.'
 - pkg: passagemath-sympow
   version: 10.8.10
   home: https://passagemath.org/docs/latest
@@ -11184,9 +11246,9 @@ packages:
   version: 14.8.1
   home: https://www.e-iceblue.com
   repo: https://www.e-iceblue.com
-  status: queued
+  status: parked
   pr: null
-  notes: '2 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: '2 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev. PARKED: same E-iceblue Spire.* family as spire-xls (parked this session with confirmed evidence of a closed, license-gated native engine). Zero sdist across all 24 PyPI releases; classifiers License :: Free To Use But Restricted / License :: Other/Proprietary License, no LICENSE file in dist-info, only a Temporary License purchase link - the standard E-iceblue paid-license-key model. manylinux2014_aarch64 (25.6 MB) and manylinux_2_34_x86_64 (45.0 MB) wheels are genuinely differently sized per arch, confirming a real per-arch compiled native engine rather than an arch-neutral payload - same shape spire-xls''s Spire.Xls.Base.so showed (113.9 MB x86_64 vs 48.2 MB aarch64, Native-AOT .NET, license calls wired straight into the closed .so). github.com/eiceblue/Spire.Doc-for-Python (their own examples link) holds only usage-example scripts, not engine source. No community/open-source edition. Genuinely infeasible.'
 - pkg: saxoncee
   version: 13.0.0
   home: https://www.saxonica.com/saxon-c/index.xml
