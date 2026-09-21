@@ -145,6 +145,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **470** — A `.queue.yml` note reading `abi: 0` is a wheel *build tag*, not an ABI tag — and
   for a co-installed-prefix ecosystem one released wheel's `readelf -d` enumerates the whole
   chain of ports that must land first (the pin/pinocchio case).
+- **471** — A GPU package's architecture axis is bounded by its *accelerator vendor's* toolkit
+  axis, so a freshly added aarch64 wheel is not a sign riscv64 is next; and a forced-platform
+  env var whose accepted values name three GPU vendors is not gotcha 459's rescue (the
+  torch-memory-saver case).
 
 ---
 
@@ -3223,3 +3227,53 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     - **Carry the interpreter ceiling down the chain.** Nothing above cmeel-boost can exceed
       cmeel-boost's own riscv64 coverage — cp312/313/314 today — even though upstream pin ships
       cp310–cp314. Decide that once, at the bottom of the chain, not per package.
+
+471. **A GPU package's architecture axis is bounded by its *accelerator vendor's* toolkit axis
+    — and a forced-platform env var whose accepted values name three GPU vendors is not gotcha
+    459's rescue (the torch-memory-saver case).** The tempting read of this one is "upstream
+    just added a second architecture, so the arch axis is open and riscv64 is the same patch":
+    0.0.9.post1 is the release that added `manylinux2014_aarch64` beside the long-standing
+    `manylinux2014_x86_64` wheel (0.0.9 and every earlier release are x86_64-only), and 0.0.10
+    keeps exactly that pair. Read the *body* of the arch branch, not the wheel list.
+    - **The non-x86 branch names the vendor, not the architecture.** `scripts/build.sh`'s entire
+      `ARCH` switch is `aarch64 → LIBCUDA_ARCH="sbsa"; BUILDER_NAME="pytorch/manylinuxaarch64-builder"`,
+      else `LIBCUDA_ARCH=${ARCH}` with `pytorch/manylinux2_28-builder`, and the image is always
+      `${BUILDER_NAME}:cuda${CUDA_VERSION}`; `scripts/build_in_docker.sh` then symlinks
+      `/usr/local/cuda-${CUDA_VERSION}/targets/${LIBCUDA_ARCH}-linux/lib/stubs/libcuda.so`.
+      aarch64 was cheap *because* NVIDIA ships an aarch64 (sbsa) CUDA toolkit and PyTorch
+      publishes a CUDA aarch64 builder image — neither exists for riscv64
+      (`redistrib_13.0.0/13.2.0/13.4.2.json` still list only `linux-x86_64`, `linux-sbsa`,
+      `linux-all`, `windows-*`). Sharpens gotcha 418: a non-x86 precedent transfers only as far
+      as the vendor toolkit's own arch list.
+    - **Read a forced-platform env var's accepted *values*, not just its existence.** gotcha 459
+      rescued vllm because `VLLM_TARGET_DEVICE=cpu` names a device *class*. Here
+      `_detect_platform()` probes `hipcc`, then `nvcc`, then `icpx`, and defaults to `"cuda"`;
+      the released 0.0.9.post1 has no override at all and current `master` adds one
+      (`TMS_PLATFORM`) whose only meaningful values are `hip`, `cuda` and `xpu`, with
+      `csrc/macro.h` ending `#else #error "USE_PLATFORM is not set"` — repeated at every branch
+      in `core.h` and `core.cpp`. Three *GPU vendors* with no CPU member is a vendor selector —
+      and the override arrived together with the XPU backend, i.e. with a *third vendor* rather
+      than with a CPU fallback. All three arms are shut anyway: ROCm publishes
+      `binary-amd64` only (`repo.radeon.com/rocm/apt/latest/dists/noble/main`) and Intel's
+      oneAPI/XPU stack has no riscv64 build either.
+    - **Two commands prove the build-time CUDA requirement** (gotcha 284's headers side, on a
+      host with no CUDA): `python3 setup.py --version` → `RuntimeError: TMS_CUDA_MAJOR env var
+      must be set for CUDA builds`, then `TMS_CUDA_MAJOR=12 pip wheel . --no-deps
+      --no-build-isolation` → `csrc/macro.h:46:10: fatal error: cuda_runtime_api.h: No such file
+      or directory`. `setup.py` also sets `libraries=['cuda','cudart']` against
+      `$CUDA_HOME/lib64{,/stubs}`.
+    - **"It hooks allocations with `LD_PRELOAD`" is not the same as hooking a generic
+      allocator.** The preload build exports `cudaMalloc`/`cudaFree` (`csrc/entrypoint.cpp`
+      under `TMS_HOOK_MODE_PRELOAD`) and forwards through `dlsym(RTLD_NEXT, "cudaMalloc")`;
+      underneath, the pause/resume mechanism *is* the CUDA virtual-memory-management driver API
+      — `readelf -Ws` on the released `.so` shows `cuMemCreate`, `cuMemMap`, `cuMemUnmap`,
+      `cuMemRelease`, `cuMemSetAccess`, `cuMemAddressReserve` undefined, with `DT_NEEDED
+      libcuda.so.1` plus `libcudart.so.{12,13}`. Unmapping physical pages while keeping a
+      virtual address reserved has no host-RAM equivalent in that API, so "the same idea for
+      CPU memory" would be a different package, not a reduced build of this one.
+    - **And the pure-Python gate closes even a hypothetical stub** (gotcha 452's shape):
+      `utils.py::_detect_cuda_major()` reads `torch.version.cuda`, falls back to
+      `ctypes.CDLL("libcudart.so.{13,12}")` and otherwise raises `RuntimeError:
+      torch_memory_saver: could not detect CUDA runtime` — reproduced by importing that one
+      module on a GPU-less host. A CPU-only riscv64 torch has `torch.version.cuda is None`, so
+      the path that picks which `<stem>_cu{12,13}.abi3.so` to load can never resolve.

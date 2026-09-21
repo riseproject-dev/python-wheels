@@ -243,6 +243,13 @@ The porting gotchas (438 of them) live in [`references/gotchas/`](gotchas/), spl
   because the shared `cmeel.prefix` `RUNPATH` means nothing is bundled; measure the closure
   over `requires_dist` + our registry and hand over the tiers (pin: 11 unported packages,
   leaves first), capped by cmeel-boost's interpreter coverage (the pin/pinocchio case).
+- **471** — A GPU package's architecture axis is bounded by its *accelerator vendor's* toolkit
+  axis, so a freshly added aarch64 wheel is no sign riscv64 is next: read the body of the arch
+  branch (`LIBCUDA_ARCH="sbsa"`, `pytorch/manylinuxaarch64-builder:cuda*`), not the wheel list.
+  And read a forced-platform env var's accepted *values* before treating it as gotcha 459's
+  rescue — `hip`/`cuda`/`xpu` with a `#error` default is a vendor selector, not a device-class
+  one; also, an `LD_PRELOAD` hook can be a hook on `cudaMalloc` over the CUDA VMM driver API
+  rather than on a generic allocator (the torch-memory-saver case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
