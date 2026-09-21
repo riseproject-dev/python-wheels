@@ -176,6 +176,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **484** — A large C++ project with its own architecture abstraction layer concentrates the
   whole port into a handful of `#error` gates in that one directory — and the build config
   the *wheel* uses decides how many of them you ever reach (the usd-core/OpenUSD case).
+- **492** — A declared dependency the build never actually links against still blocks the
+  port, because pip enforces metadata and not linkage — prove which it is with the wheel's
+  own `.pc`/`readelf` output, then block anyway (the cmeel-assimp/cmeel-zlib case).
 
 ---
 
@@ -3659,3 +3662,37 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       Arch_ObtainCacheLineSize()`. It is `ARCH_WARNING`, not `ARCH_ERROR`; the endianness check
       beside it is the one that would abort, and riscv64 is little-endian. Leave upstream's own
       diagnostic alone rather than spending a multi-hour rebuild to silence it.
+
+492. **A declared dependency the build never actually links against still blocks the port —
+    pip enforces the *metadata*, not the linkage (the cmeel-assimp/cmeel-zlib case).** Gotcha
+    483 sequenced cmeel-urdfdom behind two siblings whose `.so` files it genuinely NEEDs.
+    cmeel-assimp 6.0.5 looks like the same shape and is not: `pyproject.toml` names
+    `cmeel-zlib` in both `[build-system] requires` and `[project] dependencies`, yet nothing
+    in the built wheel depends on it.
+    - **Two cheap artefacts settle "nominal or real", and they disagree with the metadata.**
+      The package's `cmeel.patch` replaces `TARGET_LINK_LIBRARIES(assimp ${ZLIB_LIBRARIES} …)`
+      with a bare `-lz`, so `FIND_PACKAGE(ZLIB)` finding the *image's* zlib is enough: the
+      installed `lib/pkgconfig/assimp.pc` in a local rehearsal records
+      `Libs.private: … /usr/lib/x86_64-linux-gnu/libz.so` (the host's, not the dependency's),
+      and `readelf -d` on both the released and the locally built `libassimp.so.6.0.5` shows
+      `NEEDED libz.so.1` with `RUNPATH $ORIGIN` while cmeel-zlib ships its copy in
+      `cmeel.prefix/lib64` — *off* that RUNPATH. So `libz.so.1` resolves from the system at
+      run time under the manylinux allowlist, and the dependency is a build-time formality.
+      Contrast gotcha 470's `readelf`, where every `NEEDED` line named a sibling distribution.
+    - **Block anyway.** pip resolves `[build-system] requires` before the build and
+      `Requires-Dist` at install, neither of which asks the linker anything. On the target arch
+      the build env has no wheel for the dependency, and a published wheel would carry a
+      `Requires-Dist` the index cannot satisfy binary-only, so gotcha 483's one-line test
+      ("does the end user's `pip install` succeed?") still answers no — here worse than for
+      cmeel-urdfdom, because the sibling's sdist is an `ExternalProject_Add` that *downloads*
+      its upstream tarball, needing network **and** a toolchain on the user's machine.
+    - **Do not "fix" it by editing the dependency out of `pyproject.toml`.** It is the one
+      tempting shortcut once you know the dependency is nominal, and it fails goal 2 twice
+      over: the wheel's metadata would no longer match the same distribution published for
+      every other arch, and in a shared-prefix ecosystem the declaration *is* the contract its
+      consumers resolve through. Sequence behind the sibling's own port instead — and say in
+      the note that the dependency is nominal, so whoever returns knows the unblock is pure
+      metadata and the recipe needs no `CIBW_BEFORE_BUILD` dance.
+    - **Worth the five minutes even when the answer changes nothing**, because it tells the
+      next agent whether a missing sibling means "the library will not load" or only "pip will
+      refuse" — and only the first of those can still bite after the sibling lands.
