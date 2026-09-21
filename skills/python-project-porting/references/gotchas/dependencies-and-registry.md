@@ -49,6 +49,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
 - **488** — `PIP_ONLY_BINARY=:all:` in the test environment can silently *downgrade* a
   pure-Python dependency whose newer releases are sdist-only, and the symptom is a failing
   test rather than a resolution error.
+- **511** — An abi3-only *runtime* dependency is a permanent free-threading gap, decidable
+  from two PyPI JSON reads before the first CI cycle — no pin and no test-skip fixes it.
 
 ---
 
@@ -847,3 +849,31 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       `fmt_ctl_handle_mutual_exclude` *clears the other set* when it sees `:all:`, so
       whichever of the two environment variables pip happens to process second wins. Two
       env vars whose outcome depends on `os.environ` ordering is not a fix.
+
+511. **An abi3-only *runtime* dependency is a permanent free-threading gap — decide it
+    from the dependency's wheel tags before the first CI cycle, not from a red cp314t job
+    (the pytorch-tokenizers/tokenizers case).** Gotcha 97 is the same mechanism one step
+    away: there the abi3-only distribution is a *test* dependency that used to be pure
+    Python, so pinning its last `py3-none-any` release rescues the entry, and gotcha 149
+    keeps a cp314t entry whose blocking dependency is merely missing a free-threaded
+    build. Neither applies when the distribution is named in the **wheel's own
+    `Requires-Dist`** and has *only ever* published `cpNN-abi3` wheels: packaging's
+    `_abi3_applies()` ends in `and not threading`, so an abi3 wheel is never a candidate
+    under `Py_GIL_DISABLED` on any platform, and there is no earlier pure release to pin
+    back to. `pip install <your wheel>` then cannot complete under cp314t anywhere in the
+    world — HF `tokenizers` (checked through 0.22.2) publishes `cp39-abi3` plus PyPy
+    wheels and nothing else, and pytorch-tokenizers requires it — so the wheel would be
+    built and never installable, which is worse than not shipping the entry.
+    - **Two JSON reads settle it in a minute, before any push**: the sorted set of
+      interpreter tags in the dependency's own file list
+      (`{u['filename'].split('-')[2] for u in urls}` — `{'cp39', 'pp310', 'pp39'}` here,
+      i.e. abi3 only), and the same read on *upstream's own* wheels for the package you
+      are porting. Both empty of a free-threaded tag means drop `cp314t` from the matrix
+      (gotcha 33) and say which dependency in the PR's **Matrix** line; upstream shipping
+      `cp3NN-cp3NNt` while the dependency does not is gotcha 149's build-but-skip-tests
+      shape instead.
+    - **"It supports every interpreter" is what makes this easy to miss.** A single
+      `cp39-abi3` wheel satisfies cp312/cp313/cp314 and reads as full coverage in a
+      registry listing (gotcha 84's per-interpreter check), so the gap shows up only if
+      you ask specifically about free threading. The rule is worth applying to the whole
+      `Requires-Dist` list, not just the dependency you happened to look at.
