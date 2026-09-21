@@ -499,6 +499,10 @@ The porting gotchas (520 of them) live in [`references/gotchas/`](gotchas/), spl
 - **542** — A `setup.py` that itself `raise SystemExit`s above a hardcoded max Python minor
   version blocks the *build*, not just runtime behavior — trim the matrix to match rather
   than exporting the documented override env var (the cocotb case).
+- **549** — A queue note's odd-looking interpreter tag (a CPython minor with no public stable
+  release yet, an unfamiliar PyPy triple) is not evidence of scraped garbage — verify it
+  against the live PyPI JSON `releases` dict and the extension crate's own `pyo3` dependency
+  line before discounting the matrix (the ignore-python case).
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 

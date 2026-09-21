@@ -61,6 +61,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
   in a minute.
 - **542** — A `setup.py` that `raise SystemExit`s above a hardcoded max Python minor version
   blocks the build itself, not just runtime behavior — trim the matrix, don't override it.
+- **549** — A queue note's odd-looking interpreter tag (a CPython minor with no public stable
+  release yet, an unfamiliar PyPy triple) is not evidence of scraped garbage — verify it
+  against the live PyPI JSON and the extension crate's own dependency line before discounting
+  the matrix.
 
 ---
 
@@ -1117,3 +1121,29 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
       checkout root (or just `pip wheel . --no-deps` under a 3.14 interpreter) reproduces the
       `RuntimeError` on any host, x86 included — no riscv64/QEMU needed to confirm the ceiling
       is real and not an artifact of the build container.
+
+549. **A queue note's odd-looking interpreter tag is not evidence of scraped garbage — verify
+    it against the live PyPI JSON and the extension crate's own dependency line before
+    discounting the matrix (the ignore-python case).** ignore-python 0.4.1's `.queue.yml` note
+    listed `cp310,cp311,cp312,cp313,cp314,cp315,cp39,pp311` among 84 upstream Linux wheels;
+    `cp315` (a CPython minor with no public stable release as of the queue date) and `pp311`
+    read like a scraping artifact or a stale/duplicated tag, cheap to wave off before ever
+    opening the sdist. Both were real: `pip download`'s HTML page truncates and paginates, so
+    the ground truth is `curl -s https://pypi.org/pypi/<pkg>/json | python3 -c "import
+    json,sys; print([f['filename'] for f in json.load(sys.stdin)['releases']['<ver>']])"` —
+    the JSON `releases` dict lists every uploaded filename for the exact version, unpaginated.
+    It showed genuine `cp315`/`cp315t` wheels (upstream already builds against a pre-release
+    CPython, narrower than the rest of the matrix — x86_64/i686 manylinux and Windows only,
+    no aarch64/s390x/ppc64le/armv7 — because whatever runner image upstream's CI used only had
+    that interpreter on some platforms) and a genuine `pp311` (PyPy 3.11, not a typo'd `pp310`).
+    - **The second, independent check is a two-line `grep` of the extension crate's
+      manifest**: `pyo3 = "0.29.0"` with no `abi3`/`abi3-pyNN` entry in `[dependencies]` or
+      `[features]` confirms the wide matrix is genuine per-interpreter (gotcha 181's three-grep
+      test), not an abi3 collapse the queue tooling miscounted. The two checks corroborate each
+      other and take under a minute combined, before a single line of YAML or a `cargo check`
+      is worth running.
+    - **Generalizes past interpreter tags**: any queue-note detail that looks like noise
+      (a suspiciously round wheel count, a platform tag that shouldn't exist, a duplicate
+      entry) is worth one direct look at the real PyPI JSON before triaging around it —
+      the queue's own summarization, not upstream's release, is the more likely source of
+      an artifact.
