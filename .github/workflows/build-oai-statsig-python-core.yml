@@ -1,0 +1,166 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on: https://github.com/statsig-io/statsig-server-core/blob/0.23.0/.github/workflows/build.yml
+# oai-statsig-python-core is a second distribution of the same statsig-pyo3 crate (renamed
+# to oai-statsig-rust) on its own version line, so this mirrors
+# build-statsig-python-core.yml. Every public tag and branch of statsig-server-core stops
+# at 0.23.0, so the PyPI sdist is the only published form of 0.29.0 and is the upstream
+# tree here (gotcha 156); the CI.yml it bundles is maturin boilerplate, not the pipeline
+# that built the released wheels.
+name: Build oai-statsig-python-core wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/oai-statsig-python-core.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-oai-statsig-python-core.yml'
+      - 'docs/packages/oai-statsig-python-core.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-oai-statsig-python-core.yml'
+      - 'docs/packages/oai-statsig-python-core.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: oai-statsig-python-core
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build oai-statsig-python-core ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+
+    env:
+      STATSIG_VERSION: ${{ matrix.version }}
+      SDIST_DIR: oai_statsig_python_core-${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          sparse-checkout: patches/oai-statsig-python-core
+          persist-credentials: false
+
+      - name: Fetch oai-statsig-python-core ${{ env.STATSIG_VERSION }} sdist
+        run: |
+          url="$(curl -sSfL "https://pypi.org/pypi/oai-statsig-python-core/${STATSIG_VERSION}/json" \
+            | python3 -c 'import json,sys; print(next(u["url"] for u in json.load(sys.stdin)["urls"] if u["packagetype"] == "sdist"))')"
+          curl -sSfL -o sdist.tar.gz "$url"
+          # Extracted rather than handed to cibuildwheel as a tarball: for a tarball
+          # package-dir cibuildwheel chdirs into its own extraction temp dir, and
+          # CIBW_TEST_SOURCES resolves against that cwd, so the staged trees below
+          # would be invisible.
+          tar xzf sdist.tar.gz
+          test -f "${SDIST_DIR}/pyproject.toml"
+
+      - name: Apply patches
+        run: cd "${SDIST_DIR}" && git apply -v ../python-wheels/patches/oai-statsig-python-core/"${STATSIG_VERSION}"/*.patch
+
+      # The sdist carries no licence file at all, so maturin's default glob beside
+      # pyproject.toml finds nothing and upstream's wheels ship no licence text on any
+      # platform, despite the ISC declaration in their metadata.
+      - name: Stage the project licence beside pyproject.toml
+        run: |
+          cat > "${SDIST_DIR}/LICENSE" <<'LICENCE'
+          ISC License (ISC)
+          Copyright (c) 2024, Statsig, Inc.
+
+          Permission to use, copy, modify, and/or distribute this software for any purpose
+          with or without fee is hereby granted, provided that the above copyright notice
+          and this permission notice appear in all copies.
+
+          THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+          REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+          FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+          INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+          OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+          TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+          THIS SOFTWARE.
+          LICENCE
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: ${{ env.SDIST_DIR }}
+          output-dir: wheelhouse/
+          # `[tool.maturin] features` carries pyo3/abi3-py310, so this one build covers
+          # every non-free-threaded CPython >= 3.10.
+          only: cp310-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream's image bakes in rustup and a protoc release build; Rocky 10's CRB
+          # repo (enabled in the manylinux image) has protoc.
+          CIBW_BEFORE_ALL_LINUX: >-
+            yum install -y protobuf-compiler protobuf-devel &&
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          # PROTOC_INCLUDE is needed because protoc 3.19 resolves google/protobuf/*.proto
+          # from disk rather than from the binary. The two CARGO_PROFILE_RELEASE_* vars
+          # reproduce this tree's `python-release` profile, which keeps the symbols
+          # upstream's wheels ship, without naming it in MATURIN_PEP517_ARGS where every
+          # other maturin sdist in the container would inherit it (gotcha 141).
+          CIBW_ENVIRONMENT: >-
+            PATH=$PATH:$HOME/.cargo/bin
+            PROTOC_INCLUDE=/usr/include
+            CARGO_PROFILE_RELEASE_DEBUG=1
+            CARGO_PROFILE_RELEASE_STRIP=none
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # tests/utils.py reads its fixtures through ../../statsig-rust/tests/data, so
+          # both trees are staged at their positions relative to the sdist root.
+          CIBW_TEST_SOURCES: ${{ env.SDIST_DIR }}/statsig-pyo3/tests ${{ env.SDIST_DIR }}/statsig-rust/tests/data
+          CIBW_TEST_REQUIRES: pytest pytest-httpserver pytest-rerunfailures uvloop
+          CIBW_TEST_COMMAND: >-
+            python -c "from statsig_python_core import statsig_python_core as m;
+            assert m.__file__.endswith('.so'), m.__file__;
+            import importlib.metadata as md;
+            assert any('.dist-info/licenses/LICENSE' in str(p) for p in md.files('oai_statsig_python_core'))" &&
+            cd ${{ env.SDIST_DIR }}/statsig-pyo3 && python -m pytest tests -v --reruns 3
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: oai_statsig_python_core-${{ env.STATSIG_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish oai-statsig-python-core ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: oai_statsig_python_core-${{ matrix.version }}-*-manylinux_riscv64
