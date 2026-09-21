@@ -22,6 +22,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
 - **308** — A maturin shim whose star-import name collides with the compiled submodule's
 - **398** — Reproducing a `py3-none-<platform>` wheel takes an explicit retag — setuptools'
 - **457** — On cp314t our registry can hand a package a *compiled* dependency wheel where
+- **510** — A cffi *ABI-mode* payload keeps its `py3-none` tag through `auditwheel repair` —
 
 ---
 
@@ -445,3 +446,28 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
       publish for *dependents* are free-threaded in name only. Flag it against the
       dependency's own port (there, declaring free-threading or matching upstream's
       pure-wheel-on-`cp3XXt` choice is the fix), and keep porting.
+
+510. **A cffi *ABI-mode* payload keeps its `py3-none` tag through `auditwheel repair` —
+    gotcha 398's retag is only needed when `setup.py` declares `ext_modules` (the vosk
+    case; see `build-vosk.yml`).** vosk is gotcha 81's shape carried one step further:
+    `python/vosk_builder.py` calls `ffibuilder.set_source("vosk.vosk_cffi", None)`, so the
+    "extension" it generates is a *pure-Python* `vosk_cffi.py` and `__init__.py` does
+    `_ffi.dlopen(<pkgdir>/libvosk.so)` on a prebuilt 26 MB library `setup.py` copies in from
+    `$VOSK_SOURCE/src`. With no `ext_modules`, `root_is_pure` holds, so the project's own
+    `bdist_wheel` subclass returning `('py3', 'none', <plat>)` survives and **no
+    `python -m wheel tags` step is needed** — confirmed against setuptools 84 / wheel 0.48,
+    where `from wheel.bdist_wheel import bdist_wheel` still resolves through setuptools'
+    shim. Rehearse it off-arch in seconds: most of these `setup.py` files read the platform
+    from env (`VOSK_MACHINE`/`VOSK_ARCHITECTURE` here), so a plain `pip wheel` on x86 with
+    those set prints the exact riscv64 wheel name the CI job will produce.
+    - **`auditwheel repair` accepts such a wheel and rewrites only the platform half**,
+      emitting the *compressed tag set*:
+      `…-py3-none-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl`. A post-build filename
+      assertion must therefore test `endswith("manylinux_2_39_riscv64.whl")`, never equality
+      with the single string passed to `--plat`.
+    - **Whether it vendored anything is a licence question, and upstream's own wheel answers
+      it for free.** `unzip -l` the released Linux wheel: no `<pkg>.libs/` means everything
+      but the manylinux-whitelisted `libstdc++`/`libgcc_s` is linked statically, so the port
+      needs no `gpl_sources` job. Assert `not any(n.startswith("<pkg>.libs/"))` in the
+      workflow rather than trusting it — that assertion is what turns "no GPL is shipped"
+      from a claim into a check, and it fires on the build that first drags in a libgomp.
