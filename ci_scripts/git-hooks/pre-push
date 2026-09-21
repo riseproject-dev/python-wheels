@@ -1,0 +1,50 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# Installed via `git config core.hooksPath ci_scripts/git-hooks`. Second line of
+# defense behind the commit-msg hook (ci_scripts/check_no_ai_attribution.sh):
+# catches a commit made before the hook was installed, an amend/rebase that
+# reintroduced one, or a merge commit whose own message was never run through
+# commit-msg. Scans every commit about to be pushed that the remote doesn't
+# already have.
+
+set -eu
+
+toplevel="$(git rev-parse --show-toplevel)"
+checker="$toplevel/ci_scripts/check_no_ai_attribution.sh"
+zero="0000000000000000000000000000000000000000"
+
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ "$local_sha" = "$zero" ] && continue  # deleting a ref, nothing to check
+
+    if [ "$remote_sha" != "$zero" ] && git cat-file -e "$remote_sha" 2>/dev/null; then
+        range="$remote_sha..$local_sha"
+    else
+        # New ref on the remote: the remote has nothing to diff against, so
+        # bound the scan against origin/main when we have it, and otherwise
+        # fall back to just the commits this push would add on top of any
+        # local ref git already knows about.
+        base="$(git merge-base origin/main "$local_sha" 2>/dev/null || true)"
+        if [ -n "$base" ]; then
+            range="$base..$local_sha"
+        else
+            range="$local_sha"
+            echo "check_no_ai_attribution: no origin/main to diff $local_ref against, checking $local_sha itself only" >&2
+        fi
+    fi
+
+    for commit in $(git rev-list "$range" 2>/dev/null || echo "$local_sha"); do
+        msg="$(git log --format=%B -1 "$commit")"
+        if ! printf '%s' "$msg" | "$checker" - 2>/tmp/check_no_ai_attribution.$$; then
+            echo "check_no_ai_attribution: blocked in commit $(git rev-parse --short "$commit") ($local_ref):" >&2
+            cat /tmp/check_no_ai_attribution.$$ >&2
+            rm -f /tmp/check_no_ai_attribution.$$
+            status=1
+        fi
+        rm -f /tmp/check_no_ai_attribution.$$
+    done
+done
+
+exit $status
