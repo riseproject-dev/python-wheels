@@ -47,6 +47,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
   reproduce it on x86 with `-march=haswell`.
 - **507** — A segfault from a hand-written `ctypes` smoke test is usually the test's own
   declaration (`c_char_p.in_dll` on a char array, missing `restype`), not the wheel.
+- **519** — A mass test failure is upstream's, not the port's, when the vendor's own
+  released x86_64 wheel fails the same suite — prove it with one `pip install`, then ship a
+  functional smoke test instead of a half-suite deselect list.
 
 ---
 
@@ -1125,3 +1128,24 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       Prefer a real computation over a bare `CDLL()` load — loading proves linkage, not that
       the library computes — and keep it to context-free entry points so no opaque handle
       has to be faked.
+
+519. **Before deselecting, patching or replacing a failing upstream test suite, run it
+    against the *vendor's own released wheel* on x86_64 — a suite that fails there too is
+    upstream's defect, not the port's, and the only remaining question is what to test
+    instead (the fasttext-numpy2 case).** A mass failure that looks arch-specific
+    (41 of 83 tests erroring out of a C++ extension, the count changing between runs) is
+    cheap to attribute wrongly: the obvious suspects — a SIMD fallback, uninitialised
+    aligned allocations, a compiler difference — each cost a build cycle to rule out, and
+    all three were wrong here.
+    - The decisive experiment is one `pip install --only-binary :all: <pkg>==<ver>` into a
+      clean venv plus the same test invocation. Identical failures against the wheel the
+      upstream maintainer published means nothing you do to the workflow can fix it.
+    - Bisect *across distributions*, not just commits: the same suite on the
+      predecessor/sibling distribution (fastText 0.9.2 via `fasttext-wheel`) passing on
+      the same data pins the regression to the fork's own tree and dates it.
+    - Then ship a functional smoke test rather than a deselect list — a deselect list that
+      covers half the suite is not a test run. Exercise the path the distribution exists
+      for (here: load a pretrained model, predict, check the numpy return type), and prove
+      the arch-specific code while you are there: comparing a deliberately scalar-only
+      local build against the SIMD one showed the riscv64 fallback path is bit-identical,
+      which is the assertion worth writing into the test command.

@@ -961,6 +961,10 @@ The porting gotchas (500 of them) live in [`references/gotchas/`](gotchas/), spl
 - **507** — A SIGSEGV out of a hand-written `ctypes` smoke test is usually the test's own
   declaration — `c_char_p.in_dll` on a C char array dereferences the string's first bytes as
   a pointer, and a call with no `restype`/`argtypes` returns garbage; reproduce on x86 first.
+- **519** — A mass upstream-test failure is upstream's defect, not the port's, when the
+  vendor's own released x86_64 wheel fails the same suite: prove it with one
+  `pip install --only-binary :all: <pkg>==<ver>`, bisect across sibling distributions, then
+  ship a functional smoke test instead of a half-suite deselect list (the fasttext-numpy2 case).
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
