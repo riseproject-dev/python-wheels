@@ -1,0 +1,144 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 21 Sep 2026 00:00:00 +0000
+Subject: [PATCH] ipc: memset the full opened-handle cache key, incl. padding
+
+ctest's own test_provider_os_memory fails 8/50 gtest cases under
+osProviderTest/umfIpcTest.*/disjoint_w_params_0_OS_HostMemoryAccessor on
+riscv64 -- including the non-concurrent BasicFlow, AllocFreeAllocTest and
+openInTwoIpcHandlers cases, not just the concurrency-stress variants, so
+this is not a timing flake:
+
+    /work/test/ipcFixtures.hpp:543: Failure
+    Expected equality of these values:
+      ret
+        Which is: 3
+      UMF_RESULT_SUCCESS
+        Which is: 0
+    [FATAL UMF] umfMemoryProviderCloseIPCHandle: UMF check failed:
+    (ptr != NULL) in umfMemoryProviderCloseIPCHandle
+
+ret == 3 is UMF_RESULT_ERROR_INVALID_ARGUMENT. Line 543 is the second of
+two umfOpenIPCHandle() calls in BasicFlow, opening a second IPC handle
+onto the *same* coarse-grain allocation the first handle already opened
+(one at the allocation's base, one at base + size/2). By design (see
+oneapi-src/unified-memory-framework#403) the second open is meant to be a
+pure cache hit against provider_tracking.c's `hIpcMappedCache`, reusing
+the mapping the first open already created, with no new provider work.
+
+Confirmed on x86_64 (strace) that this cache-hit path is exactly what
+runs there: a single pidfd_open()/pidfd_getfd() pair for the whole test,
+and the second umfOpenIPCHandle() is served entirely from the cache.
+
+The cache (src/ipc_cache.c, `umfIpcOpenedCacheGet`) looks entries up with
+uthash's HASH_FIND/HASH_ADD, which hash and memcmp() the *raw bytes* of
+`ipc_opened_cache_key_t` (src/ipc_cache.h) over its full sizeof(),
+padding included:
+
+    typedef struct ipc_opened_cache_key_t {
+        void *remote_base_ptr;
+        umf_memory_provider_handle_t local_provider;
+        int remote_pid;
+    } ipc_opened_cache_key_t;
+
+Two 8-byte pointers plus a 4-byte int forces 4 bytes of trailing padding
+on any LP64 target (alignof == 8, so sizeof rounds 20 up to 24). The key
+is built in provider_tracking.c's trackingOpenIpcHandle() as:
+
+    ipc_opened_cache_key_t key = {0};
+    key.remote_base_ptr = ...; key.local_provider = ...; key.remote_pid = ...;
+
+`= {0}` only guarantees the *named* members are zeroed -- C leaves
+padding bytes indeterminate, and whether a given compiler's codegen
+happens to clear them anyway (as GCC 13 does on x86_64, confirmed by the
+strace/cache-hit trace above) is unspecified and not guaranteed to hold
+for every compiler/architecture. The key is then persisted into the
+cache with a plain struct assignment (`entry->key = *key;`), which only
+has to copy the *value*, not the object representation -- so even a key
+whose own padding is reliably zero is not guaranteed to land in the
+persisted entry byte-for-byte.
+
+Either gap is enough to make a same-base, same-provider, same-pid lookup
+that should be a guaranteed cache hit come back as a spurious miss,
+sending the second call back into the upstream OS provider's IPC-open
+path (a second live fd-passing/pidfd/mmap sequence) or into the cache's
+handle_id-mismatch/eviction branch against an entry that is still
+in-flight -- consistent with the FATAL "ptr != NULL" abort and the
+`stat.openCount != stat.closeCount` mismatches also seen in the
+concurrent umfIpcTest variants in the same run.
+
+Make every byte, including padding, deterministically zero on any
+compiler/architecture: memset() the local key instead of relying on
+`= {0}`, and memcpy() it into the persisted entry instead of a struct
+assignment, since memcpy() is the one construct the C standard actually
+guarantees copies every byte of its size argument.
+
+Verified locally (x86_64, built from this exact upstream tag against the
+same hwloc/numactl the workflow builds): test_provider_os_memory's full
+50/50 gtest cases still pass with this change, as do test_ipc,
+test_ipc_negative, test_ipc_max_opened_limit, test_provider_tracking,
+test_provider_tracking_fixture_tests, test_provider_devdax_memory_ipc
+and test_provider_file_memory_ipc -- no regression on the platform where
+the bug does not reproduce. The change is a no-op everywhere the
+compiler already zeroed the padding (i.e. everywhere this was passing
+before); riscv64 CI is the confirmation that it also fixes the actual
+failure, since this padding/codegen gap could not be reproduced on the
+x86_64 hardware available for this port.
+
+Upstream-Status: To upstream [not yet filed on oneapi-src/unified-memory-framework -- this session's GitHub access is scoped to riseproject-dev/python-wheels only, and the exact failing codegen step could not be confirmed without riscv64 hardware; wants a report with a real riscv64 repro before submitting upstream]
+
+diff --git a/src/ipc_cache.c b/src/ipc_cache.c
+index 0000000..0000000 100644
+--- a/src/ipc_cache.c
++++ b/src/ipc_cache.c
+@@ -8,6 +8,7 @@
+  */
+
+ #include <stdbool.h>
++#include <string.h>
+
+ #include "base_alloc_global.h"
+ #include "ipc_cache.h"
+@@ -245,7 +246,14 @@ umf_result_t umfIpcOpenedCacheGet(ipc_opened_cache_handle_t cache,
+             }
+         }
+
+-        entry->key = *key;
++        // A plain struct assignment only has to copy the *value*, not the
++        // object representation: whether the (possibly-padded) bytes of
++        // `*key` are copied byte-for-byte into entry->key is unspecified
++        // and can differ across compilers/architectures, yet entry->key is
++        // later memcmp()'d and hashed over its full sizeof() by uthash.
++        // memcpy() is the only construct the standard guarantees copies
++        // every byte, padding included, so use it instead of `=`.
++        memcpy(&entry->key, key, sizeof(entry->key));
+         entry->ref_count = 0;
+         entry->handle_id = handle_id;
+         entry->hash_table = &cache->hash_table;
+diff --git a/src/provider/provider_tracking.c b/src/provider/provider_tracking.c
+index 0000000..0000000 100644
+--- a/src/provider/provider_tracking.c
++++ b/src/provider/provider_tracking.c
+@@ -1263,9 +1263,17 @@ static umf_result_t trackingOpenIpcHandle(void *provider, void *providerIpcData,
+
+     umf_ipc_data_t *ipcUmfData = getIpcDataFromIpcHandle(providerIpcData);
+
+-    // Compiler may add paddings to the ipc_opened_cache_key_t structure
+-    // so we need to zero it out to avoid false cache miss.
+-    ipc_opened_cache_key_t key = {0};
++    // Compiler may add paddings to the ipc_opened_cache_key_t structure.
++    // `= {0}` only guarantees the *named* members are zeroed -- padding
++    // bytes are left indeterminate by the C standard, and whether a
++    // compiler's codegen happens to clear them anyway is unspecified and
++    // can differ across targets. umfIpcOpenedCacheGet() hashes and
++    // memcmp()s this struct over its full sizeof(), padding included, so
++    // an indeterminate padding byte here is compared/hashed too. Use an
++    // explicit memset() so every byte, including padding, is
++    // deterministically zero on every architecture.
++    ipc_opened_cache_key_t key;
++    memset(&key, 0, sizeof(key));
+     key.remote_base_ptr = ipcUmfData->base;
+     key.local_provider = provider;
+     key.remote_pid = ipcUmfData->pid;
+--
+2.43.0
