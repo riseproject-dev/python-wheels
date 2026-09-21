@@ -48,6 +48,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
   into a single job, so the abi3 wheel is never built and nothing fails.
 - **408** — A `setup.py` that reaches for `wheel.bdist_wheel` behind a `try/except ImportError`
   still gets its abi3 tag under modern setuptools.
+- **468** — An upstream `build = ["cp3??-*"]` glob excludes every free-threaded interpreter by
+  character count, so the project ships no `cp3NNt` wheel at all.
 
 ---
 
@@ -939,3 +941,29 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
        outcome (a `cpNN-cpNN` wheel from a project whose PyPI files are `cpNN-abi3`) is the
        signal to revisit; the fix then is upstream's pyproject, not a cibuildwheel knob,
        because `CIBW_CONFIG_SETTINGS` cannot reach a `cmdclass` that was never registered.
+
+468. **An upstream `[tool.cibuildwheel] build` glob of `cp3??-*` excludes every
+     free-threaded interpreter by *character count*, so the project ships no `cp3NNt`
+     wheel even though nothing in its config mentions free-threading — and if its
+     `setup.py` sets `py_limited_api` unconditionally, adding this repo's default
+     `cp314t` leg would ship a mislabelled wheel (the qiskit case).** Gotcha 34's
+     `setup.py`-side abi3 form is normally guarded with
+     `if not sysconfig.get_config_var('Py_GIL_DISABLED')`, and gotcha 107's spaCy note
+     covers the *explicit* exclusion (`skip = ["cp3??t-*"]`). Qiskit 2.5.2 has neither:
+     `setup.py` does a bare `options={"bdist_wheel": {"py_limited_api": "cp310"}}`, and
+     the only selector is `build = ["cp3??-*"]` — five characters after `cp`, which
+     `cp310`…`cp315` match and the six-character `cp314t` cannot. The exclusion is
+     invisible in `skip`, and PyPI confirms it: one `cp310-abi3` wheel per platform and
+     no free-threaded wheel anywhere. Adding a `cp314t` leg would not merely diverge
+     from upstream, it would tag a `Py_GIL_DISABLED` build `cp310-abi3`.
+     - **Count the `?`s in `build`/`skip` before inferring the free-threading story from
+       either.** `cp3??-*` and `cp3??t-*` differ by one character and mean opposite
+       things about which of the two upstream wrote down. Settle it in seconds on any
+       host, against upstream's unmodified config:
+       `cibuildwheel --platform linux --archs riscv64 --print-build-identifiers` printed
+       `cp310`…`cp315-manylinux_riscv64` and no `t` tag. Free-threading is no longer an
+       `--enable` group in cibuildwheel 4.x (that name now errors), so a missing `cp3NNt`
+       identifier is the glob's doing, not a disabled group.
+     - **The same glob makes the abi3 floor mandatory rather than chosen** (gotcha 96):
+       `cp310` is the first identifier the glob matches, and it is also the only
+       interpreter the fixed `py_limited_api="cp310"` tag may be compiled against.

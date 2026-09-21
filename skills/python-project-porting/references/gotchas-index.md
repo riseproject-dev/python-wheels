@@ -325,6 +325,9 @@ The porting gotchas (438 of them) live in [`references/gotchas/`](gotchas/), spl
 - **408** — A `setup.py` that reaches for `wheel.bdist_wheel` behind a `try/except ImportError`
   still gets its abi3 tag under modern setuptools — setuptools ships a `wheel.bdist_wheel`
   shim, so do not add `wheel` to `build-system.requires` to "fix" it.
+- **468** — An upstream `build = ["cp3??-*"]` glob excludes every free-threaded interpreter by
+  character count, so the project ships no `cp3NNt` wheel and an unguarded `py_limited_api`
+  would mis-tag one if a `cp314t` leg were added.
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
