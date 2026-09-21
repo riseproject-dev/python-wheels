@@ -3701,9 +3701,89 @@ packages:
   version: 6.0.5
   home: https://github.com/cmake-wheel/cmeel-assimp
   repo: https://github.com/cmake-wheel/cmeel-assimp.git
-  status: queued
+  status: blocked-on-dependency
   pr: null
-  notes: '2 Linux wheels upstream (abi: 0); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: '2 Linux wheels upstream (abi: 0); no riscv64 on PyPI or pypi.riseproject.dev.
+    The "abi: 0" is PEP 427''s optional build number, not an ABI tag (gotcha 470): the
+    released files are cmeel_assimp-6.0.5-0-py3-none-manylinux_2_28_{x86_64,aarch64}.whl
+    plus two macOS wheels, and there is no sdist on PyPI at all -- [tool.cmeel]
+    has-sitelib = false, so per gotcha 487 ONE interpreter-independent py3-none-<plat>
+    wheel covers every interpreter (103 entries: cmeel.prefix/lib/libassimp.so.6.0.5 +
+    soname links, cmeel.prefix/bin/assimp, headers, assimp-6.0 CMake config and
+    assimp.pc -- gotcha 35 shape, not gotcha 27). PORTABILITY IS FINE, and was settled
+    rather than assumed. assimp 6.0.5 is architecture-neutral C++:
+    CMakeLists.txt/code/CMakeLists.txt contain no CMAKE_SYSTEM_PROCESSOR branch and no
+    -march/-msse/-mavx/march=native string anywhere, cmake_minimum_required(VERSION
+    3.22) so CMake 4 needs no CMAKE_POLICY_VERSION_MINIMUM (unlike cmeel-console-bridge,
+    gotcha 483), and the only optional-dependency risk in the queue prompt does not
+    arise: ASSIMP_BUILD_DRACO defaults OFF and draco is the only add_subdirectory''d
+    contrib besides contrib/zlib, which is itself skipped because ASSIMP_BUILD_ZLIB
+    defaults OFF on non-Windows. The contribs actually compiled into libassimp
+    (Open3DGC, clipper, meshlab, openddlparser, poly2tri, pugixml, rapidjson, stb,
+    tinyusdz, unzip, utf8cpp, zip) are portable C++; the only SIMD in the whole enabled
+    set is stb_image.h (gated on STBI__X86_TARGET) and rapidjson (gated on opt-in
+    RAPIDJSON_SIMD, which assimp never defines), so nothing __riscv-hostile.
+    [tool.cmeel] configure-args is only -DASSIMP_BUILD_ASSIMP_TOOLS=ON
+    -DASSIMP_WARNINGS_AS_ERRORS=OFF, and cmeel.patch is 2 hunks that set INSTALL_RPATH
+    to $ORIGIN/@loader_path and replace ${ZLIB_LIBRARIES} with a plain -lz. Local
+    rehearsal per gotcha 9/125, from the real v6.0.5.c0 checkout (tag confirmed via git
+    ls-remote, not guessed) with submodules: pip wheel . --no-deps produced
+    cmeel_assimp-6.0.5-0-py3-none-manylinux_2_39_x86_64.whl in about 4 minutes on 4 x86
+    cores, structurally identical to the released wheel (same 103 entries, Build: 0,
+    Generator: cmeel). BLOCKED ON EXACTLY ONE SIBLING, cmeel-zlib 1.3.2, which is
+    already its own queued .queue.yml entry and a leaf of gotcha 470''s pin closure (its
+    deps are cmeel alone). Evidence: pyproject.toml names it twice -- [build-system]
+    requires = ["cmeel-zlib", "cmeel[build]"] and [project] dependencies =
+    ["cmeel-zlib"] -- the live PyPI JSON for cmeel-assimp 6.0.5 confirms requires_dist
+    == ["cmeel", "cmeel-zlib"], cmeel-zlib 1.3.2 publishes only manylinux/musllinux
+    x86_64+aarch64 and macOS wheels (no riscv64), pypi.riseproject.dev/simple/ still
+    lists cmeel-boost as its only cmeel package, and ci_scripts/riscv64_resolve.py
+    ''cmeel-zlib==1.3.2'' reports UNRESOLVABLE on cp312/cp313/cp314/cp314t. Nothing else
+    is missing: cmeel is py3-none-any and resolves for all four, and cmake
+    (cmeel[build]''s only heavy build input) has riscv64 wheels at 4.4.3. NUANCE WORTH
+    RECORDING, because it is the one thing that could tempt a shortcut: cmeel-zlib is a
+    *nominal* dependency on Linux, not a link-time one. The cmeel.patch links -lz by
+    name, so FIND_PACKAGE(ZLIB) picking the image''s zlib is enough to build -- verified
+    in the rehearsal, whose assimp.pc records Libs.private:
+    /usr/lib/x86_64-linux-gnu/libz.so, i.e. the host zlib, not cmeel-zlib''s -- and
+    readelf -d on both the released x86_64 wheel and the locally built one shows
+    libassimp.so.6.0.5 NEEDing libz.so.1 with RUNPATH $ORIGIN while cmeel-zlib ships its
+    libz in cmeel.prefix/lib64 (not on that RUNPATH), so libz.so.1 resolves from the
+    system at runtime under the manylinux allowlist either way. That does NOT unblock
+    the port, for gotcha 483''s reason: pip still enforces the metadata. On riscv64 the
+    build env cannot resolve a cmeel-zlib wheel, and a published cmeel_assimp riscv64
+    wheel would carry Requires-Dist: cmeel-zlib that the index cannot satisfy
+    binary-only, so every user''s pip install cmeel-assimp would fall back to
+    cmeel-zlib''s sdist -- whose CMakeLists.txt is an ExternalProject_Add that DOWNLOADS
+    https://github.com/madler/zlib/archive/refs/tags/v1.3.2.tar.gz and compiles it, i.e.
+    it needs a toolchain and network on the user''s machine (a strictly worse profile
+    than cmeel-tinyxml2/cmeel-console-bridge, which vendor their sources). Getting CI
+    green is the wrong question (gotcha 483); publishing that entry would break
+    structural goal 1. Dropping the dependency by patching pyproject.toml was considered
+    and rejected: it would diverge the wheel''s metadata from upstream''s for every
+    other cmeel consumer and break the shared-prefix contract (goal 2), and cmeel-zlib
+    is outside this port''s commit scope anyway. FOR WHOEVER TAKES cmeel-zlib: it looks
+    like a one-cycle port -- tag v1.3.2.c0 (git ls-remote), [build-system] requires =
+    ["cmeel[build]"] only, has-sitelib = false so one cp312-manylinux_riscv64
+    cibuildwheel job yields the py3-none wheel, cmake_minimum_required(VERSION 4.0) so
+    no policy floor workaround, and upstream zlib 1.3.2 has no arch-specific code; the
+    ExternalProject download means the job needs outbound github.com access (could not
+    be exercised here: this sandbox''s proxy answers 403 to github.com tarballs, which
+    is an environment limit, not an upstream failure). FOR WHOEVER RETURNS TO
+    cmeel-assimp once cmeel-zlib is on the registry: build-cmeel-tinyxml2.yml /
+    build-cmeel-console-bridge.yml are the right template (single job, no python matrix,
+    only: cp312-manylinux_riscv64, CIBW_REPAIR_WHEEL_COMMAND: "" since cmeel sets
+    INSTALL_RPATH itself, CIBW_ENVIRONMENT with CMEEL_LOG_LEVEL=DEBUG and
+    PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/), checkout
+    cmake-wheel/cmeel-assimp at v6.0.5.c0 with submodules: true, and assert
+    cmeel.prefix/lib/libassimp.so.6.0.5 plus a ctypes.CDLL smoke test on
+    cmeel.prefix/lib/libassimp.so -- note a CDLL test on cmeel-zlib''s own libz must use
+    lib64/, not lib/. Expect a noticeably longer build than the other cmeel leaves (~4
+    min on 4 fast x86 cores here, so budget hours on the riscv64 runner) but nothing
+    near cmeel-boost. No branch/worktree or PR opened and no CI cycle burned; resolved
+    with PyPI JSON, git ls-remote, the upstream checkout, readelf -d on the released and
+    locally built wheels, ci_scripts/riscv64_resolve.py, and one full local
+    sdist-equivalent build. Revisit once cmeel-zlib is on the registry.'
 - pkg: webrtcvad-wheels
   version: 2.0.14
   home: https://github.com/daanzu/py-webrtcvad-wheels
