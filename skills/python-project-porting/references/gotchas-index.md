@@ -306,6 +306,10 @@ The porting gotchas (498 of them) live in [`references/gotchas/`](gotchas/), spl
   vendor: a version that is a release-train number rather than an open tag, and a largest
   payload whose `DT_NEEDED` names the vendor's own closed runtimes, mean there is nothing to
   rebuild — plus the vendor's apt index and EULA as independent stops (the intel-openmp case).
+- **509** — A riscv64 prebuilt of the blocking crate can exist and still not unblock the port:
+  resolve the asset name the *consumer's* cargo features produce (`_ptrcomp_sandbox`), and in a
+  Bazel build read `SUPPORTED_EXECS`, not just `SUPPORTED_TARGETS` (the openai-codex-cli-bin/
+  rusty_v8 case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

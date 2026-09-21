@@ -190,6 +190,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   vendor: before reusing it on another Intel oneAPI wheel, check that the version maps to an open
   tag and that the *largest* payload's `DT_NEEDED` list stays inside that open project (the
   intel-openmp case).
+- **509** — A riscv64 prebuilt of the blocking crate can exist and still not unblock the port:
+  vendor prebuilts are keyed by *feature profile*, and a hermetic cross-toolchain's riscv64 can
+  be a target-only platform (the openai-codex-cli-bin/rusty_v8 case).
 
 ---
 
@@ -3830,3 +3833,57 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       `OPENMP_RUNTIME=COMP`, clarabel swaps the mkl-backed pardiso, scs links OpenBLAS. A park
       with no downstream cost is worth stating as such — it closes the "but numpy/torch might
       want it" question the family's name invites.
+
+509. **A riscv64 prebuilt of the blocking crate can exist and still not unblock the
+    port — vendor prebuilts are keyed by *feature profile*, and a hermetic
+    cross-toolchain's riscv64 can be a target-only platform (the
+    openai-codex-cli-bin/rusty_v8 case).** Gotcha 335 parked vl-convert-python because
+    `denoland/rusty_v8` published no riscv64 asset at the pinned version and noted that
+    riscv64 prebuilts do exist from `v150.1.0` onward. openai-codex-cli-bin pins
+    `v8 = "=150.4.0"`, i.e. squarely inside that riscv64-capable range, and it is still a
+    park — because "is there a riscv64 asset?" is the wrong question one level down.
+    - **Resolve the asset name the consumer's *cargo features* produce, not the crate's.**
+      rusty_v8's `static_lib_url()` composes
+      `librusty_v8{features}_{profile}_{target}.a.gz` where `prebuilt_features_suffix()`
+      appends `_ptrcomp`, `_sandbox`, `_simdutf` per enabled feature. codex enables
+      `features = ["v8_enable_sandbox"]` (which implies `v8_enable_pointer_compression`),
+      so the needed asset is `librusty_v8_ptrcomp_sandbox_release_<target>.a.gz`. At
+      `denoland/rusty_v8` `v150.4.0`, `librusty_v8_release_riscv64gc-unknown-linux-gnu.a.gz`
+      is a 302 but *no* `_ptrcomp_sandbox` asset exists for **any** target (x86_64 is a 404
+      too) — that profile is built and published by the *consumer*, and its release tags
+      cover x86_64/aarch64 only. One `curl -I` per candidate URL settles the whole question.
+    - **Dropping the cargo feature to match an available profile is not a packaging patch**
+      when the feature *is* the security boundary — here, V8's sandbox around
+      model-generated JS. Shipping riscv64 as the one platform with the sandbox off is a
+      behaviour divergence, not a build fix.
+    - **Both from-source recipes for V8 are x86_64-host-only, in different ways.** rusty_v8's
+      gn path (`V8_FROM_SOURCE=1`) *does* have a riscv64 branch, but read it as what it is —
+      a cross branch: `target_cpu="riscv64"` + `use_sysroot=true` +
+      `maybe_install_sysroot("riscv64")` **and** `maybe_install_sysroot("amd64")` for the
+      host. Its bootstrap downloads are host-keyed and Linux means x86_64:
+      `tools/clang/scripts/update.py` has `_HOST_OS_URL_MAP = {'linux': 'Linux_x64', …}` and
+      `third_party/rust-toolchain` in `tools/v8_deps.py` has exactly one linux object,
+      `Linux_x64/…`, downloaded unconditionally by `build_v8()`. So it cannot run on a
+      riscv64 runner at all — note that `gn` and `ninja` are *not* the gap
+      (`gn/gn/linux-riscv64` and `infra/3pp/tools/ninja/linux-riscv64` both resolve in CIPD,
+      contra the reflex from gotcha 438); clang and rustc are.
+    - **In a Bazel V8 build, read `SUPPORTED_EXECS`, not just `SUPPORTED_TARGETS`.** The
+      hermetic `llvm` BCR module upstream builds V8 with lists `("linux", "riscv64")` under
+      `SUPPORTED_TARGETS` and omits it from `SUPPORTED_EXECS` — riscv64 is a
+      cross-compilation *target*, never an execution platform, so upstream's own
+      `--platforms=@llvm//platforms:<p>` matrix could never gain a native riscv64 leg. And
+      V8's own `BUILD.bazel` annotates its riscv64 srcs with
+      `# NOTE: Bazel rules for riscv64 weren't tested on a real system.`
+    - **List every payload before pricing the port, and read the packaging script's layout
+      validator to learn which ones you cannot drop.** This wheel is five independently
+      vendor-pinned prebuilts (two Rust binaries, a dotslash-pinned ripgrep, a vendored
+      bubblewrap, a sha256-pinned zsh tarball); `_validate_codex_package_layout` hard-fails
+      unless `bin/codex`, `bin/codex-code-mode-host`, `codex-path/` and `codex-resources/`
+      are all present, so the V8-linked binary is not optional. Four of the five have no
+      riscv64 artifact upstream — a port would have to build all of them from source with a
+      toolchain upstream never uses, which is maximal divergence from the recipe the
+      workflow is supposed to mirror.
+    - **Read a 100 MB+ wheel's manifest without downloading it.** `curl -r` the last ~200 KB,
+      find `PK\x05\x06`, and walk the central directory: names and uncompressed sizes are
+      enough to see "222 MB `bin/codex` + 53 MB `bin/codex-code-mode-host` + `rg` + `bwrap` +
+      `zsh`" and to know this is gotcha 35's vendored-bundle shape before any checkout.
