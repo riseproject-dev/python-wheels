@@ -1,0 +1,232 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow mirrors the two-stage recipe SimpleITK's own Linux wheel job runs in
+# Utilities/Distribution/manylinux/imagefiles/cmd.sh (driven by Package.yml's
+# package-docker job): the SuperBuild compiles Lua, PCRE2, SWIG, ITK and the SimpleITK
+# core, then Wrapping/Python is configured against that build tree once per interpreter
+# and packaged with setup.py - no cibuildwheel and no scikit-build.
+name: Build simpleitk wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/simpleitk.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-simpleitk.yml'
+      - 'docs/packages/simpleitk.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-simpleitk.yml'
+      - 'docs/packages/simpleitk.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: simpleitk
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build simpleitk ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440  # 24h: ITK plus ~380 generated filter translation units is
+                           # ~1h30m of compile on upstream's own 4-core x86 runners
+                           # (open.cdash.org, project SimpleITK), and these 4-core
+                           # riscv64 runners are several times slower per core.
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Wrapping/Python/dist/CMakeLists.txt hardcodes --py-limited-api=cp311, so the
+        # limited-API wheel is tagged cp311-abi3 and must be built on cp311 (gotcha 96);
+        # it covers cp312-cp314, and free-threaded builds cannot use the stable ABI.
+        python: ["cp311", "cp314t"]
+
+    env:
+      SIMPLEITK_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout SimpleITK v${{ matrix.version }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: SimpleITK/SimpleITK
+          ref: v${{ env.SIMPLEITK_VERSION }}
+          fetch-depth: 0  # Version.cmake derives the wheel version with git describe
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # Lets -DWITH_RVV=OFF below reach ITK's vendored zlib-ng, whose RVV feature probe
+      # SIGILLs on this runner hardware (gotchas 272/279).
+      - name: Patch SimpleITK source
+        run: git apply python-wheels/patches/simpleitk/${{ env.SIMPLEITK_VERSION }}/00*.patch
+
+      - name: Write container script
+        run: |
+          mkdir -p build
+          cat > riscv64-build-and-test.sh <<'EOF'
+          #!/bin/bash
+          set -e -x
+
+          case "${PYTHON_TAG}" in
+            *t) python_prefix="/opt/python/${PYTHON_TAG%t}-${PYTHON_TAG}" ;;
+            *) python_prefix="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}" ;;
+          esac
+          python_exe="${python_prefix}/bin/python"
+
+          case "$1" in
+          build)
+            dnf install -y --setopt=install_weak_deps=False cmake
+
+            # ITK's vendored third-party trees declare cmake_minimum_required below 3.5,
+            # which the image's own cmake 4.x - ahead of /usr/bin on PATH - rejects
+            # (gotcha 358).
+            cmake=/usr/bin/cmake
+
+            "${cmake}" -S /simpleitk/SuperBuild -B /build/core \
+              -DCMAKE_BUILD_TYPE:STRING=Release \
+              -DBUILD_SHARED_LIBS:BOOL=OFF \
+              -DBUILD_EXAMPLES:BOOL=OFF \
+              -DBUILD_TESTING:BOOL=OFF \
+              -DWRAP_DEFAULT:BOOL=OFF \
+              -DSimpleITK_BUILD_DISTRIBUTE:BOOL=ON \
+              -DSimpleITK_BUILD_STRIP:BOOL=ON \
+              -DITK_C_OPTIMIZATION_FLAGS:STRING= \
+              -DITK_CXX_OPTIMIZATION_FLAGS:STRING= \
+              -DWITH_RVV:BOOL=OFF
+            "${cmake}" --build /build/core --parallel "$(nproc)"
+            find /build/core -name '*.o' -delete
+
+            limited_api=ON
+            case "${PYTHON_TAG}" in *t) limited_api=OFF ;; esac
+
+            # SimpleITK_PYTHON_USE_VIRTUALENV would have the dist target pip install
+            # "numpy<2.5" into a fresh venv, which has no riscv64 wheel anywhere and would
+            # be compiled from source; VIRTUAL_PYTHON_EXECUTABLE points it at the
+            # interpreter we build for instead.
+            "${cmake}" -S /simpleitk/Wrapping/Python -B /build/python \
+              -DCMAKE_BUILD_TYPE:STRING=Release \
+              -DCMAKE_C_FLAGS:STRING=-fvisibility=hidden \
+              -DCMAKE_CXX_FLAGS:STRING="-fvisibility=hidden -fvisibility-inlines-hidden" \
+              -DCMAKE_MODULE_PATH:PATH=/simpleitk \
+              -DCMAKE_PREFIX_PATH:PATH=/build/core \
+              -DSWIG_EXECUTABLE:FILEPATH=/build/core/Swig/bin/swig \
+              -DSWIG_DIR:PATH=/build/core/Swig \
+              -DBUILD_TESTING:BOOL=OFF \
+              -DSimpleITK_BUILD_DISTRIBUTE:BOOL=ON \
+              -DSimpleITK_BUILD_STRIP:BOOL=ON \
+              -DSimpleITK_PYTHON_WHEEL:BOOL=ON \
+              -DSimpleITK_PYTHON_EGG:BOOL=OFF \
+              -DSimpleITK_PYTHON_USE_LIMITED_API:BOOL="${limited_api}" \
+              -DSimpleITK_PYTHON_USE_VIRTUALENV:BOOL=OFF \
+              -DVIRTUAL_PYTHON_EXECUTABLE:FILEPATH="${python_exe}" \
+              -DPython_EXECUTABLE:FILEPATH="${python_exe}" \
+              -DPython_INCLUDE_DIR:PATH="$(find -L "${python_prefix}/include" -name Python.h -printf '%h\n')"
+
+            "${python_exe}" -m pip install -U setuptools wheel
+            "${cmake}" --build /build/python --parallel "$(nproc)"
+            "${cmake}" --build /build/python --target dist
+
+            wheel=$(find /build/python -name '*.whl')
+            auditwheel show "${wheel}"
+            auditwheel repair -w /build/wheelhouse "${wheel}"
+            ;;
+          test)
+            "${python_exe}" -m venv /tmp/venv
+            . /tmp/venv/bin/activate
+            pip install -U pip
+            pip install numpy
+            pip install /build/wheelhouse/*.whl
+
+            mkdir -p /tmp/tests/output
+            cp /simpleitk/Testing/Unit/Python/*.py /tmp/tests/
+            cd /tmp/tests
+            python -c "from SimpleITK import _SimpleITK; assert _SimpleITK.__file__.endswith('.so'), _SimpleITK.__file__"
+            python -c "import SimpleITK; print(SimpleITK.Version())"
+            for test in sitkImageTests sitkBasicFilterTests sitkTransformTests \
+                        sitkImageIndexingTest sitkNumpyArrayConversionTest \
+                        sitkGetArrayViewFromImageTest sitkProcessObjectTest \
+                        sitkImageReadWrite sitkFlatStaticMethod sitkGetGDCMSeriesIDs \
+                        ConcurrentImageRead; do
+              python "${test}.py"
+            done
+            python IOTest.py /tmp/tests/output
+            ;;
+          *)
+            echo "usage: $0 <build|test>" >&2
+            exit 1
+            ;;
+          esac
+          EOF
+
+      - name: Build wheel
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "${PWD}":/simpleitk \
+            -v "${PWD}/build":/build \
+            --workdir /simpleitk \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            --pull=newer \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /simpleitk/riscv64-build-and-test.sh build
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: simpleitk-${{ env.SIMPLEITK_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: build/wheelhouse/*.whl
+          if-no-files-found: error
+
+      - name: Test wheel
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "${PWD}":/simpleitk \
+            -v "${PWD}/build":/build \
+            --workdir /simpleitk \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            -e PIP_ONLY_BINARY=numpy \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /simpleitk/riscv64-build-and-test.sh test
+
+  publish:
+    name: Publish simpleitk ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: simpleitk-${{ matrix.version }}-*-manylinux_riscv64
