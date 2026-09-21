@@ -149,6 +149,11 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   axis, so a freshly added aarch64 wheel is not a sign riscv64 is next; and a forced-platform
   env var whose accepted values name three GPU vendors is not gotcha 459's rescue (the
   torch-memory-saver case).
+- **475** — When a package vendors a whole database engine, the architecture review can come
+  out *green* and the port still be unaffordable: price it in ninja edges × this fleet's
+  measured per-edge cost, check whether the build runs twice, and remember that an upstream
+  arch port living inside `if (CMAKE_CROSSCOMPILING)` gives a native build none of its
+  accommodations (the chdb-core/ClickHouse case).
 
 ---
 
@@ -3277,3 +3282,71 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       torch_memory_saver: could not detect CUDA runtime` — reproduced by importing that one
       module on a GPU-less host. A CPU-only riscv64 torch has `torch.version.cuda is None`, so
       the path that picks which `<stem>_cu{12,13}.abi3.so` to load can never resolve.
+
+475. **When a package vendors an entire database engine, the architecture review and the
+    affordability review are two different reviews — and the first one can come out green
+    while the second parks it (the chdb-core/ClickHouse case).** chdb-core is not a binding
+    over a library: the repo *is* a ClickHouse fork (`src/` 4,559 `.cpp`, `base/`, `programs/`,
+    a 285-entry `contrib/` of which `.github/scripts/update-submodules.sh` documents 139 as
+    submodules to clone), and the wheel's payload is `chdb/_chdb.abi3.so`, i.e. the whole
+    engine linked as one Python module. Everything a normal triage looks for says *go*:
+    `cmake/arch.cmake` sets `ARCH_RISCV64`, `cmake/linux/toolchain-riscv64.cmake` exists,
+    `ci/defs/job_configs.py` carries a `BuildTypes.RISCV64` job producing `CH_RISCV64`,
+    `contrib/jemalloc-cmake/include_linux_riscv64` and `contrib/llvm-project-cmake`'s
+    `ARCH_RISCV64` branches are already written, `contrib/corrosion-cmake` maps
+    `riscv64gc-unknown-linux-gnu`, the vendored wasmtime is 45.0.1/cranelift 0.132 (riscv64
+    backend long since upstream), and `cmake/tools.cmake`'s `CLANG_MINIMUM_VERSION 21` — with
+    GCC rejected outright — is satisfied off the shelf by the image's own 21.1.8 clang/lld
+    (gotcha 454). No vendored blob, no closed dep, Apache-2.0, a real riscv64 gap (four wheels:
+    macOS x86_64/arm64, manylinux_2_17 x86_64/aarch64, all `cp39-abi3`). It is still a park,
+    on runner-hours alone.
+    - **Price the build in ninja edges times this fleet's *measured* per-edge cost, not in
+      adjectives.** Two anchors already exist in this repo's own history, both on the same
+      4-core T-Head runners: `build-vtk.yml`'s comment records 5,095 of 12,192 edges in 7.5 h
+      (≈21 core-s/edge) and the stpyv8 V8 build reached 1,146 of 2,117 targets in 9 h 17 m
+      (≈117 core-s/edge). ClickHouse TUs belong to the second class, not the first — upstream's
+      own heavy-build guard (`cmake/heavy_build_check_scripts/prlimit_generic.sh`, wired by
+      `ENABLE_CHECK_HEAVY_BUILDS` in its riscv64 CI job) allows **1000 CPU-seconds and 5 GB per
+      translation unit** on a fast x86/ARM builder. ~4,900 in-tree TUs at V8-class cost is
+      already ~160 core-hours ≈ 40 h wall at 4 cores, *before* contrib's own thousands (the
+      embedded-compiler LLVM, arrow/parquet, aws-sdk, azure, icu, rocksdb, protobuf,
+      librdkafka, mongo, libpqxx) and before the Rust workspace (270 crates + delta-kernel-rs;
+      deltalake's 840-crate graph took 8.1 h here). Against a 48 h ceiling — the largest
+      `timeout-minutes` this repo has ever granted (`build-vtk.yml`,
+      `build-nodejs-wheel-binaries.yml`, `build-cadquery-ocp-novtk.yml`) and ~5× the ~10 h
+      libclang record — that is at or past the wall on the first pass, with no margin for the
+      iterations a first-ever port always needs.
+    - **Check whether the build runs *twice*, and whether the flag that changes between the two
+      passes lands in a generated header.** `chdb/build.sh` configures and builds the whole tree
+      with `-DENABLE_PYTHON=0` (relinking the `clickhouse` link line into `libchdb.so`), then
+      reconfigures with `-DENABLE_PYTHON=1` and builds again (relinking into
+      `_chdb.abi3.so`). That second pass is not incremental: `ENABLE_PYTHON` sets `USE_PYTHON`
+      in `src/configure_config.cmake`, which is `#cmakedefine01`'d into `src/Common/config.h.in`
+      — a header nearly every TU includes — so ninja rebuilds essentially all of `src/`. Two
+      near-full passes is the single biggest multiplier in the estimate and it is invisible in
+      the CMake flags; it is only in the build script. (Skipping the standalone `libchdb.so`,
+      which the wheel does not ship, is the one real lever — `CHDB_LITE=1` already takes it —
+      and it still leaves one full pass over the engine.)
+    - **An upstream arch port that lives inside `if (CMAKE_CROSSCOMPILING)` gives a *native*
+      build none of its accommodations.** Every riscv64 concession in `cmake/target.cmake`
+      (`GLIBC_COMPATIBILITY OFF`, `ENABLE_PARQUET OFF`, `ENABLE_RUST OFF` — "it might be ok, but
+      we need to update 'sysroot'" — `ENABLE_MYSQL/HDFS/GRPC/LDAP OFF`, `OPENSSL_NO_ASM ON`)
+      sits under that guard, and upstream's riscv64 job is a cross-compile from ARM runners
+      against `contrib/sysroot/linux-riscv64`. This repo builds natively in the manylinux
+      container, where `CMAKE_CROSSCOMPILING` is 0, so the configuration you actually get is the
+      full feature set — precisely the libraries upstream has never compiled for riscv64 — and
+      the riscv64 CI evidence covers none of it. `chdb/build.sh` then forces several *further*
+      ON: `-DENABLE_VECTORSCAN=1`, `-DENABLE_USEARCH=1 -DENABLE_SIMSIMD=1` (all three contrib
+      CMakes carry AMD64/AARCH64 source lists and nothing else) and `-DGLIBC_COMPATIBILITY=1`
+      (whose `base/glibc-compatibility/CMakeLists.txt` is a bare
+      `message(FATAL_ERROR "glibc_compatibility can only be used on x86_64 or aarch64")`). Each
+      is a one-line override, and each override is a behaviour change to justify — the point is
+      that "upstream builds riscv64 in CI" bought none of them.
+    - **Say so when the host cannot even *configure*, because that is what makes the first CI
+      run a multi-day unvalidated shot.** Gotcha 9's local rehearsal needs a clang ≥ 21 (the host
+      had 18.1.3), ~10 GB for the 139-submodule checkout (8 GB free) and tens of GB for a build
+      tree. So there is no cheap way to learn the real edge count or to catch a configure error
+      before burning a slot, and each discovery costs another one. Combined with a shared pool
+      that already had 8 runs in flight — two of them V8 builds measured in days — parking is the
+      proportionate call, the same shape as the ortools and tensorflow entries: no hard
+      architectural blocker, just a cost the pool cannot carry.

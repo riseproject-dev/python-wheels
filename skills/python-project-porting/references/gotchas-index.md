@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (459 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (466 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -250,6 +250,13 @@ The porting gotchas (459 of them) live in [`references/gotchas/`](gotchas/), spl
   rescue — `hip`/`cuda`/`xpu` with a `#error` default is a vendor selector, not a device-class
   one; also, an `LD_PRELOAD` hook can be a hook on `cudaMalloc` over the CUDA VMM driver API
   rather than on a generic allocator (the torch-memory-saver case).
+- **475** — A package that vendors a whole database engine can pass every architecture check
+  (`ARCH_RISCV64`, a riscv64 toolchain file, an upstream riscv64 CI job, riscv64 branches in the
+  jemalloc/LLVM contrib CMakes, the image's own clang 21) and still be a park on runner-hours:
+  price it in ninja edges × this fleet's measured per-edge cost (VTK ≈21 core-s, V8 ≈117),
+  check whether the build script runs the whole tree twice behind a flag that lands in a
+  generated header, and note that an upstream arch port guarded by `if (CMAKE_CROSSCOMPILING)`
+  gives a native build none of its accommodations (the chdb-core/ClickHouse case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
