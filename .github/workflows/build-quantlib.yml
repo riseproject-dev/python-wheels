@@ -1,0 +1,192 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on upstream's own wheel build setup:
+#   https://github.com/lballabio/QuantLib-SWIG/blob/v1.43/.github/workflows/wheels.yml
+name: Build quantlib wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/quantlib.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-quantlib.yml'
+      - 'docs/packages/quantlib.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-quantlib.yml'
+      - 'docs/packages/quantlib.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  SWIG_VERSION: 4.4.1
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: quantlib
+      version: ${{ inputs.version }}
+
+  make_tarballs:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    # The wheel is built from the QuantLib-SWIG release tarball, which carries the
+    # SWIG-generated wrapper the git tree does not; making it needs SWIG 4.4.1 and is
+    # architecture-independent, so it runs once on x86.
+    name: Build quantlib ${{ matrix.version }} source tarballs
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      QUANTLIB_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Install SWIG ${{ env.SWIG_VERSION }}
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libpcre2-dev libboost-dev
+          wget -q "http://downloads.sourceforge.net/project/swig/swig/swig-${SWIG_VERSION}/swig-${SWIG_VERSION}.tar.gz"
+          tar xfz "swig-${SWIG_VERSION}.tar.gz"
+          cd "swig-${SWIG_VERSION}"
+          ./configure --prefix=/usr CXXFLAGS=-O3
+          make -j "$(nproc)"
+          sudo make install
+          swig -version
+
+      - name: Checkout QuantLib v${{ env.QUANTLIB_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: lballabio/QuantLib
+          ref: v${{ env.QUANTLIB_VERSION }}
+          path: quantlib
+          persist-credentials: false
+
+      - name: Checkout QuantLib-SWIG v${{ env.QUANTLIB_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: lballabio/QuantLib-SWIG
+          ref: v${{ env.QUANTLIB_VERSION }}
+          path: quantlib-swig
+          persist-credentials: false
+
+      - name: Make tarballs
+        run: |
+          set -euxo pipefail
+          mkdir tarballs
+          cd quantlib
+          ./autogen.sh
+          ./configure
+          make dist
+          mv "QuantLib-${QUANTLIB_VERSION}.tar.gz" ../tarballs/
+          cd ../quantlib-swig
+          ./autogen.sh
+          ./configure
+          make dist
+          mv "QuantLib-SWIG-${QUANTLIB_VERSION}.tar.gz" ../tarballs/
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: quantlib-${{ env.QUANTLIB_VERSION }}-sdist
+          path: tarballs/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, make_tarballs]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build quantlib ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        tag: [cp39-abi3, cp314-cp314t]
+        include:
+          # setup.py writes py_limited_api=cp39, so the abi3 wheel is compiled once on
+          # cp39 - the oldest interpreter its tag claims - and only re-tested on the
+          # rest (CLAUDE.md gotcha 96); cp310/cp311 are dropped from that re-test set.
+          - tag: cp39-abi3
+            build: cp39-manylinux_riscv64 cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+            before_all: .ci/wheels/before_all_linux.sh
+          - tag: cp314-cp314t
+            build: cp314t-manylinux_riscv64
+            before_all: .ci/wheels/before_all_linux_nogil.sh
+
+    env:
+      QUANTLIB_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout QuantLib-SWIG v${{ env.QUANTLIB_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: lballabio/QuantLib-SWIG
+          ref: v${{ env.QUANTLIB_VERSION }}
+          persist-credentials: false
+
+      - name: Download source tarballs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: quantlib-${{ env.QUANTLIB_VERSION }}-sdist
+          path: .
+
+      - name: Unpack QuantLib and QuantLib-SWIG
+        run: |
+          set -euxo pipefail
+          tar xfz "QuantLib-${QUANTLIB_VERSION}.tar.gz"
+          tar xfz "QuantLib-SWIG-${QUANTLIB_VERSION}.tar.gz"
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: ./QuantLib-SWIG-${{ env.QUANTLIB_VERSION }}/Python
+        env:
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_ARCHS: riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: ${{ matrix.before_all }}
+          CIBW_ENVIRONMENT: CXXFLAGS="-O3 -g0" CXXQLFLAGS="-O3 -g0"
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: pytest {package}/test
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: quantlib-${{ env.QUANTLIB_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish quantlib ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: quantlib-${{ matrix.version }}-*-manylinux_riscv64
