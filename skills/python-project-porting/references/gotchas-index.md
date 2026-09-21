@@ -478,6 +478,13 @@ The porting gotchas (518 of them) live in [`references/gotchas/`](gotchas/), spl
 - **514** — A tool that models a *target* Python version caps the matrix itself — the extension
   compiles and imports on every interpreter, so run the tool's CLI, not `import`, to find the
   ceiling (the pytype case).
+- **536** — An option cibuildwheel *removed* (3.0 dropped `free-threaded-support` and the
+  `cpython-freethreading` enable group) makes 4.2.0 reject upstream's entire
+  `[tool.cibuildwheel]` table before it selects anything, so every interpreter fails in
+  seconds with no compiler in the log; upstream's own older cibuildwheel pin is why a healthy
+  tag carries it, `cibuildwheel --print-build-identifiers --only <id> .` catches it on any
+  host, and the fix is a one-line patch rather than a `config-file:` override
+  (the spacy-pkuseg case).
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 

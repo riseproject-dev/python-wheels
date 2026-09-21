@@ -56,6 +56,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
   matrix at all.
 - **514** — A tool that models a *target* Python version caps the matrix itself; its extension
   compiles on every interpreter, so only running the tool shows it.
+- **536** — A removed cibuildwheel option makes 4.2.0 reject upstream's whole
+  `[tool.cibuildwheel]` table before any build starts; `--print-build-identifiers` catches it
+  in a minute.
 
 ---
 
@@ -1049,3 +1052,32 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
     `import <pkg>` — on the newest interpreter of the default matrix before committing to it.
     Applies to anything that consumes the bytecode or AST details of the interpreter it runs
     on: type checkers, bytecode rewriters, coverage/debug tooling.
+
+536. **An option cibuildwheel has since *removed* makes it reject the whole
+    `[tool.cibuildwheel]` table before it selects anything, so every interpreter fails
+    identically and the log shows no compiler at all (the spacy-pkuseg case).** cibuildwheel
+    4.2.0 validates the config file up front and exits with
+    `cibuildwheel: error: Option '<name>' not supported in a config file`. `only:` does not
+    bypass it — selection happens after parsing — so all four matrix legs die in seconds with
+    a message that looks like a workflow typo rather than a project problem. Three ports have
+    hit it so far, all on names dropped in cibuildwheel 3.0: `free-threaded-support = false`
+    (thinc 9.1.1, spacy-pkuseg 1.0.1) and `enable = ["cpython-freethreading"]` (decord2
+    3.4.0). The release itself is not broken — upstream's own workflow pins an older
+    cibuildwheel (`pypa/cibuildwheel@v2.21.3` for spacy-pkuseg) where the option is still
+    valid — which is exactly why an otherwise-healthy tag carries it: the pin freezes the
+    config's vocabulary at the release date, and any tag more than a couple of years old is a
+    candidate.
+    - **Pre-flight, on any host, in about a minute:**
+      `cibuildwheel --print-build-identifiers --only cp312-manylinux_riscv64 .` in the
+      checkout. It parses the config and prints the identifier, nothing else — no container,
+      no runner, no build. Run it right after checking out the tag, before writing the YAML.
+      (`--platform` cannot be combined with `--only`; the identifier implies it.)
+    - **Fix with a one-line patch that comments the option out**, as
+      `patches/thinc/9.1.1/` and `patches/spacy-pkuseg/1.0.1/` do, not with a run-time
+      `config-file:` override — an override replaces upstream's whole table, silently dropping
+      its `repair-wheel-command`, `skip` and `build` settings, and goal 2 wants our recipe to
+      stay upstream's.
+    - `Upstream-Status` depends on whether upstream already fixed it: `Backport` when there
+      is a commit to cite (explosion did exactly this in thinc as 6f3a08b1), `To upstream`
+      when there is not (spacy-pkuseg's master still carries the line three commits past the
+      tag).
