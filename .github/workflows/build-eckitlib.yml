@@ -75,14 +75,54 @@ jobs:
 
       - name: Write the wheel packaging scripts
         run: |
-          cat > bundled_rpms.py <<'PY'
+          cat > collect_licences.py <<'PY'
           import glob
           import json
+          import os
+          import re
+          import shutil
+          import subprocess
           import sys
 
-          sbom = json.load(open(glob.glob(f"{sys.argv[1]}/*.dist-info/sboms/auditwheel.cdx.json")[0]))
-          names = {c["name"] for c in sbom["components"] if c["purl"].startswith("pkg:rpm/")}
-          print("\n".join(sorted(names)))
+          WHEEL_DIR = sys.argv[1]
+          dist_info = glob.glob(f"{WHEEL_DIR}/*.dist-info")[0]
+          sbom = json.load(open(f"{dist_info}/sboms/auditwheel.cdx.json"))
+
+
+          def rpm(*args):
+              return subprocess.run(["rpm", *args], capture_output=True, text=True).stdout
+
+
+          def licences_of(package):
+              return [
+                  path
+                  for path in rpm("-ql", package).splitlines()
+                  if path.startswith("/usr/share/licenses/") and os.path.isfile(path)
+              ]
+
+
+          by_source = [line.split() for line in rpm("-qa", "--qf", "%{SOURCERPM} %{NAME}\n").splitlines()]
+
+          for name in sorted({c["name"] for c in sbom["components"] if c["purl"].startswith("pkg:rpm/")}):
+              source = rpm("-q", "--qf", "%{SOURCERPM}", name)
+              files = [
+                  path
+                  for sibling_source, sibling in by_source
+                  if sibling_source == source
+                  for path in licences_of(sibling)
+              ]
+              if not files:
+                  # lz4-libs is a runtime subpackage with no %license file and no installed
+                  # sibling that has one, so its source package has to be pulled in.
+                  base = re.sub(r"-[^-]+-[^-]+\.src\.rpm$", "", source)
+                  subprocess.run(["dnf", "-y", "-q", "install", base], check=True)
+                  files = licences_of(base)
+              if not files:
+                  raise SystemExit(f"no licence file found for {name}")
+              dest = f"{dist_info}/licenses/{name}"
+              os.makedirs(dest, exist_ok=True)
+              for path in files:
+                  shutil.copy(path, dest)
           PY
 
           cat > pack_wheel.py <<'PY'
@@ -178,14 +218,14 @@ jobs:
 
               mkdir -p /tmp/final
               cd /tmp/final && unzip -q /tmp/repaired/*.whl && cd /workspace
-              LICENSES=/tmp/final/eckitlib-$PACKAGE_VERSION.dist-info/licenses
-              for pkg in $(python3 bundled_rpms.py /tmp/final); do
-                mkdir -p "$LICENSES/$pkg"
-                for f in $(rpm -ql "$pkg" | grep "^/usr/share/licenses/"); do
-                  if [ -f "$f" ]; then cp "$f" "$LICENSES/$pkg/"; fi
-                done
-                test -n "$(ls -A "$LICENSES/$pkg")"
-              done
+              python3 collect_licences.py /tmp/final
+              # Rocky ships only the GPLv2 text covering the lz4 CLI tools, while the
+              # bundled liblz4 is BSD-2-Clause and no RPM carries that text; upstream
+              # pre-compile.sh fetches it from the lz4 repository for the same reason.
+              LZ4_LICENSES=/tmp/final/eckitlib-$PACKAGE_VERSION.dist-info/licenses/lz4-libs
+              LZ4_VERSION=$(rpm -q --qf "%{VERSION}" lz4-libs)
+              curl -fsSL "https://raw.githubusercontent.com/lz4/lz4/v$LZ4_VERSION/LICENSE" -o "$LZ4_LICENSES/LICENSE"
+              curl -fsSL "https://raw.githubusercontent.com/lz4/lz4/v$LZ4_VERSION/lib/LICENSE" -o "$LZ4_LICENSES/lib-LICENSE"
 
               python3 pack_wheel.py /tmp/final wheelhouse
             '
@@ -244,9 +284,42 @@ jobs:
           path: wheelhouse/*.whl
           if-no-files-found: error
 
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources for eckitlib ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      PACKAGE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The copyleft (GPL/LGPL) libraries auditwheel vendors out of the build image
+      # along libcurl's dependency closure.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc keyutils-libs libssh libidn2 libunistring libxcrypt systemd-libs libcap pcre2
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: eckitlib-${{ env.PACKAGE_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
   publish:
     name: Publish eckitlib ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, gpl_sources]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false
@@ -260,3 +333,5 @@ jobs:
       app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
     with:
       artifact-pattern: eckitlib-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: eckitlib-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc and the copyleft libraries bundled in the wheel
