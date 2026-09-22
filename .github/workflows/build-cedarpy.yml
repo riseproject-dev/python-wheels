@@ -1,0 +1,138 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/k9securityio/cedar-py/blob/v4.8.7/.github/workflows/CI.yml
+name: Build cedarpy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cedarpy.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cedarpy.yml'
+      - 'docs/packages/cedarpy.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cedarpy.yml'
+      - 'docs/packages/cedarpy.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cedarpy
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cedarpy ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # cedarpy's pyo3 dependency has a plain `features =
+        # ["pyo3/extension-module"]` (no abi3-pyNN), so every interpreter
+        # needs its own build. pp311 is dropped: PyPy has no riscv64 port.
+        python: ['cp39', 'cp310', 'cp311', 'cp312', 'cp313', 'cp314', 'cp314t']
+
+    env:
+      CEDARPY_VERSION: ${{ matrix.version }}
+      # Without this uv would reuse the runner image's system CPython for 3.12
+      # and download a standalone build for the others.
+      UV_PYTHON_PREFERENCE: only-managed
+
+    steps:
+      - name: Checkout cedarpy v${{ env.CEDARPY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: k9securityio/cedar-py
+          ref: v${{ env.CEDARPY_VERSION }}
+          submodules: 'true'
+          persist-credentials: false
+
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --strip -i ${{ steps.interp.outputs.value }} --out dist
+          manylinux: '2_39'
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ steps.interp.outputs.value }}
+          activate-environment: true
+          enable-cache: false
+
+      # Mirrors upstream's own "unit tests (x86_64)" step (CI.yml): install
+      # from the just-built wheel with the public index disabled, then run
+      # its own test suite unmodified.
+      - name: Unit tests
+        run: |
+          uv pip install cedarpy --no-index --find-links dist --force-reinstall
+          if [ "${{ matrix.python }}" = "cp39" ]; then
+            # pyproject.toml's own dev extra declares "pytest >= 9.0.3", whose own
+            # floor is Python>=3.10 - a dev-tooling requirement above cedarpy's cp39
+            # runtime floor. Upstream's own CI never hits this: maturin's
+            # `--find-interpreter` builds a wheel per interpreter found, but a single
+            # fixed 3.13 venv (from actions/setup-python) is the only one ever
+            # pip-installed and pytest-run, so a cp39 wheel is never actually
+            # exercised upstream either. Install a pre-9.0 pytest instead of the
+            # pinned lockfile line so cp39's own wheel gets tested here too.
+            uv pip install -r requirements.txt
+            uv pip install 'pytest<9' pytest-benchmark 'parameterized==0.9.0'
+          else
+            uv pip install -r requirements.txt -r requirements.dev.txt
+          fi
+          pytest
+
+      # Mirrors upstream's own "integration tests (x86_64)" step (CI.yml).
+      - name: Integration tests
+        run: make integration-tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cedarpy-${{ env.CEDARPY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cedarpy ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: cedarpy-${{ matrix.version }}-*-manylinux_riscv64
