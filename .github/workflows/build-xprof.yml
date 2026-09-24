@@ -152,9 +152,14 @@ jobs:
           curl -fsSLo dist.zip "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-dist.zip"
           unzip -q dist.zip
 
+          # java-21-openjdk's persistent Javac worker crashes under this image's glibc
+          # ("Fatal glibc error: pthread_mutex_lock.c: assertion failed:
+          # mutex->__data.__owner == 0") once several multiplex-worker threads race;
+          # standalone forks a fresh javac per action instead of reusing one worker JVM.
           EXTRA_BAZEL_ARGS="--tool_java_runtime_version=local_jdk \
             --override_module=rules_python=/tmp/rules_python \
-            --override_module=rules_java=/tmp/rules_java" \
+            --override_module=rules_java=/tmp/rules_java \
+            --strategy=Javac=standalone" \
             bash ./compile.sh
           install -m 0755 output/bazel /work/bazel-bin/bazel
           SCRIPT
@@ -239,6 +244,7 @@ jobs:
           bazel build -c opt --config=clang_local \
             --repo_env=HERMETIC_PYTHON_VERSION="${HERMETIC_PYTHON_VERSION}" \
             --repo_env=PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            --strategy=Javac=standalone \
             --curses=no --show_progress_rate_limit=60 \
             //xprof/pywrap:profiler_plugin_c_api.so \
             //xprof/convert/events_db/python:libpywrap_events_db_c_api.so
