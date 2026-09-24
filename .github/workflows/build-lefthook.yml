@@ -1,0 +1,195 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `publish-pypi` job of
+# https://github.com/evilmartians/lefthook/blob/v2.1.11/.github/workflows/release.yml
+# and its packaging/scripts/lib/Registries/PyPI.rakumod.
+name: Build lefthook wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/lefthook.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-lefthook.yml'
+      - 'docs/packages/lefthook.yaml'
+      - 'patches/lefthook/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-lefthook.yml'
+      - 'docs/packages/lefthook.yaml'
+      - 'patches/lefthook/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: lefthook
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build lefthook ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+
+    env:
+      LEFTHOOK_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout lefthook v${{ env.LEFTHOOK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: evilmartians/lefthook
+          ref: v${{ env.LEFTHOOK_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pypi packaging build hook
+        run: git apply python-wheels/patches/lefthook/${{ env.LEFTHOOK_VERSION }}/*.patch
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      # Mirrors the "no_self_update" build id of upstream's .goreleaser.yml, the
+      # archive packaging/scripts/lib/Constants.rakumod feeds to the PyPI registry.
+      - name: Build the lefthook binary
+        run: |
+          mkdir -p packaging/registries/pypi/lefthook/bin/lefthook-linux-riscv64
+          CGO_ENABLED=0 GOOS=linux GOARCH=riscv64 go build -tags no_self_update -trimpath \
+            -ldflags "-s -w -X github.com/evilmartians/lefthook/v2/internal/version.commit=$(git rev-parse HEAD)" \
+            -o packaging/registries/pypi/lefthook/bin/lefthook-linux-riscv64/lefthook .
+
+      - name: Build wheel
+        working-directory: packaging/registries/pypi
+        env:
+          LEFTHOOK_TARGET_PLATFORM: linux
+          LEFTHOOK_TARGET_ARCH: riscv64
+        run: uv build --wheel -o dist
+
+      - name: Check the wheel ships the riscv64 lefthook binary
+        run: |
+          python3 - packaging/registries/pypi/dist/*.whl <<'EOF'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as zf:
+              names = zf.namelist()
+              assert sys.argv[1].endswith("-py3-none-manylinux_2_39_riscv64.whl"), sys.argv[1]
+              assert "lefthook/bin/lefthook-linux-riscv64/lefthook" in names, names
+              licenses = sorted(n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n)
+              assert licenses == ["LICENSE"], licenses
+              header = zf.read("lefthook/bin/lefthook-linux-riscv64/lefthook")[:20]
+              assert header[:4] == b"\x7fELF", header
+              assert header[18] == 0xF3, header  # e_machine EM_RISCV
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lefthook-${{ env.LEFTHOOK_VERSION }}-py3-none-manylinux_riscv64
+          path: packaging/registries/pypi/dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test lefthook ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 15
+    env:
+      LEFTHOOK_VERSION: ${{ matrix.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: lefthook-${{ env.LEFTHOOK_VERSION }}-py3-none-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . lefthook
+
+      # Mirrors lefthook's own README quickstart (install a hook, then trigger it
+      # with a real commit) to prove the bundled riscv64 binary actually executes.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          [ "$(lefthook version)" = "${LEFTHOOK_VERSION}" ]
+          lefthook --help >/dev/null
+
+          work=$(mktemp -d)
+          cd "$work"
+          git init -q
+          git config user.email test@example.com
+          git config user.name test
+
+          cat > lefthook.yml <<'YAML'
+          pre-commit:
+            commands:
+              echo:
+                run: echo "riscv64 hook ran" > hook-output.txt
+          YAML
+
+          lefthook install
+          test -x .git/hooks/pre-commit
+
+          git add lefthook.yml
+          git commit -q -m "test commit"
+          grep -q "riscv64 hook ran" hook-output.txt
+
+  publish:
+    name: Publish lefthook ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: lefthook-${{ matrix.version }}-py3-none-manylinux_riscv64
