@@ -86,6 +86,33 @@ jobs:
           CIBW_ENVIRONMENT: >-
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             PIP_ONLY_BINARY=numpy,scipy,qiskit,rustworkx
+          # cmake/dependency_utils.cmake's setup_conan() runs Conan 1.x
+          # (conan<2.0.0, pinned by pyproject.toml) to build fmt/8.0.1 from
+          # source. Conan 1.x's settings.yml has no riscv64 arch entry, and
+          # its autodetection matches "riscv64" on the generic `"64" in
+          # machine` fallback and misreports arch=x86_64, so its
+          # CMakeToolchain then adds an x86-only -m64 flag. Seed a
+          # riscv64-aware settings.yml and default profile before Conan
+          # runs so it never autodetects.
+          CIBW_BEFORE_BUILD: |
+            set -ex
+            pip install -q 'conan<2.0.0'
+            conan config init
+            conan_home=$(conan config home)
+            sed -i 's/arch: \[x86, x86_64,/arch: [x86, x86_64, riscv64,/' "$conan_home/settings.yml"
+            grep -q 'arch: \[x86, x86_64, riscv64,' "$conan_home/settings.yml"
+            mkdir -p "$conan_home/profiles"
+            cat > "$conan_home/profiles/default" <<'PROFILE'
+            [settings]
+            os=Linux
+            os_build=Linux
+            arch=riscv64
+            arch_build=riscv64
+            build_type=Release
+            [options]
+            [build_requires]
+            [env]
+            PROFILE
 
       - name: Check the wheel ships the extension and all licences
         run: |
