@@ -251,6 +251,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   correctly source-available and buildable in principle, and still be a park purely on
   runner-hours — check what upstream's own CI actually re-builds, not just what it lists as
   a dependency (the ifcopenshell case).
+- **560** — A GPU-vendor binding package that only `dlopen`s its runtime library at call time
+  can still be build-time blocked by the same vendor's SDK headers — check the SDK's own
+  platform matrix, not just the binding's link graph (the hip-python case).
 
 ---
 
@@ -4533,3 +4536,28 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     problem, real buildable code at a cost this repo cannot practically absorb), and the
     dependency graph itself is the evidence, read directly off upstream's own build script
     rather than assumed by analogy with a smaller OpenCASCADE consumer.
+
+560. **A GPU-vendor binding package that only `dlopen`s its runtime library at call time
+    (gotcha 284's rescue) can still be build-time blocked by the same vendor's SDK headers —
+    check the SDK's own platform matrix, not just the binding's link graph (the hip-python
+    case).** hip-python 7.2.2.562.43's compiled extensions (`hip/hip.cpython-*.so`,
+    `chip.cpython-*.so`, `chipblas`/`chipsolver`/`chipsparse`/`chipfft`/`chiprand`/`crccl`/
+    `croctx.cpython-*.so`; six manylinux2014_x86_64-only wheels, cp39-cp314, 60-67MB each, no
+    aarch64 or any other arch) have zero ROCm `DT_NEEDED` entries — `readelf -d` on every one
+    shows only `libc.so.6` — because `hip/_util/posixloader.py`'s `open_library()`/
+    `load_symbol()` `dlopen(b"libamdhip64.so")` (and the sibling `hipblas`/`hipsolver`/...
+    libraries) lazily, on first call, exactly like gotcha 284's fastsafetensors case. But
+    every one of the `.pyx` sources still does `cdef extern from "hip/hip_runtime.h"` (and
+    `hipblas.h`/`hipsolver.h`/`hipsparse.h`/`hipfft.h`/`hiprand.h`/`rccl.h`/`roctx.h` for the
+    other modules) to get the struct/enum/function declarations Cython compiles against, so
+    the build itself needs the ROCm HIP SDK's dev headers installed on the build host —
+    dlopen only defers the *library*, not the *headers*. AMD's own compatibility matrix
+    (rocm.docs.amd.com `compatibility/compatibility-matrix.html`) enumerates supported Linux
+    distros and GPU families (CDNA/RDNA) and names no CPU architecture beyond the historical
+    x86_64 default; the only riscv64 HIP/ROCm port that exists is a third-party downstream
+    (ISCAS's port, shipped by Fedora 42 / T2 SDE 25.4), and ROCm/ROCm#5629 — the open ask to
+    upstream it — closed with no AMD commitment, timeline, or official package feed. With no
+    official ROCm apt/yum repo, container image, or header package for riscv64, there is no
+    supported way to even provision the build host, regardless of the dlopen rescue.
+    `not-feasible`, same family as gurobipy/mosek (gotcha 453/534): the wall is the vendor's
+    own platform support, not this project's code.

@@ -391,6 +391,10 @@ The porting gotchas (546 of them) live in [`references/gotchas/`](gotchas/), spl
   runner-hours — check what upstream's own CI actually re-builds, not just what it lists as a
   dependency, and use a smaller already-ported OpenCASCADE consumer's real CI timings as the
   scale yardstick (the ifcopenshell case).
+- **560** — A GPU-vendor binding package that only `dlopen`s its runtime library at call time
+  (deferring the missing-library problem) can still be build-time blocked by the same
+  vendor's SDK headers — the SDK's own platform matrix, not the binding's link graph, is what
+  settles it (the hip-python case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
