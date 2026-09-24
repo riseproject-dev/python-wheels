@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (547 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -452,6 +452,11 @@ The porting gotchas (547 of them) live in [`references/gotchas/`](gotchas/), spl
   cache-populating step on `ubuntu-latest` and hand the tarball to the riscv job, and patch the
   extracted sdist rather than the checkout when a target sits inside a submodule
   (the couchbase case).
+- **569** — A tag can check out clean and still hand a build literal Git LFS pointer stubs
+  instead of real content, when upstream squash-merges former git submodules into the main
+  tree without resolving their LFS objects first — verify by sha256 against the pointer's own
+  `oid` before trusting a same-content fetch from the pre-merge submodule (the semgrep
+  v1.177.0 case).
 
 ### cibuildwheel mechanics, the matrix & abi3 — [`gotchas/cibuildwheel-matrix-and-abi3.md`](gotchas/cibuildwheel-matrix-and-abi3.md)
 
@@ -529,6 +534,10 @@ The porting gotchas (547 of them) live in [`references/gotchas/`](gotchas/), spl
   release yet, an unfamiliar PyPy triple) is not evidence of scraped garbage — verify it
   against the live PyPI JSON `releases` dict and the extension crate's own `pyo3` dependency
   line before discounting the matrix (the ignore-python case).
+- **564** — `pypa/cibuildwheel`'s action has no `build:` input (only `package-dir`,
+  `output-dir`, `config-file`, `only`, `extras`); passing one is silently dropped, and
+  cibuildwheel falls back to its default matrix floor instead of the intended abi3
+  build list (the vegafusion case) — use `CIBW_BUILD`/`only:` instead.
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
@@ -739,6 +748,17 @@ The porting gotchas (547 of them) live in [`references/gotchas/`](gotchas/), spl
 - **500** — Gotcha 233's packer-script shape, cheap variant: when the packer is *upstream's
   own* and takes locally built binaries (`--files austin:src/austin`), the port is a
   from-source build plus a one-entry platform-table patch (the austin-dist case).
+- **563** — A CMake macro (`add_go_lib()`) that shells out to `go build -buildmode=c-shared`
+  in a driven-container port (no cibuildwheel) needs `git config --global --add
+  safe.directory` for `-buildvcs=true`'s VCS stamping against the bind-mounted checkout,
+  `chmod` on any binary it writes while still root (a later unprivileged host step can't), and
+  the package's own `[test]` extra typed out by hand since there is no `CIBW_TEST_EXTRAS`
+  (the adbc-driver-flightsql case).
+- **567** — Installing clang for gotcha 132's `--config=clang_local` is not enough by
+  itself: without `CC`/`CXX` exported, Bazel's local toolchain autodetection still picks
+  plain `gcc`, and `com_google_highway`'s unconditional riscv64
+  `-menable-experimental-extensions` copt (Clang-only, no GCC equivalent) is the target
+  that finally exposes it (the xprof case).
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
@@ -1077,6 +1097,10 @@ The porting gotchas (547 of them) live in [`references/gotchas/`](gotchas/), spl
 - **512** — `--ignore`/`--ignore-glob` are silently inert under `pytest --pyargs <pkg>`; cut
   tests with `--deselect`, whose nodeids are relative to the package directory rather than the
   rootdir pytest prints, and confirm the count with `--co -q`.
+- **565** — A crashed `multiprocessing.Process` child's parent blocking forever on
+  `Queue.get()` with no timeout turns one segfault into a full job hang; bound it with
+  `CIBW_TEST_REQUIRES: pytest-timeout` plus `PYTEST_ADDOPTS="--timeout=<n>"` folded into
+  `CIBW_ENVIRONMENT`, which applies to both the build and test phases.
 
 ### Test failures, flakes & arch-specific bugs — [`gotchas/test-failures-and-flakes.md`](gotchas/test-failures-and-flakes.md)
 
@@ -1153,6 +1177,16 @@ The porting gotchas (547 of them) live in [`references/gotchas/`](gotchas/), spl
 - **553** — A SIGBUS in a doubly-nested tracking-provider pool stack's aligned-allocation
   path is real but unresolved on riscv64 without hardware to reproduce interactively, and is
   not threading-specific even though it first looked that way (the umf 1.1.0 case).
+- **566** — A from-source compiled binary segfaulting on *every* invocation across
+  independent runners (pgserver's `initdb`, PostgreSQL 16.2, plain `-O2`/GCC 14.3.1) is real
+  and unresolved without riscv64 hardware to debug interactively — not scenario-specific to
+  whichever test happened to be running, and distinct from an already-open pgsql-hackers
+  riscv64/GCC memory-failures thread (that one is sporadic; this one is deterministic).
+- **568** — A subprocess-exit self-test's hardcoded `TIMEOUT` failing only on `cp314t` for
+  one version, with byte-identical test source and no relevant code change across versions,
+  is free-threading's per-object overhead tipping an existing margin on a shared riscv64
+  runner (awscrt 0.37.0's `test_appexit`) — patch the timeout with headroom, don't skip the
+  test that proves the extension doesn't crash the interpreter on exit.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 

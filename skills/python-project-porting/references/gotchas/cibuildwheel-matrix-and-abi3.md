@@ -65,6 +65,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
   release yet, an unfamiliar PyPy triple) is not evidence of scraped garbage — verify it
   against the live PyPI JSON and the extension crate's own dependency line before discounting
   the matrix.
+- **564** — `pypa/cibuildwheel`'s action has no `build:` input; passing one is silently
+  dropped and cibuildwheel falls back to its default matrix floor instead of the intended
+  abi3 build list — use `CIBW_BUILD`/`only:` instead.
 
 ---
 
@@ -1147,3 +1150,29 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
       entry) is worth one direct look at the real PyPI JSON before triaging around it —
       the queue's own summarization, not upstream's release, is the more likely source of
       an artifact.
+
+564. **`pypa/cibuildwheel`'s GitHub Action has no `build:` input — only `package-dir`,
+    `output-dir`, `config-file`, `only` and `extras` — and passing one anyway is not a YAML
+    error, it is silently dropped (the vegafusion 2.0.3 case).** The action logs
+    `##[warning]Unexpected input(s) 'build', valid inputs are
+    ['package-dir', 'output-dir', 'config-file', 'only', 'extras']`, but only in the job's
+    *post*-step cleanup, after the whole build already ran — invisible until the job is over,
+    and easy to miss under hours of compiler output. With the intended interpreter selection
+    silently ignored, cibuildwheel falls back to its own default `[tool.cibuildwheel] build`
+    matrix (or its built-in default if the project sets none), which starts at cibuildwheel
+    4.2.0's floor — cp39 here — not the `cp312`/`cp313`/`cp314` the workflow meant to restrict
+    to for an abi3 wheel (gotcha 96). The failure surfaces two phases later and looks unrelated
+    to the typo: cibuildwheel's abi3 test dedup installs the repaired wheel into a **cp39**
+    test venv, and `pip install` then can't resolve a dependency (`arro3-core` here) that
+    genuinely has no wheel below cp311 on either PyPI or the riseproject registry — reading as
+    a dependency-floor bug, not a workflow-wiring one.
+    - **Fix is one substitution, not a version bump**: move the interpreter list from a
+      `build:` key under the action's `with:` to `CIBW_BUILD` under its `env:` (or `only:`
+      under `with:` for a single identifier) — the same knob build-datafusion.yml's own
+      cp310-abi3 leg already uses for an identical "abi3 floor vs. a dependency's real floor"
+      setup. Do not "fix" this by raising the port's build floor in the matrix; the matrix was
+      already correct; only the input name was wrong.
+    - **Pre-flight**: `grep -n '^\s*build:' .github/workflows/build-<pkg>.yml` right after
+      writing the cibuildwheel step, whenever the interpreter list sits under `with:` rather
+      than as `CIBW_BUILD`/`CIBW_SKIP` under `env:` or `only:`/`skip:` under `with:` — those
+      four are the only spellings the action accepts.

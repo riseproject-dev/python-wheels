@@ -786,3 +786,26 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
     - **Verify with `--co -q` before pushing.** It prints `1768/1820 tests collected (52
       deselected)`; a typo'd nodeid is ignored without a warning, so that count is the only
       proof the deselection did anything.
+
+565. **A crashed subprocess a test spawns via `multiprocessing.Process` turns into a
+    permanent hang, not a fast failure, when the parent's `Queue.get()` after it has no
+    timeout — bound it from outside the suite with `pytest-timeout`, not by patching the
+    test (the pgserver 0.1.4 case; generalizes gotcha 297 from a hand-rolled `readline()`
+    wait to a stdlib `multiprocessing.Queue`).** pgserver's
+    `test_reuse_deleted_datadir_short` starts a server in a child `mp.Process` and then
+    blocks on `queue_from_child.get()` with no timeout to learn its pid; when the child's
+    `initdb` call segfaults, the child dies without ever putting anything on the queue, so
+    the parent (and pytest) blocks forever with zero output — killed only by the workflow's
+    `timeout-minutes: 180`, i.e. one full job's runner budget burned on an already-known
+    failure. There is no `CIBW_TEST_COMMAND` override to add a flag to here (upstream's own
+    `pyproject.toml` sets `test-command = "bash -x {project}/cibuildwheel_test.bash
+    {project}"`, and that script does not forward extra arguments) — the fix that needs no
+    patch to upstream's source is `CIBW_TEST_REQUIRES: pytest-timeout` plus a
+    `PYTEST_ADDOPTS="--timeout=<n>"` folded into the existing `CIBW_ENVIRONMENT` line.
+    **`CIBW_ENVIRONMENT` applies during both the build *and* the test phase**, so this one
+    line is enough — no `CIBW_TEST_ENVIRONMENT` variable exists to reach for instead.
+    pytest-timeout's default `signal`/`SIGALRM` method still fires inside a blocking
+    `Queue.get()` in the main thread, so the hang breaks and the test reports FAILED with a
+    `Timeout` traceback instead of the job sitting idle. This bounds the symptom, not the
+    underlying crash (see gotcha 566 for that) — it turns an unknown number of silent hours
+    into a known number of minutes so the next CI cycle is cheap to iterate on.

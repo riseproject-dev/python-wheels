@@ -94,17 +94,37 @@ jobs:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
           # Upstream builds the wheels without testing them and tests an in-place
-          # build instead; stage only the suite so the repo-root `clickhouse_connect/`
-          # can't shadow the installed extension modules.
-          CIBW_TEST_SOURCES: tests
-          CIBW_TEST_REQUIRES: pytest pytest-asyncio numpy pyarrow sqlalchemy alembic aiohttp ${{ matrix.test_requires }}
+          # build instead; stage only the suite (plus `examples`, which
+          # test_async_alembic.py reads via `Path(__file__).parents[3]`) so the
+          # repo-root `clickhouse_connect/` can't shadow the installed extension
+          # modules.
+          CIBW_TEST_SOURCES: tests examples
+          CIBW_TEST_REQUIRES: pytest pytest-asyncio pytest-mock numpy pyarrow sqlalchemy alembic aiohttp ${{ matrix.test_requires }}
           # Keeps a dep whose riscv64 wheel we don't have from silently source-building.
           CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,pyarrow,pandas,sqlalchemy,aiohttp,lz4,backports.zstd
           # tests/unit_tests/test_driver/test_c_parity.py imports driverc directly, so a
           # wheel that fell back to pure Python fails here. TestQuery's fixture opens a
           # real connection to a ClickHouse server, which has no riscv64 image.
+          #
+          # 1.9.0 added an async SQLAlchemy dialect (cc_sqlalchemy/asyncio.py) gated on
+          # greenlet, which pypi.riseproject.dev doesn't carry and which SQLAlchemy's own
+          # `greenlet>=1; platform_machine == ...` marker never installs on riscv64 (that
+          # list is aarch64/ppc64le/x86_64/amd64/win32 only) — so greenlet is genuinely
+          # absent here, same as upstream's own optional-dependency gating intends. Per
+          # CLAUDE.md gotcha 212, running the suite (not grepping) found one file that
+          # fails to collect and two more tests, in otherwise-passing files, that import
+          # the dialect lazily inside the test body:
+          # test_async_dialect.py: ImportError at collection (--ignore, whole file).
+          # test_async_alembic.py::test_async_alembic_offline_context_compiles_without_client
+          #   and test_async_dialect_version.py::test_async_dialect_sqlalchemy_version_guard:
+          #   both `patch(...)`/`importlib.import_module(...)` the dialect module at call
+          #   time (--deselect, keeping the rest of each file).
           CIBW_TEST_COMMAND: >-
-            python -m pytest tests/unit_tests -k "not TestQuery" ${{ matrix.pytest_ignore }}
+            python -m pytest tests/unit_tests -k "not TestQuery"
+            --ignore tests/unit_tests/test_sqlalchemy/test_async_dialect.py
+            --deselect tests/unit_tests/test_sqlalchemy/test_async_alembic.py::test_async_alembic_offline_context_compiles_without_client
+            --deselect tests/unit_tests/test_sqlalchemy/test_async_dialect_version.py::test_async_dialect_sqlalchemy_version_guard
+            ${{ matrix.pytest_ignore }}
 
       - name: Check the Cython extensions made it into the wheel
         run: |

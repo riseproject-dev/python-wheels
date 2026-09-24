@@ -64,6 +64,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
   path is real but unresolved on riscv64 without hardware to reproduce interactively —
   confirmed not threading-specific (it crashes both the single- and multi-threaded variant
   of the same helper), diagnosis stops there honestly.
+- **568** — A subprocess-exit self-test's own hardcoded `TIMEOUT` failing only on `cp314t`,
+  only on one version, with byte-identical test source across versions, is free-threading
+  tipping an existing margin, not a new bug — patch the timeout with real headroom rather
+  than skip the test.
 
 ---
 
@@ -1277,3 +1281,87 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
     `TrackingProviderPoolTest/umfPoolTest.pow2AlignedAlloc/*` and
     `.../multiThreadedpow2AlignedAlloc/*`, flagged for anyone with riscv64 hardware access to
     pick up, rather than blocking the rest of the port on an unreproducible bug.
+
+    Update: a third CI run crashed on yet another case on the same fixture,
+    `TrackingProviderPoolTest/umfPoolTest.malloc_compliance/*` — not an aligned-allocation or
+    threading case at all, so the crash is not scoped to `pow2AlignedAllocHelper` either; it
+    looks like the doubly-nested tracking-provider-over-proxy-pool stack itself is unreliable
+    on riscv64, surfacing on whichever parameterization the CI runner happens to schedule
+    first. Widened the filter to also exclude `malloc_compliance`. If a fourth case crashes,
+    the pragmatic fix is excluding the whole `TrackingProviderPoolTest/umfPoolTest.*` fixture
+    rather than continuing to chase individual parameterizations.
+
+566. **A from-source build's compiled binary segfaulting on *every* invocation, not just one
+    test scenario, is real and unresolved on riscv64 without hardware to reproduce and
+    debug interactively (the pgserver 0.1.4 `initdb` case) — check the full failure set
+    before assuming the failing test's name (or its data) is the cause.** pgserver compiles
+    PostgreSQL 16.2 from source; its own `initdb` binary died with `SIGSEGV` in *every* CI
+    run across three independent riscv64 runners (cp312/cp313/cp314, three different
+    `runner_name`s) and both interpreters exercised, always on the *first* call `initdb`
+    makes in the suite (`test_get_server`, not the `test_reuse_deleted_datadir_short` whose
+    name suggests a short-path/buffer edge case — that test only happens to be the one
+    running when the crashed child's unbounded wait turns into the hang gotcha 565 bounds).
+    Every later test's `initdb` call segfaults identically, so this is not scenario-specific
+    and not one flaky machine — it reproduced across every runner instance that ran it.
+    Ruled out already: `configure` on this manylinux_2_39_riscv64 image detects real
+    `__sync`/`__atomic` builtin int32/int64 support (no fallback-spinlock path), and the
+    build passes no `-march`/aggressive flags — plain `-O2`, GCC 14.3.1 (Red Hat 14.3.1-4).
+    The signal is on the direct `initdb` child itself (Python's `subprocess.run` only
+    reports the *direct* child's signal), so the fault is in `initdb`'s own code before or
+    during its exec of `postgres --boot`, not inside the bootstrap backend. This matches an
+    open, still-unresolved pgsql-hackers thread on riscv64 buildfarm animals producing
+    "weird memory-related failures" on recent GCC — but that thread's failures are
+    sporadic in random queries, while this one is 100% deterministic in `initdb`, so treat
+    it as a related-but-distinct, equally undiagnosed data point, not the same bug.
+    **Do not treat this as diagnosed** — no riscv64 hardware or working QEMU
+    user-mode emulation was available to this session (`docker run --platform=linux/riscv64`
+    on the amd64 host used to investigate this hit `exec format error`; the sandbox's
+    `binfmt_misc` isn't writable to register a riscv64 QEMU interpreter, unlike gotcha 115's
+    real-runner case) to get a native backtrace or bisect the GCC/PostgreSQL versions
+    involved. Next steps for whoever picks this up with riscv64 access: `gdb`/core dump on
+    the built `initdb` (gotcha 115's technique) to see whether the fault is in `initdb.c`
+    itself or in something it links against; try a newer PostgreSQL point release; try an
+    older/newer GCC than 14.3.1 in the manylinux image.
+
+568. **A subprocess-exit self-test with its own hardcoded wall-clock `TIMEOUT` can fail only
+    on `cp314t`, only on one version, with no code change behind it — free-threading's extra
+    per-object overhead tips an existing margin, it doesn't create a new bug (the awscrt
+    0.37.0 `test_appexit` case).** awscrt's `test_appexit.TestAppExit.test_http` runs
+    `test/appexit_http.py` as a subprocess once per teardown stage and asserts each exits 0;
+    every wait in that script (HTTP connect, body callback, connection-shutdown future, both
+    `ClientBootstrap`/`EventLoopGroup` `shutdown_event.wait()` calls) shares one hardcoded
+    `TIMEOUT = 30.0`. On this repo's riscv64 runners, only the `cp314-cp314t` leg of 0.37.0
+    failed, at the `ClientBootstrapDone` stage, with `AssertionError: 0 != 1` from
+    `subprocess.Popen(...).returncode` — while the same leg of the immediately preceding
+    0.36.3/0.36.4 (built in the very same PR run) and the 0.37.0 cp311/cp313 legs all passed.
+    - **Rule out a version-specific regression before treating a fixed-timeout failure as a
+      real bug**: `git diff <old-tag> <new-tag> -- test/appexit_http.py test/test_appexit.py`
+      found *zero* diff across three released versions, and the only source changes at all
+      were trivial submodule bumps (`aws-c-common`, `aws-c-s3`, `aws-lc`) that don't touch
+      `aws-c-io`'s bootstrap/event-loop/host-resolver shutdown path. Byte-identical test
+      files plus an unchanged code path rules out "new test hit a new bug" and "this
+      version broke something" — the margin already existed.
+    - **Distinguish a hang from a timing margin by reading what the background threads were
+      doing when the timeout fired, not just that it fired.** The subprocess's own
+      `awscrt.io.init_logging(Trace, 'stdout')` output shares the same fd the test harness
+      captures, so on this repo's shared runners a concurrent native thread's writes land
+      byte-interleaved with the Python traceback (literally splitting one log line, e.g.
+      `...cache due to shutdown` becoming `...caTraceback...` then resuming
+      `...he due to shutdown`). Reading past the corruption showed the DNS resolver's own
+      maintenance loop re-resolving the request host roughly once a second for ~24 of the
+      30-second budget before it decided to kill its background thread, and only then did
+      the channel-bootstrap-release / event-loop-destroy sequence that fires
+      `shutdown_event` begin — all of it clean, no error, just late. That is a margin
+      problem (under 6s left for the rest of native teardown to reach Python), not a
+      deadlock.
+    - **Fix scope: patch the hardcoded timeout with `Upstream-Status: Inappropriate` and
+      real headroom, don't skip the test** — this is gotcha 316's "artificial test
+      limitation, not a real defect" case again, and patching-and-licensing.md lists a fixed
+      timeout as an explicitly justified patch reason. Skipping `test_appexit` outright would
+      have cost the one test in the suite that actually proves the package's native
+      extension doesn't crash the interpreter on process exit — the exact thing worth
+      shipping a wheel to verify. Tripling `TIMEOUT` (30s → 90s) keeps that coverage while
+      giving a busy shared riscv64 runner driving a free-threaded (no-GIL) interpreter —
+      whose per-object atomic refcounting adds measurable overhead to native-callback-into-
+      Python teardown chains like this one — comfortable room, and it still fails well
+      inside the job's own timeout if the shutdown genuinely never completes.
