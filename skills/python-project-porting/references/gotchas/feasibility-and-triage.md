@@ -4614,3 +4614,51 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     (Debian ships `qtbase5-dev` natively on riscv64), but there is no supported way to provision
     the dependency in this repo's build image at a cost this repo can practically absorb, mirroring
     the pyqt5-qt5/ifcopenshell reasoning rather than a closed-source or CUDA-only stop.
+
+562. **Existing non-x86_64 wheels (aarch64/arm64) are real evidence a build is portable, but
+    don't outweigh a scale check against this repo's own comparable precedents — a package can
+    clear the "does upstream already support another architecture" bar and still be
+    impractical (the drake case).** drake 1.56.0 ships real `manylinux_2_34_aarch64` Linux
+    wheels alongside `x86_64` (plus `macosx_arm64`), proving its whole toolchain — Bazel 8.6+,
+    CMake, GCC 14, ~80 vendored third-party Bazel repos under `tools/workspace/` — already
+    compiles clean on a non-x86_64 target, which is the opposite signal from ifcopenshell/
+    pymeshlab/mxnet (zero non-x86 precedent). The three commercial solvers are all cleanly
+    avoidable without patching drake itself: Gurobi is off by default
+    (`tools/workspace/gurobi/BUILD.bazel`'s `enabled_via_flag`), Mosek is already turned off for
+    Linux aarch64 in upstream's own `tools/wheel/image/build-drake.sh`
+    (`[ "$(arch)" == "aarch64" ] && WITH_MOSEK=OFF`) so doing the same for riscv64 is a direct
+    precedent, and SNOPT (`-DWITH_SNOPT=ON -DSNOPT_PATH=...`, unconditional in every official
+    wheel) is fetched from an access-controlled private repo
+    (`git@github.com:RobotLocomotion/snopt.git`, `tools/workspace/snopt/repository.bzl`) this
+    repo has no credentials for, but `tools/workspace/snopt/repository.bzl`'s own deferred-
+    failure design means `-DWITH_SNOPT=OFF` needs no source at all — none of the three is what
+    blocks this port. What does: (1) upstream's own supported-platform table
+    (`doc/_pages/installation.md`) lists only `x86-64`/`x86-64-v3`/`arm64` for every OS row —
+    riscv64 is scoped out explicitly, not merely unbuilt; (2) there is no public upstream CI
+    workflow to narrow to riscv64 (`.github/workflows/` in the drake repo has only `stale.yml`;
+    the real wheel-release pipeline is undocumented internal buildbot infrastructure per
+    `tools/wheel/README.rst`'s pointer to `drake.mit.edu/release_playbook.html`), so this would
+    be a "drive the container yourself" port from `tools/wheel/wheel_builder`'s Docker/CMake
+    recipe with no CI-file precedent to lean on; (3) scale: drake's own C++ core (excluding
+    third-party, bindings, examples and tests) is 814k+ lines across just
+    `multibody/solvers/geometry/systems/math/common/planning`, on top of a from-source stack of
+    15+ substantial native libraries (VTK — a trimmed internal build via
+    `tools/workspace/vtk_internal`, but this repo's own *standalone* VTK port (`.queue.yml`
+    `pkg: vtk`) already needed "up to 24h/job" for a full VTK build on the 4-core riscv64
+    self-hosted runners — plus SuiteSparse, IPOPT, NLopt, OSQP, SCS, oneTBB, Highway, FCL, CCD,
+    gz_math/gz_utils, sdformat, tinygltf, qhull, meshcat, and a Rust toolchain +
+    `crate_universe` for Clarabel), not abi3 (pydrake links `Python.h` directly like VTK), so a
+    full relink of drake's own huge core plus its bindings layer repeats per interpreter
+    (cp312/cp313/cp314) even with Bazel's disk-cache sharing the third-party+core compile
+    across them; and (4) upstream's own troubleshooting doc (`doc/_pages/troubleshooting.md`
+    `#build-oom`) documents that a *default* full build commonly runs out of memory on ordinary
+    x86_64 desktops ("the Drake build will try to use all available CPU and RAM... together
+    those compilation jobs consumed more RAM than was available"), a first-party admission of
+    resource intensity that maps directly onto this repo's known-constrained 4-core riscv64
+    runners. Individually each dependency is a solved problem elsewhere in this repo; the
+    combination — an 800k+-line own-codebase, 15+ from-source native deps including one that
+    alone needs a 24h budget standalone, three CPython rebuilds of a non-abi3 binding layer, a
+    documented OOM-prone default build, and no CI file to narrow — is the same "sum exceeds any
+    single precedent" reasoning that parked ifcopenshell (multiple from-source libraries at
+    OCCT's 6h41m-plus-9.5h/interpreter scale) and pymeshlab, not a park-by-analogy call from
+    drake's size alone.

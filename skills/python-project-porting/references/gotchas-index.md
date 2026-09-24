@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (546 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (547 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -399,6 +399,10 @@ The porting gotchas (546 of them) live in [`references/gotchas/`](gotchas/), spl
   hit the same Qt5-on-riscv64 wall as a PyQt/PySide port — check every mandatory
   `find_package` in the CMake tree the extension actually builds, not just what the
   package's name or API surface suggests (the pymeshlab case).
+- **562** — Existing non-x86_64 wheels (aarch64/arm64) are real portability evidence, but don't
+  outweigh a scale check against this repo's own comparable precedents — a package can clear
+  the "does upstream already support another architecture" bar and still be impractical (the
+  drake case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
