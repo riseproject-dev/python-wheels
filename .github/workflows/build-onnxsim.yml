@@ -1,0 +1,134 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/onnxsim/onnxsim/blob/v0.7.3/.github/workflows/build-and-test.yml
+name: Build onnxsim wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/onnxsim.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-onnxsim.yml'
+      - 'docs/packages/onnxsim.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-onnxsim.yml'
+      - 'docs/packages/onnxsim.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: onnxsim
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build onnxsim ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream ships cp310/cp311/cp312-abi3 (no free-threaded wheel here: our
+        # matrix mirrors onnxoptimizer's, which onnxsim vendors and links the
+        # same way). cp310 is dropped: onnx (the runtime dependency) has no
+        # riscv64 wheel for it on our registry, at any version, and no
+        # py3-none-any fallback either (it's a compiled extension). cp311 stays:
+        # onnx ships a riscv64 cp311 wheel, and nanobind/protobuf (the other
+        # build-time dependencies) resolve too, via their py3-none-any fallback
+        # wheels.
+        include:
+          - python: cp311
+            # No riscv64 onnxruntime wheel on cp311; the rest of the suite still
+            # runs (onnxsim falls back to onnx's reference evaluator).
+            onnxruntime: ''
+          - python: cp312
+            onnxruntime: onnxruntime
+
+    env:
+      ONNXSIM_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout onnxsim v${{ env.ONNXSIM_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: onnxsim/onnxsim
+          ref: v${{ env.ONNXSIM_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          # The riscv64 manylinux image's own cmake (3.31.8) already satisfies
+          # CMakeLists.txt's cmake_minimum_required(3.22); upstream's own
+          # CIBW_BEFORE_BUILD only pip-installs cmake/ninja for its manylinux_2_28
+          # x86_64/aarch64 images.
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            CMAKE_ARGS="
+            -DONNX_USE_PROTOBUF_SHARED_LIBS=OFF
+            -DProtobuf_USE_STATIC_LIBS=ON
+            -DONNX_USE_LITE_PROTO=ON
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+            "
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # nanobind builds the onnxsim_cpp2py_export extension (CMakeLists.txt's
+          # ONNXSIM_PYTHON path); CMake locates it via `python -m nanobind
+          # --cmake_dir`, so it must already be importable before configure runs
+          # or CMake falls back to fetching it from GitHub. protobuf is needed
+          # for the same reason as onnxoptimizer's build. Both ship a
+          # py3-none-any wheel, so they install on any interpreter/arch.
+          CIBW_BEFORE_BUILD_LINUX: pip install nanobind protobuf
+          # Upstream's own suite additionally exercises onnxscript/torch/timm/
+          # sympy/onnxslim/ultralytics/rfdetr paths, all guarded by
+          # pytest.importorskip; none of those have riscv64 wheels, so those
+          # paths are left to skip rather than installed. onnxruntime does have
+          # a riscv64 wheel on our registry, but only from cp312 (matrix.onnxruntime).
+          CIBW_TEST_REQUIRES: pytest pytest-xdist ${{ matrix.onnxruntime }}
+          CIBW_TEST_COMMAND: pytest {project}/tests/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: onnxsim-${{ env.ONNXSIM_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish onnxsim ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: onnxsim-${{ matrix.version }}-*-manylinux_riscv64
