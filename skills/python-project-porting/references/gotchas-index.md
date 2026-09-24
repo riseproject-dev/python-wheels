@@ -377,6 +377,11 @@ The porting gotchas (546 of them) live in [`references/gotchas/`](gotchas/), spl
   build time before disabling it; gotcha 480's dlopen tell used in the opposite direction, plus
   a technique for recovering a library's exact upstream CMake flags from a self-describing
   build-config string embedded in the shared library itself (the umf case).
+- **556** — A closed-source vendored runtime can leave *zero* public indices to check — not
+  even the fetch script itself, one notch past gotcha 157: a legitimate, real upstream repo
+  whose wheels bundle a per-platform binary built entirely inside the vendor's own internal
+  build with no source, no fetch script and no downstream artifact index published anywhere
+  (the google-antigravity case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

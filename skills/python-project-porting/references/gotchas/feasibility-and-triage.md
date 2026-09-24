@@ -243,6 +243,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   that vendor's SDK — check whether the code behind it `dlopen()`s the runtime before
   disabling it; plus recovering a library's exact upstream CMake flags from a self-describing
   build-config string embedded in the shared library itself (the umf case).
+- **557** — When PyPI's own metadata is blank, search for the project's own site/blog before
+  doing wheel forensics — the maintainer's own words ("not open source today") and the
+  wheel's own bundled LICENSE ("does not grant access to... the source code") can both
+  independently settle closedness (the frisky case).
 
 ---
 
@@ -4434,3 +4438,62 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       a self-describing build marker before guessing at flags from the CMakeLists defaults —
       umf's own `.so` embeds its full `UMF_ALL_CMAKE_VARIABLES` configuration as a literal
       debug string.
+
+557. **When PyPI's own metadata is blank (`home_page`/`project_urls` both null, queue's
+    `home`/`repo` fall back to the PyPI page itself), search for the project's own site/blog
+    before doing any wheel forensics — the maintainer may say outright that it is closed
+    source, which resolves feasibility in one search instead of at the `strings`/vendor-path
+    layer.** frisky 0.7.2 ("Dask scheduler in Rust", `mrocklin`) has 43 releases and **zero**
+    sdists ever (gotcha 431's shape: no upstream directory to build from even if one wanted
+    to), a `cp311-abi3` tag pattern that reads exactly like an ordinary maturin/PyO3 build, and
+    a `getfrisky.dev` site that *itself* links a `github.com/mrocklin/frisky` "source code"
+    repo — a link that 404s / is inaccessible to a GitHub credential, which alone is ambiguous
+    (private vs. nonexistent vs. just not enabled for this session). The site's own `/history/`
+    page removes the ambiguity in the maintainer's words: "Frisky is free and available to use
+    (see license), but it's **not open source today**", with reasons given (no community/PR
+    management, preferring private development) and an explicit "maybe open-sourced later if
+    it takes off" — i.e. a permanent-for-now, stated policy, not a temporary gap. The wheel
+    itself independently confirms the same thing one layer down: `frisky.abi3.so` is 96.6% of
+    the wheel (a real, large compiled Rust core, not a facade), but the bundled
+    `dist-info/licenses/LICENSE` is a bespoke "Binary Use and Redistribution License" reading
+    "This license does not grant access to, or any rights in, the source code for the
+    Software" and forbidding reverse engineering/decompilation outright — so even the
+    redistribution license itself forecloses the gotcha 77 escape hatch (build a working wheel
+    from what's already installable) as a matter of contract, independent of there being no
+    source to point cibuildwheel at in the first place. Two independent, first-party sources
+    (the maintainer's own blog and the wheel's own bundled LICENSE) agreeing beats inferring
+    closedness from wheel tags alone — check both before spending a build cycle.
+
+556. **A closed-source vendored runtime can leave *zero* public indices to check — not even
+    the fetch script itself (the google-antigravity case, one notch past gotcha 157).**
+    google-antigravity 0.1.15's two Linux wheels
+    (`py3-none-manylinux_2_17_{x86_64,aarch64}.musllinux_1_1_*`) are `vendored-binary`, not a
+    mislabeled tag: `unzip -l` shows a real per-platform payload, a 119.7 MB
+    `google/antigravity/bin/localharness` (`file`: statically linked, stripped ELF, matching
+    arch) beside ~150 KB of actual `.py` sources, and PyPI ships 5 wheels total (those two,
+    `macosx_11_0_arm64`, `win_amd64`, `win_arm64`) — one binary per platform, playwright's
+    shape. It is not optional, either: `local_connection.py` calls it "the Go localharness
+    ingress layer" and talks to it over stdio with a protobuf wire format — it is the
+    subprocess every `LocalAgentConfig` session spawns, so the SDK cannot function locally
+    without it, same as claude-agent-sdk's bundled CLI. Where it goes past gotcha 157: that
+    case had *three* independent public platform tables to read (an installer script's
+    `uname -m` case, a release manifest URL, npm `optionalDependencies`) — all confirming no
+    riscv64, but confirming it *from public sources*. Here there is nothing to read at any
+    layer. The upstream GitHub repo (`Google-Antigravity/antigravity-sdk-python` — real org,
+    real commit history, Apache-2.0, matches the PyPI metadata exactly; a legitimate project,
+    not a supply-chain look-alike) ships only the Python SDK, and says so in both
+    `pyproject.toml` (`# Include the pre-compiled Go binary in the wheel. The release script
+    places the platform-appropriate binary at google/antigravity/bin/localharness before
+    building each wheel.`) and the README ("Cloning this repository alone is not sufficient
+    to run the SDK. Always install from PyPI... to obtain the binary."). "The release script"
+    is not in the repo, and neither is one line of the Go source — it is built inside Google's
+    own internal build (a Copybara export leaves only the Python side world-readable). Unlike
+    mosek/gotcha 534 there is no abandoned sibling repo naming the fetch method, and unlike
+    playwright/gotcha 35/183 there is no downstream artifact index (`nodejs.org/dist`,
+    `unofficial-builds.nodejs.org`) to probe for a riscv64 build that might already exist.
+    A riscv64 `localharness` can only be produced and shipped by Google itself; this repo has
+    no source to cross-compile and no build recipe to mirror, so unlike gotcha 40/42's
+    conda-blocked deps or gotcha 534's mosek — each *waiting on* an artifact at a knowable
+    URL — there is not even a URL to keep watching. `parked` as `vendored-binary`: real
+    arch-specific, load-bearing content rules out gotcha 24/27's cosmetic-tag `not-feasible`,
+    but zero public build surface rules out a port by this repo, now or on any future check.
