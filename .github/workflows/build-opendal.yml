@@ -1,0 +1,144 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `wheels` job of
+# https://github.com/apache/opendal/blob/main/.github/workflows/release_python.yml
+name: Build opendal wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/opendal.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-opendal.yml'
+      - 'docs/packages/opendal.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-opendal.yml'
+      - 'docs/packages/opendal.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # opendal-python 0.47.10 was never tagged (release_python.yml releases from a
+  # bare commit, not a `vX.Y.Z` ref -- those name whole-repo/core releases and
+  # stop at v0.47.3 while bindings/python/Cargo.toml kept its own 0.47.x line).
+  # This is the commit HEAD carried when PyPI's 0.47.10 was uploaded
+  # (2026-09-22); its bindings/python and core trees are byte-identical to the
+  # 0.47.10 sdist bar one unrelated docstring in python/opendal/config.py.
+  OPENDAL_REF: ef036cded461c2765dea1a85770e2134df94e9cf
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: opendal
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build opendal ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 480
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        include:
+          # Upstream builds one abi3 wheel with `-i python3.11
+          # --features=...,abi3` plus per-interpreter wheels for cp310 and the
+          # free-threaded cp314t (bindings/python/Cargo.toml: `abi3 = [
+          # "pyo3/abi3-py311"]` is an opt-in feature, not pyo3's own default).
+          - tag: cp311-abi3
+            # Built on cp311 -- the oldest interpreter the abi3 tag claims --
+            # and re-tested on the newer ones via find_compatible_wheel.
+            build: >-
+              cp311-manylinux_riscv64 cp312-manylinux_riscv64
+              cp313-manylinux_riscv64 cp314-manylinux_riscv64
+            features: --features services-all --features abi3
+          - tag: cp310
+            build: cp310-manylinux_riscv64
+            features: --features services-all
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+            features: --features services-all
+
+    env:
+      OPENDAL_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout opendal ${{ env.OPENDAL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: apache/opendal
+          ref: ${{ env.OPENDAL_REF }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: bindings/python
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # opendal-python ships no [tool.cibuildwheel], so the Rust toolchain
+          # its maturin backend needs is installed in-container here; the
+          # crate's own rust-version floor (1.91) is well under any current
+          # stable toolchain.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            MATURIN_PEP517_ARGS="${{ matrix.features }}"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest pytest-asyncio python-dotenv
+          CIBW_TEST_SOURCES: tests
+          # OPENDAL_TEST=memory exercises the real compiled extension end to
+          # end (read/write/list/stat/delete/rename/copy, sync and async)
+          # against the in-process memory service, with no credentials or
+          # network needed; tests whose capability the memory service lacks
+          # self-skip via conftest.py's `need_capability` marker.
+          # test_file_http_requests.py is dropped: it spawns a ThreadingHTTPServer
+          # via multiprocessing, which cross-talks between jobs on a shared runner.
+          CIBW_TEST_ENVIRONMENT: OPENDAL_TEST=memory
+          CIBW_TEST_COMMAND: >-
+            python -c "import opendal._opendal as m; assert m.__file__.endswith('.so'), m.__file__" &&
+            python -m pytest -v tests --ignore=tests/test_file_http_requests.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: opendal-${{ env.OPENDAL_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish opendal ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: opendal-${{ matrix.version }}-*-manylinux_riscv64
