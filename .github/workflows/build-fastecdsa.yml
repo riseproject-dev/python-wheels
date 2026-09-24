@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 The RISE Project
 # SPDX-License-Identifier: MIT
 ---
-# This workflow is based on: https://github.com/AntonKueltz/fastecdsa/blob/v3.0.1/.github/workflows/publish-to-prod.yaml
+# This workflow is based on: https://github.com/AntonKueltz/fastecdsa/blob/v4.0.0/.github/workflows/publish-to-prod.yaml
 name: Build fastecdsa wheels (riscv64)
 
 on:
@@ -48,7 +48,7 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        # No cp314t: both extensions use single-phase init, so importing them
+        # No cp314t: the pyo3 extension uses single-phase init, so importing it
         # re-enables the GIL, and upstream ships no free-threaded wheel.
         python: ["cp312", "cp313", "cp314"]
 
@@ -70,33 +70,30 @@ jobs:
           only: ${{ matrix.python }}-manylinux_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # auditwheel vendors the image's libgmp, whose licences upstream's wheels do not carry.
+          # v4.0.0 rewrote the extension in Rust (maturin, pyo3); it ships no
+          # [tool.cibuildwheel], so the Rust toolchain its build backend needs is
+          # installed in-container here and put on PATH for the build (same
+          # pattern as build-fastuuid.yml). No more GMP: the new fastecdsa-rs-core
+          # crate is pure Rust (crypto-bigint/num-bigint), so there is nothing left
+          # to auditwheel-vendor and no extra CFLAGS/LDFLAGS to set.
           CIBW_BEFORE_ALL_LINUX: >-
-            dnf -y install gmp-devel &&
-            for f in /usr/share/licenses/gmp/COPYING*; do cp "$f" "{project}/LICENSE.gmp.$(basename "$f")"; done
-          CIBW_ENVIRONMENT_LINUX: CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib"
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$PATH:$HOME/.cargo/bin"'
           # pyproject.toml is deliberately left unstaged: its addopts demand pytest-cov
           # and its pythonpath would import the checkout instead of the wheel.
           CIBW_TEST_SOURCES: tests
           CIBW_TEST_REQUIRES: pytest
           CIBW_TEST_COMMAND: python -m pytest tests
 
-      - name: Check the extensions and licences made it into the wheel
+      - name: Check the extension and licence made it into the wheel
         run: |
           python3 - wheelhouse/*.whl <<'EOF'
           import sys, zipfile
           names = zipfile.ZipFile(sys.argv[1]).namelist()
           sos = {n.split("/")[-1].split(".", 1)[0] for n in names if n.endswith(".so")}
-          assert {"curvemath", "_ecdsa"} <= sos, sos
-          assert any(n.startswith("fastecdsa.libs/libgmp") for n in names), names
+          assert {"rust"} <= sos, sos
           lic = {n.split("/")[-1] for n in names if ".dist-info/licenses/" in n and not n.endswith("/")}
-          assert lic == {
-              "LICENSE",
-              "LICENSE.gmp.COPYING",
-              "LICENSE.gmp.COPYING.LESSERv3",
-              "LICENSE.gmp.COPYINGv2",
-              "LICENSE.gmp.COPYINGv3",
-          }, lic
+          assert lic == {"LICENSE"}, lic
           print(sorted(sos), sorted(lic))
           EOF
 
@@ -106,40 +103,9 @@ jobs:
           path: wheelhouse/*.whl
           if-no-files-found: error
 
-  gpl_sources:
-    needs: [setup]
-    if: needs.setup.outputs.versions != '[]'
-    name: Collect GPL sources for fastecdsa ${{ matrix.version }}
-    runs-on: ubuntu-24.04-riscv
-    strategy:
-      fail-fast: false
-      matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-
-    env:
-      FASTECDSA_VERSION: ${{ matrix.version }}
-
-    steps:
-      - name: Checkout python-wheels
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: ./actions/collect-gpl-sources
-        with:
-          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          packages: gcc gmp
-          output: gpl-sources.tar
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: fastecdsa-${{ env.FASTECDSA_VERSION }}-gpl-sources
-          path: gpl-sources.tar
-          if-no-files-found: error
-
   publish:
     name: Publish fastecdsa ${{ matrix.version }}
-    needs: [setup, build_wheels, gpl_sources]
+    needs: [setup, build_wheels]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false
@@ -153,5 +119,3 @@ jobs:
       app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
     with:
       artifact-pattern: fastecdsa-${{ matrix.version }}-*-manylinux_riscv64
-      gpl-sources-artifact: fastecdsa-${{ matrix.version }}-gpl-sources
-      gpl-sources-description: gcc and the GMP library bundled in the wheel
