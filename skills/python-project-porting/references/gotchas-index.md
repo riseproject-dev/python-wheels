@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (545 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (546 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -622,6 +622,13 @@ The porting gotchas (545 of them) live in [`references/gotchas/`](gotchas/), spl
   table for a `git = "https://github.com/..."` source with no matching PyPI `Requires-Dist`,
   not the crate names, before treating the CLI tool's own riscv64 status as a blocker
   (the ruff-format case).
+- **555** — Gotcha 181's unconditional `abi3-pyNN` feature has no `MATURIN_PEP517_ARGS`/
+  `--py-limited-api` knob to retag with when `NN` names an interpreter the riscv64 image
+  doesn't ship at all — the tag comes straight from the Cargo feature regardless of which
+  interpreter compiles it, so the fix is a one-line source patch bumping the feature to the
+  image's real floor (`abi3-py38` → `abi3-py39`), verified locally with `cargo check` plus
+  a `maturin build --release` whose printed floor and wheel filename both track the patch
+  (the baseten-performance-client case).
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 

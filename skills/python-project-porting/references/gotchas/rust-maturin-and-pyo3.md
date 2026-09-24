@@ -84,6 +84,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
   filter `dep_kinds`, not just `--filter-platform`.
 - **541** — `rustls` does not imply `aws-lc-sys` — when the tree resolves `ring`, riscv64 needs
   no asm, no `cmake` and no perl; plus `pcre2-sys` keeps a real riscv64 JIT.
+- **555** — Gotcha 181's unconditional `abi3-pyNN` has no flag to override when `NN` is an
+  interpreter the riscv64 image doesn't ship — patch the Cargo feature instead.
 
 ---
 
@@ -1385,3 +1387,20 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
      after another project is a compile-time source dependency, resolved and vendored by
      Cargo at build time like any other crate, not a wheel-level Python dependency gotcha
      40/249 would have you chase down.
+
+555. **Gotcha 181's unconditional `abi3-pyNN` has no flag to override when `NN` itself is
+    an interpreter the riscv64 image doesn't ship — patch the Cargo feature, don't try to
+    build around it (the baseten-performance-client case).** Gotcha 96/11 say build on the
+    crate's own declared floor, or retag if that floor is unavailable; gotcha 181's
+    unconditional-feature shape has no `MATURIN_PEP517_ARGS`/`--py-limited-api` knob to
+    retag with, because the tag comes straight from `[dependencies] pyo3`'s
+    `features = [..., "abi3-pyNN"]` regardless of which interpreter compiles it. When `NN`
+    is `38` and `manylinux_2_39_riscv64`'s oldest interpreter is cp39 (no cp38 at all), the
+    only way to make the wheel honestly claim the floor it can actually be tested on is a
+    one-line source patch bumping the feature itself (`abi3-py38` → `abi3-py39`,
+    `Upstream-Status: Inappropriate`) — every other platform's build is untouched since the
+    patch only ships in this repo's checkout. Verify locally before trusting it: a plain
+    `cargo check --release` against the patched crate confirms the feature name is valid for
+    the pinned pyo3 version, and `maturin build --release` prints `Built wheel for abi3
+    Python >= 3.9` and produces a `cp39-abi3` filename that tracks the patched feature, not
+    whichever interpreter ran the build.
