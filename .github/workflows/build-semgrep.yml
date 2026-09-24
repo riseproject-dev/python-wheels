@@ -65,11 +65,24 @@ jobs:
       SEMGREP_VERSION: ${{ matrix.version }}
 
     steps:
+      # Some semgrep patch releases (e.g. 1.175.1, 1.176.1) are republished under a
+      # bumped version with no corresponding git tag; fall back to the same
+      # major.minor's .0 tag, which their sdists are byte-identical to otherwise.
+      - name: Resolve upstream ref for v${{ env.SEMGREP_VERSION }}
+        id: upstream_ref
+        run: |
+          if git ls-remote --exit-code --tags https://github.com/semgrep/semgrep "refs/tags/v${SEMGREP_VERSION}" >/dev/null; then
+            ref="v${SEMGREP_VERSION}"
+          else
+            ref="v${SEMGREP_VERSION%.*}.0"
+          fi
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+
       - name: Checkout semgrep v${{ env.SEMGREP_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: semgrep/semgrep
-          ref: v${{ env.SEMGREP_VERSION }}
+          ref: ${{ steps.upstream_ref.outputs.ref }}
           submodules: true
           persist-credentials: false
 
@@ -81,6 +94,11 @@ jobs:
 
       - name: Apply riscv64 patches
         run: git apply -v python-wheels/patches/semgrep/${{ env.SEMGREP_VERSION }}/*.patch
+
+      - name: Stamp package version
+        run: |
+          sed -i "s/^version = \".*\"/version = \"${SEMGREP_VERSION}\"/" cli/pyproject.toml
+          sed -i "s/^__VERSION__ = \".*\"/__VERSION__ = \"${SEMGREP_VERSION}\"/" cli/src/semgrep/__init__.py
 
       - name: Build semgrep-core and the wheel
         shell: bash
