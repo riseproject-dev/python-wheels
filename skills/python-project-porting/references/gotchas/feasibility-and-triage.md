@@ -251,6 +251,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   correctly source-available and buildable in principle, and still be a park purely on
   runner-hours — check what upstream's own CI actually re-builds, not just what it lists as
   a dependency (the ifcopenshell case).
+- **561** — A pybind11 project whose Python API has nothing to do with GUI toolkits can still
+  hit the same Qt5-on-riscv64 wall as a PyQt/PySide port — check every mandatory
+  `find_package` in the CMake tree the extension actually builds, not just what the package's
+  name or API surface suggests (the pymeshlab case).
 - **560** — A GPU-vendor binding package that only `dlopen`s its runtime library at call time
   can still be build-time blocked by the same vendor's SDK headers — check the SDK's own
   platform matrix, not just the binding's link graph (the hip-python case).
@@ -4561,3 +4565,52 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     supported way to even provision the build host, regardless of the dlopen rescue.
     `not-feasible`, same family as gurobipy/mosek (gotcha 453/534): the wall is the vendor's
     own platform support, not this project's code.
+
+561. **A pybind11 project whose Python API has nothing to do with GUI toolkits can still hit
+    the same Qt5-on-riscv64 wall as a PyQt/PySide port — check every mandatory `find_package`
+    in the CMake tree the extension actually builds, not just what the package's name or API
+    surface suggests (the pymeshlab case).** pymeshlab 2025.7.post1 is a pybind11 wrapper
+    around MeshLab/VCGlib mesh-processing code; nothing in its Python surface (`pymeshlab.MeshSet`,
+    filter functions) is Qt-shaped, so it does not trip the "obviously a Qt binding" filter that
+    would send a triage straight to the pyqt5-qt5/pyside6/shiboken6 precedents. But
+    `src/CMakeLists.txt` (the top-level CMake pymeshlab's own build drives, not just meshlab's
+    optional GUI app) does `find_package(OpenGL REQUIRED)` and
+    `find_package(Qt5 COMPONENTS OpenGL Xml Network REQUIRED)` unconditionally, before any
+    `MESHLAB_BUILD_ONLY_LIBRARIES`/`MESHLAB_BUILD_MINI` option is read — those options drop the
+    standalone `meshlab` GUI executable, not Qt5 itself, which stays linked into
+    `meshlab-common` and the ~60 plugins pymeshlab's Python module depends on (Qt's
+    `QRegExp`/XML/network code is used as an internal implementation detail throughout the
+    C++ core, not just the UI). Every *other* heavy dependency in this tree — Boost, CGAL,
+    Embree, libigl, qhull, muparser, tinygltf, lib3ds/lib3mf/u3d, xerces/e57, nexus — is
+    genuinely optional and degrades cleanly at configure time
+    (`src/meshlab/src/external/*.cmake`, gated by `MESHLAB_ALLOW_OPTIONAL_EXTERNAL_LIBRARIES`,
+    each with an `else() message(STATUS "skipping")` branch when the system lib is absent and
+    download fails), the same shape this repo already disables Embree with for libigl/
+    point-cloud-utils (no riscv64 Embree ISA). Qt5 is the one hold-out with no such fallback.
+    And Qt5 is where the pyqt5-qt5 park (gotcha 372/385 area) already leaves the story for this
+    repo's build image: confirmed directly against Rocky Linux 10's real riscv64 repodata
+    (`dl.rockylinux.org/pub/rocky/10/{AppStream,BaseOS,CRB}/riscv64/os/repodata/`) that
+    AppStream/BaseOS/CRB carry `qt6-qtbase*` (which is what let shiboken6 build, PR #1696) but
+    zero `qt5-*` packages of any kind, and EPEL (gotcha 51) has no riscv64 architecture directory
+    at all (`dl.fedoraproject.org/pub/epel/10/Everything/` lists aarch64/ppc64le/s390x/source/
+    x86_64 only) — so there is nothing to `dnf install` a Qt5 SDK from inside
+    `quay.io/pypa/manylinux_2_39_riscv64`, the Rocky-10-based image every riscv64 native compile
+    in this repo actually runs in (confirmed across build-quantlib.yml/build-decord.yml/
+    build-eckitlib.yml/build-pyinstaller.yml/build-c2pa-python.yml/build-austin-dist.yml: even
+    jobs that `apt-get install` on the bare `ubuntu-24.04-riscv` runner only ever do so for
+    host-side tooling — `python3-venv`, `gdb`, `locales` — never for the library the wheel links
+    against, which is always built inside the manylinux container). Ubuntu 24.04 (noble)'s own
+    riscv64 port *does* still carry a prebuilt `qtbase5-dev` in universe (confirmed via
+    `ports.ubuntu.com/ubuntu-ports/dists/noble/universe/binary-riscv64/Packages.gz`) — but that
+    is irrelevant here: linking a manylinux-container-built extension against a Qt5 built under
+    a different distro's glibc/libstdc++ ABI is not a wheel this repo's auditwheel-based
+    pipeline can safely produce, and no other build in this repo does that. Building Qt5
+    (qtbase, with the OpenGL/Xml/Network/Gui/Widgets modules meshlab needs, plus its own
+    moc/qmake bootstrap) from source inside the manylinux image would be the pyqt5-qt5 park's
+    already-documented "full Qt5 SDK bring-up... an order of magnitude past pygame/SDL2 or
+    libclang, the largest from-source builds this repo carries" — and it would only be the base
+    layer underneath meshlab's own VCGlib + meshlab-common + plugin codebase on top. `parked`,
+    not `not-feasible`: MeshLab's CMake and Qt5 itself are both open and buildable in principle
+    (Debian ships `qtbase5-dev` natively on riscv64), but there is no supported way to provision
+    the dependency in this repo's build image at a cost this repo can practically absorb, mirroring
+    the pyqt5-qt5/ifcopenshell reasoning rather than a closed-source or CUDA-only stop.

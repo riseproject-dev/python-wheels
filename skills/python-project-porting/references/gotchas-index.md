@@ -395,6 +395,10 @@ The porting gotchas (546 of them) live in [`references/gotchas/`](gotchas/), spl
   (deferring the missing-library problem) can still be build-time blocked by the same
   vendor's SDK headers — the SDK's own platform matrix, not the binding's link graph, is what
   settles it (the hip-python case).
+- **561** — A pybind11 project whose Python API has nothing to do with GUI toolkits can still
+  hit the same Qt5-on-riscv64 wall as a PyQt/PySide port — check every mandatory
+  `find_package` in the CMake tree the extension actually builds, not just what the
+  package's name or API surface suggests (the pymeshlab case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
