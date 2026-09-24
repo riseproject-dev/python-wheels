@@ -1,0 +1,151 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/jg-rp/rust-iregexp/blob/v0.1.4/.github/workflows/pypi_release.yml
+name: Build iregexp-check wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/iregexp-check.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-iregexp-check.yml'
+      - 'docs/packages/iregexp-check.yaml'
+      - 'patches/iregexp-check/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-iregexp-check.yml'
+      - 'docs/packages/iregexp-check.yaml'
+      - 'patches/iregexp-check/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: iregexp-check
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build iregexp-check ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        include:
+          # crates/python/Cargo.toml hardcodes pyo3's abi3-py38 feature
+          # unconditionally; the riscv64 manylinux image's oldest interpreter
+          # is cp39 (no cp38), so patches/ bumps it to abi3-py39 -- gotcha 96.
+          # Built on cp39 and re-tested on the newer ones via
+          # find_compatible_wheel. Upstream ships no free-threaded wheel for
+          # this release (pyo3 0.22 predates Py_GIL_DISABLED), so there is no
+          # second matrix leg.
+          - tag: cp39-abi3
+            build: >-
+              cp39-manylinux_riscv64 cp310-manylinux_riscv64
+              cp311-manylinux_riscv64 cp312-manylinux_riscv64
+              cp313-manylinux_riscv64 cp314-manylinux_riscv64
+
+    env:
+      IREGEXP_CHECK_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout rust-iregexp v${{ env.IREGEXP_CHECK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: jg-rp/rust-iregexp
+          ref: v${{ env.IREGEXP_CHECK_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch iregexp-check source
+        run: git apply python-wheels/patches/iregexp-check/${{ env.IREGEXP_CHECK_VERSION }}/00*.patch
+
+      - name: Stage LICENSE beside crates/python's pyproject.toml
+        # maturin globs LICEN[CS]E* relative to the pyproject directory,
+        # which is crates/python -- so upstream's published wheel carries
+        # no licence text at all.
+        run: cp LICENSE.txt crates/python/LICENSE.txt
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: crates/python
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          # Upstream ships no Python test suite; exercise the RFC 9485
+          # valid/invalid patterns from crates/iregexp's own Rust test suite.
+          CIBW_TEST_COMMAND: >-
+            python -c "import iregexp_check as m;
+            assert m.iregexp_check.__file__.endswith('.so'), m.iregexp_check.__file__;
+            assert m.check(r'a.b') is True;
+            assert m.check(r'[0-9]') is True;
+            assert m.check(r'foo|bar') is True;
+            assert m.check(r'[ab]{3}') is True;
+            assert m.check(r'[ab]{3,5}') is True;
+            assert m.check(r'[ab]{3,}') is True;
+            assert m.check(r'[^ab]') is True;
+            assert m.check(r'\p{L}') is True;
+            assert m.check(r'\P{L}') is True;
+            assert m.check(r'(?<group>[a-z]*)') is False;
+            assert m.check(r'\d') is False;
+            assert m.check(r'[\S ]') is False;
+            assert m.check(r'[0-9]*?') is False;
+            assert m.check(r'(\w)\1') is False;
+            assert m.check(r'(?=.*[a-z])(?=.*[A-Z])(?=.*)[a-zA-Z]{8,}') is False;
+            assert m.check(r'(?<=[a-z]{4})\[a-z]{2}') is False;
+            print('iregexp_check smoke test OK')"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: iregexp-check-${{ env.IREGEXP_CHECK_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish iregexp-check ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: iregexp-check-${{ matrix.version }}-*-manylinux_riscv64
