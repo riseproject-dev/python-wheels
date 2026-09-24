@@ -452,6 +452,11 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
   cache-populating step on `ubuntu-latest` and hand the tarball to the riscv job, and patch the
   extracted sdist rather than the checkout when a target sits inside a submodule
   (the couchbase case).
+- **569** — A tag can check out clean and still hand a build literal Git LFS pointer stubs
+  instead of real content, when upstream squash-merges former git submodules into the main
+  tree without resolving their LFS objects first — verify by sha256 against the pointer's own
+  `oid` before trusting a same-content fetch from the pre-merge submodule (the semgrep
+  v1.177.0 case).
 
 ### cibuildwheel mechanics, the matrix & abi3 — [`gotchas/cibuildwheel-matrix-and-abi3.md`](gotchas/cibuildwheel-matrix-and-abi3.md)
 
@@ -1177,6 +1182,11 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
   and unresolved without riscv64 hardware to debug interactively — not scenario-specific to
   whichever test happened to be running, and distinct from an already-open pgsql-hackers
   riscv64/GCC memory-failures thread (that one is sporadic; this one is deterministic).
+- **568** — A subprocess-exit self-test's hardcoded `TIMEOUT` failing only on `cp314t` for
+  one version, with byte-identical test source and no relevant code change across versions,
+  is free-threading's per-object overhead tipping an existing margin on a shared riscv64
+  runner (awscrt 0.37.0's `test_appexit`) — patch the timeout with headroom, don't skip the
+  test that proves the extension doesn't crash the interpreter on exit.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
