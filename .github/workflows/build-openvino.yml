@@ -18,11 +18,13 @@ on:
     paths:
       - '.github/workflows/build-openvino.yml'
       - 'docs/packages/openvino.yaml'
+      - 'patches/openvino/**'
   push:
     branches: [main]
     paths:
       - '.github/workflows/build-openvino.yml'
       - 'docs/packages/openvino.yaml'
+      - 'patches/openvino/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -66,11 +68,22 @@ jobs:
           ref: ${{ env.OPENVINO_VERSION }}
           submodules: true
           persist-credentials: false
+          path: openvino
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch openvino source
+        working-directory: openvino
+        run: git apply -v ../python-wheels/patches/openvino/${{ env.OPENVINO_VERSION }}/*.patch
 
       - name: Write container script
         run: |
           mkdir -p build install
-          cat > riscv64-build-and-test.sh <<'EOF'
+          cat > openvino/riscv64-build-and-test.sh <<'EOF'
           #!/bin/bash
           set -e -x
 
@@ -87,6 +100,26 @@ jobs:
           esac
 
           if [ "$1" = build ]; then
+            # cmake/dependencies.cmake downloads a prebuilt oneTBB for riscv64
+            # (oneapi-tbb-2022.3.0-lin-riscv-release.tgz) that is a T-Head Xuantie
+            # toolchain build carrying vendor CUSTOM-0 opcodes (CLAUDE.md gotcha 449),
+            # not portable off this fleet. Build the same oneTBB release from source
+            # with this image's own generic rv64gc toolchain and point OpenVINO at it
+            # via -DTBB_DIR, which ov_find_package_tbb() honors ahead of ever calling
+            # ov_download_tbb().
+            git clone --branch v2022.3.0 --depth 1 https://github.com/oneapi-src/oneTBB.git /tmp/onetbb
+            /usr/bin/cmake \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX=/opt/onetbb \
+              -DCMAKE_INSTALL_LIBDIR=lib \
+              -DTBB_TEST=OFF \
+              -DTBB_EXAMPLES=OFF \
+              -DTBB_STRICT=OFF \
+              -S /tmp/onetbb \
+              -B /tmp/onetbb-build
+            /usr/bin/cmake --build /tmp/onetbb-build --parallel "$(nproc)"
+            /usr/bin/cmake --install /tmp/onetbb-build
+
             /usr/bin/cmake \
               -DCMAKE_BUILD_TYPE=Release \
               -DENABLE_INTEL_GPU=OFF \
@@ -97,6 +130,7 @@ jobs:
               -DENABLE_JS=OFF \
               -DENABLE_OV_JAX_FRONTEND=OFF \
               -DENABLE_STRICT_DEPENDENCIES=OFF \
+              -DTBB_DIR=/opt/onetbb/lib/cmake/TBB \
               -S /openvino \
               -B /build
             /usr/bin/cmake --build /build --parallel "$(nproc)"
@@ -167,7 +201,7 @@ jobs:
           podman run -t \
             --log-driver=none \
             --network=host \
-            -v "${PWD}":/openvino \
+            -v "${PWD}/openvino":/openvino \
             -v "${PWD}/build":/build \
             -v "${PWD}/install":/install \
             --workdir /openvino \
@@ -188,7 +222,7 @@ jobs:
           podman run -t \
             --log-driver=none \
             --network=host \
-            -v "${PWD}":/openvino \
+            -v "${PWD}/openvino":/openvino \
             -v "${PWD}/install":/install \
             --workdir /openvino \
             -e PYTHON_TAGS="${PYTHON_TAGS}" \

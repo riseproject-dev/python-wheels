@@ -1,0 +1,66 @@
+From 9c0ff41dfe1be9aaeb6080e01fed7d4fb38777da Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 24 Sep 2026 11:43:42 +0000
+Subject: [PATCH] cpu: riscv64: never probe for RVV 1.0 support
+
+can_compile_rvv100()/can_compile_zvfh() try to detect RVV 1.0 by executing a
+v1.0 vsetivli under a SIGILL handler and recovering via sigsetjmp/siglongjmp
+if it traps. On RVV 0.7.1 hardware (T-Head Xuantie C906/C910/C920: TH1520,
+SG2042) that recovery does not hold -- the illegal instruction brings the
+whole process down (SIGILL, exit 132) instead of returning false, observed
+as a crash inside ov.Core()/device enumeration the moment the CPU plugin is
+loaded, well before any model is compiled.
+
+Hardcode both probes to report RVV as unsupported. Every mayiuse(gv)/
+mayiuse(gv_zvfh) caller in this plugin already treats a false result as
+'fall back to the scalar/generic executor', and Transformations::MainSnippets()
+already turns Snippets/Subgraph tokenization off entirely when
+is_supported_isa() (== mayiuse(gv)) is false -- both existing, already-
+exercised code paths for riscv64 targets without RVV. This just makes this
+target take them unconditionally, instead of taking the branch that crashes.
+
+We do not have a kernel/toolchain-level root cause or a backtrace from the
+affected hardware for why the SIGILL recovery itself fails here (it would
+need re-running just the test leg against an existing wheel under gdb); until
+that exists to accompany a report, this is carried as a local workaround.
+
+Upstream-Status: To upstream [no root-cause backtrace yet to accompany a report]
+---
+ .../nodes/kernels/riscv64/cpu_isa_traits.cpp   | 18 ++++++++++++++----
+ 1 file changed, 14 insertions(+), 4 deletions(-)
+
+diff --git a/src/plugins/intel_cpu/src/nodes/kernels/riscv64/cpu_isa_traits.cpp b/src/plugins/intel_cpu/src/nodes/kernels/riscv64/cpu_isa_traits.cpp
+index 567d627..cc2293d 100644
+--- a/src/plugins/intel_cpu/src/nodes/kernels/riscv64/cpu_isa_traits.cpp
++++ b/src/plugins/intel_cpu/src/nodes/kernels/riscv64/cpu_isa_traits.cpp
+@@ -74,13 +74,23 @@ bool can_execute_generated_code() {
+ }
+ 
+ bool can_compile_rvv100() {
+-    static const bool status = can_execute_generated_code<RVVGenerator>();
+-    return status;
++    // Deliberately never probe: can_execute_generated_code<RVVGenerator>() is supposed to
++    // detect RVV 1.0 support by executing a v1.0 vsetivli under a SIGILL handler and
++    // recovering if it traps, but on RVV 0.7.1 hardware (e.g. T-Head Xuantie C906/C910/C920)
++    // the illegal instruction does not recover cleanly through sigsetjmp/siglongjmp -- it
++    // brings the whole process down instead of returning false, which is exactly the crash
++    // this patch works around. Hardcoding "unsupported" routes every mayiuse(gv) caller
++    // through OpenVINO's existing non-RVV fallback (scalar/generic node executors, and
++    // Snippets/Subgraph tokenization already turns itself off via is_supported_isa() when
++    // mayiuse(gv) is false) instead of ever attempting to execute or JIT-compile RVV 1.0
++    // code on this target.
++    return false;
+ }
+ 
+ bool can_compile_zvfh() {
+-    static const bool status = can_execute_generated_code<ZvfhGenerator>();
+-    return status;
++    // See can_compile_rvv100() above: RVV support is unconditionally disabled for this
++    // target, so the (narrower, RVV-1.0-dependent) Zvfh probe must never run either.
++    return false;
+ }
+ 
+ }  // namespace
+-- 
+2.43.0
+
