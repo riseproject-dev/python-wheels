@@ -247,6 +247,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   doing wheel forensics — the maintainer's own words ("not open source today") and the
   wheel's own bundled LICENSE ("does not grant access to... the source code") can both
   independently settle closedness (the frisky case).
+- **558** — A SWIG/pybind11-bound extension over a *stack* of large native libraries can be
+  correctly source-available and buildable in principle, and still be a park purely on
+  runner-hours — check what upstream's own CI actually re-builds, not just what it lists as
+  a dependency (the ifcopenshell case).
 
 ---
 
@@ -4497,3 +4501,35 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     URL — there is not even a URL to keep watching. `parked` as `vendored-binary`: real
     arch-specific, load-bearing content rules out gotcha 24/27's cosmetic-tag `not-feasible`,
     but zero public build surface rules out a port by this repo, now or on any future check.
+
+558. **A SWIG/pybind11-bound C++ extension over a *stack* of large native libraries can be
+    correctly source-available and buildable in principle, and still be a park purely on
+    runner-hours — check what upstream's own CI actually re-builds, not just what it lists as
+    a dependency (the ifcopenshell case).** ifcopenshell 0.8.5's `nix/build-all.py` shows its
+    real dependency graph is non-optional and large: `IfcParse` needs `boost`(1.86.0, full
+    source build) + `libxml2`(2.13.8) + `hdf5`(1.13.1) + `rocksdb`; `IfcGeom` needs
+    `IfcParse` + `occ`(OCCT 7.8.1) + `cgal`(v5.6.3, itself needing `gmp` 6.3.0 + `mpfr` 3.1.6
+    from source) + `json`(nlohmann 3.11.3) + `eigen`(3.4.0) + `OpenCOLLADA`(v1.6.68); and
+    `IfcOpenShell-Python` is `IfcGeom` bound with `swig`(4.2.1), not pybind11 — none of this
+    is swappable for the Python wheel target. Upstream's own CI never pays this cost cold:
+    `ci-ifcopenshell-python-pypi.yml`'s `make dist` only downloads a pre-built zip from
+    `s3://ifcopenshell-builds` keyed to a frozen `BUILD_COMMIT`; the actual compile lives in
+    `build_rocky.yml`, which runs `nix/build-all.py` against a persistent,
+    incrementally-updated binary cache repo (`IfcOpenShell/build-outputs`, git-lfs+S3) whose
+    entire purpose is that a full rebuild is never repeated. A first riscv64 port has no such
+    standing cache and would be exactly the cold-build case upstream structurally avoids.
+    The scale is not abstract: this repo's own cadquery-ocp-novtk port (PR #2114) builds only
+    *one* of these deps — OCCT, pinned to 8.0.1.0, the same scale as ifcopenshell's pinned
+    7.8.1 — from scratch on the real riscv64 self-hosted runner, and that alone took 6h41m for
+    the OCCT SDK (run 35438360375, job 105884808675: `2026-09-19T14:53:17Z`–`21:34:57Z`) plus
+    ~9.5–10h per interpreter to compile pybind11 bindings against it (cp312, job
+    105971393535: `22:47:07Z`–`08:31:19Z`, 9h44m) — about 17h wall-clock for one OCCT-only
+    dependency on one wheel version. ifcopenshell needs that same OCCT-scale build *plus* five
+    more substantial from-source native libraries, plus its own much larger multi-schema
+    codebase (default schemas `IFC2X3;IFC4;IFC4X3_ADD2`) compiled via SWIG for 5 CPython
+    versions — scaling to multiple days of self-hosted riscv64 runner time for one version,
+    on infrastructure shared with many concurrent ports. `parked`, not `not-feasible`: nothing
+    here is closed or unportable in principle (gotcha 41 does not apply — this is the inverse
+    problem, real buildable code at a cost this repo cannot practically absorb), and the
+    dependency graph itself is the evidence, read directly off upstream's own build script
+    rather than assumed by analogy with a smaller OpenCASCADE consumer.

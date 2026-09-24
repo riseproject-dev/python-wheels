@@ -386,6 +386,11 @@ The porting gotchas (546 of them) live in [`references/gotchas/`](gotchas/), spl
   doing wheel forensics — the maintainer's own words ("not open source today") and the
   wheel's own bundled LICENSE ("does not grant access to... the source code") can both
   independently settle closedness (the frisky case).
+- **558** — A SWIG/pybind11-bound extension over a *stack* of large native libraries can be
+  correctly source-available and buildable in principle, and still be a park purely on
+  runner-hours — check what upstream's own CI actually re-builds, not just what it lists as a
+  dependency, and use a smaller already-ported OpenCASCADE consumer's real CI timings as the
+  scale yardstick (the ifcopenshell case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
