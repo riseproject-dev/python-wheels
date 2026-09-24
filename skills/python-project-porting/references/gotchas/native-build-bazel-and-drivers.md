@@ -64,6 +64,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
 - **563** — A CMake macro that shells out to `go build` in a driven-container port brings
   `-buildvcs=true` ownership failures, root-owned binaries a host step can't `chmod`, and a
   hand-typed `[test]` extra that can silently drop a dependency.
+- **567** — Installing clang for gotcha 132's `--config=clang_local` is not enough by
+  itself: without `CC`/`CXX` exported, Bazel's local toolchain autodetection still picks
+  plain `gcc`, and `com_google_highway`'s unconditional riscv64 `-menable-experimental-extensions`
+  copt (Clang-only, no GCC equivalent) is the target that finally exposes it.
 
 ---
 
@@ -1070,3 +1074,37 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       `[project.optional-dependencies]` test/dbapi extras against the pip install line before
       assuming a missing dependency is riscv64-specific — `protobuf` already ships ordinary
       riscv64 wheels on PyPI.
+
+567. **Installing clang for gotcha 132's `--config=clang_local` is necessary but not
+    sufficient — Bazel's local toolchain autodetection still defaults to plain `gcc` unless
+    `CC`/`CXX` are exported before `bazel build` runs, and it takes a real Highway/XLA-family
+    target to expose that the switch never took (the xprof case; PR #2270).** `--config=
+    clang_local` (`common:clang_local --noincompatible_enable_cc_toolchain_resolution` +
+    `--repo_env USE_HERMETIC_CC_TOOLCHAIN=0`) only turns off the hermetic/toolchain-resolution
+    machinery gotcha 132 describes; it does not itself select clang. Bazel's
+    `local_config_cc` repository rule then falls back to whatever `tools/cpp/
+    unix_cc_configure.bzl`'s `find_cc()` resolves — the `CC` env var, or the literal string
+    `"gcc"` if `CC` is unset — regardless of whether a `clang` binary is sitting right there on
+    `PATH`. Nothing in the build fails immediately: TSL/XLA's own C++ compiles cleanly under
+    stock `gcc` for hundreds to thousands of actions, so a build can run 10+ minutes deep
+    before dying on the one target that actually needs clang — which reads like a
+    dependency-specific incompatibility, not "the compiler switch never took".
+    - **`com_google_highway`'s `BUILD.bazel` is what surfaces it.** Its top-level `COPTS`
+      appends `-march=rv64gcv1p0` and `-menable-experimental-extensions` to *every* riscv64
+      compile via a bare `select({"@platforms//cpu:riscv64": [...]})`, layered on top of (not
+      gated by) the earlier `":compiler_gcc"` vs `"//conditions:default"` branch — so the
+      Clang-only flag is added even when gcc was actually selected. `-menable-experimental-
+      extensions` has no GCC equivalent at all (absent from GCC's RISC-V Options
+      documentation, any version); the failure is `gcc: error: unrecognized command-line
+      option '-menable-experimental-extensions'` on `hwy/per_target.cc`, not a version-gated
+      "too old" message.
+    - **Confirm before touching anything**: `bazel build ... --subcommands 2>&1 | grep -m1
+      'gcc\|clang'` on the failing target (or just read the failing `CppCompile` command
+      line's argv[0], as printed in the error) tells you which compiler actually ran, in
+      seconds — cheaper than guessing from the flag name.
+    - **Fix: export `CC=clang` (and `CXX=clang++`) in the same shell, after installing clang
+      and before the `bazel build` invocation** — not a `--copt`/`select()` workaround, and
+      not a patch to Highway (a correctly-selected clang accepts the flag as a no-op, since
+      `rv64gcv1p0`'s extensions are all ratified). `--repo_env=CC=clang` on the bazel command
+      line works too, but a plain shell `export` matches how the rest of the script already
+      threads `JAVA_HOME` and needs no extra `--repo_env` bookkeeping.

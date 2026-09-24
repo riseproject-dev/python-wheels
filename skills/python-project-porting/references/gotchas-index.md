@@ -749,6 +749,11 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
   `chmod` on any binary it writes while still root (a later unprivileged host step can't), and
   the package's own `[test]` extra typed out by hand since there is no `CIBW_TEST_EXTRAS`
   (the adbc-driver-flightsql case).
+- **567** — Installing clang for gotcha 132's `--config=clang_local` is not enough by
+  itself: without `CC`/`CXX` exported, Bazel's local toolchain autodetection still picks
+  plain `gcc`, and `com_google_highway`'s unconditional riscv64
+  `-menable-experimental-extensions` copt (Clang-only, no GCC equivalent) is the target
+  that finally exposes it (the xprof case).
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
