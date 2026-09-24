@@ -38,6 +38,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
   build "successfully" — into a `py3-none-any` wheel with no extension in it.
 - **521** — A SWIG binding can publish wheels and no sdist because its build input is
   upstream's `make dist` tarball *pair*, not its git tree.
+- **569** — A release tag can check out clean and still hand a build Git LFS pointer stubs
+  instead of real content, when upstream squash-merges former submodules into the main tree
+  without resolving their LFS objects first.
 - **546** — A project can ship its C++ dependency-manager cache inside the sdist, making the
   from-sdist build hermetic where a from-checkout build is not.
 
@@ -714,3 +717,37 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/sdist-source-and-versi
        `git apply --directory=<dir> patches/<pkg>/<ver>/00*.patch` covers them — and `git apply`
        works outside a repository, which the workspace root is once `actions/checkout` has gone
        into a subdirectory.
+
+569. **A release tag can check out clean and still hand a build Git LFS pointer stubs instead
+     of real content, when upstream squash-merges former git submodules into the main tree
+     without resolving their LFS objects first (the semgrep v1.177.0 case).** semgrep vendors
+     ~35 tree-sitter grammars as `languages/<lang>/tree-sitter/semgrep-<lang>` git submodules
+     through v1.176.0; at v1.177.0 upstream inlined every one of them into the main tree as
+     plain directories (`160000 commit` → `040000 tree` in `git ls-tree`) and, by v1.178.0,
+     had re-vendored the real generated sources. Only the v1.177.0 tag itself is broken: the 34
+     `lib/parser.c` files that used to live inside those submodules were committed as literal
+     132-byte Git LFS pointer blobs (`version https://git-lfs.github.com/spec/v1\noid
+     sha256:...\nsize ...`) — real *content* of the git blob, not a checkout artifact — and
+     `dune build` chokes trying to compile that text as C (`parser.c:1:1: error: unknown type
+     name 'version'`). This is not gotcha 242's missing-`parser.c` case, and no
+     `lfs: true`/`git lfs pull` fixes it: the top-level repo's `.gitattributes` never declares a
+     `filter=lfs` rule for these paths (checked at every one of v1.175.0–v1.178.0), so nothing
+     tells git to run the smudge filter even with git-lfs installed — the pointer text is what a
+     plain, correct checkout is *supposed* to produce from that tag's tree.
+     - **Confirm it's the tag, not the checkout, before treating it as a workflow bug.** `git
+       cat-file -p <tag>:<path>` on a throwaway clone shows the pointer text directly from the
+       git object database, with no `actions/checkout`, LFS config or CI involved.
+     - **The real content is recoverable, and self-verifying, from the pre-merge submodule.**
+       Each pointer's `oid sha256:...` is the exact hash of the file upstream meant to ship.
+       `git ls-tree <previous-tag> <path>` (v1.176.0 here, the last tag before the migration)
+       gives the submodule's own commit SHA; fetching that path from
+       `raw.githubusercontent.com/<org>/<repo>/<commit>/<path-in-submodule>` and rehashing
+       confirmed a byte-for-byte match against the pointer's `oid`/`size` for every one of the
+       34 files (typescript, circom, java, rust checked directly) — the grammar hadn't changed
+       between the two tags, only how it was stored.
+     - **Fix it as a version-scoped repair step, not a permanent checkout change**, since only
+       the one tag is broken: a small manifest (`patches/<pkg>/<broken-version>/
+       lfs-pointer-fixups.tsv`, one row per `path / org / repo / commit / path-in-submodule`)
+       drives a step that re-fetches and re-verifies each pointer file's content by its own
+       embedded `oid` before overwriting it, and is a no-op (skipped entirely) for every other
+       version, whose manifest file doesn't exist.
