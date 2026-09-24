@@ -529,6 +529,10 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
   release yet, an unfamiliar PyPy triple) is not evidence of scraped garbage — verify it
   against the live PyPI JSON `releases` dict and the extension crate's own `pyo3` dependency
   line before discounting the matrix (the ignore-python case).
+- **564** — `pypa/cibuildwheel`'s action has no `build:` input (only `package-dir`,
+  `output-dir`, `config-file`, `only`, `extras`); passing one is silently dropped, and
+  cibuildwheel falls back to its default matrix floor instead of the intended abi3
+  build list (the vegafusion case) — use `CIBW_BUILD`/`only:` instead.
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
