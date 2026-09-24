@@ -1,0 +1,159 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# This workflow is based on: https://github.com/pola-rs/polars/blob/main/.github/workflows/release-python.yml
+
+name: Build polars-lts-cpu wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/polars-lts-cpu.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-polars-lts-cpu.yml'
+      - 'docs/packages/polars-lts-cpu.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-polars-lts-cpu.yml'
+      - 'docs/packages/polars-lts-cpu.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYTHON_VERSION: '3.9'
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  # `--profile dist-release` (see "Build wheel" below) inherits fat LTO +
+  # codegen-units=1 from py-polars' Cargo.toml. Overriding it here keeps the
+  # dist-release profile name/other settings intact without patching
+  # Cargo.toml.
+  CARGO_PROFILE_DIST_RELEASE_LTO: 'off'
+  CARGO_PROFILE_DIST_RELEASE_CODEGEN_UNITS: '16'
+  CARGO_PROFILE_DIST_RELEASE_OPT_LEVEL: '1'
+  # Limit the number of build jobs to help avoid resource exhaustion. This may
+  # need to be adjusted if the runners change.
+  CARGO_BUILD_JOBS: '2'
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: polars-lts-cpu
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build polars-lts-cpu ${{ matrix.version }} linux-riscv64
+    runs-on: ubuntu-24.04-riscv
+    # build-polars-runtime.yml (this repo's other polars build, same upstream
+    # crate graph) takes ~4.5h at this same opt-level/job-count on these
+    # 4-core runners; deltalake's comparably sized graph took 8.1h. Sized
+    # with headroom over both.
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      POLARS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout polars py-${{ env.POLARS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pola-rs/polars
+          ref: py-${{ env.POLARS_VERSION }}
+          persist-credentials: false
+
+      - name: Free some disk space (remove unused packages)
+        uses: jlumbroso/free-disk-space@v1.3.1
+
+      # Avoid potential out-of-memory errors
+      - name: Set swap space for Linux
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 10
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install yq
+        run: uv pip install yq
+
+      - name: Rename package to polars-lts-cpu
+        run: |
+          tomlq -i -t '.project.name = "polars-lts-cpu"' py-polars/pyproject.toml
+          sed -i 's/polars\[/polars-lts-cpu[/' py-polars/pyproject.toml
+
+      - name: Set variables in CPU check module
+        run: |
+          sed -i 's/^_POLARS_ARCH = "unknown"$/_POLARS_ARCH = "riscv64"/g' py-polars/polars/_cpu_check.py
+          sed -i 's/^_POLARS_LTS_CPU = False$/_POLARS_LTS_CPU = True/g' py-polars/polars/_cpu_check.py
+
+      # The manylinux riscv64 support relied on below needs a maturin-action
+      # newer than the `v1` tag upstream pins, and there's no `manylinux: auto`
+      # mapping for riscv64 yet either - both pinned explicitly here. Left
+      # `maturin-version` unset (upstream pins 1.8.3): unverified against the
+      # newer action/riscv64 combination, so deferring to the action's default.
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          args: >
+            --profile dist-release
+            --manifest-path py-polars/Cargo.toml
+            --out dist
+          manylinux: '2_39'
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - name: Test wheel
+        run: |
+          uv pip install --force-reinstall --verbose dist/*.whl
+          python -c 'import polars; polars.show_versions()'
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: polars-lts-cpu-${{ env.POLARS_VERSION }}-linux-riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish polars-lts-cpu ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    with:
+      artifact-pattern: polars-lts-cpu-${{ matrix.version }}-*
