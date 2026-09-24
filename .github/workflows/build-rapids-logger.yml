@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build, which drives 'pip wheel' + 'auditwheel
+# repair' from python/rapids-logger with no cibuildwheel wrapper:
+#   https://github.com/rapidsai/rapids-logger/blob/v0.3.0/ci/build_wheel.sh
+name: Build rapids-logger wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/rapids-logger.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-rapids-logger.yml'
+      - 'docs/packages/rapids-logger.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-rapids-logger.yml'
+      - 'docs/packages/rapids-logger.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: rapids-logger
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build rapids-logger ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+
+    env:
+      RAPIDS_LOGGER_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout rapids-logger v${{ env.RAPIDS_LOGGER_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: rapidsai/rapids-logger
+          ref: v${{ env.RAPIDS_LOGGER_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python/rapids-logger
+          output-dir: wheelhouse/
+          # wheel.py-api = "py3", so one build serves every interpreter.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_COMMAND: python -c "import rapids_logger; rapids_logger.load_library()"
+
+      - name: Check the wheel carries librapids_logger and hides fmt/spdlog symbols
+        run: |
+          extract_dir="$(mktemp -d)"
+          unzip -q wheelhouse/*.whl -d "${extract_dir}"
+          library="$(find "${extract_dir}" -type f -name 'librapids_logger.so')"
+          test -n "${library}"
+          readelf --dyn-syms --wide "${library}" | c++filt > symbols.txt
+          for lib in fmt spdlog; do
+            if grep -qE "${lib}::" symbols.txt; then
+              echo "error: found exported '${lib}::' symbols in ${library}"
+              exit 1
+            fi
+          done
+          find "${extract_dir}" -name '*.so'
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rapids-logger-${{ env.RAPIDS_LOGGER_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish rapids-logger ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: rapids-logger-${{ matrix.version }}-*-manylinux_riscv64
