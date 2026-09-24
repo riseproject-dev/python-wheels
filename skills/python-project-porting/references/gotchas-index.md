@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (547 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -739,6 +739,12 @@ The porting gotchas (547 of them) live in [`references/gotchas/`](gotchas/), spl
 - **500** — Gotcha 233's packer-script shape, cheap variant: when the packer is *upstream's
   own* and takes locally built binaries (`--files austin:src/austin`), the port is a
   from-source build plus a one-entry platform-table patch (the austin-dist case).
+- **563** — A CMake macro (`add_go_lib()`) that shells out to `go build -buildmode=c-shared`
+  in a driven-container port (no cibuildwheel) needs `git config --global --add
+  safe.directory` for `-buildvcs=true`'s VCS stamping against the bind-mounted checkout,
+  `chmod` on any binary it writes while still root (a later unprivileged host step can't), and
+  the package's own `[test]` extra typed out by hand since there is no `CIBW_TEST_EXTRAS`
+  (the adbc-driver-flightsql case).
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 

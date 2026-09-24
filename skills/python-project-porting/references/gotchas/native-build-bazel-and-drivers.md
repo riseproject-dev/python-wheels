@@ -61,6 +61,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
   child, so such a cmeel distribution installs into `cmeel.prefix/lib64/`, not `lib/`.
 - **500** — When the wheel comes from a packer script, check whether it is *upstream's own*
   and whether it has a local-files mode before reproducing it.
+- **563** — A CMake macro that shells out to `go build` in a driven-container port brings
+  `-buildvcs=true` ownership failures, root-owned binaries a host step can't `chmod`, and a
+  hand-typed `[test]` extra that can silently drop a dependency.
 
 ---
 
@@ -1027,3 +1030,43 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
     - **The packer decides the wheel's contents, so a per-arch content change is a one-line
       patch**: shipping only the binaries that work on this architecture means editing that
       table entry, not the build.
+
+563. **A CMake macro that shells out to `go build` inside a driven-container port (no
+    cibuildwheel) brings three Go/root-ownership gotchas that gotcha 15's C++-only playbook
+    doesn't cover (the adbc-driver-flightsql case).** Apache Arrow ADBC's FlightSQL driver
+    looks identical in shape to its siblings adbc-driver-postgresql/adbc-driver-sqlite (a
+    thin ctypes Python wrapper around a driven-manylinux-image build, `py3-none-any` retagged
+    and auditwheel-repaired), but `c/driver/flightsql/CMakeLists.txt` calls `add_go_lib()`
+    (`c/cmake_modules/GoUtils.cmake`), which runs `go build -buildmode=c-shared` with
+    `CGO_ENABLED=1` instead of driving CMake/gcc alone — a distinct riscv64 question layered
+    on top of the already-solved C/C++ one (does go.dev ship the pinned Go version for
+    `linux-riscv64`? it has since 1.19).
+    - **Installing Go inside the container is one `curl`+`tar` (already proven by
+      `build-certbot-dns-multi.yml`/`build-wandb.yml`), but `add_go_lib()` always passes
+      `-buildvcs=true`, and the bind-mounted checkout fails as "detected dubious ownership in
+      repository at '/workspace'"** the moment `go build` shells out to `git`, because the
+      container writes as root into a checkout owned by the host runner's uid. Gotcha 117
+      already names the fix (`git config --global --add safe.directory "*"`) for a
+      cibuildwheel `before-script-linux`; it applies identically to a hand-written `build.sh`
+      run via `docker run -v $(pwd):/workspace`, so add it before any `go build`/
+      `cmake --build` step that could touch git.
+    - **Any binary the container writes as root and a later host-side step needs to `chmod`
+      (not just read) fails with `Operation not permitted`, because the unprivileged GitHub
+      Actions runner user does not own it.** Building `go/adbc/driver/flightsql/cmd/testserver`
+      in-container to test the wheel against it on the host (mirroring upstream's own
+      `native-unix.yml` "Test Python Driver Flight SQL" job, since testing this driver
+      otherwise needs a live Dremio/GizmoSQL account) means the binary crosses that
+      root/unprivileged boundary; set the executable bit with `chmod 755` while still root
+      inside `build.sh`, immediately after `go build`, rather than `chmod +x` on the host step
+      that runs it — reading a root-owned file from an unprivileged host step is fine, only
+      *changing* its mode isn't.
+    - **A driven-container test step has no `CIBW_TEST_EXTRAS` to reach for, so the package's
+      own `[test]` extra (not just `[dbapi]`) has to be typed out by hand and can silently
+      drop a dependency the test files actually import** — `adbc_driver_flightsql`'s
+      `pyproject.toml` declares `test = ["pandas", "protobuf", "pyarrow>=14.0.1", "pytest"]`,
+      and omitting `protobuf` reproduces as `ModuleNotFoundError: No module named 'google'` at
+      collection time in exactly the two test files (`test_errors.py`, `test_incremental.py`)
+      that import `google.protobuf.any_pb2` directly. Diff the
+      `[project.optional-dependencies]` test/dbapi extras against the pip install line before
+      assuming a missing dependency is riscv64-specific — `protobuf` already ships ordinary
+      riscv64 wheels on PyPI.
