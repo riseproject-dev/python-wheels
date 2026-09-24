@@ -1286,3 +1286,35 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
     first. Widened the filter to also exclude `malloc_compliance`. If a fourth case crashes,
     the pragmatic fix is excluding the whole `TrackingProviderPoolTest/umfPoolTest.*` fixture
     rather than continuing to chase individual parameterizations.
+
+566. **A from-source build's compiled binary segfaulting on *every* invocation, not just one
+    test scenario, is real and unresolved on riscv64 without hardware to reproduce and
+    debug interactively (the pgserver 0.1.4 `initdb` case) — check the full failure set
+    before assuming the failing test's name (or its data) is the cause.** pgserver compiles
+    PostgreSQL 16.2 from source; its own `initdb` binary died with `SIGSEGV` in *every* CI
+    run across three independent riscv64 runners (cp312/cp313/cp314, three different
+    `runner_name`s) and both interpreters exercised, always on the *first* call `initdb`
+    makes in the suite (`test_get_server`, not the `test_reuse_deleted_datadir_short` whose
+    name suggests a short-path/buffer edge case — that test only happens to be the one
+    running when the crashed child's unbounded wait turns into the hang gotcha 565 bounds).
+    Every later test's `initdb` call segfaults identically, so this is not scenario-specific
+    and not one flaky machine — it reproduced across every runner instance that ran it.
+    Ruled out already: `configure` on this manylinux_2_39_riscv64 image detects real
+    `__sync`/`__atomic` builtin int32/int64 support (no fallback-spinlock path), and the
+    build passes no `-march`/aggressive flags — plain `-O2`, GCC 14.3.1 (Red Hat 14.3.1-4).
+    The signal is on the direct `initdb` child itself (Python's `subprocess.run` only
+    reports the *direct* child's signal), so the fault is in `initdb`'s own code before or
+    during its exec of `postgres --boot`, not inside the bootstrap backend. This matches an
+    open, still-unresolved pgsql-hackers thread on riscv64 buildfarm animals producing
+    "weird memory-related failures" on recent GCC — but that thread's failures are
+    sporadic in random queries, while this one is 100% deterministic in `initdb`, so treat
+    it as a related-but-distinct, equally undiagnosed data point, not the same bug.
+    **Do not treat this as diagnosed** — no riscv64 hardware or working QEMU
+    user-mode emulation was available to this session (`docker run --platform=linux/riscv64`
+    on the amd64 host used to investigate this hit `exec format error`; the sandbox's
+    `binfmt_misc` isn't writable to register a riscv64 QEMU interpreter, unlike gotcha 115's
+    real-runner case) to get a native backtrace or bisect the GCC/PostgreSQL versions
+    involved. Next steps for whoever picks this up with riscv64 access: `gdb`/core dump on
+    the built `initdb` (gotcha 115's technique) to see whether the fault is in `initdb.c`
+    itself or in something it links against; try a newer PostgreSQL point release; try an
+    older/newer GCC than 14.3.1 in the manylinux image.

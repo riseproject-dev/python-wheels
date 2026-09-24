@@ -1087,6 +1087,10 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
 - **512** — `--ignore`/`--ignore-glob` are silently inert under `pytest --pyargs <pkg>`; cut
   tests with `--deselect`, whose nodeids are relative to the package directory rather than the
   rootdir pytest prints, and confirm the count with `--co -q`.
+- **565** — A crashed `multiprocessing.Process` child's parent blocking forever on
+  `Queue.get()` with no timeout turns one segfault into a full job hang; bound it with
+  `CIBW_TEST_REQUIRES: pytest-timeout` plus `PYTEST_ADDOPTS="--timeout=<n>"` folded into
+  `CIBW_ENVIRONMENT`, which applies to both the build and test phases.
 
 ### Test failures, flakes & arch-specific bugs — [`gotchas/test-failures-and-flakes.md`](gotchas/test-failures-and-flakes.md)
 
@@ -1163,6 +1167,11 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
 - **553** — A SIGBUS in a doubly-nested tracking-provider pool stack's aligned-allocation
   path is real but unresolved on riscv64 without hardware to reproduce interactively, and is
   not threading-specific even though it first looked that way (the umf 1.1.0 case).
+- **566** — A from-source compiled binary segfaulting on *every* invocation across
+  independent runners (pgserver's `initdb`, PostgreSQL 16.2, plain `-O2`/GCC 14.3.1) is real
+  and unresolved without riscv64 hardware to debug interactively — not scenario-specific to
+  whichever test happened to be running, and distinct from an already-open pgsql-hackers
+  riscv64/GCC memory-failures thread (that one is sporadic; this one is deterministic).
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
