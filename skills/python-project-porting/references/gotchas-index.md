@@ -382,6 +382,10 @@ The porting gotchas (546 of them) live in [`references/gotchas/`](gotchas/), spl
   whose wheels bundle a per-platform binary built entirely inside the vendor's own internal
   build with no source, no fetch script and no downstream artifact index published anywhere
   (the google-antigravity case).
+- **557** — When PyPI's own metadata is blank, search for the project's own site/blog before
+  doing wheel forensics — the maintainer's own words ("not open source today") and the
+  wheel's own bundled LICENSE ("does not grant access to... the source code") can both
+  independently settle closedness (the frisky case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
