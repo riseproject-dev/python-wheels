@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (520 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (545 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -875,6 +875,10 @@ The porting gotchas (520 of them) live in [`references/gotchas/`](gotchas/), spl
 - **550** — When a vendored downloader's unknown-platform branch is a graceful PATH search
   rather than a hard failure, gotcha 77's patch is unnecessary — build the binary yourself and
   drop it on `PATH` in `CIBW_BEFORE_BUILD` (the shfmt-py case).
+- **554** — When the *wheel-building tool itself* (not a downloader) lacks riscv64 in its own
+  hardcoded platform table, import it and extend the table in a `run:` step instead of
+  patching it — and check separately whether it embeds a LICENSE at all (the mcp-grafana /
+  go-to-wheel case).
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 
@@ -1105,10 +1109,16 @@ The porting gotchas (520 of them) live in [`references/gotchas/`](gotchas/), spl
   test against upstream's post-release `master`, and `git cherry-pick -x` the fix that
   landed after the tag was cut into an `Upstream-Status: Backport` patch (the
   scylla-driver 3.29.11 case).
-- **545** — A raw-byte `memcmp()`/hash cache key over a padded struct is a latent,
-  compiler/arch-dependent bug even where it has been green on x86_64 for years: `{0}` and
-  `=` are not guaranteed to touch padding, `memset()`/`memcpy()` are (the umf 1.1.0 IPC
-  opened-handle cache case).
+- **545** — *(retracted, see 552)* A source-only root-cause theory that reads convincingly
+  is still a theory — confirm it against a fresh CI run on the target architecture before
+  calling it fixed (the umf 1.1.0 IPC case; the padding/`memcmp()` theory this entry
+  originally documented did not apply to the actual failing line).
+- **552** — Docker's default seccomp profile blocks `pidfd_getfd(2)` with `EPERM` unless the
+  container has `CAP_SYS_PTRACE`, even for a process duplicating a fd of its own — the real
+  cause of the failure gotcha 545 misdiagnosed (the umf 1.1.0 IPC case).
+- **553** — A SIGBUS in a doubly-nested tracking-provider pool stack's aligned-allocation
+  path is real but unresolved on riscv64 without hardware to reproduce interactively, and is
+  not threading-specific even though it first looked that way (the umf 1.1.0 case).
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 

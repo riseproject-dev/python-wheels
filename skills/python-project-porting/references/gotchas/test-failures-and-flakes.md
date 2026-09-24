@@ -53,9 +53,17 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **535** — A release tag can ship tests its own source does not satisfy — diff the failing
   test against upstream's post-release `master` and cherry-pick the fix as a `Backport`
   patch, before blaming the architecture.
-- **545** — A raw-byte `memcmp()`/hash cache key over a padded struct (`{0}`-initialised,
-  copied by `=`) is a latent, compiler/arch-dependent bug even when it has passed on x86_64
-  for years — `memset()` and `memcpy()` it instead of trusting `{0}` or `=` to touch padding.
+- **545** — A source-only root-cause theory that reads convincingly is still a theory:
+  confirm it against a fresh CI run before calling it fixed — a plausible padding/`memcmp()`
+  bug, reasoned entirely from source, turned out not to even apply to the failing line
+  (retracted; see 552 for the real cause).
+- **552** — Docker's default seccomp profile blocks `pidfd_getfd(2)` with `EPERM` unless the
+  container has `CAP_SYS_PTRACE`, even for a process duplicating a fd of its own — a
+  test-environment gap, not a library bug.
+- **553** — A SIGBUS in a doubly-nested tracking-provider pool stack's aligned-allocation
+  path is real but unresolved on riscv64 without hardware to reproduce interactively —
+  confirmed not threading-specific (it crashes both the single- and multi-threaded variant
+  of the same helper), diagnosis stops there honestly.
 
 ---
 
@@ -1189,10 +1197,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       dependency will do this to you: check the skip *count* against CI's, not just the
       pass count.
 
-545. **A raw-byte `memcmp()`/hash cache key built over a padded struct is a latent,
-    compiler/arch-dependent correctness bug even when it has been green on x86_64 for years
-    — `{0}` and `=` are not guaranteed to touch padding, `memset()`/`memcpy()` are (the umf
-    1.1.0 IPC case).** `test_provider_os_memory`'s ctest failed 8 of 50 gtest cases under
+545. **[RETRACTED — see gotcha 552 for the real cause.] A source-only root-cause theory
+    that reads convincingly is still a theory: confirm it against a fresh CI run on the
+    target architecture before calling it fixed (the umf 1.1.0 IPC case).**
+    `test_provider_os_memory`'s ctest failed 8 of 50 gtest cases under
     `osProviderTest/umfIpcTest.*/disjoint_w_params_0_OS_HostMemoryAccessor` on riscv64,
     including the *non-concurrent* `BasicFlow`, `AllocFreeAllocTest` and
     `openInTwoIpcHandlers` — not just the concurrency-stress variants — ruling out a plain
@@ -1206,43 +1214,66 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
         Which is: 0
     [FATAL UMF] umfMemoryProviderCloseIPCHandle: UMF check failed: (ptr != NULL)
     ```
-    - The failing line is the *second* of two `umfOpenIPCHandle()` calls onto the *same*
-      coarse-grain allocation (one handle at the allocation's base, one at
-      `base + size/2`). By design the second open is meant to be served entirely from
-      `provider_tracking.c`'s opened-handle cache (a hash table keyed by
-      `{remote_base_ptr, local_provider, remote_pid}`) with no new provider work — confirmed
-      on x86_64 with `strace`: a single `pidfd_open()`/`pidfd_getfd()` pair for the whole
-      test, the second open a pure cache hit.
-    - The cache key struct is two pointers plus an `int`, which forces 4 bytes of trailing
-      padding on any LP64 target. uthash's `HASH_FIND`/`HASH_ADD` hash and `memcmp()` the
-      key over its full `sizeof()`, padding included. The key is built with
-      `ipc_opened_cache_key_t key = {0};` then named-field assignment, and stored with
-      `entry->key = *key;` — but `= {0}` only guarantees the *named* members are zeroed
-      (padding is left indeterminate by the C standard), and a plain struct assignment only
-      has to copy the *value*, not the object representation, so even a key with reliably
-      zero padding is not guaranteed to land in the persisted entry byte-for-byte. Either
-      gap is enough to turn a lookup that must be a cache hit into a spurious miss — on
-      whichever compiler/architecture combination doesn't happen to zero or preserve the
-      padding, which is unspecified behaviour, not a guarantee, even where it has held for
-      years on x86_64/GCC.
-    - **The fix is mechanical and safe everywhere:** `memset(&key, 0, sizeof(key))` instead
-      of `= {0}` for construction, and `memcpy(&entry->key, key, sizeof(entry->key))`
-      instead of `entry->key = *key;` for persistence — `memset`/`memcpy` are the only
-      constructs the standard actually guarantees touch every byte. This is a no-op
-      everywhere the compiler already zeroed padding (i.e. everywhere the suite was already
-      green), so it carries no regression risk, and it directly targets the *documented*
-      hazard — the code already had a comment above the `= {0}` acknowledging padding was a
-      concern, just not a fix strong enough to guarantee it.
-    - **Validate what you can without the failing architecture, and say plainly what you
-      couldn't.** hwloc/numactl built once and reused from scratch let a local x86_64 build
-      of the *exact* upstream tag confirm no regression (`test_provider_os_memory` 50/50,
-      plus every other IPC-adjacent suite), and `strace` on the unpatched binary proved the
-      cache-hit code path the bug report's own reasoning depends on. Neither proves the fix
-      *closes* the riscv64 failure — that this specific padding/codegen gap could not be
-      reproduced on available x86_64 hardware is a real limit, not a rounding error, and the
-      patch (`Upstream-Status: To upstream`) says so rather than claiming a false-confidence
-      fix; CI on the target architecture is what actually confirms it.
-    - This is the same family as gotcha 519/535 in spirit — read the *exact* failing line
-      and the *exact* code path before reaching for a skip — but the culprit here is neither
-      an upstream test bug nor a stale tag: it is a genuine, if latent-until-now,
-      correctness gap in how upstream's own C code builds a hash key.
+    - **What this entry originally claimed:** the failing line was the *second* of two
+      `umfOpenIPCHandle()` calls onto the same coarse-grain allocation, meant to be served
+      from `provider_tracking.c`'s opened-handle cache — and that cache's key struct (two
+      pointers plus an `int`, 4 bytes of trailing padding on LP64) was hashed/`memcmp()`'d by
+      uthash over its full `sizeof()` including padding, while being built with
+      `= {0}` and persisted with a plain struct assignment, neither of which the C standard
+      guarantees touches padding. Patched with `memset()`/`memcpy()`
+      (`patches/umf/1.1.0/0001-...-incl-pad.patch`), validated on x86_64 (50/50 plus every
+      IPC-adjacent suite, no regression), and pushed as `Upstream-Status: To upstream` with
+      an explicit note that the riscv64 fix was unconfirmed pending a fresh CI run.
+    - **Why it was wrong.** The fresh riscv64 CI run on the patched commit reproduced the
+      *exact same* 8 failures, unchanged. Re-reading `ipcFixtures.hpp` showed the failing
+      line in `BasicFlow` is the *first* of its two `umfOpenIPCHandle()` calls, not the
+      cache-hit second lookup the theory depended on — so the padding/cache-miss theory
+      never even applied to this failure. The patch was reverted.
+    - **The real cause** is Docker's default seccomp profile blocking `pidfd_getfd(2)`
+      without `CAP_SYS_PTRACE` — see gotcha 552.
+    - **Lesson kept for its own sake:** a hypothesis this specific, reasoned entirely from
+      source, cross-checked with `strace` on x86_64, and validated with a clean local
+      rehearsal, can still simply be about the wrong code path. None of that rigor
+      substitutes for reading the *exact* failing line against the theory one more time, or
+      for the target-architecture CI run that actually confirms a fix closes the failure —
+      this is the same family as gotcha 519/535 in spirit, just the case where doing all the
+      right things still didn't catch it before a wasted CI cycle.
+
+552. **Docker's default seccomp profile blocks `pidfd_getfd(2)` with `EPERM` unless the
+    container has `CAP_SYS_PTRACE`, even for a process duplicating a fd of its own (the umf
+    1.1.0 IPC case; supersedes the disproven theory in gotcha 545).** UMF's
+    `os_open_ipc_handle()` anonymous-fd path calls `utils_duplicate_fd()` →
+    `pidfd_getfd(2)` to duplicate an allocation's fd so it can be handed across the IPC
+    boundary. Under Docker's default seccomp profile this syscall returns `EPERM`, which
+    `utils_errno_to_umf_result()` maps to `UMF_RESULT_ERROR_INVALID_ARGUMENT` (ret=3) —
+    surfacing as 8/50 riscv64 gtest failures in `test_provider_os_memory`, every one of them
+    calling `umfOpenIPCHandle()` (every IPC test that doesn't call it passes), plus a
+    `FATAL "ptr != NULL"` abort at pool teardown from freeing a cache entry that was never
+    actually opened. Matches upstream issue oneapi-src/unified-memory-framework#979. **Fix:**
+    add `--cap-add=SYS_PTRACE` to the test container's `docker run`, which also lifts the
+    Yama `ptrace_scope` restriction the same syscall is subject to — no UMF source change
+    needed, this is a test-environment gap, not a library bug. Confirmed by a green riscv64
+    CI run with only this flag added and no source patch.
+
+553. **A SIGBUS in a doubly-nested tracking-provider pool stack's aligned-allocation path is
+    real but unresolved on riscv64 without hardware to reproduce interactively (the umf
+    1.1.0 case) — say so plainly instead of over-scoping a skip to match one crash log.**
+    `test_provider_tracking_fixture_tests`'s `TrackingProviderPoolTest/umfPoolTest` suite (a
+    proxy pool over a `provider_from_pool` that itself wraps a proxy pool over a file-backed
+    provider — two nested tracking providers) crashes with `Bus error` inside
+    `pow2AlignedAllocHelper` (`test/poolFixtures.hpp`, which drives aligned allocations from
+    1 byte up to 4 MiB). A first riscv64 CI run crashed while running the *multi-threaded*
+    `multiThreadedpow2AlignedAlloc` case, which looked like a concurrency bug and was skipped
+    via `GTEST_FILTER` on that name alone. A later CI run on the same commit crashed instead
+    in the plain *single-threaded* `pow2AlignedAlloc` case — both call the identical helper,
+    so the crash is not threading-specific and the first skip was scoped too narrowly; it is
+    in the shared aligned-allocation path itself, through this specific doubly-nested
+    provider stack. No seccomp/docker-environment explanation was found (unlike gotcha 552),
+    and no single obvious bug was identified in `provider_tracking.c`'s atomics, `critnib`'s
+    tagged-pointer bit or `provider_file_memory.c`'s coarse suballocator locking without
+    riscv64 hardware to reproduce and debug interactively — **do not treat this as
+    diagnosed.** Every other test on the same fixture (non-aligned alloc/free, both
+    single-threaded and multi-threaded) passes. Skipped via `GTEST_FILTER` excluding both
+    `TrackingProviderPoolTest/umfPoolTest.pow2AlignedAlloc/*` and
+    `.../multiThreadedpow2AlignedAlloc/*`, flagged for anyone with riscv64 hardware access to
+    pick up, rather than blocking the rest of the port on an unreproducible bug.

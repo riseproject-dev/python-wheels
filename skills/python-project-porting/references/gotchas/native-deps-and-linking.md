@@ -43,6 +43,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
   does not list needs no `OPENSSL_NO_ASM`.
 - **550** — When the downloader's unknown-platform branch is a graceful PATH search rather
   than a hard failure, gotcha 77's patch is unnecessary — just put the self-built binary
+- **554** — A Go-binary-in-a-wheel tool (not a downloader) can also lack riscv64 in its own
+  platform table — drive its Python API directly instead of patching it (the mcp-grafana case).
   there (the shfmt-py case).
 ---
 
@@ -754,3 +756,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
        `debug.ReadBuildInfo().Main.Version`, and Go's automatic VCS stamping fills that in
        correctly from a plain `actions/checkout` at the tag even with the default
        `fetch-depth: 1` — verified locally against a shallow clone.
+
+554. **A Go-binary-in-a-wheel tool (not a downloader) can also lack riscv64 in its own
+     platform table — drive its Python API directly instead of patching it (the mcp-grafana
+     case).** Gotcha 550 is a project's own downloader missing a riscv64 entry; mcp-grafana
+     puts the same gap one layer further out. Its PyPI wheels aren't built by setuptools or
+     cibuildwheel at all — upstream's `release.yml` calls a third-party tool,
+     [go-to-wheel](https://github.com/nikaro/go-to-wheel), pinned to one commit, which
+     cross-compiles `./cmd/mcp-grafana` per platform (`CGO_ENABLED=0`, Go's own
+     cross-compilation) and hand-writes the wheel zip. Its `PLATFORM_MAPPINGS` dict — the
+     table of `"linux-amd64"`-style keys to `(goos, goarch, wheel-platform-tag)` triples —
+     has no riscv64 key, and its CLI silently `continue`s past any platform string that isn't
+     already a key, so passing `--platforms linux-riscv64` on the command line does nothing.
+     - **The tool is a plain importable module, not a black box.** Since a port only adds
+       files under `.github/workflows/` and `docs/packages/`, patching go-to-wheel itself
+       would need a `patches/` entry for a *dependency of the build*, not of the package being
+       ported — out of scope. Importing it and mutating the module-level dict before calling
+       its own `build_wheels()` function needs no patch at all: `import go_to_wheel as gtw;
+       gtw.PLATFORM_MAPPINGS["linux-riscv64"] = ("linux", "riscv64",
+       "manylinux_2_39_riscv64")`, then call `gtw.build_wheels(..., platforms=["linux-riscv64"])`
+       with the same `name`/`version`/`package_path`/`description`/`url`/`license_`/`readme`
+       upstream's own CLI invocation passes — this is "drive the tool yourself", the same
+       move workflow-anatomy.md documents for cibuildwheel-shaped builds, applied to a
+       different build tool.
+     - **The tool's wheels ship no LICENSE at all**, on any platform — `go_to_wheel.build_wheel`
+       never writes a `dist-info/licenses/` entry regardless of the `--license` string passed
+       (that string only reaches the `License-Expression` METADATA header). This repo requires
+       every wheel it publishes to carry upstream's licence file, so the gap needs a second,
+       independent fix even once riscv64 itself builds: read the built wheel back, add
+       `<dist-info>/licenses/LICENSE`, and regenerate `RECORD` (`gtw.generate_record()` is
+       already exported and does the hashing) before uploading — a few lines of `zipfile`
+       in the same `run:` step, no new files.
