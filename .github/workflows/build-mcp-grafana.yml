@@ -1,0 +1,192 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+name: Build mcp-grafana wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/mcp-grafana.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mcp-grafana.yml'
+      - 'docs/packages/mcp-grafana.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mcp-grafana.yml'
+      - 'docs/packages/mcp-grafana.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: mcp-grafana
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build mcp-grafana ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 45
+
+    env:
+      MCP_GRAFANA_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout mcp-grafana v${{ env.MCP_GRAFANA_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: grafana/mcp-grafana
+          ref: v${{ env.MCP_GRAFANA_VERSION }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: 'stable'
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      # Upstream's own pypi job (release.yml) builds every wheel through this exact
+      # pinned commit; its PLATFORM_MAPPINGS has no riscv64 entry yet, so it's added
+      # here rather than through the CLI, which can't reach that dict.
+      - name: Install go-to-wheel
+        run: uv pip install "go-to-wheel @ git+https://github.com/nikaro/go-to-wheel@f7939c6868e195204eae1370f899933e555513e3"
+
+      - name: Build wheel
+        run: |
+          python3 - <<'PY'
+          import os
+          import zipfile
+
+          import go_to_wheel as gtw
+
+          gtw.PLATFORM_MAPPINGS["linux-riscv64"] = ("linux", "riscv64", "manylinux_2_39_riscv64")
+
+          wheels = gtw.build_wheels(
+              ".",
+              name="mcp-grafana",
+              version=os.environ["MCP_GRAFANA_VERSION"],
+              package_path="./cmd/mcp-grafana",
+              platforms=["linux-riscv64"],
+              description="Grafana MCP server - interact with Grafana via the Model Context Protocol",
+              url="https://github.com/grafana/mcp-grafana",
+              license_="Apache-2.0",
+              readme="README.md",
+              output_dir="dist",
+          )
+
+          # go-to-wheel ships no LICENSE in dist-info; add it so the wheel carries
+          # upstream's licence (this repo requires that of every wheel it publishes).
+          wheel_path = wheels[0]
+          with zipfile.ZipFile(wheel_path) as whl:
+              entries = {name: whl.read(name) for name in whl.namelist()}
+          dist_info = next(n.split("/")[0] for n in entries if n.endswith(".dist-info/METADATA"))
+          record_name = f"{dist_info}/RECORD"
+          entries[f"{dist_info}/licenses/LICENSE"] = open("LICENSE", "rb").read()
+          entries[record_name] = b""
+          entries[record_name] = gtw.generate_record(entries).encode()
+
+          with zipfile.ZipFile(wheel_path, "w", zipfile.ZIP_DEFLATED) as whl:
+              for name, content in entries.items():
+                  info = zipfile.ZipInfo(name)
+                  if "/bin/" in name:
+                      info.external_attr = 0o755 << 16
+                  whl.writestr(info, content)
+          PY
+
+      - name: Verify the wheel ships the riscv64 mcp-grafana binary
+        run: |
+          python3 - dist/*.whl <<'EOF'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as zf:
+              names = zf.namelist()
+              print("\n".join(names))
+              assert sys.argv[1].endswith("-py3-none-manylinux_2_39_riscv64.whl"), sys.argv[1]
+              assert "mcp_grafana/bin/mcp-grafana" in names, names
+              licenses = sorted(n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n)
+              assert licenses == ["LICENSE"], licenses
+              header = zf.read("mcp_grafana/bin/mcp-grafana")[:20]
+              assert header[:4] == b"\x7fELF", header
+              assert header[18] == 0xF3, header  # e_machine EM_RISCV
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mcp-grafana-${{ env.MCP_GRAFANA_VERSION }}-py3-none-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test mcp-grafana ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 15
+    env:
+      MCP_GRAFANA_VERSION: ${{ matrix.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: mcp-grafana-${{ env.MCP_GRAFANA_VERSION }}-py3-none-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . mcp-grafana
+
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          [ "$(mcp-grafana --version)" = "v${MCP_GRAFANA_VERSION}" ]
+          mcp-grafana -h 2>&1 | grep -q -- '-transport'
+
+  publish:
+    name: Publish mcp-grafana ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: mcp-grafana-${{ matrix.version }}-py3-none-manylinux_riscv64
