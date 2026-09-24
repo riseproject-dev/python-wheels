@@ -20,6 +20,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
 - **292** — Gotcha 81's "diff the wheel `size` field" test can pass on a real per-arch binary
 - **295** — A require-extension knob that reaches the container correctly (gotcha 129's
 - **308** — A maturin shim whose star-import name collides with the compiled submodule's
+- **559** — A pure-Rust maturin project's top-level `__file__` never points at the `.so` —
 - **398** — Reproducing a `py3-none-<platform>` wheel takes an explicit retag — setuptools'
 - **457** — On cp314t our registry can hand a package a *compiled* dependency wheel where
 - **510** — A cffi *ABI-mode* payload keeps its `py3-none` tag through `auditwheel repair` —
@@ -394,6 +395,38 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
       9/56's standing advice) — `murmurhash2/__init__.py` +
       `murmurhash2/murmurhash2.abi3.so` next to each other names both the shim and the
       real extension before a single CI cycle is spent on the wrong probe.
+
+559. **A pure-Rust maturin project's top-level `__file__` never points at the `.so` — not
+    just when a name collides with gotcha 308's shim (the ruff-format case; see
+    `build-ruff-format.yml`).** Gotcha 308 covers a *collision*: the generated
+    `__init__.py`'s `from .<mod> import *` overwriting the submodule attribute with a
+    same-named exported function, which raises `AttributeError` on `.__file__`. A pure-Rust
+    maturin crate with no such collision fails the same probe more quietly: `import
+    ruff_format as m; m.__file__` resolves fine, but to the generated
+    `ruff_format/__init__.py` (a `.py` file) — `m.__file__.endswith('.so')` is just `False`,
+    no exception, easy to mistake for "the wheel shipped pure Python". maturin makes this
+    call from the checked-out file layout alone (`project_layout.rs`'s `determine()`: no
+    `<module>/__init__.py` next to `Cargo.toml` and no `[tool.maturin] python-source` means
+    "pure Rust", and `module_dir()`'s own doc comment says outright that the module dir it
+    returns *is* the generated package around the extension) — before it ever knows which
+    interpreter it's building for, so the same shim ships identically on an abi3 leg and a
+    free-threaded leg of the same crate. The build log's "Found type stub file at
+    `<mod>.pyi`" line is a red herring here too: it means a `.pyi` rides along inside that
+    generated package, not that the layout is somehow different because of it.
+    - **Use gotcha 308's `sys.modules` fix unconditionally for any pure-Rust maturin
+      project**, not only after a collision bites: `python -c "import <mod>, sys; assert
+      sys.modules['<mod>.<mod>'].__file__.endswith('.so')"`. Cheaper still, `unzip -l` on
+      the wheel shows the shim/extension pair (gotcha 9/56/308's standing advice) before
+      writing the probe at all.
+    - **Don't blame the interpreter for a per-leg failure until the sibling leg has
+      actually run.** `build-ruff-format.yml`'s first CI run showed the failure on
+      `cp314t` only — but that was gotcha 402's matrix collapse (the `include:`-only
+      `tag`/`build` keys folded both legs into one job), not evidence the smoke test was
+      somehow free-threading-specific: `cp38-abi3` had not run at all (absent from the job
+      list, not merely queued) and failed identically once the matrix fix let it run.
+      Check the run's job list against the declared legs before a diagnosis that starts
+      "only cp314t" — gotcha 402's own advice, worth repeating here because the two bugs
+      compounded in one PR.
 
 398. **Reproducing a `py3-none-<platform>` wheel takes an explicit retag — setuptools'
     `bdist_wheel` ignores `--python-tag` the moment `ext_modules` is non-empty (the
