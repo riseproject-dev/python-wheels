@@ -1,0 +1,88 @@
+---
+name: Build psutil wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'psutil version to build (git tag without leading v, e.g. 7.2.2)'
+        required: true
+        default: '7.2.2'
+  pull_request:
+    paths:
+      - '.github/workflows/build-psutil.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || '7.2.2' }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PSUTIL_VERSION: ${{ inputs.version || '7.2.2' }}
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_ONLY_BINARY: ':all:'
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  wheels:
+    name: "${{ matrix.os }}, ${{ matrix.arch }}${{ matrix.tag && format(' ({0})', matrix.tag) || '' }}"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60  # riscv64 runners are slower than upstream's other lanes; upstream's own is 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04-riscv, arch: riscv64, build: "*manylinux*", tag: manylinux }
+          - { os: ubuntu-24.04-riscv, arch: riscv64, build: "*musllinux*", tag: musllinux }
+    steps:
+      - name: Checkout psutil v${{ env.PSUTIL_VERSION }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: giampaolo/psutil
+          ref: v${{ env.PSUTIL_VERSION }}
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: "0.12.3"
+
+      # Not pypa/cibuildwheel: that action pip-installs itself from an
+      # sdist on every lane, which takes ~18 secs instead of ~5.
+      - name: Build wheels
+        shell: bash
+        run: uvx --from 'cibuildwheel==4.1.1' cibuildwheel --output-dir wheelhouse
+        env:
+          CIBW_ARCHS: "${{ matrix.arch }}"
+          CIBW_BUILD: "${{ matrix.build || '*' }}"
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.tag || 'all' }}
+          path: wheelhouse
+          compression-level: 0
+
+  publish:
+    name: Publish psutil ${{ inputs.version || '7.2.2' }} to GitLab
+    needs: [wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Publish wheels and open docs PR
+        uses: riseproject-dev/python-wheels/actions/publish-wheels@main
+        with:
+          artifact-pattern: wheels-*
+          gitlab-username: ${{ vars.GITLAB_DEPLOY_USER }}
+          gitlab-token: ${{ secrets.GITLAB_DEPLOY_TOKEN }}
+          gitlab-project-id: ${{ vars.GITLAB_PROJECT_ID }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
