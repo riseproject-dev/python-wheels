@@ -2,7 +2,12 @@
 # SPDX-License-Identifier: MIT
 ---
 # Based on the `build-wheels` job of
-# https://github.com/WorksApplications/sudachi.rs/blob/v0.6.11/.github/workflows/build-python-wheels.yml
+# https://github.com/WorksApplications/sudachi.rs/blob/v0.7.0/.github/workflows/build-python-wheels.yml
+# 0.7.0 switched the python/ build from setuptools-rust to maturin, whose
+# pyo3 dependency now enables the "abi3-py310" feature (python/Cargo.toml):
+# one cp310 wheel loads on every newer non-free-threaded CPython, so the
+# matrix collapses to it plus the separate free-threaded cp314t build
+# (CLAUDE.md gotcha 11), same shape as build-apache-tvm-ffi.yml.
 name: Build sudachipy wheels (riscv64)
 
 on:
@@ -52,8 +57,7 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        # No abi3: pyo3's abi3 feature isn't enabled in python/Cargo.toml.
-        python: ["cp312", "cp313", "cp314", "cp314t"]
+        python: ["cp310", "cp314t"]
         include:
           # tokenizers has no free-threaded wheel anywhere (abi3-only); its sdist
           # build is unproven here, so drop just the one test module that needs it.
@@ -84,12 +88,16 @@ jobs:
       - name: Build and test wheel
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
-          package-dir: python
+          package-dir: .
         env:
           CIBW_ARCHS: riscv64
           CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
           CIBW_SKIP: '*-musllinux_*'  # rustup.rs has no riscv64 musl toolchain
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # cibuildwheel's audit step needs a host `uv`, which the self-hosted
+          # runner doesn't have; override upstream's build-frontend = "build[uv]"
+          # (CLAUDE.md gotcha 13).
+          CIBW_BUILD_FRONTEND: build
           # No Rust in the manylinux image; install it and put cargo on PATH. Skips
           # upstream's PGO before-all (external corpus download + release build of
           # sudachi-cli), which would otherwise re-run once per matrix leg here.
@@ -102,7 +110,7 @@ jobs:
           # Upstream's own build_and_test.sh test command, run against {package}
           # (gotcha 5) since cibuildwheel tests from an empty scratch directory.
           CIBW_TEST_COMMAND: >-
-            bash -c "cd {package} && ${{ matrix.drop_pretokenizer_test }} python -m unittest discover -s tests -v"
+            bash -c "cd {package}/python && ${{ matrix.drop_pretokenizer_test }} python -m unittest discover -s tests -v"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
