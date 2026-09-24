@@ -1368,3 +1368,20 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
        `libc` and nothing else — which is also what lets you drop an upstream
        `before-script-linux` that installs `libssl-dev`/`openssl-devel` for an OpenSSL the tree
        never links.
+
+551. **A "`<tool>-format`"/"`<tool>` bindings" package's implied runtime dependency on
+     `<tool>` itself is not real when the binding is PyO3/maturin — check `Cargo.toml`, not
+     the package name, before treating `<tool>`'s own riscv64 status as a blocker
+     (`ruff-format` 0.5.4).** PyPI's summary for `ruff-format` reads "Python bindings for the
+     Ruff code formatter", which suggests it needs the `ruff` PyPI wheel at runtime and would
+     be gated on that wheel's own riscv64 availability. Its `Requires-Dist` is in fact empty:
+     `Cargo.toml` pulls `ruff_python_formatter`/`ruff_python_parser` as git dependencies
+     straight from `astral-sh/ruff.git`, and maturin compiles them directly into the wheel's
+     own `.so` — the same shape complexipy and chalkpy-rs independently hit pulling
+     `ruff_python_parser`/`ruff_python_ast` the same way. `ruff` the CLI/PyPI package never
+     enters the picture at build or run time, so its riscv64 status is irrelevant to this
+     port. The tell is the `[dependencies]` table itself (`git = "https://github.com/..."`
+     with no matching PyPI `Requires-Dist`), not the crate names inside it — a crate named
+     after another project is a compile-time source dependency, resolved and vendored by
+     Cargo at build time like any other crate, not a wheel-level Python dependency gotcha
+     40/249 would have you chase down.

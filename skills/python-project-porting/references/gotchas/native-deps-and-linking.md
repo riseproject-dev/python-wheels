@@ -41,6 +41,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
   QEMU `make` (the usd-core/OpenUSD case).
 - **547** — A vendored BoringSSL's generated assembly is self-guarded, so an architecture it
   does not list needs no `OPENSSL_NO_ASM`.
+- **550** — When the downloader's unknown-platform branch is a graceful PATH search rather
+  than a hard failure, gotcha 77's patch is unnecessary — just put the self-built binary
+  there (the shfmt-py case).
 ---
 
 16. **All-static BUNDLED build + a dep the project can't bundle = link failure.**
@@ -722,3 +725,32 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
        TLS backend through `couchbase.get_metadata()['openssl_runtime']`; asserting `BoringSSL`
        there in the test command proves the static library is genuinely linked in rather than
        the build having quietly fallen back to the image's OpenSSL.
+
+550. **When the downloader's unknown-platform branch is a graceful PATH search rather than
+     a hard failure, gotcha 77's patch is unnecessary — just put the self-built binary there
+     (the shfmt-py case).** shfmt-py vendors mvdan/sh's `shfmt` Go binary: `setup.py`'s
+     `fetch_binaries` command looks up `(sys.platform, platform.machine())` in a hardcoded
+     `POSTFIX_SHA256` table and downloads the matching GitHub release asset. riscv64 isn't a
+     key — mvdan/sh's own release process publishes no `linux_riscv64` asset for any version —
+     but unlike gotcha 77's ddtrace case (a `continue`/early-return that needs patching to
+     reach), the `KeyError` here is already caught by a `fall_back_to_path_shfmt()` the project
+     ships for its *own* unsupported platforms (FreeBSD, illumos): it `shutil.which("shfmt")`s
+     and copies whatever it finds. Building `shfmt` from source with the Go toolchain
+     (`CGO_ENABLED=0 GOOS=linux GOARCH=riscv64 go build ./cmd/shfmt` — Go's cross-compilation
+     needs no riscv64 host) and copying the result to `/usr/local/bin/shfmt` in
+     `CIBW_BEFORE_BUILD` exercises that existing fallback with **zero patches to setup.py**,
+     unlike s5cmd's sibling case (`patches/s5cmd/`) where the downloader had no such escape
+     hatch.
+     - **Read the `except`/fallback branch before reaching for a patch.** A downloader that
+       raises immediately on an unknown platform needs gotcha 77's treatment; one that already
+       degrades to a PATH search, a bundled system package, or a "build it yourself" branch
+       needs only a workflow step to satisfy that branch — check for this before patching.
+     - **This also means the port needs no maintenance once upstream ships riscv64**: the
+       instant `POSTFIX_SHA256` gets a real `("linux", "riscv64")` entry, `fetch_binaries` stops
+       raising and downloads it instead — nothing here to revert (goal 3 for free).
+     - **The version string still comes out right with no `-ldflags` stamping**, unlike
+       s5cmd's `peak/s5cmd` (which needs an explicit `-X .../version.Version=` because it has
+       no VCS stamping): `mvdan.cc/sh`'s `cmd/shfmt` reads
+       `debug.ReadBuildInfo().Main.Version`, and Go's automatic VCS stamping fills that in
+       correctly from a plain `actions/checkout` at the tag even with the default
+       `fetch-depth: 1` — verified locally against a shallow clone.

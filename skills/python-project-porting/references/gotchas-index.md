@@ -616,6 +616,12 @@ The porting gotchas (520 of them) live in [`references/gotchas/`](gotchas/), spl
   `cargo metadata --filter-platform` must also drop `{"dev"}`-only `dep_kinds` edges before the
   graph describes what the wheel builds — read unfiltered, it manufactures a ring/tokio-shaped
   blocker no `maturin build` ever reaches (the chonkie-core case).
+- **551** — A "`<tool>-format`"/"`<tool>` bindings" package's implied runtime dependency on
+  `<tool>` itself is not real when the binding is PyO3/maturin pulling the underlying crates as
+  git dependencies straight from upstream's own repo — check `Cargo.toml`'s `[dependencies]`
+  table for a `git = "https://github.com/..."` source with no matching PyPI `Requires-Dist`,
+  not the crate names, before treating the CLI tool's own riscv64 status as a blocker
+  (the ruff-format case).
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
@@ -866,6 +872,9 @@ The porting gotchas (520 of them) live in [`references/gotchas/`](gotchas/), spl
   self-guarded on `OPENSSL_X86_64`/`OPENSSL_AARCH64` and `crypto/` picks its portable C off the
   same macros — check `target.h` for `OPENSSL_RISCV64`, then assert the backend from the built
   wheel (the couchbase case).
+- **550** — When a vendored downloader's unknown-platform branch is a graceful PATH search
+  rather than a hard failure, gotcha 77's patch is unnecessary — build the binary yourself and
+  drop it on `PATH` in `CIBW_BEFORE_BUILD` (the shfmt-py case).
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 
