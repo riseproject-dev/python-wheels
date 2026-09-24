@@ -1,0 +1,105 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build_wheels` job of
+# https://github.com/posit-dev/multimark/blob/v0.3.2/.github/workflows/ci.yml
+name: Build multimark wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/multimark.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-multimark.yml'
+      - 'docs/packages/multimark.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-multimark.yml'
+      - 'docs/packages/multimark.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: multimark
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build multimark ${{ matrix.version }} cp39-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        libc: [manylinux, musllinux]
+
+    env:
+      MULTIMARK_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout multimark v${{ env.MULTIMARK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: posit-dev/multimark
+          ref: v${{ env.MULTIMARK_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: cp39-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: ${{ matrix.libc == 'manylinux' && 'yum install -y libffi-devel' || 'apk add libffi-dev' }}
+          # cffi, both a build-time and a runtime dependency, has a riscv64
+          # wheel on our registry for manylinux only; musllinux builds it from
+          # sdist against the libffi-dev installed above.
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: python -m pytest {project}/tests -x
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: multimark-${{ env.MULTIMARK_VERSION }}-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish multimark ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: multimark-${{ matrix.version }}-*riscv64
