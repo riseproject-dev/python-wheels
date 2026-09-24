@@ -59,25 +59,32 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        tag: [cp39-abi3, cp314t]
         include:
           # python_bindings/Cargo.toml hardcodes pyo3's abi3-py38 feature
           # unconditionally; the riscv64 manylinux image's oldest interpreter
           # is cp39 (no cp38), so patches/ bumps it to abi3-py39 -- gotcha 96.
           # Built on cp39 and re-tested on the newer ones via
           # find_compatible_wheel, matching upstream's own --find-interpreter.
+          #
+          # cp314t is dropped (gotcha 326): Cargo.lock pins pyo3 0.24.2,
+          # whose build script hard-errors "configured Python interpreter
+          # version (3.14) is newer than PyO3's maximum supported version
+          # (3.13)" for any non-abi3 (free-threaded) build -- confirmed on
+          # this repo's own first CI attempt, same error text as the pyrage
+          # precedent. Upstream's real free-threaded floor is cp313t
+          # (PyPI ships …-cp313-cp313t-… wheels, matching pyo3 0.24.2's
+          # exact ceiling), but the riscv64 image ships no cp313t at all
+          # (gotcha 96/11), so there is no interpreter that is both image-
+          # available and within this pinned pyo3's ceiling. Bumping pyo3
+          # would need bumping pyo3-async-runtimes/pythonize/numpy in step
+          # and is a source-level API migration, not a patch-worthy
+          # one-liner -- too invasive for this port (gotcha 326's pyrage
+          # precedent hit the identical wall).
           - tag: cp39-abi3
             build: >-
               cp39-manylinux_riscv64 cp310-manylinux_riscv64
               cp311-manylinux_riscv64 cp312-manylinux_riscv64
               cp313-manylinux_riscv64 cp314-manylinux_riscv64
-          # pyo3 disables abi3 under Py_GIL_DISABLED regardless of the
-          # feature above, so this is a per-interpreter wheel. Upstream's
-          # floor is cp313t; the riscv64 image ships no cp313t (cibuildwheel
-          # itself offers no cp313t build target on any platform either), so
-          # cp314t is the only free-threaded target here.
-          - tag: cp314t
-            build: cp314t-manylinux_riscv64
 
     env:
       BASETEN_PERFORMANCE_CLIENT_VERSION: ${{ matrix.version }}
@@ -122,11 +129,13 @@ jobs:
           CIBW_BEFORE_ALL_LINUX: >-
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
             dnf -y install perl
-          # CARGO_BUILD_JOBS=2 halves concurrent rustc processes: the two
-          # matrix legs compile this same dependency tree concurrently on
-          # shared/limited runner memory, and a first run SIGABRT'd
-          # (signal 6, "corrupted double-linked list") mid-futures-macro
-          # codegen on one leg while the other succeeded -- gotcha 228.
+          # CARGO_BUILD_JOBS=2 halves concurrent rustc processes on this
+          # runner's limited memory -- a first CI attempt (back when the
+          # matrix still had a second, concurrently-building cp314t leg,
+          # since dropped below) SIGABRT'd (signal 6, "corrupted
+          # double-linked list") mid-futures-macro codegen -- gotcha 228.
+          # Kept even with a single remaining leg: cheap insurance against
+          # the same OOM-driven abort on this dependency tree.
           CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin" CARGO_BUILD_JOBS=2
           CIBW_TEST_REQUIRES: pytest anyio
           # test-sources resolves against the checkout root, not package-dir.
