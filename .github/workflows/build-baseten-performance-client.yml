@@ -1,0 +1,177 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/basetenlabs/truss/blob/main/.github/workflows/build-maturin.yml
+name: Build baseten-performance-client wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/baseten-performance-client.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-baseten-performance-client.yml'
+      - 'docs/packages/baseten-performance-client.yaml'
+      - 'patches/baseten-performance-client/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-baseten-performance-client.yml'
+      - 'docs/packages/baseten-performance-client.yaml'
+      - 'patches/baseten-performance-client/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # basetenlabs/truss is a monorepo; each package release is a plain commit,
+  # never a git tag (baseten-performance-client's own release workflow only
+  # tags on request). This is the commit whose python_bindings/pyproject.toml
+  # reads 0.1.13, 15 minutes before the PyPI upload timestamp, and its
+  # Cargo.lock/python_bindings/src/lib.rs are byte-identical to the released
+  # sdist. Move it together with BASETEN_PERFORMANCE_CLIENT_VERSION.
+  BASETEN_PERFORMANCE_CLIENT_REF: a53b7a2a891d8df8fe12d5b35c2ea92c4497b171
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: baseten-performance-client
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build baseten-performance-client ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        include:
+          # python_bindings/Cargo.toml hardcodes pyo3's abi3-py38 feature
+          # unconditionally; the riscv64 manylinux image's oldest interpreter
+          # is cp39 (no cp38), so patches/ bumps it to abi3-py39 -- gotcha 96.
+          # Built on cp39 and re-tested on the newer ones via
+          # find_compatible_wheel, matching upstream's own --find-interpreter.
+          #
+          # cp314t is dropped (gotcha 326): Cargo.lock pins pyo3 0.24.2,
+          # whose build script hard-errors "configured Python interpreter
+          # version (3.14) is newer than PyO3's maximum supported version
+          # (3.13)" for any non-abi3 (free-threaded) build -- confirmed on
+          # this repo's own first CI attempt, same error text as the pyrage
+          # precedent. Upstream's real free-threaded floor is cp313t
+          # (PyPI ships …-cp313-cp313t-… wheels, matching pyo3 0.24.2's
+          # exact ceiling), but the riscv64 image ships no cp313t at all
+          # (gotcha 96/11), so there is no interpreter that is both image-
+          # available and within this pinned pyo3's ceiling. Bumping pyo3
+          # would need bumping pyo3-async-runtimes/pythonize/numpy in step
+          # and is a source-level API migration, not a patch-worthy
+          # one-liner -- too invasive for this port (gotcha 326's pyrage
+          # precedent hit the identical wall).
+          - tag: cp39-abi3
+            build: >-
+              cp39-manylinux_riscv64 cp310-manylinux_riscv64
+              cp311-manylinux_riscv64 cp312-manylinux_riscv64
+              cp313-manylinux_riscv64 cp314-manylinux_riscv64
+
+    env:
+      BASETEN_PERFORMANCE_CLIENT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout truss ${{ env.BASETEN_PERFORMANCE_CLIENT_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: basetenlabs/truss
+          ref: ${{ env.BASETEN_PERFORMANCE_CLIENT_REF }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch baseten-performance-client source
+        run: git apply python-wheels/patches/baseten-performance-client/${{ env.BASETEN_PERFORMANCE_CLIENT_VERSION }}/00*.patch
+
+      - name: Stage LICENSE beside python_bindings' pyproject.toml
+        # maturin globs LICEN[CS]E* relative to the pyproject directory,
+        # which is baseten-performance-client/python_bindings -- so
+        # upstream's published wheel carries no licence text at all.
+        run: cp LICENSE baseten-performance-client/python_bindings/LICENSE
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: baseten-performance-client/python_bindings
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # The crate's default features build both rustls (resolves to
+          # ring, no riscv64 issue) and native-tls, whose openssl-sys
+          # vendors and compiles OpenSSL from source. The image's minimal
+          # perl-interpreter lacks FindBin/Time::Piece, which Configure
+          # needs -- gotcha 46.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
+            dnf -y install perl
+          # CARGO_BUILD_JOBS=2 halves concurrent rustc processes on this
+          # runner's limited memory -- a first CI attempt (back when the
+          # matrix still had a second, concurrently-building cp314t leg,
+          # since dropped below) SIGABRT'd (signal 6, "corrupted
+          # double-linked list") mid-futures-macro codegen -- gotcha 228.
+          # Kept even with a single remaining leg: cheap insurance against
+          # the same OOM-driven abort on this dependency tree.
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin" CARGO_BUILD_JOBS=2
+          CIBW_TEST_REQUIRES: pytest anyio
+          # test-sources resolves against the checkout root, not package-dir.
+          CIBW_TEST_SOURCES: >-
+            baseten-performance-client/python_bindings/tests
+            baseten-performance-client/python_bindings/pyproject.toml
+          # A dummy key only satisfies PerformanceClient's local
+          # constructor validation (verified: the concurrency-settings
+          # tests raise before any request); every test that needs a real
+          # deployment self-skips on EMBEDDINGS_REACHABLE/RERANK_REACHABLE.
+          # test_methods.py exercises the HTTP verbs against httpbin.org.
+          CIBW_TEST_ENVIRONMENT: BASETEN_API_KEY=dummy
+          CIBW_TEST_COMMAND: >-
+            cd baseten-performance-client/python_bindings &&
+            python -c "import baseten_performance_client.baseten_performance_client as m; assert m.__file__.endswith('.so'), m.__file__" &&
+            python -m pytest -v tests/test_bindings.py tests/test_methods.py tests/test_client_embed.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: baseten-performance-client-${{ env.BASETEN_PERFORMANCE_CLIENT_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish baseten-performance-client ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: baseten-performance-client-${{ matrix.version }}-*-manylinux_riscv64
