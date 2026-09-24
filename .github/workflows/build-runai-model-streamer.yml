@@ -1,0 +1,314 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# This workflow is based on: https://github.com/run-ai/runai-model-streamer/blob/master/Makefile
+---
+name: Build runai-model-streamer wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/runai-model-streamer.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-runai-model-streamer.yml'
+      - 'docs/packages/runai-model-streamer.yaml'
+      - 'patches/runai-model-streamer/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-runai-model-streamer.yml'
+      - 'docs/packages/runai-model-streamer.yaml'
+      - 'patches/runai-model-streamer/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Upstream's own .bazelversion; bazelisk publishes no riscv64 binary, so it is
+  # bootstrapped from the dist archive instead.
+  BAZEL_VERSION: '7.6.1'
+  # Versions bazel 7.6.1's own MODULE.bazel pins; both need a riscv64 fix below.
+  RULES_PYTHON_VERSION: '0.33.2'
+  RULES_JAVA_VERSION: '7.6.5'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: runai-model-streamer
+      version: ${{ inputs.version }}
+
+  bazel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Bootstrap bazel (riscv64)
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+
+    steps:
+      - name: Restore bazel binary
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: bazel-bin
+          key: bazel-${{ env.BAZEL_VERSION }}-manylinux_riscv64
+
+      - name: Bootstrap bazel ${{ env.BAZEL_VERSION }}
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p bazel-bin
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e BAZEL_VERSION="${BAZEL_VERSION}" \
+            -e RULES_PYTHON_VERSION="${RULES_PYTHON_VERSION}" \
+            -e RULES_JAVA_VERSION="${RULES_JAVA_VERSION}" \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+
+          # rules_python 0.33.2's PLATFORMS has no riscv64 entry, aborting the bootstrap
+          # (bazelbuild/bazel#23018). Any linux entry is a safe stand-in: the toolchain it names
+          # is never selected on a riscv64 host. Fixed in bazel 8.2.0; the 7.x backport is open.
+          mkdir -p /tmp/rules_python
+          curl -fsSLo /tmp/rules_python.tar.gz "https://github.com/bazel-contrib/rules_python/releases/download/${RULES_PYTHON_VERSION}/rules_python-${RULES_PYTHON_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_python.tar.gz -C /tmp/rules_python --strip-components=1
+          sed -i 's|fail("No platform declared for host OS {} on arch {}".format(os_name, arch))|return "x86_64-unknown-linux-gnu"|' \
+            /tmp/rules_python/python/private/toolchains_repo.bzl
+
+          # rules_java 7.x maps riscv64 to a stray-colon include path, so libcpu_profiler.so
+          # can't find jni_md.h. Fixed in rules_java 8.x, never backported.
+          mkdir -p /tmp/rules_java
+          curl -fsSLo /tmp/rules_java.tar.gz "https://github.com/bazelbuild/rules_java/releases/download/${RULES_JAVA_VERSION}/rules_java-${RULES_JAVA_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_java.tar.gz -C /tmp/rules_java
+          sed -i 's|\[":include/linux"\]|["include/linux"]|g' /tmp/rules_java/toolchains/BUILD
+
+          mkdir -p /tmp/bazel-src
+          cd /tmp/bazel-src
+          curl -fsSLo dist.zip "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-dist.zip"
+          unzip -q dist.zip
+
+          EXTRA_BAZEL_ARGS="--tool_java_runtime_version=local_jdk \
+            --override_module=rules_python=/tmp/rules_python \
+            --override_module=rules_java=/tmp/rules_java" \
+            bash ./compile.sh
+          install -m 0755 output/bazel /work/bazel-bin/bazel
+          SCRIPT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin/bazel
+          if-no-files-found: error
+
+  build_wheel:
+    name: Build runai-model-streamer ${{ matrix.version }} py3-none-manylinux_riscv64
+    needs: [setup, bazel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      RUNAI_MODEL_STREAMER_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout runai-model-streamer ${{ env.RUNAI_MODEL_STREAMER_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: run-ai/runai-model-streamer
+          ref: ${{ env.RUNAI_MODEL_STREAMER_VERSION }}
+          path: runai-model-streamer
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch runai-model-streamer source
+        working-directory: runai-model-streamer
+        run: git apply -v ../python-wheels/patches/runai-model-streamer/${{ env.RUNAI_MODEL_STREAMER_VERSION }}/*.patch
+
+      - name: Download bazel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin
+
+      - name: Build the C++ streamer library and package the wheel
+        run: |
+          mkdir -p dist
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work/runai-model-streamer \
+            -e PACKAGE_VERSION="${RUNAI_MODEL_STREAMER_VERSION}" \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False java-21-openjdk-devel
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+          install -m 0755 /work/bazel-bin/bazel /usr/local/bin/bazel
+          git config --global --add safe.directory '*'
+
+          cd cpp
+          bazel build streamer:libstreamer.so --config=riscv64
+
+          cd ../py/runai_model_streamer
+          /opt/python/cp312-cp312/bin/pip install -q wheel
+          /opt/python/cp312-cp312/bin/python setup.py bdist_wheel --plat-name manylinux2014_riscv64
+          cp dist/*.whl /work/dist/
+          SCRIPT
+
+      - name: Verify the wheel ships a riscv64 shared object
+        run: |
+          python3 - dist/*.whl <<'EOF'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as zf:
+              names = zf.namelist()
+              so = next(n for n in names if n.endswith("libstreamer/lib/libstreamer.so"))
+              header = zf.read(so)[:20]
+              assert header[:4] == b"\x7fELF", header
+              assert header[18] == 0xF3, header  # EM_RISCV
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: runai-model-streamer-${{ matrix.version }}-py3-none-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test runai-model-streamer ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14']
+
+    env:
+      RUNAI_MODEL_STREAMER_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout runai-model-streamer ${{ env.RUNAI_MODEL_STREAMER_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: run-ai/runai-model-streamer
+          ref: ${{ env.RUNAI_MODEL_STREAMER_VERSION }}
+          path: runai-model-streamer
+          persist-credentials: false
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: runai-model-streamer-${{ env.RUNAI_MODEL_STREAMER_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install the wheel and upstream's test dependencies
+        env:
+          UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+          UV_INDEX_STRATEGY: unsafe-best-match
+        run: uv pip install -r runai-model-streamer/py/runai_model_streamer/requirements.dev wheelhouse/*.whl
+
+      # setup.py's package_data ships libstreamer.so alone; upstream's own dev
+      # fixtures for the mocked object-storage tests are never part of the
+      # wheel, so they are copied in from the checkout before running them.
+      - name: Stage upstream's test fixtures into the installed package
+        run: |
+          site="$(python -c 'import runai_model_streamer, os; print(os.path.dirname(runai_model_streamer.__file__))')"
+          cp -r runai-model-streamer/py/runai_model_streamer/runai_model_streamer/safetensors_streamer/tests/test_files \
+            "$site/safetensors_streamer/tests/"
+
+      # Run from the installed package's own parent directory so this exercises the
+      # wheel's copy, not the checkout's, matching upstream's `make -C py test-unit-real`
+      # (minus test-dist, which needs a multi-node torchrun harness).
+      - name: Run upstream's tests against the installed wheel
+        run: |
+          site="$(python -c 'import runai_model_streamer, os; print(os.path.dirname(os.path.dirname(runai_model_streamer.__file__)))')"
+          cd "$site"
+          python -m unittest discover -b runai_model_streamer
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources for runai-model-streamer ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      RUNAI_MODEL_STREAMER_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: runai-model-streamer-${{ env.RUNAI_MODEL_STREAMER_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish runai-model-streamer ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: runai-model-streamer-${{ matrix.version }}-py3-none-manylinux_riscv64
+      gpl-sources-artifact: runai-model-streamer-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
