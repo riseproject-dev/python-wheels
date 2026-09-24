@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 21 Sep 2026 00:43:31 +0000
+Subject: [PATCH] fix: read code.co_qualname only where it exists (CPython >=
+ 3.11)
+
+`_find_exposure_callsite` reads `frame.f_code.co_qualname` unconditionally, but
+that attribute was added in CPython 3.11, while this package declares
+`requires-python = ">=3.10"` and ships a single `pyo3/abi3-py310` wheel. On
+CPython 3.10 the access raises `AttributeError: 'code' object has no attribute
+'co_qualname'`; `ErrorBoundary.wrap` swallows it, prints "Statsig SDK Error
+(Python Bindings): _find_exposure_callsite", and returns None, so
+`_get_exposure_callsite_metadata` falls back to its "unknown" branch and every
+exposure event gets `exposure_source_file`/`exposure_source_function` of
+"unknown" and a null `exposure_source_line`. Callsite logging is therefore
+silently dead on the oldest interpreter the wheel supports, and the two
+`test_exposure_logging.py` callsite tests fail.
+
+This is not architecture-specific: against upstream's own published
+oai_statsig_python_core-0.29.0-cp310-abi3-manylinux_2_17_x86_64 wheel, both
+tests fail on x86_64 under CPython 3.10 with the identical assertion and
+warning, and both pass under 3.11. Our riscv64 CI sees it because the abi3
+wheel is built and tested with cp310, the lowest supported interpreter.
+
+Fall back to `co_name`, which every supported version has. For a module-level
+function the two are identical; for a method `co_name` loses the enclosing
+class prefix, which is a far better result on 3.10 than "unknown".
+
+Upstream-Status: To upstream [not yet submitted; the release is cut from a non-public tree -- public statsig-server-core stops at 0.23.0, which predates this callsite code entirely -- so this needs a maintainer discussion rather than a drive-by PR]
+---
+ py_src/statsig_python_core/statsig.py | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/py_src/statsig_python_core/statsig.py b/py_src/statsig_python_core/statsig.py
+index 26b3e7a..d7cf090 100644
+--- a/py_src/statsig_python_core/statsig.py
++++ b/py_src/statsig_python_core/statsig.py
+@@ -287,9 +287,11 @@ class Statsig(StatsigBasePy):
+             while frame is not None:
+                 module_name = frame.f_globals.get("__name__", "")
+                 if not self._is_exposure_callsite_module_ignored(module_name):
++                    code = frame.f_code
++                    # code.co_qualname is CPython >= 3.11; this package supports 3.10.
+                     return (
+-                        Path(frame.f_code.co_filename).name,
+-                        frame.f_code.co_qualname,
++                        Path(code.co_filename).name,
++                        getattr(code, "co_qualname", code.co_name),
+                         frame.f_lineno,
+                     )
+                 frame = frame.f_back
