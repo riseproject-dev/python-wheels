@@ -912,6 +912,7 @@ The porting gotchas (546 of them) live in [`references/gotchas/`](gotchas/), spl
 - **292** — Gotcha 81's "diff the wheel `size` field" test can pass on a real per-arch binary
 - **295** — A require-extension knob that reaches the container correctly (gotcha 129's
 - **308** — A maturin shim whose star-import name collides with the compiled submodule's
+- **558** — A pure-Rust maturin project's top-level `__file__` never points at the `.so` —
 - **398** — Reproducing a `py3-none-<platform>` wheel takes an explicit retag — setuptools'
 - **457** — On cp314t our registry can hand a package a *compiled* dependency wheel where
 - **510** — A cffi *ABI-mode* payload keeps its `py3-none` tag through `auditwheel repair` —
