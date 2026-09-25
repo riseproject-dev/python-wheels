@@ -134,10 +134,11 @@ def main():
     if error_found:
         print("Valid formats:")
         for key, value in valid_statuses.items():
-            print(f"  - Upstream-Status: {key} {value["hint"]}")
-            print(
-                f"    {value["hint"]}: {value["description"]} {'(mandatory)' if value["mandatory"] else ''}"
-            )
+            hint = value["hint"]
+            description = value["description"]
+            mandatory = "(mandatory)" if value["mandatory"] else ""
+            print(f"  - Upstream-Status: {key} {hint}")
+            print(f"    {hint}: {description} {mandatory}")
         sys.exit(1)
     sys.exit(0)
 

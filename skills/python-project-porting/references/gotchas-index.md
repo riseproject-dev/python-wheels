@@ -1193,6 +1193,14 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
   on `sys.version_info`, don't skip the test. Also: a cache key over a whole patches
   directory pays a rebuild for changes the cached step can't have read from — key it on only
   the files that step actually applies.
+- **571** — A test that hangs only on free-threaded CPython (cp314t), intermittently, and
+  only on some releases of the same package (awscrt's `test_stream_lives_until_complete_*`,
+  0.36.3/0.36.4) is a deferred-object-freeing race in the test, not a riscv64 bug: freeing an
+  object whose last reference was dropped on a native thread is deferred under free-threading
+  until some thread next runs Python bytecode, so a test that drops the reference then
+  immediately blocks the main thread on that object's side effect (a socket it owns closing)
+  can deadlock forever. Fix the test to wait for the object to actually free before blocking;
+  don't drop cp314t from the matrix — free-threading support is real in these releases.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 

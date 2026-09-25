@@ -73,6 +73,13 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
   expected value on `sys.version_info`, don't skip the test. Plus: a cache key over a whole
   patches directory rebuilds on changes it can't have affected — key it on only the files
   the cached step reads.
+- **571** — On free-threaded CPython (cp314t), an object whose last reference is dropped on
+  a native (non-Python) thread isn't freed there and then — freeing is deferred to whichever
+  thread next runs Python bytecode. A test that drops the last reference on a native
+  callback thread and then blocks the main thread in a call that only returns once that
+  object is freed (e.g. waiting for a socket the object still owns to close) can deadlock
+  forever under free-threading while working fine under the GIL, intermittently, because it
+  depends on which thread gets there first (awscrt's `test_stream_lives_until_complete_*`).
 
 ---
 
@@ -1399,3 +1406,33 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       change (itself paying one last rebuild, since the key differs from every prior
       round's), but every purely wheel-side iteration after it hits the cache instead of
       repeating the ~24h build.
+
+571. **A test that hangs only on free-threaded CPython (cp314t), intermittently, and only
+    on some releases of the same package, is a deferred-object-freeing race in the test
+    itself, not a riscv64 or version regression (awscrt's
+    `test_stream_lives_until_complete_http`/`..._async_http`/`..._https`/`..._async_https`,
+    seen hanging on 0.36.3 and 0.36.4's cp314t legs, never on the same versions' other
+    interpreters, and not on every run).** Each test drops its last reference to an HTTP
+    stream object, then calls the local test server's `shutdown()`, which blocks until the
+    client socket closes — and that socket only closes when the stream object (which owns
+    it) is freed. Under the GIL, dropping the last reference on awscrt's native completion-
+    callback thread frees the object immediately, right there, on that thread. Under
+    free-threading, CPython instead *defers* freeing an object whose last reference was
+    dropped on a thread that isn't currently running Python bytecode — the free only
+    happens the next time some thread runs Python code and processes the deferred-free
+    queue. If the main thread is already blocked inside `shutdown()` when this happens,
+    nothing is left running Python code to process the queue, so the object is never freed,
+    the socket never closes, and `shutdown()` blocks forever. Whether it hangs depends on
+    which thread reaches its blocking point first, which is why it reproduces intermittently
+    and moved between package versions rather than being tied to one release. Confirmed with
+    a minimal reproducer against upstream's own published wheel (hangs 3/3 on cp314t, returns
+    in <1s 3/3 on cp314) and by patching the same deferred-free wait into a standalone repro
+    (0/3 hangs after). Fix: patch the test to keep a weak reference to the stream and poll
+    until it is actually freed (bounded by the test's own timeout) *before* calling
+    `shutdown()`, rather than dropping the reference and immediately blocking on its side
+    effect — `Upstream-Status: To upstream`, since this is a latent bug in the test itself
+    that would eventually hang on any free-threaded build, not something riscv64-specific.
+    Do not "fix" this by dropping cp314t from the affected version's matrix: free-threading
+    support is real in these releases (it shipped in awscrt v0.32.0, with a related race fix
+    in v0.33.0), so excluding the interpreter would hide a genuine, reportable upstream bug
+    behind a riscv64-only workaround instead of fixing the actual race.
