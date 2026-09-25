@@ -1187,6 +1187,12 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
   is free-threading's per-object overhead tipping an existing margin on a shared riscv64
   runner (awscrt 0.37.0's `test_appexit`) — patch the timeout with headroom, don't skip the
   test that proves the extension doesn't crash the interpreter on exit.
+- **570** — A hardcoded `sys.getrefcount()` baseline is an interpreter-version contract, not
+  a fixed constant — CPython 3.14's `LOAD_FAST_BORROW` optimization lowers it by one per
+  affected call site (stpyv8's `testReferenceCount`, cp314 only) — branch the expected value
+  on `sys.version_info`, don't skip the test. Also: a cache key over a whole patches
+  directory pays a rebuild for changes the cached step can't have read from — key it on only
+  the files that step actually applies.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 

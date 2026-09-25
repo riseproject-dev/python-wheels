@@ -68,6 +68,11 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
   only on one version, with byte-identical test source across versions, is free-threading
   tipping an existing margin, not a new bug — patch the timeout with real headroom rather
   than skip the test.
+- **570** — A hardcoded `sys.getrefcount()` baseline is an interpreter-version contract:
+  CPython 3.14's `LOAD_FAST_BORROW` can lower it by one per affected call site — branch the
+  expected value on `sys.version_info`, don't skip the test. Plus: a cache key over a whole
+  patches directory rebuilds on changes it can't have affected — key it on only the files
+  the cached step reads.
 
 ---
 
@@ -1365,3 +1370,32 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       whose per-object atomic refcounting adds measurable overhead to native-callback-into-
       Python teardown chains like this one — comfortable room, and it still fails well
       inside the job's own timeout if the shutdown genuinely never completes.
+
+570. **A hardcoded `sys.getrefcount()` baseline in a test is an interpreter-version
+    contract, not a fixed constant — CPython 3.14's `LOAD_FAST_BORROW` optimization can
+    lower it by exactly one per affected call site (stpyv8 13.1.201.22's
+    `test_Wrapper.py::TestWrapper::testReferenceCount`, cp314 only).** The test hardcodes
+    expected `sys.getrefcount(obj)` values of 2 and 4 at two call sites. CPython 3.14 added
+    a `LOAD_FAST_BORROW` bytecode that skips the incref a call argument used to take
+    whenever the compiler can prove the local's frame slot still owns the reference
+    afterward — true at both sites here, since `obj` is read again later in the function —
+    so both baselines are one lower on 3.14+ than on cp312/cp313, which still emit the old
+    `LOAD_FAST`. This is a documented, interpreter-wide behavior change (also hit by e.g.
+    root-project/root#18988 and pandas-dev/pandas#61368), not anything specific to this
+    package or to riscv64. Fix: branch the expected baseline on
+    `sys.version_info >= (3, 14)` rather than skipping or patching away the assertion —
+    the test still proves the same refcounting invariant on every interpreter, just with
+    the version-correct expected value.
+    - **A second, unrelated lesson from the same round: a cache key over a whole directory
+      is only as precise as the files that actually affect the cached artifact.** This
+      port's `build_v8` job caches the ~23h V8 monolith build keyed on
+      `hashFiles(patches/stpyv8/**)`, but three of its patches (0001-0003) touch the
+      `checkout_v8`/`build_v8` steps while the rest (settings.py's link line, the test
+      suite) are read only by `build_wheel`, which `--skip-build-v8` never reaches. Keying
+      on the whole `patches/stpyv8/**` glob meant a wheel-only or test-only patch — like
+      this round's baseline fix — changed the key and forced a full V8 rebuild it could
+      never have affected. Narrowing the `hashFiles()` glob to just the patches a given
+      cached step actually reads (0001-0003, not `**`) is a one-time cache-key-format
+      change (itself paying one last rebuild, since the key differs from every prior
+      round's), but every purely wheel-side iteration after it hits the cache instead of
+      repeating the ~24h build.
