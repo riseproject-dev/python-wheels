@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# Restates upstream's HATCH_BUILD_HOOK_ENABLE_MYPYC=1 alongside our registry,
+# needed because the hook's own "cryptography" build dependency has no riscv64
+# wheel on public PyPI. mypy>=1.20 makes the compiled ContentStream.__init__
+# reject a bytearray where the released x86_64/aarch64 wheels accept one, so
+# CIBW_BEFORE_BUILD pins the newest mypy release predating playa-pdf 1.1.0.
+name: Build playa-pdf wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/playa-pdf.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-playa-pdf.yml'
+      - 'docs/packages/playa-pdf.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-playa-pdf.yml'
+      - 'docs/packages/playa-pdf.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: playa-pdf
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build playa-pdf ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # mypyc emits per-interpreter (non-abi3) wheels; upstream ships cp314t too.
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      PLAYA_PDF_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout playa v${{ env.PLAYA_PDF_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: dhdaines/playa
+          ref: v${{ env.PLAYA_PDF_VERSION }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
+          CIBW_BEFORE_BUILD: pip install "hatchling>=1.27.0" hatch-vcs hatch-mypyc "mypy==1.19.1" cryptography
+          CIBW_ENVIRONMENT: >-
+            HATCH_BUILD_HOOK_ENABLE_MYPYC=1
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_SOURCES: tests samples pyproject.toml
+          CIBW_TEST_REQUIRES: pytest cryptography pdfminer.six
+          CIBW_TEST_COMMAND: >-
+            python -c "import playa.parser as m; assert m.__file__.endswith('.so'), 'wheel is not compiled'"
+            && python -m pytest tests -v
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: playa-pdf-${{ env.PLAYA_PDF_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish playa-pdf ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: playa-pdf-${{ matrix.version }}-*-manylinux_riscv64
