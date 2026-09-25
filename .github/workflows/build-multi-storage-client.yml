@@ -1,0 +1,137 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `multi-storage-client` job of
+# https://github.com/NVIDIA/multi-storage-client/blob/1.0.1/.github/workflows/.source.yml
+name: Build multi-storage-client wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/multi-storage-client.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-multi-storage-client.yml'
+      - 'docs/packages/multi-storage-client.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-multi-storage-client.yml'
+      - 'docs/packages/multi-storage-client.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: multi-storage-client
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build multi-storage-client ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      MULTI_STORAGE_CLIENT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout multi-storage-client ${{ env.MULTI_STORAGE_CLIENT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: NVIDIA/multi-storage-client
+          ref: ${{ env.MULTI_STORAGE_CLIENT_VERSION }}
+          persist-credentials: false
+
+      - name: Stage LICENSE beside multi-storage-client's pyproject.toml
+        # maturin globs LICEN[CS]E* relative to the pyproject directory, which
+        # is multi-storage-client/ -- upstream's published wheel carries no
+        # licence text at all.
+        run: cp LICENSE multi-storage-client/LICENSE
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: multi-storage-client
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # multi-storage-client ships no [tool.cibuildwheel]; the Rust
+          # toolchain its maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest pytest-asyncio boto3
+          # test-sources resolves against the checkout root, not package-dir.
+          CIBW_TEST_SOURCES: >-
+            multi-storage-client/tests
+            multi-storage-client/pyproject.toml
+          # The Rust client's own tests and the cloud-provider tests need a
+          # local S3-compatible gateway (versitygw) or real cloud credentials
+          # that CI has neither of, so this runs the provider-agnostic and
+          # POSIX/mocked-S3 slice of the suite instead.
+          CIBW_TEST_COMMAND: >-
+            cd multi-storage-client &&
+            python -c "import multistorageclient_rust as m; assert m.__file__.endswith('.so'), m.__file__" &&
+            python -m pytest -v
+            tests/test_multistorageclient/unit/providers/test_base_storage_provider.py
+            tests/test_multistorageclient/unit/providers/test_file_credentials_provider.py
+            tests/test_multistorageclient/unit/providers/test_manifest_formats.py
+            tests/test_multistorageclient/unit/providers/test_manifest_metadata.py
+            tests/test_multistorageclient/unit/providers/test_metadata_rewrite.py
+            tests/test_multistorageclient/unit/providers/test_outdated_storage_providers.py
+            tests/test_multistorageclient/unit/providers/test_posix_file.py
+            tests/test_multistorageclient/unit/providers/test_symlinks.py
+            tests/test_multistorageclient/unit/providers/test_s3_checksum_algorithm.py
+            tests/test_multistorageclient/unit/providers/test_s3_error_translation.py
+            tests/test_multistorageclient/unit/client
+            tests/test_multistorageclient/unit/generators
+            -k "not AWSS3 and not SwiftStack and not GoogleCloudStorage and not AzureBlobStorage and not AIStore and not to_s3_to_posix"
+            --import-mode=importlib
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: multi-storage-client-${{ env.MULTI_STORAGE_CLIENT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish multi-storage-client ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: multi-storage-client-${{ matrix.version }}-*-manylinux_riscv64
