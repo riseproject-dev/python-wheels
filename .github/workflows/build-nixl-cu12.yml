@@ -1,0 +1,175 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build:
+#   https://github.com/ai-dynamo/nixl/blob/v1.4.0/contrib/build-wheel.sh
+#   https://github.com/ai-dynamo/nixl/blob/v1.4.0/contrib/Dockerfile.manylinux
+name: Build nixl-cu12 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/nixl-cu12.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-nixl-cu12.yml'
+      - 'docs/packages/nixl-cu12.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-nixl-cu12.yml'
+      - 'docs/packages/nixl-cu12.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  UCX_REF: v1.22.0
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: nixl-cu12
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build nixl-cu12 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: [cp312, cp313, cp314, cp314t]
+
+    env:
+      NIXL_CU12_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout ai-dynamo/nixl v${{ env.NIXL_CU12_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ai-dynamo/nixl
+          ref: v${{ env.NIXL_CU12_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch nixl source
+        run: |
+          git apply python-wheels/patches/nixl-cu12/${{ env.NIXL_CU12_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream's UCX build minus --with-cuda: there is no riscv64 CUDA toolkit, so meson builds the CPU-only backends.
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf install -y --enablerepo=crb autoconf automake libtool make ninja-build
+            libaio-devel numactl-devel rdma-core-devel &&
+            git clone --depth 1 --branch ${{ env.UCX_REF }} https://github.com/openucx/ucx.git /tmp/ucx &&
+            cd /tmp/ucx &&
+            ./autogen.sh &&
+            ./contrib/configure-release-mt --prefix=/usr --libdir=/usr/lib64
+            --enable-shared --disable-static --disable-doxygen-doc --enable-experimental-api
+            --enable-optimizations --enable-cma --enable-devel-headers --with-verbs --with-dm
+            --without-gdrcopy --with-efa --without-dc --without-rdmacm --without-gga &&
+            make -j"$(nproc)" &&
+            make -j"$(nproc)" install-strip &&
+            ldconfig
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          CIBW_BEFORE_BUILD: >-
+            pip install meson meson-python pybind11 patchelf pyyaml types-PyYAML 'setuptools>=80.9.0'
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
+            auditwheel repair
+            --exclude 'libcuda*' --exclude 'libcufile*' --exclude 'libssl*' --exclude 'libcrypto*'
+            --exclude 'libefa*' --exclude 'libhwloc*' --exclude 'libfabric*' --exclude 'libtorch*'
+            --exclude 'libc10*' --exclude 'libdoca*' --exclude 'libred_client*' --exclude 'libred_async*'
+            --exclude 'liblz4*'
+            -w {dest_dir} {wheel} &&
+            python {project}/contrib/wheel_add_ucx_plugins.py --ucx-plugins-dir /usr/lib64/ucx
+            --skip-nixl-plugins {dest_dir}/*.whl
+          CIBW_BEFORE_TEST: pip install --no-deps nixl==${{ env.NIXL_CU12_VERSION }}
+          CIBW_TEST_REQUIRES: pytest pytest-timeout
+          CIBW_TEST_SOURCES: test
+          CIBW_TEST_ENVIRONMENT: >-
+            UCX_TLS=^shm
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=:all:
+          CIBW_TEST_COMMAND: pytest -s test/python
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: nixl-cu12-${{ env.NIXL_CU12_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Collect GPL sources for nixl-cu12 ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      NIXL_CU12_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: libaio
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: nixl-cu12-${{ env.NIXL_CU12_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish nixl-cu12 ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: nixl-cu12-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: nixl-cu12-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: the copyleft libraries bundled in the wheel
