@@ -261,6 +261,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **581** — A `-nightly`/`-weekly`/dev-only distribution (date-stamped `.devN` versions, no tag,
   no sdist, pruned from PyPI, skipped by `check_versions.py`) is not a portable release — park it
   and point at the stable sibling, which carries the real verdict (the tf-nightly case).
+- **582** — An "Apache-2.0" ctypes wrapper can be a thin shell over a closed-source vendor C
+  SDK: read the licence file shipped *inside* the wheel and the vendor's SDK tarball, not the
+  PyPI licence field (the solace-pubsubplus case).
 
 ---
 
@@ -4711,3 +4714,33 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     `ls-remote` shows no matching tag → park with "port `<stable>` instead". If the stable
     package is parked too, the nightly takes its reason plus this one. Never let a nightly
     be a project's first riscv64 port.
+
+582. **An "Apache-2.0" ctypes wrapper can be a thin shell over a closed-source vendor C SDK —
+    the PyPI licence field describes only the wrapper; read the licence file shipped *inside*
+    the wheel and the vendor's own SDK tarball (the solace-pubsubplus case).** solace-pubsubplus
+    1.11.0 has no sdist and no public source repo (PyPI's only URL is a docs page). Its six
+    wheels are `py36-none-<platform>`: `py36` is just a hand-set `python_tag`, so gotcha
+    27/35's reading of `py3-none-*` applies unchanged. PyPI metadata says
+    `License :: OSI Approved :: Apache Software License`, and the dist-info `LICENSE.txt` and
+    `NOTICE.txt` agree. That is true only of the 157 `.py` files. The payload that matters is
+    `solace/messaging/lib/linux-<arch>/libsolclient.so` (6.7 MB, the bulk of the
+    unpacked wheel), which `core/_solace_session.py` opens with `cdll.LoadLibrary`. It is Solace's
+    CCSMP C API. Two cheap checks settle it with no build attempt:
+    - **The in-wheel third-party licence file names the real terms.** `solace/licenses.txt`
+      lists the bundled OSS (c-ares, OpenSSL, zlib, ...) *and* a `Solace` section, the
+      "SOLACE API LICENSE AGREEMENT", whose §1.2.4 forbids attempts to "derive the source
+      code version of any API software provided in object code form". A clause like that is
+      proof the vendor publishes no source. No amount of searching GitHub will find one.
+      Grep every `licenses.txt`/`THIRD-PARTY*`/`NOTICE*` in the wheel for `reverse
+      engineer`/`object code`/`proprietary` before trusting the classifier.
+    - **The vendor's SDK download is the platform table** (a fourth source beside gotcha
+      157's three). The download page's slugs (`products.solace.com/download/C_API_{LINUX32,
+      LINUX64,ARM,MUSL,OSX,IOS,VS2015,RN}`) contain zero `riscv`. The `C_API_ARM` tarball
+      (`solclient-7.33.2.3`) holds `include/solclient/*.h`, prebuilt `lib/libsolclient.{so,a}`
+      and a few `Intro/*.c` samples: headers, binaries and examples, nothing to compile.
+    The loader first tries `ctypes.util.find_library('solclient')` (from `LD_LIBRARY_PATH`)
+    before the bundled copy. That hook would let a user plug in a riscv64 `libsolclient` if
+    one existed. None does, so the category is `vendored-binary` (gotcha 183) with no
+    fallback: installable nowhere on riscv64 (no sdist, no `-any` wheel) and non-functional
+    even if repackaged. Park it, and name the in-wheel licence clause and the SDK platform
+    list in the note so a later triage does not repeat the search for source.

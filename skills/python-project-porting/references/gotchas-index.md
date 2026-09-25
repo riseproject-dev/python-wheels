@@ -407,6 +407,9 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
   recoverable commit, no sdist, pruned from PyPI, skipped by `check_versions.py`) is not a
   portable release target — park it and point at its stable sibling, which carries the real
   feasibility verdict (the tf-nightly case).
+- **582** — An "Apache-2.0" ctypes wrapper can be a thin shell over a closed-source vendor C
+  SDK: read the licence file shipped *inside* the wheel and the vendor's SDK tarball, not the
+  PyPI licence field (the solace-pubsubplus case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
