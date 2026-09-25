@@ -65,11 +65,24 @@ jobs:
       SEMGREP_VERSION: ${{ matrix.version }}
 
     steps:
+      # Some semgrep patch releases (e.g. 1.175.1, 1.176.1) are republished under a
+      # bumped version with no corresponding git tag; fall back to the same
+      # major.minor's .0 tag, which their sdists are byte-identical to otherwise.
+      - name: Resolve upstream ref for v${{ env.SEMGREP_VERSION }}
+        id: upstream_ref
+        run: |
+          if git ls-remote --exit-code --tags https://github.com/semgrep/semgrep "refs/tags/v${SEMGREP_VERSION}" >/dev/null; then
+            ref="v${SEMGREP_VERSION}"
+          else
+            ref="v${SEMGREP_VERSION%.*}.0"
+          fi
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+
       - name: Checkout semgrep v${{ env.SEMGREP_VERSION }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: semgrep/semgrep
-          ref: v${{ env.SEMGREP_VERSION }}
+          ref: ${{ steps.upstream_ref.outputs.ref }}
           submodules: true
           persist-credentials: false
 
@@ -81,6 +94,48 @@ jobs:
 
       - name: Apply riscv64 patches
         run: git apply -v python-wheels/patches/semgrep/${{ env.SEMGREP_VERSION }}/*.patch
+
+      # v1.177.0's own tag has ~35 languages/*/tree-sitter/*/lib/parser.c files checked in
+      # as literal Git LFS pointer stubs instead of their generated content -- a real
+      # upstream bug from squash-merging the per-language submodules into the main tree
+      # without resolving their LFS objects first (fixed again in v1.178.0). No `lfs: true`
+      # fixes this: the tag's own .gitattributes never marks these paths for LFS, so a
+      # correct checkout produces exactly this pointer text. See CLAUDE.md gotcha 569.
+      # No-op (and harmless) for every version but 1.177.0, which is the only one with a
+      # fixups manifest.
+      - name: Repair upstream Git LFS pointer stubs
+        shell: bash
+        run: |
+          set -eu
+          manifest="python-wheels/patches/semgrep/${SEMGREP_VERSION}/lfs-pointer-fixups.tsv"
+          if [ ! -f "$manifest" ]; then
+            echo "No LFS pointer fixups listed for ${SEMGREP_VERSION}; nothing to repair."
+            exit 0
+          fi
+          while IFS=$'\t' read -r path org repo commit rel; do
+            case "$path" in ''|'#'*) continue ;; esac
+            first_line=$(head -n1 "$path")
+            if [ "$first_line" != "version https://git-lfs.github.com/spec/v1" ]; then
+              echo "skip $path: no longer an LFS pointer stub"
+              continue
+            fi
+            oid=$(sed -n 's/^oid sha256://p' "$path" | head -n1)
+            size=$(sed -n 's/^size //p' "$path" | head -n1)
+            echo "Repairing $path from $org/$repo@$commit:$rel (want sha256=$oid size=$size)"
+            curl -fsSL "https://raw.githubusercontent.com/$org/$repo/$commit/$rel" -o "$path.real"
+            actual_size=$(wc -c <"$path.real")
+            actual_oid=$(sha256sum "$path.real" | cut -d' ' -f1)
+            if [ "$actual_oid" != "$oid" ] || [ "$actual_size" != "$size" ]; then
+              echo "::error::LFS pointer repair mismatch for $path: expected sha256=$oid size=$size, got sha256=$actual_oid size=$actual_size"
+              exit 1
+            fi
+            mv "$path.real" "$path"
+          done < "$manifest"
+
+      - name: Stamp package version
+        run: |
+          sed -i "s/^version = \".*\"/version = \"${SEMGREP_VERSION}\"/" cli/pyproject.toml
+          sed -i "s/^__VERSION__ = \".*\"/__VERSION__ = \"${SEMGREP_VERSION}\"/" cli/src/semgrep/__init__.py
 
       - name: Build semgrep-core and the wheel
         shell: bash
