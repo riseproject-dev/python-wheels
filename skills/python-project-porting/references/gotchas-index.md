@@ -759,6 +759,12 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
   plain `gcc`, and `com_google_highway`'s unconditional riscv64
   `-menable-experimental-extensions` copt (Clang-only, no GCC equivalent) is the target
   that finally exposes it (the xprof case).
+- **573** — `gn gen` evaluates every `BUILD.gn` any root target reaches, `gn_check`/test
+  groups included, so a forked file's `assert(false, "Unsupported target CPU riscv64")`
+  blocks a cross-build of a library that never links it (PDFium's `skia/BUILD.gn` via
+  `group("gn_check")`). Read the "which caused the file to be included" line, diff the fork
+  against Chromium's copy (which has an empty riscv64 branch) and carry that as a patch
+  (the liteparse/pdfium case).
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 

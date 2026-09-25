@@ -68,6 +68,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
   itself: without `CC`/`CXX` exported, Bazel's local toolchain autodetection still picks
   plain `gcc`, and `com_google_highway`'s unconditional riscv64 `-menable-experimental-extensions`
   copt (Clang-only, no GCC equivalent) is the target that finally exposes it.
+- **573** — `gn gen` fails on an `assert(false, "Unsupported target CPU riscv64")` in a
+  `BUILD.gn` for a library you are not even building: GN loads every file any root target
+  reaches, `gn_check`/test groups included. Diff the project's fork of that file against
+  Chromium's own copy and carry its empty riscv64 branch as a patch.
 
 ---
 
@@ -1108,3 +1112,39 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       `rv64gcv1p0`'s extensions are all ratified). `--repo_env=CC=clang` on the bazel command
       line works too, but a plain shell `export` matches how the rest of the script already
       threads `JAVA_HOME` and needs no extra `--repo_env` bookkeeping.
+
+573. **`gn gen` loads every `BUILD.gn` any root target reaches — not just what ninja will
+    build — so a CPU assert in a forked copy of a Chromium file blocks a riscv64 cross-build
+    of a library that never uses it (the liteparse/pdfium case).** A PDFium cross-build
+    (run-llama/pdfium-binaries' `steps/05-configure.sh`, `target_cpu = "riscv64"`,
+    `pdf_use_skia` left false) died in under a second of `gn gen`:
+    ```
+    ERROR at //skia/BUILD.gn:581:5: Assertion failed.
+        assert(false, "Unsupported target CPU " + current_cpu)
+    See //BUILD.gn:465:15: which caused the file to be included.
+        deps += [ "//skia" ]
+    ```
+    The `deps` line is PDFium's root `group("gn_check")`, which adds `//skia` whenever the
+    gclient var `checkout_skia` is true — and it is for `checkout_configuration=small`
+    (`checkout_skia = checkout_configuration != "minimal"` in DEPS). No `pdfium` target
+    depends on Skia; the group exists only so `gn check` sees it, yet evaluating it runs
+    `skia_opts`' `if/else if` CPU ladder, whose final `else` asserts.
+    - **The "See ... which caused the file to be included" line is the triage key.** It names
+      the edge that pulled the file in; if that is a check/test/fuzzer group rather than the
+      product target, the fix is a GN-level one, not a port of the library.
+    - **Chromium's `//build` is usually riscv64-ready; the project's *own forks* of Chromium
+      files are not.** PDFium carries its own `skia/BUILD.gn` (no riscv64 even on pdfium
+      main), while Chromium's `skia/BUILD.gn` has `} else if (current_cpu == "riscv64") {`
+      with an empty body. `build/toolchain/linux` (`clang_riscv64`), `config/sysroot.gni`
+      (`debian_trixie_riscv64-sysroot`) and `config/rust.gni` all handle it, as do PDFium's
+      `third_party/cpu_features` and `third_party/highway` BUILD files — `skia/BUILD.gn` was
+      the only closed CPU ladder in the whole tree.
+      Before the next CI cycle, sparse-clone just the build files at the pinned branch
+      (`git clone --depth 1 --branch <ref> --filter=blob:none --no-checkout` then
+      `git sparse-checkout set --no-cone '*.gn' '*.gni'`, ~2MB) and
+      `grep -rn 'current_cpu\|target_cpu'` for any other closed CPU ladder.
+    - **Patch, don't reconfigure.** Carry Chromium's empty branch as a one-hunk patch under
+      `patches/<pkg>/<version>/`, applied with `git apply` in the gclient checkout right after
+      the upstream recipe's own patch step. Switching the checkout to
+      `checkout_configuration=minimal` would also drop `checkout_skia`, but it rewrites the
+      upstream recipe's `02-checkout.sh` and changes which deps land, for no gain.
