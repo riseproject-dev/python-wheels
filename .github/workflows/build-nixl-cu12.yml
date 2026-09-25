@@ -83,6 +83,7 @@ jobs:
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           # Upstream's UCX build minus --with-cuda: there is no riscv64 CUDA toolkit, so meson builds the CPU-only backends.
+          # Like upstream's Dockerfile, NIXL is also installed system-wide so auditwheel can resolve its subproject sonames (liburing.so.2).
           CIBW_BEFORE_ALL_LINUX: >-
             dnf install -y --enablerepo=crb autoconf automake libtool make ninja-build
             libaio-devel numactl-devel rdma-core-devel &&
@@ -95,6 +96,12 @@ jobs:
             --without-gdrcopy --with-efa --without-dc --without-rdmacm --without-gga &&
             make -j"$(nproc)" &&
             make -j"$(nproc)" install-strip &&
+            ldconfig &&
+            /opt/python/cp312-cp312/bin/python -m venv /tmp/nixl-venv &&
+            /tmp/nixl-venv/bin/pip install meson pybind11 patchelf pyyaml types-PyYAML 'setuptools>=80.9.0' &&
+            PATH=/tmp/nixl-venv/bin:$PATH meson setup /tmp/nixl-build {project} --prefix=/usr/local/nixl --buildtype=release &&
+            PATH=/tmp/nixl-venv/bin:$PATH ninja -C /tmp/nixl-build install &&
+            printf '%s\n' /usr/local/nixl/lib64 /usr/local/nixl/lib64/plugins > /etc/ld.so.conf.d/nixl.conf &&
             ldconfig
           CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
           CIBW_BEFORE_BUILD: >-
