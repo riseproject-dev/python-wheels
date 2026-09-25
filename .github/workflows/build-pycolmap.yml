@@ -1,0 +1,400 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/colmap/colmap/blob/4.1.1/.github/workflows/build-pycolmap.yml
+# Upstream installs COLMAP's dependencies with vcpkg and builds COLMAP itself in
+# python/ci/install-colmap-almalinux.sh (cibuildwheel's before-all). vcpkg has no
+# riscv64 binary cache, so the libraries Rocky 10 does not package are built here
+# from the versions upstream's vcpkg baseline pins, COLMAP is built once with
+# upstream's CMake flags, and the per-interpreter wheel jobs build only the bindings.
+name: Build pycolmap wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pycolmap.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pycolmap.yml'
+      - 'docs/packages/pycolmap.yaml'
+      - 'patches/pycolmap/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pycolmap.yml'
+      - 'docs/packages/pycolmap.yaml'
+      - 'patches/pycolmap/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  DNF_PACKAGES: >-
+    ninja-build eigen3-devel boost-devel sqlite-devel openblas-devel
+    libcurl-devel openssl-devel mesa-libGL-devel libX11-devel
+    libtiff-devel libjpeg-turbo-devel libpng-devel openexr-devel imath-devel
+    expat-devel zlib-ng-compat-devel
+  GLOG_VERSION: 0.7.1
+  METIS_VERSION: 5.1.0
+  METIS_SHA256: 76faebe03f6c963127dbb73c13eab58c9a3faeae48779f049066a21c087c5db2
+  GLEW_VERSION: 2.3.1
+  GLEW_SHA256: b64790f94b926acd7e8f84c5d6000a86cb43967bd1e688b03089079799c9e889
+  SUITESPARSE_VERSION: 7.12.2
+  CERES_VERSION: 2.2.0
+  OIIO_VERSION: 3.1.14.0
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pycolmap
+      version: ${{ inputs.version }}
+
+  colmap:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build COLMAP ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 2880
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      PYCOLMAP_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout COLMAP ${{ env.PYCOLMAP_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: colmap/colmap
+          ref: ${{ env.PYCOLMAP_VERSION }}
+          path: colmap
+          persist-credentials: false
+
+      - name: Restore the COLMAP dependencies
+        id: deps
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: sdk
+          key: pycolmap-deps-manylinux_riscv64-glog${{ env.GLOG_VERSION }}-metis${{ env.METIS_VERSION }}-glew${{ env.GLEW_VERSION }}-suitesparse${{ env.SUITESPARSE_VERSION }}-ceres${{ env.CERES_VERSION }}-oiio${{ env.OIIO_VERSION }}
+
+      - name: Build the COLMAP dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p sdk
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}/sdk:/opt/colmap" \
+            -e DNF_PACKAGES \
+            -e GLOG_VERSION -e METIS_VERSION -e METIS_SHA256 -e GLEW_VERSION -e GLEW_SHA256 \
+            -e SUITESPARSE_VERSION -e CERES_VERSION -e OIIO_VERSION \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False ${DNF_PACKAGES}
+
+          # METIS 5.1.0, GLEW and yaml-cpp declare a cmake_minimum_required CMake 4 rejects.
+          export CMAKE_POLICY_VERSION_MINIMUM=3.5
+          common=(-GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/colmap
+                  -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_PREFIX_PATH=/opt/colmap -DBLA_VENDOR=OpenBLAS)
+          licenses=/opt/colmap/share/licenses
+          mkdir -p "${licenses}"
+          cd /tmp
+
+          git clone --depth 1 --branch "v${GLOG_VERSION}" https://github.com/google/glog
+          cmake -S glog -B glog/build "${common[@]}" \
+            -DBUILD_SHARED_LIBS=ON -DBUILD_TESTING=OFF -DWITH_GFLAGS=OFF -DWITH_GTEST=OFF
+          cmake --build glog/build --target install --parallel "$(nproc)"
+          cp glog/COPYING "${licenses}/glog-COPYING"
+
+          curl -fsSLo metis.tar.gz "https://karypis.github.io/glaros/files/sw/metis/metis-${METIS_VERSION}.tar.gz"
+          echo "${METIS_SHA256}  metis.tar.gz" | sha256sum -c -
+          tar xzf metis.tar.gz
+          make -C "metis-${METIS_VERSION}" config shared=1 prefix=/opt/colmap
+          make -C "metis-${METIS_VERSION}" install -j "$(nproc)"
+          cp "metis-${METIS_VERSION}/LICENSE.txt" "${licenses}/METIS-LICENSE.txt"
+
+          # Only configure-time: COLMAP's FindDependencies requires GLEW even with the GUI off.
+          curl -fsSLo glew.tgz "https://github.com/nigels-com/glew/releases/download/glew-${GLEW_VERSION}/glew-${GLEW_VERSION}.tgz"
+          echo "${GLEW_SHA256}  glew.tgz" | sha256sum -c -
+          tar xzf glew.tgz
+          cmake -S "glew-${GLEW_VERSION}/build/cmake" -B glew-build "${common[@]}" -DBUILD_UTILS=OFF
+          cmake --build glew-build --target install --parallel "$(nproc)"
+
+          # upstream's vcpkg ceres[suitesparse] pulls CHOLMOD's GPL modules and SPQR in.
+          git clone --depth 1 --branch "v${SUITESPARSE_VERSION}" https://github.com/DrTimothyAldenDavis/SuiteSparse
+          cmake -S SuiteSparse -B SuiteSparse/build "${common[@]}" \
+            -DSUITESPARSE_ENABLE_PROJECTS="suitesparse_config;amd;camd;colamd;ccolamd;cholmod;spqr" \
+            -DBUILD_STATIC_LIBS=OFF -DBUILD_TESTING=OFF -DSUITESPARSE_DEMOS=OFF \
+            -DSUITESPARSE_USE_FORTRAN=OFF -DSUITESPARSE_USE_CUDA=OFF -DSUITESPARSE_USE_OPENMP=OFF \
+            -DSUITESPARSE_USE_STRICT=ON
+          cmake --build SuiteSparse/build --target install --parallel "$(nproc)"
+          cp SuiteSparse/LICENSE.txt "${licenses}/SuiteSparse-LICENSE.txt"
+          cp SuiteSparse/SPQR/Doc/gpl.txt "${licenses}/SuiteSparse-gpl.txt"
+
+          git clone --depth 1 --branch "${CERES_VERSION}" https://github.com/ceres-solver/ceres-solver
+          cmake -S ceres-solver -B ceres-solver/build "${common[@]}" \
+            -DBUILD_SHARED_LIBS=ON -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF -DBUILD_BENCHMARKS=OFF \
+            -DGFLAGS=OFF -DUSE_CUDA=OFF -DSUITESPARSE=ON -DLAPACK=ON -DSCHUR_SPECIALIZATIONS=ON \
+            -DPROVIDE_UNINSTALL_TARGET=OFF
+          cmake --build ceres-solver/build --target install --parallel "$(nproc)"
+          cp ceres-solver/LICENSE "${licenses}/ceres-solver-LICENSE"
+
+          # Rocky 10 has no fmt, robin-map or OpenColorIO (nor OCIO's yaml-cpp, pystring,
+          # minizip-ng): let OpenImageIO build them itself, as its own PyPI wheels do.
+          git clone --depth 1 --branch "v${OIIO_VERSION}" https://github.com/AcademySoftwareFoundation/OpenImageIO
+          cmake -S OpenImageIO -B OpenImageIO/build "${common[@]}" \
+            -DOpenImageIO_BUILD_MISSING_DEPS="fmt;Robinmap;OpenColorIO;pystring;yaml-cpp;minizip-ng" \
+            -DBUILD_TESTING=OFF -DOIIO_BUILD_TESTS=OFF -DOIIO_BUILD_TOOLS=OFF -DBUILD_DOCS=OFF \
+            -DINSTALL_DOCS=OFF -DSTOP_ON_WARNING=OFF -DLINKSTATIC=OFF -DENABLE_IV=OFF \
+            -DUSE_PYTHON=OFF -DUSE_DCMTK=OFF -DUSE_FFMPEG=OFF -DUSE_FREETYPE=OFF -DUSE_GIF=OFF \
+            -DUSE_JXL=OFF -DUSE_LIBHEIF=OFF -DUSE_LIBRAW=OFF -DUSE_NUKE=OFF -DUSE_OPENCV=OFF \
+            -DUSE_OPENJPEG=OFF -DUSE_OpenVDB=OFF -DUSE_PTEX=OFF -DUSE_TBB=OFF -DUSE_WEBP=OFF
+          cmake --build OpenImageIO/build --target install --parallel "$(nproc)"
+          cp OpenImageIO/LICENSE.md "${licenses}/OpenImageIO-LICENSE.md"
+          cp OpenImageIO/THIRD-PARTY.md "${licenses}/OpenImageIO-THIRD-PARTY.md"
+          for dep in OpenColorIO fmt Robinmap pystring yaml-cpp minizip-ng; do
+            found=$(find "OpenImageIO/build/deps/${dep}" -maxdepth 1 -type f \( -iname 'LICENSE*' -o -iname 'COPYING*' \))
+            test -n "${found}"
+            for file in ${found}; do cp "${file}" "${licenses}/${dep}-$(basename "${file}")"; done
+          done
+          ls "${licenses}"
+          SCRIPT
+
+      - name: Save the COLMAP dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: sdk
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+
+      - name: Build COLMAP
+        run: |
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}/sdk:/opt/colmap" \
+            -v "${GITHUB_WORKSPACE}/colmap:/colmap" \
+            -e DNF_PACKAGES \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False ${DNF_PACKAGES}
+
+          cmake -S /colmap -B /tmp/build -GNinja \
+            -DCUDA_ENABLED=OFF \
+            -DONNX_ENABLED=OFF \
+            -DGUI_ENABLED=OFF \
+            -DCGAL_ENABLED=OFF \
+            -DLSD_ENABLED=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXE_LINKER_FLAGS_INIT="-ldl" \
+            -DCMAKE_INSTALL_PREFIX=/opt/colmap \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            -DCMAKE_PREFIX_PATH=/opt/colmap \
+            -DBLA_VENDOR=OpenBLAS
+          cmake --build /tmp/build --target install --parallel "$(nproc)"
+
+          licenses=/opt/colmap/share/licenses
+          cp /tmp/build/_deps/faiss-src/LICENSE "${licenses}/faiss-LICENSE"
+          cp /tmp/build/_deps/poselib-src/LICENSE "${licenses}/PoseLib-LICENSE"
+          cp /colmap/src/thirdparty/VLFeat/LICENSE "${licenses}/VLFeat-LICENSE"
+          cp /colmap/src/thirdparty/PoissonRecon/LICENSE "${licenses}/PoissonRecon-LICENSE"
+          SCRIPT
+
+      - name: Pack the COLMAP SDK
+        run: tar -C sdk -czf colmap-sdk.tar.gz .
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pycolmap-${{ env.PYCOLMAP_VERSION }}-colmap-sdk
+          path: colmap-sdk.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, colmap]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pycolmap ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream's build selector (cp3{10,11,12,13,14}) has no free-threaded interpreter.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      PYCOLMAP_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout COLMAP ${{ env.PYCOLMAP_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: colmap/colmap
+          ref: ${{ env.PYCOLMAP_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch COLMAP
+        run: git apply python-wheels/patches/pycolmap/${{ env.PYCOLMAP_VERSION }}/*.patch
+
+      - name: Download the COLMAP SDK
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: pycolmap-${{ env.PYCOLMAP_VERSION }}-colmap-sdk
+
+      # auditwheel vendors the from-source libraries of the SDK and the image libraries
+      # they pull in; ship the licence of each alongside COLMAP's own.
+      - name: Write the wheel repair script
+        run: |
+          cat > riscv64-repair-wheel.sh <<'EOF'
+          set -euxo pipefail
+          wheel="$1"
+          dest="$2"
+          work="$(mktemp -d)"
+          mkdir -p "${work}/core" "${work}/licenses" "${work}/repaired"
+          auditwheel repair -w "${work}/repaired" "${wheel}"
+          cp /opt/colmap/share/licenses/* "${work}/licenses/"
+          python3 -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); z.extractall(sys.argv[2], [n for n in z.namelist() if n.startswith("pycolmap/_core")])' "${wheel}" "${work}/core"
+          mapfile -t grafted < <(python3 -c 'import re, sys, zipfile; print("\n".join(re.sub(r"-[0-9a-f]{8}(\.so)", r"\1", n.split("/")[-1]) for n in zipfile.ZipFile(sys.argv[1]).namelist() if n.startswith("pycolmap.libs/") and n != "pycolmap.libs/"))' "${work}"/repaired/*.whl)
+          mapfile -t libs < <(ldd "${work}"/core/pycolmap/_core*.so | tr ' ' '\n' | grep '^/' | grep -v '^/opt/colmap/' | sort -u \
+            | xargs readlink -f | while read -r lib; do if printf '%s\n' "${grafted[@]}" | grep -qxF "$(basename "${lib}")"; then echo "${lib}"; fi; done)
+          mapfile -t pkgs < <(rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null | grep -E '^[A-Za-z0-9._+-]+$' | sort -u)
+          dnf reinstall -y --setopt=tsflags= "${pkgs[@]}" >/dev/null || true
+          for pkg in "${pkgs[@]}"; do
+            files=$(rpm -qL "${pkg}" | grep -v '^(contains no files)$' || true)
+            if [ -n "${files}" ]; then
+              for file in ${files}; do cp "${file}" "${work}/licenses/${pkg}-$(basename "${file}")"; done
+            else
+              rpm -q --qf '%{NAME} %{VERSION}: %{LICENSE}\n' "${pkg}" >> "${work}/licenses/third-party.txt"
+            fi
+          done
+          python3 - "${work}"/repaired/*.whl "${work}/licenses" "${dest}" <<'PY'
+          import base64, hashlib, os, sys, zipfile
+
+          wheel, licenses, dest = sys.argv[1:]
+          with zipfile.ZipFile(wheel) as src:
+              entries = [(info, src.read(info)) for info in src.infolist()]
+          record_name = next(info.filename for info, _ in entries if info.filename.endswith(".dist-info/RECORD"))
+          dist_info = record_name.split("/")[0]
+          with zipfile.ZipFile(os.path.join(dest, os.path.basename(wheel)), "w", zipfile.ZIP_DEFLATED) as out:
+              for info, data in entries:
+                  if info.filename == record_name:
+                      record = data.decode()
+                  else:
+                      out.writestr(info, data)
+              record = record if record.endswith("\n") else record + "\n"
+              for name in sorted(os.listdir(licenses)):
+                  path = f"{dist_info}/licenses/{name}"
+                  with open(os.path.join(licenses, name), "rb") as f:
+                      data = f.read()
+                  out.writestr(path, data)
+                  digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+                  record += f"{path},sha256={digest},{len(data)}\n"
+              out.writestr(record_name, record)
+          PY
+          EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf install -y --setopt=install_weak_deps=False ${{ env.DNF_PACKAGES }} &&
+            mkdir -p /opt/colmap &&
+            tar -C /opt/colmap -xzf {project}/colmap-sdk.tar.gz
+          # Upstream's vcpkg build links every dependency statically, so only what the
+          # module uses ends up in it; --as-needed keeps the shared equivalents to that set.
+          # WERROR_ENABLED=ON from upstream's config settings is left out: the image's GCC 14
+          # is newer than upstream's gcc-toolset-12.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            CMAKE_PREFIX_PATH=/opt/colmap
+            LD_LIBRARY_PATH=/opt/colmap/lib
+            LDFLAGS=-Wl,--as-needed
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: bash {project}/riscv64-repair-wheel.sh {wheel} {dest_dir}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pycolmap-${{ env.PYCOLMAP_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources for pycolmap ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      PYCOLMAP_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # libgomp/libgfortran, libtiff's jbigkit and libcurl's copyleft closure, all
+      # vendored out of the build image.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc jbigkit-libs keyutils-libs libssh libidn2 libunistring libxcrypt systemd-libs libcap pcre2
+          output: gpl-sources.tar
+
+      # CHOLMOD's GPL modules and SPQR are built from source into the wheel.
+      - name: Add the SuiteSparse sources
+        run: |
+          curl -fsSLo "SuiteSparse-${SUITESPARSE_VERSION}.tar.gz" \
+            "https://github.com/DrTimothyAldenDavis/SuiteSparse/archive/refs/tags/v${SUITESPARSE_VERSION}.tar.gz"
+          tar -rf gpl-sources.tar "SuiteSparse-${SUITESPARSE_VERSION}.tar.gz"
+          tar -tf gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pycolmap-${{ env.PYCOLMAP_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish pycolmap ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pycolmap-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: pycolmap-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc and the copyleft libraries bundled in the wheel
