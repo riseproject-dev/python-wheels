@@ -1,0 +1,127 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build` job of
+# https://github.com/firecrawl/pdf-inspector/blob/32555d23356f7892762a38edb3a5b0cad7ec326b/.github/workflows/publish-pypi.yml
+name: Build pdf-inspector wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pdf-inspector.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pdf-inspector.yml'
+      - 'docs/packages/pdf-inspector.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pdf-inspector.yml'
+      - 'docs/packages/pdf-inspector.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # Upstream pushed no v1.17.0 tag, so pin the release commit "chore(release):
+  # bump package versions to 1.17.0 (#450)", whose tree matches the 1.17.0 PyPI
+  # sdist. Update it alongside PDF_INSPECTOR_VERSION (1.18.0+ are tagged v<ver>).
+  PDF_INSPECTOR_REF: 32555d23356f7892762a38edb3a5b0cad7ec326b
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pdf-inspector
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pdf-inspector ${{ matrix.version }} cp38-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+
+    env:
+      PDF_INSPECTOR_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pdf-inspector ${{ env.PDF_INSPECTOR_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: firecrawl/pdf-inspector
+          ref: ${{ env.PDF_INSPECTOR_REF }}
+          persist-credentials: false
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --out dist
+          manylinux: '2_39'
+
+      - name: Verify the wheel ships the compiled extension
+        run: |
+          set -euo pipefail
+          python3 - dist/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = [n for n in names if n.endswith(".so")]
+          assert "pdf_inspector/pdf_inspector.abi3.so" in sos, sos
+          assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
+          print(sys.argv[1], "->", sos)
+          EOF
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: false
+
+      # Upstream's CI never runs tests/test_python.py; it is the binding's own suite.
+      # The encrypted fixture fails on every arch at 1.17.0 (password-less call);
+      # upstream fixed the test in firecrawl/pdf-inspector#489.
+      - name: Run tests/test_python.py
+        run: |
+          set -euo pipefail
+          for py in 3.12 3.13 3.14; do
+            venv="$RUNNER_TEMP/venv-$py"
+            uv venv --python "$py" "$venv"
+            uv pip install --python "$venv/bin/python" dist/*.whl pytest
+            "$venv/bin/python" -m pytest -v tests/test_python.py \
+              --deselect 'tests/test_python.py::TestMultipleFixtures::test_process_all_fixtures[encrypted-secret123.pdf]'
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pdf-inspector-${{ env.PDF_INSPECTOR_VERSION }}-cp38-abi3-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pdf-inspector ${{ matrix.version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pdf-inspector-${{ matrix.version }}-*-manylinux_riscv64
