@@ -1425,6 +1425,37 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       plugin needs RVV 1.0 SIGILLs for every user on baseline rv64gc — gotcha 139's exact
       prohibition. That makes "make it build" and "make it shippable" two different questions,
       and it is what turns this from a bug to fix into a decision to escalate.
+    - **Correction from a later round (PR #2122, run 35995279535, commit 16a592a0a4): the
+      disambiguation above landed on the wrong candidate, and there IS an off switch.** A
+      hardcode-the-probe-to-false patch (`can_compile_rvv100()`/`can_compile_zvfh()` -> `false`,
+      landed as this PR's `0001-...patch`) shipped believing the probe's own SIGILL recovery was
+      what failed — it wasn't, and the crash reproduced again on the *next* build, at a different
+      point (during `compile_model()`, after `ov.Core()` now succeeded). Reproducing under QEMU
+      with `QEMU_CPU=rv64,v=false` pinned the fault to one exact instruction: `.init_array` entry
+      17/25 of `libopenvino_riscv_cpu_plugin.so`, a compiler-generated `vsetivli zero, 8, e8, mf2,
+      ta, ma` that zero-fills a global at load time, before any `mayiuse()` call runs. Its source
+      is **oneDNN**, not the plugin's own `riscv64/` kernel/emitter objects: oneDNN's own
+      `cmake/platform.cmake` adds `-march=rv64gcv` to all of oneDNN's compile flags whenever the
+      compiler *can build* RVV intrinsics, with no runtime check at all, and oneDNN links
+      statically into the plugin — so "`-march=rv64gcv` appears nowhere in the build" above is
+      wrong; the CI log for that build states `Using RV64 march flag: -march=rv64gcv` in the
+      oneDNN sub-build. The plugin's own riscv64 JIT emitters generate vector code only at
+      runtime (never baked into a static initializer), so the "kernel/emitter objects in link
+      order" attribution above is also wrong — the ~10.7 MiB vector region is oneDNN's, not
+      theirs. **The actual off switch is oneDNN's own `-DCAN_COMPILE_RVV_INTRINSICS=OFF`**,
+      passed to the top-level OpenVINO CMake configure step; it makes oneDNN skip the compiler
+      probe and take its existing non-RVV branch (`-march=rv64gc`, RVV sources excluded by their
+      own `#ifdef`s) — no source patch needed for this half of the fix. The probe-hardcode patch
+      from the wrong diagnosis was kept (never rewrite a pushed PR's history over a superseded
+      finding) and given a real, narrower justification instead: `mayiuse()` builds an
+      `Xbyak_riscv::CPU` object on every call whose *constructor* JIT-runs an unguarded
+      `csrr a0, vlenb`, reachable from `compile_model()` via `mayiuse(gv)` — a second-order call
+      site the original probe patch happens to also close (by short-circuiting `gv` before the
+      object is built), documented in this PR's `0002-...patch`. Lesson: when static ELF evidence
+      can't distinguish two hypotheses (as this entry explicitly flagged), get the backtrace
+      before landing the fix that assumes one of them — reproducing under QEMU with vector
+      support toggled off is cheap and pins the exact instruction, which static attribute-section
+      reading cannot.
 
 454. **The image's LLVM is a whole toolchain *minus Clang's static libraries* — `llvm-static`
     exists, `clang-devel` ships no `.a` at all (the warp-lang case).** `build-tilelang.yml` links

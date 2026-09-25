@@ -845,7 +845,12 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
   (SIGILL) inside `ov.Core()` — its CPU plugin is the only library in the wheel whose
   `Tag_RISCV_arch` carries `v1p0`, with 64,554 vector instructions against zero in the other 19,
   and upstream's own riscv64 CI only ever tests under `qemu -cpu rv64,v=true,vext_spec=v1.0`, so
-  read the artifact's ELF attributes rather than trusting the upstream CI's existence.
+  read the artifact's ELF attributes rather than trusting the upstream CI's existence. **Corrected
+  by a later round in the same entry**: the vector code traced to oneDNN's own unconditional
+  `-march=rv64gcv` (a real off switch exists, `-DCAN_COMPILE_RVV_INTRINSICS=OFF`), not to the
+  plugin's own riscv64 kernel/emitter objects or to the runtime probe's SIGILL recovery failing —
+  confirmed by reproducing under QEMU with vector support toggled off and pinning the exact
+  faulting instruction, after a first fix landed on the wrong hypothesis.
 - **454** — The image's LLVM is a whole toolchain *minus Clang's static libraries*: `llvm-static`
   installs 304 `libLLVM*.a`, `clang-devel` installs none, so a project that links Clang statically
   has to build LLVM+Clang from source (the warp-lang case).
