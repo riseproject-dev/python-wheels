@@ -1,0 +1,122 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-wheels` job of
+# https://github.com/chopratejas/headroom/blob/v0.37.0/.github/workflows/release.yml
+name: Build headroom-ai wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/headroom-ai.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-headroom-ai.yml'
+      - 'docs/packages/headroom-ai.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-headroom-ai.yml'
+      - 'docs/packages/headroom-ai.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: headroom-ai
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build headroom-ai ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 480
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        include:
+          # pyo3's abi3-py310 feature is on unconditionally (Cargo.toml
+          # workspace.dependencies.pyo3), so one abi3 wheel serves every
+          # interpreter it claims. Upstream's own release matrix builds no
+          # free-threaded (cp314t) wheel either -- there is no non-abi3
+          # build path to switch to for it here.
+          - tag: cp310-abi3
+            # Built on cp310 -- the oldest interpreter the abi3 tag claims --
+            # and re-tested on the newer ones via find_compatible_wheel.
+            build: >-
+              cp310-manylinux_riscv64 cp311-manylinux_riscv64
+              cp312-manylinux_riscv64 cp313-manylinux_riscv64
+              cp314-manylinux_riscv64
+
+    env:
+      HEADROOM_AI_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout headroom v${{ env.HEADROOM_AI_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: chopratejas/headroom
+          ref: v${{ env.HEADROOM_AI_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # headroom ships no [tool.cibuildwheel], so the Rust toolchain its
+          # maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_TEST_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Mirrors upstream's own per-wheel smoke-import gate
+          # (release.yml's smoke-import-wheels job): import the package and
+          # its compiled extension, nothing from the 175k-line source-tree
+          # pytest suite (which needs the proxy/ml/evals extras and a live
+          # checkout, and belongs to upstream's ci.yml, not the wheel matrix).
+          CIBW_TEST_COMMAND: >-
+            python -c "import headroom._core as m; assert m.__file__.endswith('.so'), m.__file__"
+            && python -c "from headroom._core import hello; assert hello() == 'headroom-core', hello()"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: headroom-ai-${{ env.HEADROOM_AI_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish headroom-ai ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: headroom-ai-${{ matrix.version }}-*-manylinux_riscv64
