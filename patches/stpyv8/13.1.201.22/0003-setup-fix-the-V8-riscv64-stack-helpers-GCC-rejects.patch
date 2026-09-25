@@ -1,0 +1,123 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 20 Sep 2026 12:30:00 +0200
+Subject: [PATCH] setup: fix the V8 riscv64 stack helpers GCC rejects
+
+The first run to get past gclient sync and into the build spent 9h17m in
+ninja, reached 1146 of 2117 targets -- as far as the first translation
+unit that pulls in src/codegen/macro-assembler.h -- and stopped there:
+
+  FAILED: obj/v8_base_without_compiler/baseline.o
+  ../../src/codegen/riscv/macro-assembler-riscv.h:389:13: error: explicit
+    specialization in non-namespace scope 'class v8::internal::MacroAssembler'
+  ../../src/codegen/riscv/macro-assembler-riscv.h:537:13: error: explicit
+    specialization in non-namespace scope 'class v8::internal::MacroAssembler'
+
+MacroAssembler::push_helper and ::pop_helper walk a register pack by
+recursion and end it with a one-register explicit specialization declared
+inside the class body. An explicit specialization has to be declared at
+namespace scope; clang -- the only compiler V8 builds this port with --
+takes the in-class one as an extension, GCC rejects it, and settings.py
+has to choose GCC here because no prebuilt Chromium clang runs on a
+riscv64 host. Nothing riscv64-specific is wrong with the code: it is
+simply the first time this header meets a compiler other than clang.
+
+V8 fixed it in 13.8 by replacing both specializations with an empty,
+zero-register overload: once the pack is empty the variadic overload has
+already stored the last register at sp+0, so the base case has nothing
+left to do and the generated code is identical. Backport exactly that --
+rewriting the pinned 13.1.201.22 header with the hunk below reproduces
+13.8's own text byte for byte, and both forms were compiled either way to
+confirm which compiler accepts which.
+
+Refuse to build rather than rewrite nothing if a future V8 no longer
+matches: silently skipping costs another ten hours to find out.
+
+Also pass ninja -k 1000 on riscv64. V8 is warning-clean under clang only,
+which is why settings.py already declares treat_warnings_as_errors=false,
+but a hard error like this one is still found one translation unit per
+run, and this run costs ten hours before it even reaches this file. Let
+one build collect as many of them as it can instead; drop it once the
+build is green.
+
+https://github.com/riseproject-dev/python-wheels/actions/runs/35479941332/job/105995838025
+
+Upstream-Status: To upstream [not yet submitted to cloudflare/stpyv8]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ setup.py | 51 ++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 50 insertions(+), 1 deletion(-)
+
+diff --git a/setup.py b/setup.py
+index e887710..9586b8d 100644
+--- a/setup.py
++++ b/setup.py
+@@ -236,7 +236,50 @@ def checkout_v8():
+             exit(1)
+ 
+ 
++def unnest_riscv_stack_helper_specializations():
++    # V8 compiles its RISC-V port with clang only, and clang takes an explicit
++    # specialization declared inside a class body as an extension. GCC, which
++    # settings.py routes this build at (is_clang=false, no prebuilt clang runs
++    # on riscv64), rejects it the way the standard asks -- an explicit
++    # specialization has to be declared at namespace scope:
++    #
++    #   src/codegen/riscv/macro-assembler-riscv.h:389:13: error: explicit
++    #   specialization in non-namespace scope 'class v8::internal::MacroAssembler'
++    #
++    # Both offenders are the one-register base case of a variadic recursion
++    # that pushes or pops a register list. V8 replaced them with an empty,
++    # zero-register overload in 13.8; the variadic overload already writes the
++    # last register at sp+0 once the pack is empty, so the emitted code does
++    # not change. Backport that shape.
++    header = os.path.join(
++        V8_HOME, "src", "codegen", "riscv", "macro-assembler-riscv.h"
++    )
++
++    with open(header, encoding="utf-8", mode="r") as fd:
++        text = fd.read()
++
++    for helper, access in (("push", "StoreWord"), ("pop", "LoadWord")):
++        specialization = (
++            "  template <>\n"
++            f"  void {helper}_helper(Register r) {{\n"
++            f"    {access}(r, MemOperand(sp, 0));\n"
++            "  }\n"
++        )
++
++        if specialization not in text:
++            log.error("No %s_helper specialization to unnest in %s", helper, header)
++            exit(1)
++
++        text = text.replace(specialization, f"  void {helper}_helper() {{}}\n", 1)
++
++    with open(header, encoding="utf-8", mode="w") as fd:
++        fd.write(text)
++
++
+ def build_v8():
++    if RISCV64:
++        unnest_riscv_stack_helper_specializations()
++
+     args = f"gen {os.path.join('out.gn', 'x64.release.sample')} --args=\"{GN_ARGS}\""
+     success, _, __ = exec_cmd(
+         os.path.join(DEPOT_HOME, "gn"),
+@@ -248,9 +291,15 @@ def build_v8():
+     if not success:
+         exit(1)
+ 
++    # V8's own CI never compiles this tree with GCC, so a first riscv64 build
++    # meets GCC-only diagnostics one translation unit at a time -- and a single
++    # one of them costs the ten hours it takes to reach it. Collect them all in
++    # one run instead; drop this once the build is green.
++    keep_going = "-k 1000 " if RISCV64 else ""
++
+     success, _, __ = exec_cmd(
+         os.path.join(DEPOT_HOME, "ninja"),
+-        f"-C {os.path.join('out.gn', 'x64.release.sample')} v8_monolith",
++        f"-C {os.path.join('out.gn', 'x64.release.sample')} {keep_going}v8_monolith",
+         cwd=V8_HOME,
+         msg="Build V8 with ninja",
+     )

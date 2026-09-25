@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 21 Sep 2026 14:10:00 +0200
+Subject: [PATCH] settings: drop the boost_system link Boost 1.89 removed
+
+The first run whose V8 build went green then failed every build_wheel
+job, all three at the same final link:
+
+  g++ ... -lboost_system -lboost_iostreams -lboost_filesystem \
+      -lv8_monolith -lboost_python312 -lrt -o _STPyV8...so
+  /usr/bin/ld: cannot find -lboost_system: No such file or directory
+
+Nothing else was missing: -lv8_monolith and -lboost_python312 both
+resolved, so the V8 half and the Boost.Python half are fine and this is
+the one library that no longer exists.
+
+Boost.System has been header-only since Boost 1.69; what remained was a
+stub compiled library kept for compatibility, and Boost 1.89 removed it
+("System: The stub compiled library has been removed; System has been
+header-only since release 1.69 ... The easiest fix is to just remove
+system from the list of components as it's no longer required",
+https://www.boost.org/users/history/version_1_89_0.html). boostorg/system
+has carried neither build/Jamfile.v2 nor src/ since the boost-1.89.0 tag,
+so `b2 --with-system` builds nothing and no libboost_system is installed.
+Upstream's linux.yml pins Boost 1.87.0, where the stub still exists,
+which is why upstream has not met this; this port builds against 1.90.0
+because 1.87.0 predates CPython 3.14.
+
+Removing the entry is the whole fix: the extension references no symbol
+from the stub, boost::system::error_code and the two categories being
+inline in the headers.
+
+Upstream-Status: To upstream [not yet submitted to cloudflare/stpyv8]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ settings.py | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/settings.py b/settings.py
+index c0e908a..6a9c0f4 100644
+--- a/settings.py
++++ b/settings.py
+@@ -138,7 +138,6 @@ if os.name in ("nt",):
+
+ elif os.name in ("posix",):
+     libraries = [
+-        "boost_system",
+         "boost_iostreams",
+         "boost_filesystem",
+         "v8_monolith",

@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 24 Sep 2026 00:00:00 +0200
+Subject: [PATCH] tests: adjust testReferenceCount for CPython 3.14's
+ borrowed-ref calling convention
+
+cp312/cp313 pass this test; only cp314 fails, always on the first
+assertion:
+
+  self.assertEqual(2, sys.getrefcount(obj))
+  AssertionError: 2 != 1
+
+CPython 3.14 added a `LOAD_FAST_BORROW` opcode: whenever the compiler
+can prove a local variable's frame slot still owns the reference after
+a call returns, it loads that local as a call argument without an
+incref, instead of the owning load every earlier version always used.
+`obj` is read again after each `sys.getrefcount(obj)` call in this
+test (by `fn(obj)`, and then by the second `sys.getrefcount(obj)`),
+so the compiler can prove it in both places, and both baselines this
+test hardcodes are one lower on 3.14+ as a result. This is a documented
+interpreter-wide behavior change, not anything version-specific to
+stpyv8 or to riscv64: cpython/Doc/whatsnew/3.14.rst's "Optimizations"
+section covers it, and the same "AssertionError: N != N-1" pattern hit
+other projects' refcount-based tests on 3.14 (e.g.
+root-project/root#18988, pandas-dev/pandas#61368).
+
+The `+ 2` delta the JSContext wrapper itself contributes when `obj` is
+passed into the JS call is unrelated to the calling convention and
+unaffected by it, so only the baseline needs a version branch.
+
+Upstream-Status: To upstream [cloudflare/stpyv8 was archived read-only on 2026-06-18, so there is no repository left to open a PR or issue against]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ tests/test_Wrapper.py | 16 +++++++++++++---
+ 1 file changed, 13 insertions(+), 3 deletions(-)
+
+diff --git a/tests/test_Wrapper.py b/tests/test_Wrapper.py
+index 16faca6..c9f4c3d 100644
+--- a/tests/test_Wrapper.py
++++ b/tests/test_Wrapper.py
+@@ -941,11 +941,21 @@ class TestWrapper(unittest.TestCase):
+
+                 obj = Hello()
+
+-                self.assertEqual(2, sys.getrefcount(obj))
++                # CPython 3.14's LOAD_FAST_BORROW optimization (see the 3.14
++                # what's-new "Optimizations" notes) skips the incref a
++                # sys.getrefcount(obj) call used to take for its own `obj`
++                # argument whenever the compiler can prove the frame's local
++                # slot still owns obj once the call returns -- true at both
++                # call sites below, since `obj` is read again afterward. Every
++                # baseline this test asserts is one lower on 3.14+ as a result;
++                # the delta the JSContext wrapper itself adds is unaffected.
++                base_refcount = 1 if sys.version_info >= (3, 14) else 2
++
++                self.assertEqual(base_refcount, sys.getrefcount(obj))
+
+                 fn(obj)
+
+-                self.assertEqual(4, sys.getrefcount(obj))
++                self.assertEqual(base_refcount + 2, sys.getrefcount(obj))
+
+                 del obj
+
+--
+2.55.0
