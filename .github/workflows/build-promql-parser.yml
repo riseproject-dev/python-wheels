@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/messense/py-promql-parser/blob/5d938c2891539759a7d19253ea0b0ca8b5c60e2f/.github/workflows/CI.yml
+name: Build promql-parser wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/promql-parser.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-promql-parser.yml'
+      - 'docs/packages/promql-parser.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-promql-parser.yml'
+      - 'docs/packages/promql-parser.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # Upstream pushed no v0.10.0 tag; this is "Update promql-parser to 0.10.0", whose
+  # tree is byte-identical to the 0.10.0 PyPI sdist. Update it alongside the version.
+  PROMQL_PARSER_REF: 5d938c2891539759a7d19253ea0b0ca8b5c60e2f
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: promql-parser
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build promql-parser ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # No abi3 feature on pyo3, so one wheel per interpreter; pp311 is dropped
+        # (PyPy has no riscv64 port) and musllinux with it (no riscv64 musl rustup).
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      PROMQL_PARSER_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout promql-parser ${{ env.PROMQL_PARSER_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: messense/py-promql-parser
+          ref: ${{ env.PROMQL_PARSER_REF }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          only: ${{ matrix.python }}-manylinux_riscv64
+          output-dir: wheelhouse/
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$PATH:$HOME/.cargo/bin"'
+          # Upstream's CI runs no tests; run its example script and the README's examples.
+          CIBW_TEST_SOURCES: test_promql_parser.py README.md
+          CIBW_TEST_COMMAND: >-
+            python -c "import promql_parser.promql_parser as m; assert m.__file__.endswith('.so'), m.__file__"
+            && python test_promql_parser.py
+            && python -c "import re, pathlib;
+            blocks = re.findall(r'\x60{3}python\n(.*?)\x60{3}', pathlib.Path('README.md').read_text(), re.S);
+            assert len(blocks) == 5, len(blocks);
+            [exec(b, {}) for b in blocks];
+            print(len(blocks), 'README examples OK')"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: promql-parser-${{ env.PROMQL_PARSER_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish promql-parser ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: promql-parser-${{ matrix.version }}-*-manylinux_riscv64
