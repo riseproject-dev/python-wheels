@@ -410,6 +410,10 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
 - **582** — An "Apache-2.0" ctypes wrapper can be a thin shell over a closed-source vendor C
   SDK: read the licence file shipped *inside* the wheel and the vendor's SDK tarball, not the
   PyPI licence field (the solace-pubsubplus case).
+- **584** — Blank `project_urls` is not blank metadata: grep the long description for a repo
+  link first; then diff the binding's `#include "..."` list against its own tree, because an
+  open wrapper that includes vendor headers it does not ship is build-time locked to the
+  vendor SDK (the dmpython case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

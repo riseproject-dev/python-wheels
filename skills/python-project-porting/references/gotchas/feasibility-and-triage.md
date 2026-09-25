@@ -264,6 +264,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **582** — An "Apache-2.0" ctypes wrapper can be a thin shell over a closed-source vendor C
   SDK: read the licence file shipped *inside* the wheel and the vendor's SDK tarball, not the
   PyPI licence field (the solace-pubsubplus case).
+- **584** — Blank `project_urls` is not blank metadata: grep the long description for a repo
+  link first; then diff the binding's `#include "..."` list against its own tree, because an
+  open wrapper that includes vendor headers it does not ship is build-time locked to the
+  vendor SDK (the dmpython case).
 
 ---
 
@@ -4744,3 +4748,39 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     fallback: installable nowhere on riscv64 (no sdist, no `-any` wheel) and non-functional
     even if repackaged. Park it, and name the in-wheel licence clause and the SDK platform
     list in the note so a later triage does not repeat the search for source.
+
+584. **Blank `project_urls` is not blank metadata, and an "open-source" DB binding can be
+    uncompilable outside the vendor's install tree (the dmpython case).** dmpython 2.5.38
+    (Dameng/DM8 DB-API driver) has `home_page`, `project_urls`, `author` and `download_url`
+    all null, so the queue's `home`/`repo` were empty. Two cheap reads settle it before any
+    web search or wheel forensics:
+    - **Grep the long description for a forge link.** `curl -s
+      https://pypi.org/pypi/<pkg>/json | jq -r .info.description | grep -Eo
+      'https?://(github|gitee|gitlab)[^ )]*'` found `[gh]: https://github.com/DamengDB/dmPython`
+      in a Markdown link-reference block at the bottom of the README. PyPI shows no sidebar
+      link for it because it is not a `Project-URL`, but it is still the canonical repo. Do
+      this before gotcha 557's site search or gotcha 392's feedstock probe.
+    - **Diff the `#include "..."` set against the repo tree.** The repo holds every `.c`
+      file under Mulan PSL v2, but `py_Dameng.h` includes `DPI.h`, `DPIext.h` and
+      `DPItypes.h`, which exist nowhere in it. `setup.py` raises `SetupError` unless
+      `DM_HOME` (or `PATH`) points at a DM install containing `libdmdpi.so` plus those
+      headers, and links `libraries=["dmdpi"]`. So this is gotcha 342's shape (vendor
+      library linked at build time), not gotcha 373's (cx_Oracle's ODPI-C self-declares its
+      OCI prototypes and `dlopen`s at runtime, so it compiles anywhere). One `grep -h
+      '#include "' *.c *.h | sort -u` against `ls` shows which case you are in. Headers
+      scattered across random GitHub repos are copies lifted from DM installs, not a
+      vendor-published SDK.
+    - **The bundled `.so` is the product, and the licence fields describe only the glue.**
+      The aarch64 wheel's extension is 1.3 MB. auditwheel grafted
+      `dmpython.libs/libdmdpi-<hash>.so` (13.7 MB) beside it, plus a private OpenSSL under
+      `dmssl/`. `strings` on `libdmdpi` shows `dm.ini`/`dmmal.ini` config-file templates and
+      "Only %d physical CPUs can be used due to the license restriction!", which means it is
+      carved from the closed DM server code base. Meanwhile PyPI says `Python Software
+      Foundation License` (a leftover from the cx_Oracle-derived `setup.py`) and the repo
+      says Mulan PSL v2. Neither covers `libdmdpi`.
+    - **Wheel tags beat the vendor's docs for the platform table, and neither lists
+      riscv64.** Dameng's dmPython install page says the wheel supports only
+      `win_amd64, x86_64`, yet PyPI ships `manylinux2014_aarch64` too. The download page
+      offers only "X86" and unnamed "信创" (domestic-CPU) packages, with other platforms by
+      phone request. No riscv64 DM8 or DPI build is published anywhere. Park it: the source
+      is open, but there is nothing to link it against.
