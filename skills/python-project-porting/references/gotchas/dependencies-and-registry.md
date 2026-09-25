@@ -51,6 +51,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
   test rather than a resolution error.
 - **511** — An abi3-only *runtime* dependency is a permanent free-threading gap, decidable
   from two PyPI JSON reads before the first CI cycle — no pin and no test-skip fixes it.
+- **574** — A bare `cpXY-*` `CIBW_BUILD` builds musllinux in the same job, and
+  `PIP_ONLY_BINARY=:all:` then fails its test install on a dependency we ship for manylinux
+  only — split on `libc` and name only the sdists `:all:` was steering around.
 
 ---
 
@@ -877,3 +880,27 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       registry listing (gotcha 84's per-interpreter check), so the gap shows up only if
       you ask specifically about free threading. The rule is worth applying to the whole
       `Requires-Dist` list, not just the dependency you happened to look at.
+
+574. **A bare `cpXY-*` in `CIBW_BUILD` also builds the musllinux wheel in the same job, and
+    `PIP_ONLY_BINARY=:all:` in `CIBW_TEST_ENVIRONMENT` fails that leg on any dependency we
+    ship for manylinux only — after the manylinux half has already passed (the pyvex
+    case).** pyvex's workflow set `CIBW_BUILD: "cp312-* cp313-* cp314-*"` under a job named
+    `…-manylinux_riscv64`; cibuildwheel ran all three manylinux interpreters green (64
+    tests each), then built the musllinux abi3 wheel for 16 more minutes and died ~40
+    minutes in at the test install: `No matching distribution found for cffi>=1.0.3`.
+    cffi (and bitarray, via bitstring) have riscv64 wheels on our registry for manylinux
+    only. The build phase hid it — the isolated build env compiled cffi from sdist without
+    complaint, because only-binary is test-only (gotcha 12).
+    - **Split the job on `libc: [manylinux, musllinux]`** (`CIBW_BUILD:
+      cpXY-${{ matrix.libc }}_riscv64 …`, both `CIBW_*LINUX_RISCV64_IMAGE`s set, artifact
+      name and publish `artifact-pattern` widened to `*riscv64`). A single job running both
+      libcs back to back spends most of a 60-minute budget before the musl tests start.
+    - **Gate only-binary on `matrix.libc`, and on musllinux name only what `:all:` was
+      silently steering around rather than dropping it.** `:all:` had been doing
+      resolution work too (gotcha 488): bitstring 4.4.0 needs `tibs<0.6`, which exists
+      only as a Rust sdist, so `:all:` backtracked bitstring to 4.3.1. With no only-binary
+      at all the musl leg would try to compile tibs; `PIP_ONLY_BINARY=tibs` lets cffi and
+      bitarray build from sdist and still lands on bitstring 4.3.1. Diff the manylinux
+      leg's `Successfully installed …` line against a `docker run --platform
+      linux/riscv64 quay.io/pypa/musllinux_1_2_riscv64` install of the same requirements
+      to confirm the two legs resolve the same versions.

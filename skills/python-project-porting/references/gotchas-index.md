@@ -1013,6 +1013,10 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
 - **511** — An abi3-only *runtime* dependency is a permanent free-threading gap: abi3 never
   applies under `Py_GIL_DISABLED`, so no pin and no test-skip fixes it — read the
   dependency's wheel tags and drop `cp314t` before the first CI cycle.
+- **574** — A bare `cpXY-*` `CIBW_BUILD` also builds musllinux in the same job, where
+  `PIP_ONLY_BINARY=:all:` fails the test install on a dependency we ship for manylinux only
+  (cffi, bitarray) — split on `libc` and gate only-binary per libc, naming only the sdist
+  `:all:` was steering around.
 
 ### Build-tool drift & pins — [`gotchas/build-tool-drift-and-pins.md`](gotchas/build-tool-drift-and-pins.md)
 
