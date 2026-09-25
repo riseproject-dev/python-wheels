@@ -1,0 +1,127 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the manylinux build path of upstream's own
+# _build-wheel-natively.bash/build-wheel.bash (they build in a custom manylinux_2_28
+# image with a hand-built OpenSSL baked in; we use the standard riscv64 image instead).
+name: Build aerospike wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/aerospike.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-aerospike.yml'
+      - 'docs/packages/aerospike.yaml'
+      - 'patches/aerospike/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-aerospike.yml'
+      - 'docs/packages/aerospike.yaml'
+      - 'patches/aerospike/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: aerospike
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build aerospike ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: [cp312, cp313, cp314, cp314t]
+
+    env:
+      AEROSPIKE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout aerospike-client-python ${{ env.AEROSPIKE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: aerospike/aerospike-client-python
+          ref: ${{ env.AEROSPIKE_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch aerospike-client-c source
+        run: git apply python-wheels/patches/aerospike/${{ env.AEROSPIKE_VERSION }}/*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # libyaml-devel is CRB-only, not EPEL (gotcha 51 doesn't apply); openssl-devel
+          # is in AppStream. Both resolve on riscv64, matching upstream's own yum install.
+          CIBW_BEFORE_ALL_LINUX: dnf install -y libyaml-devel openssl-devel
+          # Real Aerospike server is out of scope; instead prove the extension is
+          # compiled and client() exercises the real C cluster-init code path (the one
+          # the riscv64 as_arch_pause patch touches), failing fast against a closed port.
+          CIBW_TEST_COMMAND: |
+            python3 - <<'PYEOF'
+            import aerospike
+            from aerospike import exception
+            import aerospike_helpers
+            from aerospike_helpers import expressions
+            from aerospike_helpers.operations import operations
+            assert aerospike.__file__.endswith('.so'), aerospike.__file__
+            try:
+                aerospike.client({'hosts': [('127.0.0.1', 13000)], 'policies': {'timeout': 1000}})
+                raise SystemExit('expected a ConnectionError connecting to a closed port')
+            except exception.ConnectionError:
+                pass
+            PYEOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: aerospike-${{ env.AEROSPIKE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish aerospike ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: aerospike-${{ matrix.version }}-*-manylinux_riscv64
