@@ -403,6 +403,10 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
   outweigh a scale check against this repo's own comparable precedents — a package can clear
   the "does upstream already support another architecture" bar and still be impractical (the
   drake case).
+- **581** — A `-nightly`/`-weekly`/dev-only distribution (date-stamped `.devN` versions, no tag or
+  recoverable commit, no sdist, pruned from PyPI, skipped by `check_versions.py`) is not a
+  portable release target — park it and point at its stable sibling, which carries the real
+  feasibility verdict (the tf-nightly case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

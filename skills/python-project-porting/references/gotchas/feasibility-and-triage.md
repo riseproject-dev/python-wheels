@@ -258,6 +258,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **560** — A GPU-vendor binding package that only `dlopen`s its runtime library at call time
   can still be build-time blocked by the same vendor's SDK headers — check the SDK's own
   platform matrix, not just the binding's link graph (the hip-python case).
+- **581** — A `-nightly`/`-weekly`/dev-only distribution (date-stamped `.devN` versions, no tag,
+  no sdist, pruned from PyPI, skipped by `check_versions.py`) is not a portable release — park it
+  and point at the stable sibling, which carries the real verdict (the tf-nightly case).
 
 ---
 
@@ -2588,6 +2591,16 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       for the CPU JIT, with `linux_riscv64` and `riscv64_or_cross` defined in
       `xla/tsl/BUILD`. Citing the sibling's hunk anyway would put a false hard blocker in the
       queue; the honest note says "scope and naming, *not* Bazel-blocked like jaxlib".
+      **The re-verification also works the other way.** From the 2.22 line on (the
+      `dev20260823` nightly and `v2.22.0-rc0`), TF's vendored XLA *does* contain the jaxlib
+      blocker. `xla/codegen/intrinsic/cpp:embed_bitcode` defines/links AArch64 unconditionally,
+      plus ARM/Hexagon/PowerPC/SystemZ/X86, with no `if_llvm_riscv_available`. Its genrule
+      turns `eigen_unary_{32,64}_ll` into objects for the default triple. The path into the
+      wheel is `//tensorflow/python` → `if_xla_available` (on by default, `.bazelrc`
+      `--define=with_xla_support=true`) → `compiler/aot:tfcompile_lib` →
+      `xla/service/cpu:cpu_compiler` → `backends/cpu/codegen:ir_compiler` →
+      `xla/codegen:intrinsic_lib` → `_cpp_gen_intrinsics`. A 2.22+ port therefore needs the
+      same two-hunk XLA patch as PR #526.
     - **Before costing a big Bazel build, check whether its wheel is per-interpreter.**
       `_get_full_wheel_name` formats `cp{v}-cp{v}` from `HERMETIC_PYTHON_VERSION`, so TF is
       one full build **per** interpreter (cp310–cp313 = 4), with none of the abi3/`py3-none`
@@ -4662,3 +4675,39 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     single precedent" reasoning that parked ifcopenshell (multiple from-source libraries at
     OCCT's 6h41m-plus-9.5h/interpreter scale) and pymeshlab, not a park-by-analogy call from
     drake's size alone.
+
+581. **A `-nightly`/`-weekly`/dev-only distribution is not a release you can port; park it
+    and point at its stable sibling, which carries the real feasibility verdict (the
+    tf-nightly case).** Entries like `tf-nightly 2.22.0.dev20260823`, `onnx-weekly`,
+    `tensordict-nightly`, `torchft-nightly`, `ai-edge-litert-nightly` or `pyagrum-nightly` look
+    like any other package missing a riscv64 wheel. But the things this repo depends on are
+    all missing:
+    - **There is no tag, and often no commit you can recover.** Run `git ls-remote <repo> |
+      grep -iE 'nightly|dev'`. TensorFlow has no per-date tags. Its one `refs/heads/nightly`
+      is force-moved every day (at triage it already pointed at a 2026-09-24 commit). So the
+      source of `dev20260823` is only "whatever master was when the job ran": 7 master commits
+      landed in the 24h before the wheels were uploaded. The wheel does not record a commit
+      either. The only version string in `libtensorflow_framework.so.2` is
+      `2.22.0-dev20260823`, with no `git describe` hash. You can read a single member through
+      HTTP `Range` requests with `zipfile` over a seekable reader, so there is no need to
+      download the 288 MB wheel. The workflow derives its git ref from `matrix.version`,
+      and here there is nothing to derive it from.
+    - **The upgrade tracker never follows it.** `ci_scripts/check_versions.py` drops
+      `is_devrelease`/`is_prerelease` versions in both `get_new_versions` and
+      `get_versions_since`. A `docs/packages/<pkg>.yaml` whose versions are all `.devN` never
+      gets bumped, so the entry is already stale when it is queued. The queue had
+      `dev20260823`; PyPI's latest was `dev20260924` at triage.
+    - **Upstream deletes old versions.** Count the `releases` in
+      `https://pypi.org/pypi/<pkg>/json` and find the oldest. tf-nightly has existed since 2017,
+      but PyPI lists only 156 releases and the oldest is `2.21.0.dev20260202`, a rolling window
+      of about 8 months. After that the upstream version our wheel claims to match no longer
+      exists on PyPI, which breaks gotcha 18's three-way match after the fact.
+    - **The code is the stable line's code.** Nightly is master, and the next stable branch
+      (here `r2.22`, with `v2.22.0-rc0` already tagged) has the same build graph. Run the
+      blocker check against that branch as well. The stable package nearly always gets the same
+      verdict, so write the nightly park note to point at the stable entry, and keep the full
+      feasibility evidence in the stable entry.
+    How to apply: every PyPI version is `.dev`/date-stamped, there is no sdist, and
+    `ls-remote` shows no matching tag → park with "port `<stable>` instead". If the stable
+    package is parked too, the nightly takes its reason plus this one. Never let a nightly
+    be a project's first riscv64 port.
