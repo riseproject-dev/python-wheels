@@ -107,12 +107,20 @@ def classify(files):
 
 def report_versions(package, data, entry, limit):
     releases = data["releases"]
-    try:
-        from packaging.version import Version
+    from packaging.version import InvalidVersion, Version
 
-        order = sorted(releases, key=Version)
-    except Exception:
-        order = sorted(releases)
+    def version_key(v):
+        # A single unparseable release (a non-PEP440 string some projects
+        # still publish) used to make the whole list fall back to lexicographic
+        # order, silently misreporting "latest" for every release. Sort
+        # unparseable versions after parseable ones instead of poisoning the
+        # whole sort.
+        try:
+            return (1, Version(v))
+        except InvalidVersion:
+            return (0, v)
+
+    order = sorted(releases, key=version_key)
 
     latest = data["info"]["version"]
     queued = (entry or {}).get("version")
