@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on: https://github.com/taishi-i/dynet/blob/3c9f35de86e98a5809e9c81394194c8f6e0aa0dc/.github/workflows/build_macos_wheels.yml
+# and the test step of https://github.com/taishi-i/dynet/blob/3c9f35de86e98a5809e9c81394194c8f6e0aa0dc/.travis/test_dynet.sh
+name: Build dynet38 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/dynet38.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-dynet38.yml'
+      - 'docs/packages/dynet38.yaml'
+      - 'patches/dynet38/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-dynet38.yml'
+      - 'docs/packages/dynet38.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # No 2.2 tag; the build_macos_wheels branch tip is the tree the latest 2.2 wheels (cp314) were built from.
+  DYNET38_REF: 3c9f35de86e98a5809e9c81394194c8f6e0aa0dc
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: dynet38
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build dynet38 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      DYNET38_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout dynet ${{ env.DYNET38_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: taishi-i/dynet
+          ref: ${{ env.DYNET38_REF }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply python-wheels/patches/dynet38/${{ env.DYNET38_VERSION }}/*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_USE_PEP517=1
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+          CIBW_TEST_COMMAND: cd {project}/tests/python && python test.py
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert any(n.startswith("_dynet.") and n.endswith(".so") for n in names), names
+          assert any(n.startswith("dynet38.libs/libdynet") for n in names), names
+          licences = {n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n} - {""}
+          assert licences == {"LICENSE.txt", "LICENSE.eigen-mpl2"}, licences
+          EOF
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dynet38-${{ env.DYNET38_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish dynet38 ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: dynet38-${{ matrix.version }}-*-manylinux_riscv64
