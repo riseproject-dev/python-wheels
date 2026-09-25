@@ -1252,6 +1252,10 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
   `interrupt()` lost because the engine clears the flag when execution starts, after a slow
   compile; re-signal in a bounded loop, and apply test patches to the `CIBW_TEST_SOURCES`
   checkout, not just the sdist.
+- **583** — A riscv64-only test failure can be drift from a dependency newer than upstream's lock
+  file: reproduce on x86_64 with PyPI wheels of both versions. mink's trivial-QP `solve_ik` tests
+  fail against daqp 0.9.x on every arch (daqp #168 made the proximal shift relative but kept the
+  absolute nonconvex check) and pass on the locked 0.8.5 — pin it in `CIBW_TEST_REQUIRES`.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 

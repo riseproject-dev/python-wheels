@@ -78,6 +78,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
   the thread finishes — read the summary's timestamp, not the job duration. Plus: a
   cancellation flag reset when execution starts swallows an interrupt sent during a slow
   compile (gotcha 38's shape).
+- **583** — A test failing on riscv64 only because our registry carries a newer dependency than
+  upstream's lock file is drift, not an arch bug: reproduce it on x86_64 with PyPI's wheels of
+  both versions. mink's `solve_ik` tests fail against daqp 0.9.x (all arches) and pass on
+  upstream's locked 0.8.5 — pin the lock's version in `CIBW_TEST_REQUIRES`, even from sdist.
 - **571** — On free-threaded CPython (cp314t), an object whose last reference is dropped on
   a native (non-Python) thread isn't freed there and then — freeing is deferred to whichever
   thread next runs Python bytecode. A test that drops the last reference on a native
@@ -1498,3 +1502,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
     re-signal in a bounded loop. (2) When `CIBW_TEST_SOURCES` copies the tests from a
     separate checkout (not the sdist), a test patch applied only to the sdist is a silent
     no-op: also `git apply --include='<tests dir>/*'` the series to that checkout.
+
+583. **A test failing on riscv64 only because our registry carries a newer dependency
+    than upstream's lock file is version drift, not an arch bug — reproduce it on
+    x86_64 before blaming the port (see `build-mink.yml`).** mink 1.3.0's
+    `test_solve_ik.py::test_trivial_solution` and
+    `test_exceeding_limits_without_safety_break_does_not_throw` failed on riscv64 with
+    `NoSolutionFound: QP solver daqp failed to find a solution` (260 other tests
+    green). Both call `solve_ik` with no tasks, so the QP Hessian is just mink's
+    Levenberg-Marquardt damping, `1e-12 * I`, with `q = 0`. `pip install daqp==X numpy`
+    on x86_64 and one `daqp.solve(np.eye(6)*1e-12, np.zeros(6), ...)` call per
+    version shows `exitflag` -5 (`DAQP_EXIT_NONCONVEX`) on **every** arch for 0.9.0
+    and 0.9.1 (and 0.8.2/0.8.3), and 1 (optimal) for 0.7.2, 0.8.4 and 0.8.5. Upstream
+    CI is green only because it runs `uv run pytest` against `uv.lock`, which pins
+    daqp **0.8.5**. Our registry only has 0.9.1, so our test env drifted.
+    - **Root cause (upstream daqp, `ef97920` "Improve DAQP-PROX", #168, first in
+      0.9.0):** the diagonal-Hessian branch of `daqp_update_Rinv` now adds the
+      proximal shift only when `H_ii <= zero_tol * hessian_scale` (relative; 1e-23
+      here), but still rejects `H_ii <= zero_tol` (absolute, 1e-11) as nonconvex. A
+      uniformly tiny diagonal is never shifted, so it is always rejected. In 0.8.5 the
+      shift trigger and the rejection used the same absolute `zero_tol`.
+    - **Fix in the test env, not a daqp patch:** the bug is not riscv64-specific, and
+      patching our daqp would make it diverge from PyPI's. Pin upstream's lock
+      version in `CIBW_TEST_REQUIRES` (`daqp==0.8.5`) and take `daqp` out of
+      `PIP_ONLY_BINARY` so pip builds that version from its sdist (setuptools + Cython,
+      no CMake; seconds on riscv64). This is gotcha 25's rule (take test-dep
+      versions from upstream's lock) applied to a *compiled runtime* dependency that
+      has no older riscv64 wheel.
+    - **The bisect is the proof that deselecting would be wrong:** if an older version
+      of the dependency passes on the same arch, the test is fine and the environment
+      is not.
+
