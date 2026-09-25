@@ -35,6 +35,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
   source collection flakes at random — retry, don't relax the check.
 - **538** — scikit-build-core's `wheel.license-files` is overridable from the environment, so
   an explicit list that leaves the vendored notices out needs no patch.
+- **578** — setuptools resolves `license_files` against the *working directory* at
+  `bdist_wheel` time, so a `setup.py` whose cmdclass `os.chdir()`s breaks a relative entry.
 
 ---
 
@@ -706,3 +708,25 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
       into the extension does not strictly require its text in the wheel. Shipping it costs
       nothing and matches what the rest of the repo does; the MIT and BSD-3-Clause ones are
       the mandatory half.
+
+578. **setuptools resolves `license_files` against the working directory when `bdist_wheel`
+    copies them, not against `setup.py`'s directory, so a licence patch on a `setup.py` whose
+    cmdclass `os.chdir()`s passes every check until the last step (the dynet38 case).**
+    DyNet's `build_py.run()` does `os.chdir(BUILD_DIR + "/python")` (a CMake build tree) and
+    never changes back. A patch that fixed `license_files=("../LICENSE.txt",)` to
+    `("LICENSE.txt", "LICENSE.eigen-mpl2")` compiled libdynet and `_dynet` for ~40 minutes
+    per interpreter. `egg_info` even logged `adding license file 'LICENSE.txt'`. Then all three
+    jobs died in `bdist_wheel` with `error: [Errno 2] No such file or directory:
+    'LICENSE.txt'`. The pattern is globbed from the source root when `setup()` runs, but
+    the file is copied from the relative path later, under whatever cwd the build left.
+    - **Absolute paths are not an escape hatch.** setuptools >= 77 rejects them with
+      `InvalidConfigError: Pattern '/…/LICENSE.txt' should be relative and must not start
+      with '/'`. And `../` is exactly the upstream bug that matched nothing.
+    - **Copy the files into the directory the cmdclass switched to**, straight after its
+      `chdir`: `copyfile(os.path.join(SCRIPT_DIR, f), f)` for each entry, reusing one
+      `LICENSE_FILES` tuple for both the copy and `license_files=`.
+    - **Reproduce it in seconds before a CI cycle.** Build a ten-line `setup.py` with the
+      same `build_py` `chdir` and the same `license_files`, using `uv build --wheel`
+      (current setuptools). It fails with the identical `Errno 2` without the copy and ships
+      both files under `dist-info/licenses/` with it. Grep the upstream `setup.py` for
+      `os.chdir` whenever you touch its `license_files`.

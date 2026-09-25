@@ -1276,6 +1276,10 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
   on `;`), so a project whose `wheel.license-files = ["LICENSE"]` leaves its statically linked
   fmt/pybind11 and vendored headers unnotified needs a `CIBW_ENVIRONMENT` entry, not a patch —
   the env source outranks `pyproject.toml` and the override replaces the list (the pyslang case).
+- **578** — setuptools copies `license_files` relative to the *cwd* at `bdist_wheel` time, so a
+  `setup.py` cmdclass that `os.chdir()`s into a CMake build tree makes a correct relative entry
+  fail with `[Errno 2] No such file or directory: 'LICENSE.txt'` after the whole compile; absolute
+  paths are rejected, so copy the files into the chdir target (the dynet38 case).
 
 ### Local validation & the aarch64/QEMU rehearsal — [`gotchas/local-validation-and-rehearsal.md`](gotchas/local-validation-and-rehearsal.md)
 
