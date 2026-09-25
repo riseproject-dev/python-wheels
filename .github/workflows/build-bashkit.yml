@@ -1,0 +1,132 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on:
+# https://github.com/everruns/bashkit/blob/v0.17.1/.github/workflows/publish-python.yml
+# https://github.com/everruns/bashkit/blob/v0.17.1/.github/workflows/python.yml
+name: Build bashkit wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/bashkit.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-bashkit.yml'
+      - 'docs/packages/bashkit.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-bashkit.yml'
+      - 'docs/packages/bashkit.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: bashkit
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build bashkit ${{ matrix.version }} cp39-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      BASHKIT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout bashkit v${{ env.BASHKIT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: everruns/bashkit
+          ref: v${{ env.BASHKIT_VERSION }}
+          persist-credentials: false
+
+      - name: Stage the licence beside bashkit's pyproject.toml
+        # maturin globs LICEN[CS]E* relative to the pyproject directory, which
+        # is crates/bashkit-python/ -- upstream's published wheels carry none.
+        run: cp LICENSE crates/bashkit-python/
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: crates/bashkit-python
+          output-dir: wheelhouse/
+        env:
+          # pyo3's abi3-py39 feature is on unconditionally: built once on cp39
+          # and re-tested on the newer interpreters. No free-threaded wheel
+          # upstream. musllinux is dropped: rustup.rs ships no riscv64 musl
+          # toolchain.
+          CIBW_BUILD: >-
+            cp39-manylinux_riscv64 cp310-manylinux_riscv64
+            cp311-manylinux_riscv64 cp312-manylinux_riscv64
+            cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # The integration-test deps have riscv64 wheels from cp312 only; their
+          # tests importorskip them.
+          CIBW_BEFORE_TEST: >-
+            pip install pytest pytest-asyncio
+            "langchain-core; python_version >= '3.12'"
+            "langgraph; python_version >= '3.12'"
+            "fastapi; python_version >= '3.12'"
+            "httpx; python_version >= '3.12'" &&
+            pip install {project}/crates/bashkit-python/test-fixtures/random-fs
+          CIBW_TEST_SOURCES: >-
+            crates/bashkit-python/tests
+            crates/bashkit-python/bashkit/deepagents.py
+            crates/bashkit-python/pyproject.toml
+          CIBW_TEST_COMMAND: >-
+            python -c "import bashkit._bashkit as m, importlib.metadata as md;
+            assert m.__file__.endswith('.so'), m.__file__;
+            assert any(str(p).endswith('licenses/LICENSE') for p in md.files('bashkit'))" &&
+            cd crates/bashkit-python &&
+            pytest tests/ -v
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bashkit-${{ env.BASHKIT_VERSION }}-cp39-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish bashkit ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: bashkit-${{ matrix.version }}-*-manylinux_riscv64
