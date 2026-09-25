@@ -765,6 +765,10 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
   `group("gn_check")`). Read the "which caused the file to be included" line, diff the fork
   against Chromium's copy (which has an empty riscv64 branch) and carry that as a patch
   (the liteparse/pdfium case).
+- **575** — `--config=clang_local` also drops the hermetic linker: without `lld` installed,
+  Bazel's `local_config_cc` probe falls back to GNU `ld`, so an upstream `-Wl,--icf=all`
+  (lld/gold-only; gold has no riscv64) fails at the final `CppLink` hours in. `dnf install
+  lld` next to `clang` and Bazel adds `-fuse-ld=lld` itself (the xprof case).
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 

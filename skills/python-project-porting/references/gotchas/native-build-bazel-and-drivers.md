@@ -72,6 +72,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
   `BUILD.gn` for a library you are not even building: GN loads every file any root target
   reaches, `gn_check`/test groups included. Diff the project's fork of that file against
   Chromium's own copy and carry its empty riscv64 branch as a patch.
+- **575** — The linker half of gotcha 567: under `--config=clang_local` Bazel links with GNU
+  `ld` unless `lld` is installed, so an upstream `-Wl,--icf=all` (which assumes the hermetic
+  clang+lld toolchain) only fails at the final `.so` link, hours in. `dnf install lld` and
+  Bazel's own linker probe switches every link to `-fuse-ld=lld`.
 
 ---
 
@@ -1148,3 +1152,25 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       the upstream recipe's own patch step. Switching the checkout to
       `checkout_configuration=minimal` would also drop `checkout_skia`, but it rewrites the
       upstream recipe's `02-checkout.sh` and changes which deps land, for no gain.
+
+575. **`--config=clang_local` swaps the linker too: without `lld` in the image, Bazel's
+    `local_config_cc` links with GNU `ld`, and an upstream linkopt that assumes the hermetic
+    clang+lld toolchain fails only at the *final* link — after 13h of compilation (the xprof
+    case; PR #2270).** Gotcha 567 fixes which *compiler* runs; the linker is chosen separately.
+    Bazel 7.x `tools/cpp/unix_cc_configure.bzl` probes `$CC empty.cc -Wl,--start-lib
+    -Wl,--end-lib -fuse-ld=lld` (then `gold`) and, only if that succeeds, adds
+    `-fuse-ld=<path>` to every link. With `clang` alone installed the probe fails (`invalid
+    linker name in argument '-fuse-ld=lld'`), gold has no riscv64 backend, so clang falls back
+    to the image's GNU `ld` (bfd) silently. xprof's `//xprof/pywrap:profiler_plugin_c_api.so`
+    carries `-Wl,--exclude-libs,ALL -Wl,--gc-sections -Wl,--icf=all -Wl,--strip-all` in its
+    default-branch `linkopts`, and bfd has no `--icf`: `/usr/bin/ld: unrecognized option
+    '--icf=all'` on the one `CppLink` that runs after ~8,700 compile actions.
+    - **Fix: add `lld` to the same `dnf install` as `clang`** — no `--linkopt`, no patch.
+      Rocky 10 AppStream ships `lld` 21.1.8 for riscv64, matching the image's clang 21.1.8,
+      and the probe then prints `"/usr/bin/ld.lld" ... -m elf64lriscv` and Bazel adds
+      `-fuse-ld=/usr/bin/ld.lld` itself. Dropping `--icf=all` with a patch would diverge from
+      upstream's binary; lld is what upstream links with anyway.
+    - **Pre-flight it in seconds, not hours:** before a multi-hour Bazel/XLA-family build,
+      `grep -rn -- '-Wl,--icf\|fuse-ld\|--start-lib' <checkout>` for gold/lld-only linker
+      flags, and in the image run `clang++ -fPIC -shared -fuse-ld=lld -Wl,--icf=all x.cc`
+      vs. the same without `-fuse-ld` — the bfd failure reproduces under QEMU instantly.
