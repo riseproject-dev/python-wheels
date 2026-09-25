@@ -1,0 +1,162 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-vegafusion-python-linux-64`/
+# `test-vegafusion-python-linux-64` jobs of
+# https://github.com/hex-inc/vegafusion/blob/v2.0.3/.github/workflows/build_test.yml
+name: Build vegafusion wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/vegafusion.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-vegafusion.yml'
+      - 'docs/packages/vegafusion.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-vegafusion.yml'
+      - 'docs/packages/vegafusion.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: vegafusion
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build vegafusion ${{ matrix.version }} cp39-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+
+    env:
+      VEGAFUSION_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout vegafusion v${{ env.VEGAFUSION_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: hex-inc/vegafusion
+          ref: v${{ env.VEGAFUSION_VERSION }}
+          persist-credentials: false
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+
+      # Same OOM guard build-datafusion.yml/build-pylance.yml need on these
+      # runners for a comparably sized Rust workspace (arrow + datafusion +
+      # tonic).
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 16
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: vegafusion-python
+          output-dir: wheelhouse/
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # pyo3 carries abi3-py39 unconditionally in vegafusion-python/Cargo.toml,
+          # so upstream ships one cp39-abi3 wheel and no free-threaded variant.
+          # arro3-core and pyarrow/duckdb have no riscv64 wheel in our registry
+          # below cp312, so the abi3 wheel is built on cp312 and re-tested on
+          # cp313/cp314 via cibuildwheel's abi3 dedup (same shape as
+          # build-datafusion.yml). musllinux is dropped: rustup.rs ships no
+          # riscv64 musl toolchain. This must be CIBW_BUILD, not a `build:` action
+          # input (pypa/cibuildwheel has no such input and silently drops it,
+          # falling back to its default cp39 floor - gotcha 564).
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          # protobuf-src (enabled transitively through vegafusion-core) vendors
+          # and compiles protoc itself, the same mechanism build-datafusion.yml's
+          # `protoc` feature relies on, so no system protobuf package is needed.
+          # `release` is used instead of upstream's own `release-opt` profile
+          # (fat LTO, codegen-units=1) so any other maturin sdist this container
+          # builds during the test phase still resolves a real cargo profile
+          # name (gotcha 141); the tuning is expressed instead with
+          # CARGO_PROFILE_RELEASE_* below, the same codegen-units/opt-level
+          # tradeoff build-datafusion.yml makes for this workspace's size on
+          # the 4-core riscv64 runners.
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            MATURIN_PEP517_ARGS="--profile release --strip --features protobuf-src"
+            CARGO_PROFILE_RELEASE_OPT_LEVEL=3
+            CARGO_PROFILE_RELEASE_LTO=thin
+            CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+            CARGO_BUILD_JOBS=2
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Without this pip prefers PyPI's releases, which have no riscv64
+          # wheel for these, and source-builds them in the container.
+          CIBW_TEST_ENVIRONMENT: >-
+            PIP_ONLY_BINARY=numpy,pandas,pyarrow,duckdb,polars,polars-runtime-64,arro3-core,psutil
+          # Mirrors upstream's own linux-64/arm64 test jobs' optional+test
+          # dependencies, less vl-convert-python (no riscv64 wheel; its pinned
+          # rusty_v8 has no riscv64 build - gotcha 335), which altair's
+          # chart.transformed_data() needs to compile Vega-Lite in every
+          # test_transformed_data.py case, and the jupyter-widget stack
+          # (Chrome/selenium/skimage/jupytext), which test_jupyter_widget.py
+          # needs. altair/vega-datasets only serve those two files. pandas<3
+          # matches upstream's pixi pin: pandas 3's default str dtype maps to
+          # arrow large_string, which test_transformer.py asserts against.
+          CIBW_TEST_REQUIRES: >-
+            pytest "pandas>=2.2,<3" polars "duckdb>=1.0" pyarrow
+          CIBW_TEST_SOURCES: >-
+            vegafusion-python/pyproject.toml vegafusion-python/tests
+            vegafusion-runtime/tests/specs
+          CIBW_TEST_COMMAND: >-
+            cd vegafusion-python &&
+            python -m pytest tests -v
+            --ignore=tests/test_jupyter_widget.py
+            --ignore=tests/test_transformed_data.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: vegafusion-${{ env.VEGAFUSION_VERSION }}-cp39-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish vegafusion ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: vegafusion-${{ matrix.version }}-*-manylinux_riscv64
