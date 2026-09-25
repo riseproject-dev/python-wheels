@@ -1239,6 +1239,12 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
   reservation on mmap failure rather than hardcoding a 256GB cap (some riscv64 hardware has
   more). Worth a quick smoke test for any database/allocator/mmap-cache port with a multi-TB
   default reservation.
+- **580** — A job that "ran 4 hours then failed" may have failed in hour two: a failed test
+  that abandons a non-daemon thread keeps the interpreter alive after pytest's summary until
+  the thread ends — check the summary's timestamp first. Kuzu's case: a single fixed-delay
+  `interrupt()` lost because the engine clears the flag when execution starts, after a slow
+  compile; re-signal in a bounded loop, and apply test patches to the `CIBW_TEST_SOURCES`
+  checkout, not just the sdist.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 

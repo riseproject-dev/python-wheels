@@ -73,6 +73,11 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
   expected value on `sys.version_info`, don't skip the test. Plus: a cache key over a whole
   patches directory rebuilds on changes it can't have affected — key it on only the files
   the cached step reads.
+- **580** — A job that "ran 4 hours then failed" may have failed in hour two: a test that
+  abandons a non-daemon thread keeps the interpreter alive after pytest's summary line until
+  the thread finishes — read the summary's timestamp, not the job duration. Plus: a
+  cancellation flag reset when execution starts swallows an interrupt sent during a slow
+  compile (gotcha 38's shape).
 - **571** — On free-threaded CPython (cp314t), an object whose last reference is dropped on
   a native (non-Python) thread isn't freed there and then — freeing is deferred to whichever
   thread next runs Python bytecode. A test that drops the last reference on a native
@@ -1467,3 +1472,29 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
     any port of a database, allocator, or `mmap`-based cache with a multi-TB default
     reservation is worth a quick `Database()`/`open()`-with-defaults smoke test on this
     fleet before trusting a build that only exercised small reservations.
+
+580. **A job that "ran for 4 hours, then failed" may have failed after two: a failed test
+    that leaves a non-daemon `threading.Thread` running keeps the interpreter alive *after*
+    pytest prints its summary, until that thread finishes — so compare the summary line's
+    timestamp with the step's end before hunting for a late compile error, an OOM, or a
+    runner timeout (kuzu 0.11.3, `test_connection_interrupt`).** Both `cp312` and `cp313`
+    printed `1 failed, 211 passed ... in 338s` at 18:41, then sat silent until 20:36, when the
+    abandoned thread's own traceback (`DID NOT RAISE RuntimeError`) appeared and the step
+    failed. The 4h20m job was ~2h of compile, ~6 min of tests and ~1h55m of the interpreter
+    waiting at exit for a query nobody was watching. The failure itself is gotcha 38's shape
+    in a C++ engine: the test starts `UNWIND RANGE(1,1000000) ... UNWIND RANGE(1,1000000)
+    ... RETURN COUNT(...)` on a thread, sleeps 5s, calls `conn.interrupt()` **once**, and
+    joins for 100s. Kuzu's binder constant-folds each `RANGE()` into a million-element list
+    literal (and names it by its `toString()`), and `ClientContext::executeNoLock()` calls
+    `resetActiveQuery()` — clearing the interrupted flag — only once compilation is done. On
+    the riscv64 runner that compile outlasts the 5s sleep, so the interrupt lands mid-compile,
+    is wiped, and the query runs to completion. The tell that it was *lost*, not *slow*: the
+    thread eventually returned normally ("DID NOT RAISE") instead of raising late; an
+    interrupt that reached the executing operators would have been honoured at the next
+    `getNextTuple()`. Fix: patch the test to re-issue the interrupt every second until the
+    thread ends, inside the same 100s budget (unchanged on fast hosts, where the first one
+    sticks) — not a deselect. Two generalisations: (1) any "set a cancel flag, then the
+    worker resets it when it starts" API races a single fixed-delay cancel on a slow host;
+    re-signal in a bounded loop. (2) When `CIBW_TEST_SOURCES` copies the tests from a
+    separate checkout (not the sdist), a test patch applied only to the sdist is a silent
+    no-op: also `git apply --include='<tests dir>/*'` the series to that checkout.
