@@ -1,0 +1,118 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 25 Sep 2026 00:00:00 +0000
+Subject: [PATCH] test: let the stream be freed before stopping the local
+ server on free-threaded builds
+
+TestClient and TestAsyncClient's _test_stream_lives_until_complete drop
+every local reference to the stream and the connection, wait for the
+response, then call _stop_server(). That calls HTTPServer.shutdown(), and
+the single-threaded HTTPServer is still inside handle() for the HTTP/1.1
+keep-alive connection. So shutdown() only returns once the client socket
+closes, which happens only when the Python stream (which holds the
+connection) is deallocated.
+
+With the GIL, the stream's last reference is dropped by the DECREFs in
+s_on_stream_complete on the native event-loop thread, and the stream,
+connection and socket are freed right there. On a free-threaded build, an
+object's owner thread is the one that created it (here the test's main
+thread). A DECREF from any other thread that takes the shared refcount
+negative only queues the object for its owner to merge. The owner merges
+the next time it runs bytecode, i.e. when the eval breaker fires. If the main
+thread is already parked in shutdown()'s Event.wait() by then, nothing ever
+merges the refcount. The stream never dies, the socket never closes and
+the job hangs until the CI timeout. Whether it hangs depends on whether
+the main thread gets from the completion wake-up into shutdown() before
+the native thread's final DECREF.
+
+That is what happened on this repo's riscv64 runners. 0.36.4 cp314t hung in
+test_http_client's test_stream_lives_until_complete_http, and on a
+later run 0.36.3 cp314t hung in test_aiohttp_client's. Each version
+passes on other runs, and test/ is byte-identical across 0.36.3, 0.36.4
+and 0.37.0. It is not specific to riscv64: with upstream's own
+awscrt 0.36.3 cp314-cp314t x86_64 wheel from PyPI, a reproducer that
+reaches shutdown() before the response arrives hangs 3/3 on 3.14.7t,
+while cp314 returns in 0.5s 3/3.
+
+Keep a weakref to the stream and, after the completion check, run
+bytecode until it is freed (bounded by the test's own timeout) before
+stopping the server. Nothing else changes: the tests still check that the
+stream completes after every local reference is gone, and now also
+wait for it to be released instead of relying on the GIL's immediate
+deallocation.
+
+Upstream-Status: To upstream [latent free-threading deadlock in upstream's own test harness, reproduced on x86_64 with upstream's PyPI wheel; not yet sent, since that needs a contributor-signed upstream PR, which this repo's automation does not open]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/test/test_aiohttp_client.py b/test/test_aiohttp_client.py
+index 8d24c39..57facfb 100644
+--- a/test/test_aiohttp_client.py
++++ b/test/test_aiohttp_client.py
+@@ -3,6 +3,7 @@
+ 
+ import time
+ import socket
++import weakref
+ import sys
+ import asyncio
+ import unittest
+@@ -235,6 +236,8 @@ class TestAsyncClient(AsyncLocalServerTestBase):
+             # Schedule task to collect response but don't await it yet
+             collect_task = asyncio.create_task(response.collect_response(stream))
+ 
++            stream_ref = weakref.ref(stream)
++
+             # Delete references to stream and connection
+             del stream
+             del connection
+@@ -243,6 +246,14 @@ class TestAsyncClient(AsyncLocalServerTestBase):
+             status_code = await collect_task
+             self.assertEqual(200, status_code)
+ 
++            # On free-threaded builds the stream's last reference is dropped on the
++            # native thread, and CPython defers freeing it to this (owning) thread.
++            # Run bytecode until that happens: the stream keeps the keep-alive
++            # connection open, and _stop_server() would otherwise block forever.
++            deadline = time.monotonic() + self.timeout
++            while stream_ref() is not None and time.monotonic() < deadline:
++                await asyncio.sleep(0.01)
++
+         finally:
+             self._stop_server()
+ 
+diff --git a/test/test_http_client.py b/test/test_http_client.py
+index 5364d7e..b2733d4 100644
+--- a/test/test_http_client.py
++++ b/test/test_http_client.py
+@@ -3,6 +3,7 @@
+ 
+ import time
+ import socket
++import weakref
+ import sys
+ import subprocess
+ from urllib.parse import urlparse
+@@ -267,6 +268,7 @@ class TestClient(LocalServerTestBase):
+             stream = connection.request(request)
+             stream.activate()
+             completion_future = stream.completion_future
++            stream_ref = weakref.ref(stream)
+ 
+             # delete all local references
+             del stream
+@@ -275,6 +277,14 @@ class TestClient(LocalServerTestBase):
+             # stream should still complete successfully
+             completion_future.result(self.timeout)
+ 
++            # On free-threaded builds the stream's last reference is dropped on the
++            # native thread, and CPython defers freeing it to this (owning) thread.
++            # Run bytecode until that happens: the stream keeps the keep-alive
++            # connection open, and _stop_server() would otherwise block forever.
++            deadline = time.monotonic() + self.timeout
++            while stream_ref() is not None and time.monotonic() < deadline:
++                time.sleep(0.01)
++
+         finally:
+             self._stop_server()
+ 

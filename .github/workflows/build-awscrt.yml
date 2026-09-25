@@ -16,11 +16,13 @@ on:
     paths:
       - '.github/workflows/build-awscrt.yml'
       - 'docs/packages/awscrt.yaml'
+      - 'patches/awscrt/**'
   push:
     branches: [main]
     paths:
       - '.github/workflows/build-awscrt.yml'
       - 'docs/packages/awscrt.yaml'
+      - 'patches/awscrt/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -55,6 +57,10 @@ jobs:
         # Each abi3 wheel is built on the oldest interpreter its tag claims and only
         # re-tested on the next one, so cp311 is here despite our cp312 floor: awscrt
         # defines PY_SSIZE_T_CLEAN and parses "s#"/"z#" throughout.
+        # wheel_tag is a real matrix dimension (not include-only) so it fans out
+        # against every pending version instead of collapsing to one combination
+        # per include entry (CLAUDE.md gotcha 402).
+        wheel_tag: [cp311-abi3, cp313-abi3, cp314-cp314t]
         include:
           - wheel_tag: cp311-abi3
             builds: cp311-manylinux_riscv64 cp312-manylinux_riscv64
@@ -81,6 +87,20 @@ jobs:
         run: |
           python3 continuous-delivery/update-version.py
           grep -q "__version__ = '${AWSCRT_VERSION}'" awscrt/__init__.py
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # Only some versions need patching, so a missing directory is not an error.
+      - name: Apply patches
+        run: |
+          patches="$PWD/python-wheels/patches/awscrt/${AWSCRT_VERSION}"
+          if [ -d "$patches" ]; then
+            git apply -v "$patches"/*.patch
+          fi
 
       - name: Build wheels
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
