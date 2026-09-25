@@ -31,6 +31,7 @@ permissions:
 
 env:
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
 
 jobs:
   setup:
@@ -46,7 +47,8 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-    name: Build pyvex ${{ matrix.version }} cp312-abi3-manylinux_riscv64
+        libc: [manylinux, musllinux]
+    name: Build pyvex ${{ matrix.version }} cp312-abi3-${{ matrix.libc }}_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     env:
@@ -66,16 +68,20 @@ jobs:
         env:
           CIBW_ARCHS: riscv64
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_BUILD: "cp312-* cp313-* cp314-*"
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_BUILD: cp312-${{ matrix.libc }}_riscv64 cp313-${{ matrix.libc }}_riscv64 cp314-${{ matrix.libc }}_riscv64
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair --exclude libpyvex.so -w {dest_dir} {wheel}"
           CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_TEST_ENVIRONMENT: "PIP_ONLY_BINARY=:all:"
+          # cffi and bitarray have riscv64 wheels on our registry for manylinux
+          # only, so musllinux builds them from sdist; tibs stays binary-only so
+          # bitstring resolves to the same 4.3.1 on both legs.
+          CIBW_TEST_ENVIRONMENT: ${{ matrix.libc == 'manylinux' && 'PIP_ONLY_BINARY=:all:' || 'PIP_ONLY_BINARY=tibs' }}
           CIBW_TEST_GROUPS: dev
           CIBW_TEST_COMMAND: pytest {project}/tests
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: pyvex-${{ env.PYVEX_VERSION }}-cp312-abi3-manylinux_riscv64
+          name: pyvex-${{ env.PYVEX_VERSION }}-cp312-abi3-${{ matrix.libc }}_riscv64
           path: ./wheelhouse/*.whl
           if-no-files-found: error
 
@@ -94,4 +100,4 @@ jobs:
     secrets:
       app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
     with:
-      artifact-pattern: pyvex-${{ matrix.version }}-*-manylinux_riscv64
+      artifact-pattern: pyvex-${{ matrix.version }}-*riscv64
