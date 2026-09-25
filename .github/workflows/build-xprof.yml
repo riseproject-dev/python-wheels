@@ -19,11 +19,13 @@ on:
     paths:
       - '.github/workflows/build-xprof.yml'
       - 'docs/packages/xprof.yaml'
+      - 'patches/xprof/**'
   push:
     branches: [main]
     paths:
       - '.github/workflows/build-xprof.yml'
       - 'docs/packages/xprof.yaml'
+      - 'patches/xprof/**'
 
 run-name: build-xprof ${{ inputs.version && format('- {0}', inputs.version) || '' }}
 
@@ -222,6 +224,7 @@ jobs:
             -v "${GITHUB_WORKSPACE}:/work" \
             -w /work \
             -e HERMETIC_PYTHON_VERSION \
+            -e XPROF_VERSION \
             "${MANYLINUX_RISCV64_IMAGE}" \
             bash <<'SCRIPT' 2>&1 | tee build.log
           set -eux
@@ -255,12 +258,24 @@ jobs:
           # Arrow/Parquet events database, added upstream after this release) - the
           # real released wheel carries only profiler_plugin_c_api.so, confirmed by
           # unzipping it.
-          bazel build -c opt --config=clang_local \
-            --repo_env=HERMETIC_PYTHON_VERSION="${HERMETIC_PYTHON_VERSION}" \
-            --repo_env=PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
-            --strategy=Javac=standalone \
-            --curses=no --show_progress_rate_limit=60 \
-            //xprof/pywrap:profiler_plugin_c_api.so
+          BAZEL_FLAGS=(
+            -c opt --config=clang_local
+            --repo_env=HERMETIC_PYTHON_VERSION="${HERMETIC_PYTHON_VERSION}"
+            --repo_env=PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            --strategy=Javac=standalone
+            --curses=no --show_progress_rate_limit=60
+          )
+          TARGET=//xprof/pywrap:profiler_plugin_c_api.so
+
+          # patches/xprof/<version> are against @llvm-raw (the LLVM @xla pins), not
+          # xprof: the image's clang 21.1.8 crashes on MLIR's BuiltinDialectBytecode.cpp
+          # (llvm/llvm-project#188249). Fetch without building, then patch in place.
+          bazel build "${BAZEL_FLAGS[@]}" --nobuild "${TARGET}"
+          LLVM_RAW="$(bazel info output_base)/external/llvm-raw"
+          for patch in /work/python-wheels/patches/xprof/"${XPROF_VERSION}"/*.patch; do
+            git -C "${LLVM_RAW}" apply -v "${patch}"
+          done
+          bazel build "${BAZEL_FLAGS[@]}" "${TARGET}"
 
           cp -a /work/dist-reference /work/dist
           cp bazel-bin/xprof/pywrap/profiler_plugin_c_api.so \

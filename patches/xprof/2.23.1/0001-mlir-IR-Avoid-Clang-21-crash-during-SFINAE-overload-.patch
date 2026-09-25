@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 25 Sep 2026 03:00:00 +0200
+Subject: [PATCH] [mlir][IR] Avoid Clang 21 crash during SFINAE overload
+ resolution
+
+Upstream-Status: Backport [https://github.com/llvm/llvm-project/commit/9722a2ceddb6e4fc098f89c9c55c5ad7afd1a64c]
+
+Applies to @llvm-raw (llvm/llvm-project c9b25a6437fd, the commit pinned by
+the openxla/xla c520e3fb3f00 that xprof 2.23.1 builds against), not to the
+xprof checkout.
+
+mlir::getChecked() in mlir/Bytecode/BytecodeImplementation.h probes
+T::getChecked(emitError, params...) through llvm::is_detected. For every
+attribute/type without a no-context getChecked (AffineMapAttr, ArrayAttr, ...)
+that probe fails overload resolution against the inherited
+StorageUserBase::getChecked(function_ref, MLIRContext *, Args...) template.
+Clang 21's CWG2369 handling skips the function_ref parameter (it has a
+converting constructor), finds the MLIRContext * one bad, and returns with
+the first conversion slot never initialized; building the candidate notes
+then reads it. Clang 21.1.8 (the manylinux_2_39 image's clang, RESF
+21.1.8-1.el10) dies there with SIGILL (exit 132) compiling
+mlir/lib/IR/BuiltinDialectBytecode.cpp, identically on x86_64, independent
+of stack size (ulimit -s unlimited still crashes) - llvm/llvm-project#188249,
+#198278. Clang 22.1.0 is not affected.
+
+This is upstream commit 9722a2ceddb6 by Kazu Hirata (llvm/llvm-project#208359,
+2026-07-09), unchanged: the context parameter becomes a constrained Arg1 &&,
+so the probe fails template argument deduction instead of hitting the
+uninitialized conversion. The resulting header is byte-identical to upstream
+main's.
+---
+ mlir/include/mlir/IR/StorageUniquerSupport.h | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/mlir/include/mlir/IR/StorageUniquerSupport.h b/mlir/include/mlir/IR/StorageUniquerSupport.h
+--- a/mlir/include/mlir/IR/StorageUniquerSupport.h
++++ b/mlir/include/mlir/IR/StorageUniquerSupport.h
+@@ -194,9 +194,16 @@
+   /// Get or create a new ConcreteT instance within the ctx. If the arguments
+   /// provided are invalid, errors are emitted using the provided `emitError`
+   /// and a null object is returned.
+-  template <typename... Args>
++  ///
++  /// Workaround: We use Arg1 && instead of MLIRContext * in the parameter list
++  /// to work around a bug in Clang 21.1.8 where Clang segfaults during SFINAE
++  /// overload resolution when attempting to match non-pointer arguments
++  /// against an unconstrained MLIRContext * parameter.
++  template <typename Arg1, typename... Args,
++            typename = std::enable_if_t<std::is_convertible_v<
++                llvm::remove_cvref_t<Arg1>, MLIRContext *>>>
+   static ConcreteT getChecked(function_ref<InFlightDiagnostic()> emitErrorFn,
+-                              MLIRContext *ctx, Args... args) {
++                              Arg1 &&ctx, Args... args) {
+     // If the construction invariants fail then we return a null attribute.
+     if (failed(ConcreteT::verifyInvariants(emitErrorFn, args...)))
+       return ConcreteT();
+-- 
+2.47.0
