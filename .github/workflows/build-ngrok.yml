@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the Linux `maturin build` steps of
+# https://github.com/ngrok/ngrok-python/blob/v1.7.0/.github/workflows/build.yml
+# and the `test` job of
+# https://github.com/ngrok/ngrok-python/blob/v1.7.0/.github/workflows/ci.yml
+name: Build ngrok wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ngrok.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ngrok.yml'
+      - 'docs/packages/ngrok.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ngrok.yml'
+      - 'docs/packages/ngrok.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: ngrok
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build ngrok ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    env:
+      NGROK_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout ngrok-python v${{ env.NGROK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ngrok/ngrok-python
+          ref: v${{ env.NGROK_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # pyo3 carries abi3-py310 unconditionally, so cp313/cp314 re-test the
+          # cp312 build. pyo3 0.22 cannot build for free-threaded CPython.
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # aws-lc-sys is built with its `bindgen` feature, which needs libclang.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal &&
+            dnf -y install clang-devel
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_SOURCES: test examples pytest.ini
+          CIBW_TEST_REQUIRES: pytest pytest-timeout aiohttp requests mypy
+          # Upstream's suite needs an NGROK_AUTHTOKEN secret; these tests need
+          # none, and test_ca_cert/test_invalid_authtoken still complete a TLS
+          # handshake with the ngrok service.
+          CIBW_TEST_COMMAND: >-
+            python -c "import ngrok.ngrok as m; assert m.__file__.endswith('.so'), m.__file__" &&
+            python -m mypy
+            examples/ngrok-forward-minimal.py examples/ngrok-forward-full.py
+            examples/ngrok-http-minimal.py examples/ngrok-http-full.py
+            examples/ngrok-labeled.py examples/ngrok-tcp.py examples/ngrok-tls.py &&
+            python -m pytest -v test/test_main.py test/test.py
+            -k "TestNgrokMain or test_import or test_pipe_name or test_ca_cert or test_invalid_authtoken"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ngrok-${{ env.NGROK_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish ngrok ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: ngrok-${{ matrix.version }}-*-manylinux_riscv64
