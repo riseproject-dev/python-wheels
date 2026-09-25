@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build:
+#   https://github.com/cvc5/cvc5/blob/cvc5-1.3.4/.github/workflows/package_pypi.yml
+name: Build cvc5 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cvc5.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cvc5.yml'
+      - 'docs/packages/cvc5.yaml'
+      - 'patches/cvc5/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cvc5.yml'
+      - 'docs/packages/cvc5.yaml'
+      - 'patches/cvc5/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cvc5
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cvc5 ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      CVC5_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout cvc5 cvc5-${{ env.CVC5_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: cvc5/cvc5
+          ref: cvc5-${{ env.CVC5_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # skip-worktree keeps cmake/version.cmake from suffixing the version with "-modified".
+      - name: Apply patches
+        run: |
+          git apply -v python-wheels/patches/cvc5/${{ env.CVC5_VERSION }}/*.patch
+          git update-index --skip-worktree cmake/Helpers.cmake
+
+      - name: Create pyproject.toml
+        run: |
+          mkdir -p build/src/api/python
+          sed -e 's/^\(description=".*\)"/\1 (BSD version)"/' \
+              -e 's/^\(readme = {text = ".*\)\(", content-type = "text\/plain"\)/\1 (BSD version)\2/' \
+              ./src/api/python/pyproject.toml > ./build/src/api/python/pyproject.toml
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: ./build/src/api/python/
+        env:
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream's COPYING only links to the CaDiCaL and SymFPU licences; ship the texts.
+          CIBW_BEFORE_ALL_LINUX: >-
+            bash ./contrib/cibw/before_all_linux.sh false &&
+            cp build/deps/src/CaDiCaL-EP/LICENSE build/src/api/python/licenses/cadical-LICENSE &&
+            cp build/deps/src/SymFPU-EP/LICENSE-BSD build/src/api/python/licenses/symfpu-LICENSE
+          CIBW_ENVIRONMENT_LINUX: >-
+            LD_LIBRARY_PATH="$(pwd)/install/lib64:$LD_LIBRARY_PATH"
+          CIBW_TEST_COMMAND: python {project}/examples/api/python/quickstart.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cvc5-${{ env.CVC5_VERSION }}-cibw-wheels-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cvc5 ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: cvc5-${{ matrix.version }}-*-manylinux_riscv64
