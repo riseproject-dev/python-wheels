@@ -1,0 +1,163 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build` job of
+# https://github.com/sgl-project/sglang/blob/3f44268fe57ebd70ef52963ea9fb7621e99f185c/.github/workflows/release-pypi-gateway.yml
+# and the `python-unit-tests` job of
+# https://github.com/sgl-project/sglang/blob/3f44268fe57ebd70ef52963ea9fb7621e99f185c/.github/workflows/pr-test-rust.yml
+name: Build sglang-router wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/sglang-router.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sglang-router.yml'
+      - 'docs/packages/sglang-router.yaml'
+      - 'patches/sglang-router/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sglang-router.yml'
+      - 'docs/packages/sglang-router.yaml'
+      - 'patches/sglang-router/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_ONLY_BINARY: ':all:'
+  # sglang tags no sgl-model-gateway release after gateway-v0.3.1: 0.3.2 is
+  # "[smg] release 0.3.2 (#17168)", 33 minutes before the PyPI upload, and its
+  # sgl-model-gateway/ sources are identical to the released sdist. Move it
+  # together with the version in docs/packages/sglang-router.yaml.
+  SGLANG_ROUTER_REF: 3f44268fe57ebd70ef52963ea9fb7621e99f185c
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: sglang-router
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build sglang-router ${{ matrix.version }} cp38-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+
+    env:
+      SGLANG_ROUTER_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout sglang ${{ env.SGLANG_ROUTER_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: sgl-project/sglang
+          ref: ${{ env.SGLANG_ROUTER_REF }}
+          path: sglang-repo
+          sparse-checkout: sgl-model-gateway
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch sgl-model-gateway
+        run: git -C sglang-repo apply "$GITHUB_WORKSPACE"/python-wheels/patches/sglang-router/${{ env.SGLANG_ROUTER_VERSION }}/00*.patch
+
+      - name: Move sgl-model-gateway folder to root and delete sglang-repo
+        run: |
+          mv sglang-repo/sgl-model-gateway/* .
+          rm -rf sglang-repo
+
+      - name: Stage LICENSE beside bindings/python/pyproject.toml
+        # maturin globs LICEN[CS]E* relative to the pyproject directory, so
+        # upstream's published wheels carry no licence text at all.
+        run: cp LICENSE bindings/python/LICENSE
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          working-directory: bindings/python
+          target: riscv64gc-unknown-linux-gnu
+          manylinux: '2_39'
+          args: --release --out dist --features vendored-openssl
+          rust-toolchain: stable
+          # protobuf ships no riscv64 protoc release; CRB's 3.19 keeps the
+          # well-known types in /usr/include rather than in the binary (gotcha 100).
+          # CARGO_BUILD_JOBS=2 guards the ~670-crate graph against rustc OOM (gotcha 228).
+          docker-options: -e CI -e PROTOC_INCLUDE=/usr/include -e CARGO_BUILD_JOBS=2
+          before-script-linux: dnf -y --enablerepo=crb install perl-core make protobuf-compiler protobuf-devel
+
+      - name: Verify the wheel ships the compiled extension and the licence
+        run: |
+          set -euo pipefail
+          python3 - bindings/python/dist/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert "sglang_router/sglang_router_rs.abi3.so" in names, names
+          assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
+          print(sys.argv[1], "->", names)
+          EOF
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Test wheel install
+        run: |
+          uv pip install bindings/python/dist/*.whl
+          python -c "import sglang_router; print('Python package: OK')"
+          python -c "from sglang_router.sglang_router_rs import Router; print('Rust extension: OK')"
+          python -m sglang_router.launch_router --help > /dev/null && echo "Entry point: OK"
+
+      - name: Run Python unit tests
+        run: |
+          uv pip install pytest
+          cd bindings/python
+          python -m pytest -q tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sglang-router-${{ env.SGLANG_ROUTER_VERSION }}-cp38-abi3-manylinux_riscv64
+          path: bindings/python/dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish sglang-router ${{ matrix.version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: sglang-router-${{ matrix.version }}-*-manylinux_riscv64
