@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 13 Sep 2026 10:39:42 +0200
+Subject: [PATCH] builder: patch a GCC/Clang source incompatibility in
+ unicode.h
+
+CI got past gn gen and almost an hour into the actual ninja build,
+then failed compiling with GCC (is_clang=false, see above):
+
+  ../../src/strings/unicode.h:218:13: error: explicit specialization
+    in non-namespace scope 'class unibrow::Utf8'
+  ../../src/strings/unicode.h:219:10: error: template-id
+    'WriteLeadingAscii<uint8_t>' in declaration of primary template
+
+unibrow::Utf8::WriteLeadingAscii's two explicit specializations are
+declared a second time inside the class body in unicode.h; clang
+accepts this as an extension, GCC correctly rejects it per the
+standard (explicit specializations of a member template must be
+declared at namespace scope). The out-of-line definitions in
+unicode.cc are already namespace-scope ('namespace unibrow { template
+<> size_t Utf8::WriteLeadingAscii<uint8_t>(...) {...} }') and
+standard-conformant on their own, so the in-class declarations are
+both redundant and non-portable. Wire up the previously-unused
+apply_patch() to drop them for a riscv64 (GCC) build.
+
+Upstream-Status: To upstream [not yet submitted to bpcreech/PyMiniRacer]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ ...iscv64-gcc-unicode-write-leading-ascii.patch | 17 +++++++++++++++++
+ builder/v8_build.py                             | 10 ++++++++++
+ 2 files changed, 27 insertions(+)
+ create mode 100644 builder/0001-riscv64-gcc-unicode-write-leading-ascii.patch
+
+diff --git a/builder/0001-riscv64-gcc-unicode-write-leading-ascii.patch b/builder/0001-riscv64-gcc-unicode-write-leading-ascii.patch
+new file mode 100644
+index 0000000..6efd1ce
+--- /dev/null
++++ b/builder/0001-riscv64-gcc-unicode-write-leading-ascii.patch
+@@ -0,0 +1,17 @@
++--- src/strings/unicode.h	2026-09-13 10:38:02
+++++ src/strings/unicode.h	2026-09-13 10:38:02
++@@ -214,14 +214,6 @@
++ 
++   template <typename Char>
++   static size_t WriteLeadingAscii(const Char* src, char* dest, size_t size);
++-
++-  template <>
++-  size_t WriteLeadingAscii<uint8_t>(const uint8_t* src, char* dest,
++-                                    size_t size);
++-
++-  template <>
++-  size_t WriteLeadingAscii<uint16_t>(const uint16_t* src, char* dest,
++-                                     size_t size);
++ 
++   // Encode the given characters as Utf8 into the provided output buffer.
++   struct EncodingResult {
+diff --git a/builder/v8_build.py b/builder/v8_build.py
+index 0cc9bb3..77cbb87 100644
+--- a/builder/v8_build.py
++++ b/builder/v8_build.py
+@@ -393,6 +393,16 @@ def build_v8(args: Args) -> None:
+     if args.fetch_only:
+         return
+ 
++    if machine().lower() == "riscv64":
++        # GCC (used instead of clang on riscv64, see is_clang=false above)
++        # rejects unibrow::Utf8::WriteLeadingAscii's explicit specializations
++        # declared inside the class body ("explicit specialization in
++        # non-namespace scope 'class unibrow::Utf8'"); clang accepts it as
++        # an extension. The out-of-line definitions in unicode.cc are
++        # already namespace-scope and standard-conformant on their own, so
++        # the in-class declarations are both redundant and non-portable:
++        apply_patch("0001-riscv64-gcc-unicode-write-leading-ascii.patch")
++
+     build_dir = get_v8_path() / "out.gn" / "build"
+ 
+     run_build(build_dir, args)

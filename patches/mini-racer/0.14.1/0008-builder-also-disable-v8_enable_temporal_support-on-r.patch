@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 13 Sep 2026 09:04:26 +0200
+Subject: [PATCH] builder: also disable v8_enable_temporal_support on riscv64
+
+enable_rust=false alone doesn't work: gn gen failed with
+
+  ERROR at //build/rust/gni_impl/rust_target.gni:41:3: Assertion failed.
+    assert(enable_rust)
+  See //build/rust/rust_static_library.gni:222:3: whence it was called.
+  See //build/rust/cargo_crate.gni:252:5: whence it was called.
+  See //third_party/rust/temporal_capi/v0_1/BUILD.gn:11:1: whence it was called.
+  See //third_party/rust/temporal_capi/BUILD.gn:33:19: which caused the
+  file to be included.
+
+v8_enable_temporal_support (gni/v8.gni) unconditionally depends on
+//third_party/rust/temporal_capi via the v8_maybe_temporal group in
+BUILD.gn, and its own default expression already excludes ppc64 and
+s390x by name, with the comment "some architectures don't have Rust
+toolchains in Chromium" -- riscv64 is simply missing from that list.
+Temporal is runtime-flag-gated even when built in (needs
+--harmony-temporal per gni/v8.gni's own comment), so disabling it
+drops no default-on behavior.
+
+Upstream-Status: To upstream [not yet submitted to bpcreech/PyMiniRacer]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ builder/v8_build.py | 17 +++++++++++------
+ 1 file changed, 11 insertions(+), 6 deletions(-)
+
+diff --git a/builder/v8_build.py b/builder/v8_build.py
+index c82341e..0cc9bb3 100644
+--- a/builder/v8_build.py
++++ b/builder/v8_build.py
+@@ -326,12 +326,17 @@ def run_build(build_dir: Path, args: Args) -> None:
+         # libstdc++ instead, which is what a GCC build normally pairs with:
+         opts["use_custom_libcxx"] = "false"
+ 
+-        # enable_rust defaults to build_with_chromium (false for our
+-        # standalone v8 checkout), but the prebuilt third_party/rust-toolchain
+-        # is, like Chromium's clang, published for amd64/arm64/mac hosts only;
+-        # something still invokes it for our riscv64 build and segfaults
+-        # trying to run it, so disable Rust explicitly rather than rely on a
+-        # default this pinned build/rust.gni revision may compute differently:
++        # v8_enable_temporal_support (gni/v8.gni) already excludes ppc64 and
++        # s390x by name, with the comment "some architectures don't have
++        # Rust toolchains in Chromium" -- riscv64 is simply missing from
++        # that list. It pulls in //third_party/rust/temporal_capi
++        # unconditionally when true (v8_maybe_temporal in BUILD.gn), and the
++        # prebuilt third_party/rust-toolchain (like Chromium's clang) isn't
++        # usable on riscv64 (it segfaulted: 'rustc --print=cfg
++        # --target=riscv64gc-unknown-linux-gnu' died with SIGSEGV).
++        # Temporal is runtime-flag-gated even when built in (needs
++        # --harmony-temporal), so this drops no default-on behavior:
++        opts["v8_enable_temporal_support"] = "false"
+         opts["enable_rust"] = "false"
+ 
+     if is_linux() and target_cpu != get_local_v8_target_cpu():
