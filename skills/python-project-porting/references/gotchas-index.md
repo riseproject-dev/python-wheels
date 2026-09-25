@@ -1025,6 +1025,9 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
   `PIP_ONLY_BINARY=:all:` fails the test install on a dependency we ship for manylinux only
   (cffi, bitarray) — split on `libc` and gate only-binary per libc, naming only the sdist
   `:all:` was steering around.
+- **577** — A musllinux leg that source-builds PyYAML (riscv64 wheels are manylinux-only)
+  silently gets a pure-Python build with no `CSafeLoader` when libyaml headers are absent —
+  `apk add yaml-dev` in `CIBW_BEFORE_TEST` on musllinux and set `PYYAML_FORCE_LIBYAML=1`.
 
 ### Build-tool drift & pins — [`gotchas/build-tool-drift-and-pins.md`](gotchas/build-tool-drift-and-pins.md)
 

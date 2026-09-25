@@ -54,6 +54,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
 - **574** — A bare `cpXY-*` `CIBW_BUILD` builds musllinux in the same job, and
   `PIP_ONLY_BINARY=:all:` then fails its test install on a dependency we ship for manylinux
   only — split on `libc` and name only the sdists `:all:` was steering around.
+- **577** — A musllinux leg that source-builds PyYAML (manylinux-only riscv64 wheels) gets
+  a silently pure-Python build with no `CSafeLoader`/`CSafeDumper` — `apk add yaml-dev`
+  before testing and set `PYYAML_FORCE_LIBYAML=1` so a missing libyaml fails loudly.
 
 ---
 
@@ -904,3 +907,29 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       leg's `Successfully installed …` line against a `docker run --platform
       linux/riscv64 quay.io/pypa/musllinux_1_2_riscv64` install of the same requirements
       to confirm the two legs resolve the same versions.
+
+577. **On musllinux, a test install that builds PyYAML from sdist silently produces a
+    pure-Python PyYAML with no `CSafeLoader`/`CSafeDumper` — the install succeeds, and the
+    failure surfaces only in tests that assume the C bindings (the annotatedyaml case).**
+    PyYAML's riscv64 wheels (PyPI and our registry) are manylinux-only, so every musllinux
+    leg compiles it from sdist. Its build-requires pull in Cython, but the `_yaml`
+    extension also needs libyaml headers, which `musllinux_1_2_riscv64` lacks; PyYAML's
+    `setup.py` then quietly skips the extension (a ~45 kB `linux_riscv64` wheel in the
+    `Created wheel for pyyaml` line is the tell) and `yaml.__with_libyaml__` is `False`.
+    annotatedyaml's `try_both_loaders`/`try_both_dumpers` fixtures do `pyyaml.CSafeLoader`
+    under `except ImportError`, so the missing attribute raised `AttributeError` and
+    errored 53 tests on every musllinux interpreter while manylinux (registry wheel with
+    libyaml) was green. Gotcha 221's "PyYAML builds fine from sdist" holds only for
+    packages that never touch the C loader. This is not gotcha 574: no only-binary
+    constraint was involved, and the dependency installed without error.
+    - **Install libyaml in the musl test container and force PyYAML to use it:**
+      `CIBW_BEFORE_TEST: ${{ matrix.libc == 'musllinux' && 'apk add --no-cache yaml-dev'
+      || '' }}` plus `PYYAML_FORCE_LIBYAML=1` in `CIBW_ENVIRONMENT` (which also reaches
+      the test venv), so a missing libyaml fails the PyYAML build instead of degrading
+      it. This keeps the C-loader path, which is the one downstream users hit, under test
+      rather than patching the fixtures to skip it.
+    - The same silent fallback applies to any dependency with an optional C
+      accelerator that is probed at build time (PyYAML, and similar `setup.py`s that
+      catch a failed `build_ext`). When a musllinux leg source-builds a dependency the
+      manylinux leg got as a wheel, compare the two wheels' sizes in the log before
+      trusting that they are equivalent.
