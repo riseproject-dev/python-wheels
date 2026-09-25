@@ -1,0 +1,46 @@
+From 728980fe6d03379af74d1bb4f04fab977d5039d9 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 24 Sep 2026 11:26:36 +0000
+Subject: [PATCH] Do not pass -march=native to the pgvector build
+
+pgvector's Makefile sets `OPTFLAGS = -march=native` unconditionally,
+with hand-written exceptions only for Mac ARM and ppc64 (neither of
+which supports -march=native either). On the manylinux_riscv64
+(quay.io/pypa/manylinux_2_39_riscv64) image, GCC's -march=native
+self-detection produces an empty/invalid ISA string on riscv64 and
+the build fails outright:
+
+    gcc: error: '-march=native': ISA string must begin with rv32 or rv64
+
+pgvector is fetched and built by pgserver's own pgbuild/Makefile at
+build time (not vendored in this checkout), so the fix lives here
+rather than as a patch to a downloaded tarball: override OPTFLAGS to
+empty on the two `make -C $(PGVECTOR_DIR)` invocations, the same way
+pgvector's own Makefile already blanks OPTFLAGS for architectures
+that reject -march=native. pgvector still gets the auto-vectorization
+flags (-ftree-vectorize etc.) at the baseline rv64gc ISA; only the
+native/RVV-specific tuning is dropped.
+
+Upstream-Status: Inappropriate [riscv64/CI-infra-specific override of a downstream build script; pgvector's own -march=native default is correct for every architecture it targets]
+---
+ pgbuild/Makefile | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/pgbuild/Makefile b/pgbuild/Makefile
+index d6f8b13..f9ecbb4 100644
+--- a/pgbuild/Makefile
++++ b/pgbuild/Makefile
+@@ -55,8 +55,8 @@ $(PGVECTOR_DIR)/Makefile: $(PGVECTOR_DIR).tar.gz
+ $(INSTALL_PREFIX)/lib/vector.so: $(PGVECTOR_DIR)/Makefile $(INSTALL_PREFIX)/bin/postgres
+ 	unset MAKELEVEL && unset MAKEFLAGS && unset MFLAGS \
+ 		&& export PG_CONFIG=$(INSTALL_PREFIX)/bin/pg_config \
+-		&& $(MAKE) -C $(PGVECTOR_DIR) -j \
+-		&& $(MAKE) -C $(PGVECTOR_DIR) install
++		&& $(MAKE) -C $(PGVECTOR_DIR) -j OPTFLAGS= \
++		&& $(MAKE) -C $(PGVECTOR_DIR) install OPTFLAGS=
+ 
+ .PHONY: pgvector
+ pgvector: postgres $(INSTALL_PREFIX)/lib/vector.so
+-- 
+2.43.0
+
