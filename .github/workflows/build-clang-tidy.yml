@@ -1,0 +1,109 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/ssciwr/clang-tidy-wheel/blob/main/.github/workflows/release.yml
+name: Build clang-tidy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/clang-tidy.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-clang-tidy.yml'
+      - 'docs/packages/clang-tidy.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-clang-tidy.yml'
+      - 'docs/packages/clang-tidy.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # ssciwr/clang-tidy-wheel has no v22.1.8 tag yet; pin the commit whose
+  # CMakeLists.txt/pyproject.toml this workflow was written against and
+  # override clang-tidy_version.txt the same way upstream's own
+  # workflow_dispatch(llvm_version) input does.
+  CLANG_TIDY_WHEEL_REF: 0dc6a6edd1f404d5f0b84b59872f9b6d22211134
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: clang-tidy
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build clang-tidy ${{ matrix.version }} py2.py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440  # full LLVM/clang compile from source; unlike clang-format-wheel this
+                            # upstream CMakeLists.txt does not restrict LLVM_TARGETS_TO_BUILD
+
+    env:
+      CLANG_TIDY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout clang-tidy-wheel
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ssciwr/clang-tidy-wheel
+          ref: ${{ env.CLANG_TIDY_WHEEL_REF }}
+          persist-credentials: false
+
+      - name: Set clang-tidy_version.txt to ${{ env.CLANG_TIDY_VERSION }}
+        run: echo "${CLANG_TIDY_VERSION}" > clang-tidy_version.txt
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # wheel.py-api = "py2.py3", so one build serves every interpreter.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_TEST: rm -rf {package}/clang_tidy
+          # Repeats pyproject.toml's own `environment` table: CIBW_ENVIRONMENT replaces
+          # rather than merges with it (gotcha 107).
+          CIBW_ENVIRONMENT: >-
+            CMAKE_GENERATOR=Ninja
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: clang-tidy-${{ env.CLANG_TIDY_VERSION }}-py2.py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish clang-tidy ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: clang-tidy-${{ matrix.version }}-*-manylinux_riscv64
