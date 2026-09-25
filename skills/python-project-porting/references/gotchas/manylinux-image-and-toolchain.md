@@ -108,6 +108,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
   until proven otherwise — normalising it is a self-inflicted bug.
 - **548** — `-Wcast-align` under `-Werror` is a riscv64-only wall for wire-protocol casts;
   GCC emits it only on strict-alignment targets.
+- **576** — Rocky 10's `libjpeg-turbo-devel` CMake config declares a `turbojpeg` target whose
+  library lives in the separate CRB `turbojpeg` package, so `find_package(libjpeg-turbo)` fails
+  until you install it.
 ---
 
 26. **The riscv64 runners ship GCC 13; some packages need GCC 14 or later.** The compiler
@@ -1739,3 +1742,31 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
      - **Predicting the next one is cheap**: `-Wcast-align` is the only alignment-sensitive
        entry in that warning list, so demoting it closes the class — every other warning there
        is architecture-independent and already passes on the arches upstream builds.
+
+576. **Rocky 10's `libjpeg-turbo-devel` ships a CMake package config that is broken on its own:
+     `find_package(libjpeg-turbo)` fails until the separate `turbojpeg` package is also
+     installed (the pycolmap/OpenImageIO case).** `libjpeg-turbo-devel` (AppStream) installs
+     `/usr/lib64/cmake/libjpeg-turbo/libjpeg-turboTargets*.cmake`, which declares both
+     `libjpeg-turbo::jpeg` and `libjpeg-turbo::turbojpeg`, but `libturbojpeg.so.0.3.0` is in the
+     `turbojpeg` subpackage (CRB, enabled in the manylinux_2_39 image). CMake checks every
+     imported target's file when the config is loaded, so any `find_package(libjpeg-turbo
+     CONFIG)` stops at configure with `The imported target "libjpeg-turbo::turbojpeg"
+     references the file "/usr/lib64/libturbojpeg.so.0.3.0" but this file does not exist`,
+     even when the project only links `libjpeg-turbo::jpeg`. OpenImageIO 3.x does exactly that
+     find, and pycolmap's dependency build hit it 53 minutes in, after glog, SuiteSparse and
+     Ceres. Projects that use CMake's `FindJPEG` module or pkg-config are not affected.
+     - **Fix**: add `turbojpeg` (or `turbojpeg-devel`) next to `libjpeg-turbo-devel` in the
+       `dnf install`. It is a runtime library only, so auditwheel grafts it only if something
+       actually links it.
+     - **Reproduce it in seconds on any arch**: in `rockylinux/rockylinux:10`, `dnf install
+       libjpeg-turbo-devel cmake gcc`, then configure a three-line `CMakeLists.txt` holding
+       `find_package(libjpeg-turbo CONFIG REQUIRED)`; `dnf install --enablerepo=crb turbojpeg`
+       makes it pass.
+     - **Same build, next trap: OpenImageIO 3.1.14.0's `OpenImageIO_BUILD_MISSING_DEPS` pystring
+       build clones pystring's `master` and checks it against a fixed commit**, which broke
+       once master moved on to pystring v1.2.0 (`pystring: Tag master resolved to commit …,
+       but expected …`). OpenImageIO 3.1.14.1 changes only that pin, to the v1.2.0 tag. Any from-source
+       dependency whose build verifies a *branch* against a hard-coded commit breaks over time
+       with no change on our side: take the upstream patch release that re-pins it rather than
+       `-D<Project>_DEPENDENCY_BUILD_ALLOW_UNVERIFIED_TAGS=ON`, which builds whatever the branch
+       holds that day.

@@ -899,6 +899,10 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
   that decodes a wire protocol out of a byte buffer, because GCC emits it only on
   strict-alignment targets and upstream's x86_64/aarch64 CI never sees it; `CXXFLAGS` cannot
   undo it, so demote it in the project's own warning CMake (the couchbase case).
+- **576** — Rocky 10's `libjpeg-turbo-devel` CMake config declares `libjpeg-turbo::turbojpeg`
+  but that library ships in the separate CRB `turbojpeg` package, so any
+  `find_package(libjpeg-turbo)` (OpenImageIO's included) fails at configure until `turbojpeg` is
+  installed too (the pycolmap case).
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
