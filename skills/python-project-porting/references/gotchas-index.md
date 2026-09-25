@@ -951,6 +951,10 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
   hardcoded platform table, import it and extend the table in a `run:` step instead of
   patching it — and check separately whether it embeds a LICENSE at all (the mcp-grafana /
   go-to-wheel case).
+- **579** — meson-python packs only the real file of a versioned-SONAME subproject library
+  (`liburing.so.2.14`), never the `liburing.so.2` symlink, so `auditwheel repair` can't locate it —
+  install the meson project system-wide and `ldconfig` it in before-all, as upstream's wheel
+  Dockerfile does (the nixl-cu12 case).
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 

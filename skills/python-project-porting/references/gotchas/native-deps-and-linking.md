@@ -46,6 +46,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
 - **554** — A Go-binary-in-a-wheel tool (not a downloader) can also lack riscv64 in its own
   platform table — drive its Python API directly instead of patching it (the mcp-grafana case).
   there (the shfmt-py case).
+- **579** — meson-python packs only the real file of a versioned-SONAME subproject library
+  (`liburing.so.2.14`), never its SONAME symlink, so auditwheel can't locate `liburing.so.2` —
+  install the meson project system-wide + `ldconfig` in before-all, as upstream does (the
+  nixl-cu12 case).
 ---
 
 16. **All-static BUNDLED build + a dep the project can't bundle = link failure.**
@@ -787,3 +791,35 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
        `<dist-info>/licenses/LICENSE`, and regenerate `RECORD` (`gtw.generate_record()` is
        already exported and does the hashing) before uploading — a few lines of `zipfile`
        in the same `run:` step, no new files.
+
+579. **meson-python drops the SONAME symlink of a versioned subproject library, so auditwheel
+     can't find it — make the loader find a system-installed copy (the nixl-cu12 case).** A
+     meson project whose wheel carries a shared library built by a meson/CMake *subproject*
+     with a versioned SONAME (NIXL's `liburing` wrap: `SONAME liburing.so.2`, file
+     `liburing.so.2.14`; its prometheus-cpp CMake subproject: `libcore.so.1.3`/`libpull.so.1.3`)
+     builds and packs fine, then `auditwheel repair` dies with `ValueError: Cannot repair wheel,
+     because required library "liburing.so.2" could not be located`. meson-python writes the
+     library into `.<pkg>.mesonpy.libs/` under its real filename only — a wheel can't hold the
+     `liburing.so.2 -> liburing.so.2.14` symlink `ninja install` would create — and auditwheel
+     resolves each `DT_NEEDED` by SONAME through RPATH/`LD_LIBRARY_PATH`/`ld.so.cache`, so the
+     copy sitting in the wheel never matches. Unversioned in-tree libraries (`libnixl.so`,
+     `libserdes.so`) are unaffected, which is why only the subproject ones trip it.
+     - **Check upstream's own wheel before patching anything.** Its
+       `<pkg>.libs/liburing-<hash>.so.2.14` is auditwheel's graft of a *system* copy, with the
+       unused `.mesonpy.libs/liburing.so.2.14` alongside — the tell that upstream's wheel
+       builder installed the whole project first. NIXL's `contrib/Dockerfile.manylinux` does
+       exactly that: `meson setup build --prefix=/usr/local/nixl && ninja install`, then
+       registers the libdir with the loader, before `contrib/build-wheel.sh` runs the
+       meson-python build and `auditwheel repair`.
+     - **Mirror it in `CIBW_BEFORE_ALL`.** A throwaway venv provides meson + pybind11 (the
+       project's `find_installation('python3')`/`dependency('pybind11')` need both even for a
+       plain install); `meson setup /tmp/<pkg>-build {project} --prefix=/usr/local/<pkg>`,
+       `ninja -C /tmp/<pkg>-build install`, write the install's `lib64` (and any
+       `lib64/plugins`) to `/etc/ld.so.conf.d/<pkg>.conf`, `ldconfig`. On the Rocky/Alma
+       manylinux images meson's default libdir is `lib64`, not upstream's Debian-style
+       `lib/<triplet>`. It costs one extra C++ build per job; the subproject downloads it
+       leaves in `{project}/subprojects/` are reused by the wheel build.
+     - **Validate the result in a clean container**, not the build one: with
+       `/usr/local/<pkg>` on the loader path, a missing graft would still import. A fresh image
+       plus `pip install --no-deps` of the repaired wheel, then loading the backend that
+       needs the library (NIXL's POSIX plugin links liburing), proves the graft.
