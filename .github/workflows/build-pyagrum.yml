@@ -1,0 +1,194 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on: https://gitlab.com/agrumery/aGrUM/-/blob/3.1.1/.gitlab-ci.yml
+name: Build pyagrum wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyagrum.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyagrum.yml'
+      - 'docs/packages/pyagrum.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyagrum.yml'
+      - 'docs/packages/pyagrum.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyagrum
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pyagrum ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+
+    env:
+      PYAGRUM_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout aGrUM ${{ env.PYAGRUM_VERSION }}
+        run: git clone --depth 1 --branch "$PYAGRUM_VERSION" https://gitlab.com/agrumery/aGrUM.git aGrUM
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "$MANYLINUX_RISCV64_IMAGE"
+
+      # halfexcept1, upstream's default, leaves a 4-core runner a single job.
+      - name: Build wheel
+        run: |
+          docker run -i --rm -v "$PWD/aGrUM:/aGrUM" -w /aGrUM \
+            -e CI_PROJECT_DIR=/aGrUM \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            -e PIP_ONLY_BINARY=numpy \
+            "$MANYLINUX_RISCV64_IMAGE" \
+            bash wrappers/pyagrum/wheelhouse/build_wheels_linux.sh cp310-cp310 -j all
+
+      # act zips the wheel itself, with only aGrUM's own licences and a linux_riscv64 tag.
+      - name: Add vendored licences and repair wheel
+        run: |
+          curl -fsSL --retry 5 https://raw.githubusercontent.com/nlohmann/json/v3.12.0/LICENSE.MIT -o aGrUM/nlohmann-json-LICENSE.txt
+          docker run -i --rm -v "$PWD/aGrUM:/aGrUM" -w /aGrUM "$MANYLINUX_RISCV64_IMAGE" bash -s <<'EOF'
+          set -euxo pipefail
+          ext=src/agrum/base/external
+          sed -n '2,20p' "$ext/tinyxml/ticpp/ticpp.h" > ticpp-LICENSE.txt
+          /opt/python/cp312-cp312/bin/python - wheels/*.whl "$ext/lrslib-LICENSE.txt" "$ext/nanodbc-LICENSE.txt" \
+            "$ext/TinyXml2-LICENSE.txt" ticpp-LICENSE.txt nlohmann-json-LICENSE.txt <<'PYEOF'
+          import os
+          import sys
+          import zipfile
+
+          whl, *notices = sys.argv[1:]
+          with zipfile.ZipFile(whl, "a", zipfile.ZIP_DEFLATED) as zf:
+              dist_info = next(n.split("/")[0] for n in zf.namelist() if n.endswith(".dist-info/WHEEL"))
+              for notice in notices:
+                  zf.write(notice, f"{dist_info}/LICENSES/{os.path.basename(notice)}")
+          PYEOF
+          auditwheel repair -w wheelhouse wheels/*.whl
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyagrum-${{ env.PYAGRUM_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: aGrUM/wheelhouse/*.whl
+          if-no-files-found: error
+
+  test_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # scikit-learn, a hard dependency, has no riscv64 wheel below cp312.
+        python: ["cp312", "cp313", "cp314"]
+    name: Test pyagrum ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    env:
+      PYAGRUM_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout aGrUM ${{ env.PYAGRUM_VERSION }}
+        run: git clone --depth 1 --branch "$PYAGRUM_VERSION" https://gitlab.com/agrumery/aGrUM.git aGrUM
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: pyagrum-${{ env.PYAGRUM_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: aGrUM/wheels
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "$MANYLINUX_RISCV64_IMAGE"
+
+      # test_wheel_linux.sh inlined: the image has no virtualenv. playwright has no
+      # riscv64 wheel and only serves the notebook tests, which upstream's wheel test skips.
+      - name: Test wheel
+        run: |
+          docker run -i --rm -v "$PWD/aGrUM:/aGrUM" -w /aGrUM \
+            -e PYDIR=${{ matrix.python }}-${{ matrix.python }} \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            -e PIP_ONLY_BINARY=:all: \
+            "$MANYLINUX_RISCV64_IMAGE" bash -s <<'EOF'
+          set -euxo pipefail
+          "/opt/python/$PYDIR/bin/python" -m venv /venv
+          source /venv/bin/activate
+          grep -vx playwright wrappers/pyagrum/testunits/requirements.txt > /tmp/requirements.txt
+          pip install -r /tmp/requirements.txt
+          pip install wheels/*.whl
+          MPLBACKEND=AGG python wrappers/pyagrum/testunits/gumTest.py
+          EOF
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # aGrUM builds with -fopenmp, so auditwheel vendors the image's libgomp.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyagrum-${{ matrix.version }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyagrum ${{ matrix.version }}
+    needs: [setup, build_wheels, test_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyagrum-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: pyagrum-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
