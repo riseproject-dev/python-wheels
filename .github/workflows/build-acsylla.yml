@@ -1,0 +1,148 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/acsylla/acsylla/blob/master/.github/workflows/release-linux-aarch64.yml
+name: Build acsylla wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/acsylla.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-acsylla.yml'
+      - 'docs/packages/acsylla.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-acsylla.yml'
+      - 'docs/packages/acsylla.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: acsylla
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build acsylla ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    env:
+      ACSYLLA_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout acsylla ${{ env.ACSYLLA_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: acsylla/acsylla
+          ref: v${{ env.ACSYLLA_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # bin/build_manylinux_2_28_wheel.sh, plus the notices of the statically linked
+          # cpp-driver (and its third_party code), libuv and the bundled OpenSSL, which
+          # upstream's wheels do not ship.
+          CIBW_BEFORE_ALL_LINUX: |
+            set -ex
+            dnf install -y openssl-devel
+            LIBUV_VERSION=1.52.1
+            curl -fsSLO https://dist.libuv.org/dist/v$LIBUV_VERSION/libuv-v$LIBUV_VERSION.tar.gz
+            tar -xzf libuv-v$LIBUV_VERSION.tar.gz
+            (cd libuv-v$LIBUV_VERSION && sh autogen.sh && CFLAGS="-O3 -flto -fPIC" LDFLAGS="-flto" ./configure --with-pic && make && make install)
+            git config --global --add safe.directory '*'
+            make install-driver
+            cp libuv-v$LIBUV_VERSION/LICENSE LICENSE.libuv
+            cp libuv-v$LIBUV_VERSION/LICENSE-extra LICENSE.libuv-extra
+            cp vendor/cpp-driver/licenses/apache-2.0.txt LICENSE.cpp-driver
+            cp vendor/cpp-driver/src/third_party/curl/COPYING LICENSE.cpp-driver-curl
+            cp vendor/cpp-driver/src/third_party/hdr_histogram/LICENSE.txt LICENSE.cpp-driver-hdr_histogram
+            cp vendor/cpp-driver/src/third_party/http-parser/LICENSE-MIT LICENSE.cpp-driver-http-parser
+            cp vendor/cpp-driver/src/third_party/rapidjson/license.txt LICENSE.cpp-driver-rapidjson
+            cp vendor/cpp-driver/src/third_party/sparsehash/COPYING LICENSE.cpp-driver-sparsehash
+            cp /usr/share/licenses/openssl-libs/LICENSE.txt LICENSE.openssl
+          CIBW_ENVIRONMENT: >-
+            LIBUV_ROOT_DIR=/usr/local
+            UV_LIBRARY_PATH=/usr/local/lib
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_BEFORE_BUILD: make cythonize
+          # Upstream tests against the cassandra:latest image, which has no riscv64 build;
+          # run the same Cassandra release on Temurin 17 (the image's JRE) in the container.
+          CIBW_BEFORE_TEST_LINUX: |
+            set -ex
+            dnf install -y procps-ng
+            curl -fsSL -o /tmp/jre.tar.gz https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jre_riscv64_linux_hotspot_17.0.20.1_1.tar.gz
+            echo "79c40c11fbad2b6771d08b9d4a7328bedfe49660b711930d3fe6529e5f28f99f  /tmp/jre.tar.gz" | sha256sum -c -
+            curl -fsSL -o /tmp/cassandra.tar.gz https://archive.apache.org/dist/cassandra/5.0.9/apache-cassandra-5.0.9-bin.tar.gz
+            echo "beaf3df6342ef1a0ccc83fa80214f250b32c35cfbb1af591b00e3fd539eef0915bc3b89f0e7ae73f6d50cbb03f6075c4e4cf32d3c46ff9c33f745542fcc925df  /tmp/cassandra.tar.gz" | sha512sum -c -
+            mkdir -p /opt/jre /opt/cassandra
+            tar -xzf /tmp/jre.tar.gz -C /opt/jre --strip-components=1
+            tar -xzf /tmp/cassandra.tar.gz -C /opt/cassandra --strip-components=1
+            export JAVA_HOME=/opt/jre PATH=/opt/jre/bin:$PATH
+            cd / && bash /project/bin/make_test_certs.sh
+            cp /project/conf/cassandra/cassandra.yaml /opt/cassandra/conf/cassandra.yaml
+            /opt/cassandra/bin/cassandra -R > /tmp/cassandra.out 2>&1
+            for i in $(seq 900); do (echo > /dev/tcp/127.0.0.1/9042) 2>/dev/null && exit 0; sleep 1; done
+            cat /tmp/cassandra.out /opt/cassandra/logs/system.log; exit 1
+          CIBW_TEST_REQUIRES: pytest pytest-asyncio pytest-cov
+          CIBW_TEST_SOURCES: tests pyproject.toml
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m; f={p.name for p in m.files('acsylla') if '.dist-info/licenses/' in str(p)}; assert {'LICENSE.cpp-driver', 'LICENSE.libuv', 'LICENSE.openssl'} <= f, f" &&
+            ln -s /certs certs && python -m pytest -v tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: acsylla-${{ env.ACSYLLA_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish acsylla ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: acsylla-${{ matrix.version }}-*-manylinux_riscv64
