@@ -80,6 +80,15 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
   object is freed (e.g. waiting for a socket the object still owns to close) can deadlock
   forever under free-threading while working fine under the GIL, intermittently, because it
   depends on which thread gets there first (awscrt's `test_stream_lives_until_complete_*`).
+- **572** — This fleet's riscv64 cores are Sv39-only, which caps a single process's virtual
+  address space at 256GB — a hardcoded multi-TB mmap reservation (a database/allocator
+  defaulting to "reserve huge, use little") fails outright here, not just slowly (kuzu's
+  `max_db_size` defaulting to 8TB: `Database()` fails immediately with
+  `Mmap for size 8796093022208 failed`). Reproduces on x86 too under `ulimit -v 256GB`, so
+  it's not riscv64-specific hardware weirdness, just the first arch in this fleet whose real
+  ceiling is below what upstream assumed safe to over-reserve. Fix: shrink the reservation
+  (halving on an mmap failure until it fits) rather than hardcoding 256GB, since Sv48 riscv64
+  hardware exists and a hardcoded cap would under-provision there.
 
 ---
 
@@ -1436,3 +1445,25 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
     support is real in these releases (it shipped in awscrt v0.32.0, with a related race fix
     in v0.33.0), so excluding the interpreter would hide a genuine, reportable upstream bug
     behind a riscv64-only workaround instead of fixing the actual race.
+
+572. **A database/allocator that reserves a huge address-space range up front and only
+    touches a little of it can fail outright on this fleet, not just underperform — the
+    riscv64 cores here are Sv39-only, a real ~256GB ceiling on one process's virtual address
+    space (kuzu 0.11.3's default `Database()` reserving 8TB via a single `mmap`).** The
+    Python API's `max_db_size` defaults to 8TB (`8796093022208` bytes) on the theory that
+    reserving virtual address space is free until pages are actually touched — true on
+    Sv48/Sv57 (x86_64, most aarch64) but not on Sv39, where 8TB simply doesn't exist in the
+    process's address space and the `mmap` call fails immediately:
+    `Mmap for size 8796093022208 failed`. Confirmed this isn't riscv64-hardware-specific
+    weirdness by reproducing the identical failure on x86_64 under `ulimit -v 256GB` with the
+    real published wheel — it's a ceiling this fleet happens to hit first, not a riscv64 bug
+    in kuzu. Fix: on an mmap failure, retry with a halved reservation until one succeeds
+    (verified 8TB -> ... -> 128GB/64GB/32GB across three `Database()` calls in the same
+    process) rather than hardcoding a 256GB cap — some riscv64 hardware (and any future
+    Sv48 board) has more address space than Sv39, and a hardcoded cap would under-provision
+    there for no reason. `Upstream-Status: To upstream` doesn't apply here (kuzudb/kuzu is
+    archived, 0.11.3 was the final release) but would otherwise be the right call: this is a
+    real bug in the library's own assumption, not a test artifact. Generalizes beyond kuzu:
+    any port of a database, allocator, or `mmap`-based cache with a multi-TB default
+    reservation is worth a quick `Database()`/`open()`-with-defaults smoke test on this
+    fleet before trusting a build that only exercised small reservations.

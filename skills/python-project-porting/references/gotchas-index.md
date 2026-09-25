@@ -1206,6 +1206,14 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
   immediately blocks the main thread on that object's side effect (a socket it owns closing)
   can deadlock forever. Fix the test to wait for the object to actually free before blocking;
   don't drop cp314t from the matrix — free-threading support is real in these releases.
+- **572** — This fleet's riscv64 cores are Sv39-only, a real ~256GB ceiling on one process's
+  virtual address space — a database/allocator that reserves a huge range up front on the
+  "virtual memory is free" assumption (kuzu's `Database()` defaulting to an 8TB `mmap`) fails
+  outright here, not just slowly. Reproduces identically on x86_64 under `ulimit -v 256GB`, so
+  it's this fleet's real ceiling, not riscv64-specific weirdness. Fix: retry with a halved
+  reservation on mmap failure rather than hardcoding a 256GB cap (some riscv64 hardware has
+  more). Worth a quick smoke test for any database/allocator/mmap-cache port with a multi-TB
+  default reservation.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
