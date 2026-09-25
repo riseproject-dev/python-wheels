@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["pyyaml"]
+# dependencies = ["pyyaml", "packaging"]
 # ///
 """
 First-pass feasibility triage of a queued package, from PyPI metadata alone.
