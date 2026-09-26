@@ -1,0 +1,140 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_aarch64_wheels` job of:
+# https://github.com/fonttools/skia-pathops/blob/v0.9.2/.github/workflows/ci.yml
+# and the `build-linux` job of the skia-builder submodule it pins (which produces the
+# prebuilt libskia that job downloads):
+# https://github.com/fonttools/skia-builder/blob/501d7a3e80dd57900d0ab42ddb0f6c08f3665d26/.github/workflows/ci.yml
+name: Build skia-pathops wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/skia-pathops.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-skia-pathops.yml'
+      - 'docs/packages/skia-pathops.yaml'
+      - 'patches/skia-pathops/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-skia-pathops.yml'
+      - 'docs/packages/skia-pathops.yaml'
+      - 'patches/skia-pathops/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  GN_REVISION: b2afae122eeb6ce09c52d63f67dc53fc517dbdc8
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: skia-pathops
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build skia-pathops ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    env:
+      SKIA_PATHOPS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout skia-pathops v${{ env.SKIA_PATHOPS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: fonttools/skia-pathops
+          ref: v${{ env.SKIA_PATHOPS_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch skia-pathops source
+        run: git apply python-wheels/patches/skia-pathops/${{ env.SKIA_PATHOPS_VERSION }}/*.patch
+
+      - name: Build and Test Wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: cp310-manylinux_riscv64 cp311-manylinux_riscv64 cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            BUILD_SKIA_FROM_SOURCE=0 SKIA_LIBRARY_DIR=build/download
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SKIA_PATHOPS=${{ env.SKIA_PATHOPS_VERSION }}
+          # skia-builder publishes no riscv64 libskia and Skia's bin/fetch-gn has no
+          # riscv64 CIPD gn, so build gn from source at fetch-gn's pinned revision
+          # and run skia-builder's build_skia.py in-container to fill build/download.
+          CIBW_BEFORE_ALL_LINUX: |
+            set -e
+            python3 -m pip install ninja
+            git clone https://gn.googlesource.com/gn /tmp/gn
+            git -C /tmp/gn checkout ${{ env.GN_REVISION }}
+            (cd /tmp/gn && CXX=g++ python3 build/gen.py --allow-warnings && ninja -C out gn)
+            install -m 0755 /tmp/gn/out/gn src/cpp/skia-builder/skia/bin/gn
+            python3 src/cpp/skia-builder/build_skia.py --no-sync-deps --no-fetch-gn build/download
+          CIBW_TEST_EXTRAS: testing
+          CIBW_TEST_COMMAND: pytest {project}/tests
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: auditwheel repair -w {dest_dir} {wheel}
+
+      - name: Check the wheel ships both licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              licences = {n.split(".dist-info/licenses/", 1)[1]
+                          for n in names if ".dist-info/licenses/" in n} - {""}
+              assert licences == {"LICENSE", "src/cpp/skia-builder/skia/LICENSE"}, (whl, licences)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: skia-pathops-${{ env.SKIA_PATHOPS_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish skia-pathops ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: skia-pathops-${{ matrix.version }}-cp310-abi3-manylinux_riscv64
