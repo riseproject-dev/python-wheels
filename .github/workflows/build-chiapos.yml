@@ -1,0 +1,122 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on: https://github.com/Chia-Network/chiapos/blob/2.0.12/.github/workflows/build-wheels.yml
+name: Build chiapos wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/chiapos.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-chiapos.yml'
+      - 'docs/packages/chiapos.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-chiapos.yml'
+      - 'docs/packages/chiapos.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: chiapos
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build chiapos ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      CHIAPOS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout chiapos ${{ env.CHIAPOS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Chia-Network/chiapos
+          ref: ${{ env.CHIAPOS_VERSION }}
+          persist-credentials: false
+
+      # pybind11, BLAKE3, FiniteStateEntropy and picosha2 are compiled into the extension; upstream ships none of their notices.
+      - name: Stage the vendored dependencies' licences
+        run: |
+          set -euo pipefail
+          tag() { sed -n "/GIT_REPOSITORY .*\/$1\.git/{n;s/.*GIT_TAG *//p}" CMakeLists.txt; }
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/pybind/pybind11/$(tag pybind11)/LICENSE" -o LICENSE.pybind11
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/BLAKE3-team/BLAKE3/$(tag BLAKE3)/LICENSE" -o LICENSE.blake3
+          cp lib/FiniteStateEntropy/LICENSE LICENSE.finite-state-entropy
+          sed -n '/The MIT License/,/THE SOFTWARE\./p' lib/include/picosha2.hpp > LICENSE.picosha2
+          test -s LICENSE.picosha2
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Bladebit's prebuilt green_reaper harvester has no riscv64 build; upstream's own riscv64 job builds without it.
+          CIBW_BEFORE_ALL: ''
+          CIBW_ENVIRONMENT: CP_USE_GREEN_REAPER=0
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          exts = [n for n in names if n.endswith(".so")]
+          assert len(exts) == 1 and exts[0].startswith("chiapos.cpython-"), exts
+          assert exts[0].endswith("-riscv64-linux-gnu.so"), exts
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          assert licences == {"LICENSE", "LICENSE.blake3", "LICENSE.finite-state-entropy",
+                              "LICENSE.picosha2", "LICENSE.pybind11"}, licences
+          EOF
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: chiapos-${{ env.CHIAPOS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish chiapos ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: chiapos-${{ matrix.version }}-*-manylinux_riscv64
