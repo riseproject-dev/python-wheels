@@ -1,0 +1,185 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/jswhit/pygrib-wheels/blob/53d8d09080ae59fb5ec85b3c524ef2fd6f5f47bf/.github/workflows/build-wheels.yml
+# and its config.sh (multibuild), which builds ecCodes and its codecs from source.
+name: Build pygrib wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pygrib.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pygrib.yml'
+      - 'docs/packages/pygrib.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pygrib.yml'
+      - 'docs/packages/pygrib.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  ECCODES_VERSION: '2.44.0'
+  OPENJPEG_VERSION: '2.5.4'
+  LIBAEC_VERSION: '1.1.4'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pygrib
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pygrib ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 600
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      PYGRIB_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pygrib ${{ env.PYGRIB_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: jswhit/pygrib
+          ref: v${{ env.PYGRIB_VERSION }}rel
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # libpng comes from the distro; upstream only builds it because its manylinux2014 base lacks it.
+          CIBW_BEFORE_ALL_LINUX: |
+            set -ex
+            dnf -y install libpng-devel zlib-devel
+            mkdir -p /tmp/libaec /tmp/openjpeg
+
+            curl -fsSL "https://github.com/Deutsches-Klimarechenzentrum/libaec/releases/download/v$LIBAEC_VERSION/libaec-$LIBAEC_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/libaec
+            cmake -S /tmp/libaec -B /tmp/libaec/build \
+              -D CMAKE_BUILD_TYPE=Release \
+              -D CMAKE_INSTALL_PREFIX=/usr/local \
+              -D CMAKE_INSTALL_LIBDIR=lib \
+              -D BUILD_STATIC_LIBS=OFF \
+              -D BUILD_TESTING=OFF
+            cmake --build /tmp/libaec/build -j "$(nproc)"
+            cmake --install /tmp/libaec/build
+
+            curl -fsSL "https://github.com/uclouvain/openjpeg/archive/refs/tags/v$OPENJPEG_VERSION.tar.gz" | tar xz --strip-components=1 -C /tmp/openjpeg
+            cmake -S /tmp/openjpeg -B /tmp/openjpeg/build \
+              -D CMAKE_BUILD_TYPE=Release \
+              -D CMAKE_INSTALL_PREFIX=/usr/local \
+              -D CMAKE_INSTALL_LIBDIR=lib \
+              -D BUILD_CODEC=OFF
+            cmake --build /tmp/openjpeg/build -j "$(nproc)"
+            cmake --install /tmp/openjpeg/build
+            ldconfig
+
+            curl -fsSL "https://confluence.ecmwf.int/download/attachments/45757960/eccodes-$ECCODES_VERSION-Source.tar.gz" | tar xz -C /tmp
+            cp -r "/tmp/eccodes-$ECCODES_VERSION-Source/definitions" "{project}/src/pygrib/share/eccodes"
+            mv "{project}/src/pygrib/share/eccodes/template.3.32769.def" "{project}/src/pygrib/share/eccodes/definitions/grib2"
+            cmake -S "/tmp/eccodes-$ECCODES_VERSION-Source" -B /tmp/eccodes-build \
+              -D CMAKE_INSTALL_PREFIX=/usr/local \
+              -D CMAKE_INSTALL_LIBDIR=lib \
+              -D ENABLE_FORTRAN=OFF \
+              -D ENABLE_NETCDF=OFF \
+              -D ENABLE_TESTS=OFF \
+              -D ENABLE_JPG_LIBJASPER=OFF \
+              -D ENABLE_JPG_LIBOPENJPEG=ON \
+              -D ENABLE_PNG=ON \
+              -D ENABLE_AEC=ON
+            cmake --build /tmp/eccodes-build -j "$(nproc)"
+            cmake --install /tmp/eccodes-build
+            ldconfig
+
+            cp "/tmp/eccodes-$ECCODES_VERSION-Source/LICENSE" "{project}/LICENSE.eccodes"
+            cp "/tmp/eccodes-$ECCODES_VERSION-Source/NOTICE" "{project}/NOTICE.eccodes"
+            cp /tmp/openjpeg/LICENSE "{project}/LICENSE.openjpeg"
+            cp /tmp/libaec/LICENSE.txt "{project}/LICENSE.libaec"
+            cp /usr/share/licenses/libpng/LICENSE "{project}/LICENSE.libpng"
+          CIBW_ENVIRONMENT: >-
+            PYGRIB_WHEEL=true
+            ECCODES_VERSION=${{ env.ECCODES_VERSION }}
+            OPENJPEG_VERSION=${{ env.OPENJPEG_VERSION }}
+            LIBAEC_VERSION=${{ env.LIBAEC_VERSION }}
+            PIP_ONLY_BINARY=numpy,pyproj
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: test sampledata utils
+          CIBW_TEST_COMMAND: >-
+            cd test && pytest -vv test.py test_latlons.py && cd .. &&
+            python utils/grib_list sampledata/rap.wrfnat.grib2 -s
+
+      - name: Check the wheel ships the extension, the definitions and the licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          print("\n".join(n for n in names if ".libs/" in n))
+          assert any(
+              n.startswith("pygrib/_pygrib.") and n.endswith(".so") for n in names
+          ), names
+          assert "pygrib/share/eccodes/definitions/grib2/template.3.32769.def" in names
+          assert "pygrib/share/eccodes/definitions/boot.def" in names
+          licences = {
+              n.rsplit("/", 1)[1]
+              for n in names
+              if ".dist-info/licenses/" in n
+          } - {""}
+          assert licences == {
+              "LICENSE",
+              "LICENSE.eccodes",
+              "NOTICE.eccodes",
+              "LICENSE.libaec",
+              "LICENSE.libpng",
+              "LICENSE.openjpeg",
+          }, licences
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pygrib-${{ env.PYGRIB_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pygrib ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pygrib-${{ matrix.version }}-*-manylinux_riscv64
