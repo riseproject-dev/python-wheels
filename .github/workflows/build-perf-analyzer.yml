@@ -1,0 +1,227 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# perf_analyzer tags no release; PyPI's 2.60.0 wheels were built from the r26.04
+# head, the commit their binary reports in `perf_analyzer --version`. Upstream's
+# wheel build runs in NVIDIA's internal CI, so this follows the documented
+# source build (docs/install.md) and packages the binary with the repo's own
+# pyproject.toml.
+name: Build perf-analyzer wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/perf-analyzer.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-perf-analyzer.yml'
+      - 'docs/packages/perf-analyzer.yaml'
+      - 'patches/perf-analyzer/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-perf-analyzer.yml'
+      - 'docs/packages/perf-analyzer.yaml'
+      - 'patches/perf-analyzer/**'
+
+run-name: build-perf-analyzer ${{ inputs.version && format('- {0}', inputs.version) || '' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Move together with the version in docs/packages/perf-analyzer.yaml.
+  PERF_ANALYZER_REF: 3a49a23abf06242ed170ee479b5e2e080e4250e6
+  TRITON_RELEASE_BRANCH: r26.04
+  # Rocky 10 packages no RapidJSON, and its 1.1.0 release does not compile with GCC 14.
+  RAPIDJSON_REF: 24b5e7a8b27f42fa16b96fc70aade9106cf7102f
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: perf-analyzer
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    name: Build perf-analyzer ${{ matrix.version }} py3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      PERF_ANALYZER_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout triton-inference-server/perf_analyzer @ ${{ env.PERF_ANALYZER_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: triton-inference-server/perf_analyzer
+          ref: ${{ env.PERF_ANALYZER_REF }}
+          path: perf_analyzer
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        working-directory: perf_analyzer
+        run: |
+          for p in ../python-wheels/patches/perf-analyzer/${PERF_ANALYZER_VERSION}/*.patch; do
+            git apply --verbose "$p"
+          done
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
+
+      - name: Build wheel
+        run: |
+          mkdir -p wheelhouse
+          set -o pipefail
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e PERF_ANALYZER_VERSION \
+            -e TRITON_RELEASE_BRANCH \
+            -e RAPIDJSON_REF \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT' 2>&1 | tee build.log
+          set -eux
+
+          dnf install -y --disablerepo=extras --setopt=install_weak_deps=False openssl-devel zlib-ng-compat-devel
+          export PATH="/opt/python/cp312-cp312/bin:${PATH}"
+          git config --global --add safe.directory '*'
+
+          # c-ares, as pinned by gRPC v1.54.3, declares a cmake_minimum_required below CMake 4's floor.
+          export CMAKE_POLICY_VERSION_MINIMUM=3.5
+          # abseil lts_20230125 reads the cycle counter with rdcycle, which Linux 6.6+ traps as SIGILL
+          # on riscv64; abseil dropped that path for RISC-V upstream (abseil/abseil-cpp#1644).
+          export CXXFLAGS="-DABSL_USE_UNSCALED_CYCLECLOCK=0"
+
+          git clone -q https://github.com/Tencent/rapidjson /tmp/rapidjson
+          git -C /tmp/rapidjson checkout -q "${RAPIDJSON_REF}"
+          cmake -S /tmp/rapidjson -B /tmp/rapidjson/build \
+            -DRAPIDJSON_BUILD_DOC=OFF -DRAPIDJSON_BUILD_EXAMPLES=OFF -DRAPIDJSON_BUILD_TESTS=OFF
+          cmake --install /tmp/rapidjson/build
+
+          cd /work/perf_analyzer
+          PA_VERSION="$(python -c 'import runpy; print(runpy.run_path("src/perf_analyzer/__init__.py")["__version__"])')"
+          test "${PA_VERSION}" = "${PERF_ANALYZER_VERSION}"
+
+          cmake -B /tmp/build -S . \
+            -DTRITON_ENABLE_GPU=OFF \
+            -DTRITON_CLIENT_REPO_TAG="${TRITON_RELEASE_BRANCH}" \
+            -DTRITON_COMMON_REPO_TAG="${TRITON_RELEASE_BRANCH}" \
+            -DTRITON_CORE_REPO_TAG="${TRITON_RELEASE_BRANCH}" \
+            -DTRITON_THIRD_PARTY_REPO_TAG="${TRITON_RELEASE_BRANCH}"
+          cmake --build /tmp/build --parallel "$(nproc)"
+
+          mkdir /tmp/unit-tests
+          # "invalid json" asserts RapidJSON 1.1.0's error code 10, which Tencent/rapidjson@85500e8 changed to 12.
+          # concurrency_sequence and custom_load_sequences' serial_sequences subcase assert wall-clock request
+          # counts, the latter while the workers still run; both fail intermittently on a busy runner (gotcha 594).
+          (cd /tmp/unit-tests && /usr/local/bin/perf_analyzer_unit_tests \
+            --subcase-exclude="invalid json,serial_sequences" \
+            --test-case-exclude="concurrency_sequence")
+
+          CC=/tmp/build/cc_clients/src/cc-clients
+          TP=/tmp/build/cc_clients/src/cc-clients-build/_deps/repo-third-party-build
+          PA=/tmp/build/perf_analyzer/src/perf-analyzer-build/_deps
+          install -m 0644 "${CC}/LICENSE" LICENSE.triton-client
+          install -m 0644 "${PA}/repo-common-src/LICENSE" LICENSE.triton-common
+          install -m 0644 "${TP}/grpc-repo/src/grpc/LICENSE" LICENSE.grpc
+          install -m 0644 "${TP}/grpc-repo/src/grpc/third_party/abseil-cpp/LICENSE" LICENSE.abseil-cpp
+          install -m 0644 "${TP}/grpc-repo/src/grpc/third_party/protobuf/LICENSE" LICENSE.protobuf
+          install -m 0644 "${TP}/grpc-repo/src/grpc/third_party/re2/LICENSE" LICENSE.re2
+          install -m 0644 "${TP}/grpc-repo/src/grpc/third_party/cares/cares/LICENSE.md" LICENSE.c-ares
+          install -m 0644 "${TP}/curl/src/curl/COPYING" LICENSE.curl
+          install -m 0644 "${PA}/libb64-src/LICENSE.md" LICENSE.libb64
+          install -m 0644 /tmp/rapidjson/license.txt LICENSE.rapidjson
+          install -m 0644 "$(rpm -qL openssl-libs | grep -m1 '/LICENSE')" LICENSE.openssl
+
+          install -D -m 0755 /usr/local/bin/perf_analyzer src/perf_analyzer/bin/perf_analyzer
+          python -m pip install -q -U pip wheel
+          python -m pip wheel --no-deps -w dist .
+          # The payload is a CLI the pure-Python wrapper execs, which is why upstream's wheels are py3-none.
+          python -m wheel tags --platform-tag linux_riscv64 --remove dist/*.whl
+          auditwheel repair --plat manylinux_2_39_riscv64 -w /work/wheelhouse dist/*.whl
+          SCRIPT
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: perf-analyzer-${{ env.PERF_ANALYZER_VERSION }}-build-log
+          path: build.log
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: perf-analyzer-${{ env.PERF_ANALYZER_VERSION }}-py3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+      - name: Test wheel
+        run: |
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -e PERF_ANALYZER_REF \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          for py in cp312-cp312 cp313-cp313 cp314-cp314 cp314-cp314t; do
+            venv="/tmp/venv-${py}"
+            "/opt/python/${py}/bin/python" -m venv "${venv}"
+            "${venv}/bin/python" -m pip install -q --only-binary=:all: /work/wheelhouse/*.whl
+
+            cd /tmp
+            "${venv}/bin/perf_analyzer" --version | tee /tmp/version.txt
+            grep -F "(commit ${PERF_ANALYZER_REF:0:7}" /tmp/version.txt
+            "${venv}/bin/python" - <<'PY'
+          import importlib.metadata as md
+
+          names = {p.name for p in md.files("perf-analyzer") if "licenses" in p.parts}
+          expected = {
+              "LICENSE", "LICENSE.triton-client", "LICENSE.triton-common", "LICENSE.grpc",
+              "LICENSE.abseil-cpp", "LICENSE.protobuf", "LICENSE.re2", "LICENSE.c-ares",
+              "LICENSE.curl", "LICENSE.libb64", "LICENSE.rapidjson", "LICENSE.openssl",
+          }
+          assert expected <= names, sorted(expected - names)
+          PY
+          done
+          SCRIPT
+
+  publish:
+    name: Publish perf-analyzer ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: perf-analyzer-${{ matrix.version }}-py3-manylinux_riscv64
