@@ -82,6 +82,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
   upstream's lock file is drift, not an arch bug: reproduce it on x86_64 with PyPI's wheels of
   both versions. mink's `solve_ik` tests fail against daqp 0.9.x (all arches) and pass on
   upstream's locked 0.8.5 — pin the lock's version in `CIBW_TEST_REQUIRES`, even from sdist.
+- **593** — cp314/cp314t-only `ValueError: cannot resize an array that may be referenced by
+  another object` is NumPy >= 2.4's Python 3.14 `ndarray.resize` refcheck, which a Cython caller
+  always trips; same numpy on every leg, so not gotcha 583's drift — backport upstream's fix.
 - **571** — On free-threaded CPython (cp314t), an object whose last reference is dropped on
   a native (non-Python) thread isn't freed there and then — freeing is deferred to whichever
   thread next runs Python bytecode. A test that drops the last reference on a native
@@ -1564,3 +1567,25 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
     - **It costs a cheap rehearsal, not a CI cycle:** each kiwipiepy leg spends ~75 min
       compiling and ~37 min per interpreter in the suite on the riscv runner; the x86_64
       check took two minutes.
+
+593. **A cp314/cp314t-only wall of `ValueError: cannot resize an array that may be referenced
+    by another object` is NumPy >= 2.4 meeting Python 3.14, not riscv64 and not registry drift
+    (the cantera case).** cantera 3.2.0 failed 59 tests + 64 errors on cp314 and cp314t (every
+    `gas["H2", "O2"]` / `SolutionArray` slice) while cp312/cp313 passed — all four legs had
+    installed the *same* numpy 2.5.3, so gotcha 583's "newer dependency than upstream tested"
+    check alone (compare the installed versions) rules drift in or out in one grep.
+    - **The mechanism:** `PyArray_Resize` with `refcheck=True` tests `Py_REFCNT(self) > 2`
+      through numpy 2.3.x, but from 2.4 on a Python >= 3.14 build requires
+      `PyUnstable_Object_IsUniquelyReferenced(self)` (3.14's borrowed stack references make the
+      old count unreliable). A call from Cython (`self._attr.resize(n)`) holds the attribute's
+      reference plus a temporary one, so it fails *every* time; 2.5 only rewords the error to
+      "It is possible that this is a false positive." Any extension calling `.resize()` on a
+      numpy array from C/Cython and released before numpy 2.4 (Dec 2025) is exposed on cp314.
+    - **Reproduce on x86_64 in a minute with upstream's own PyPI wheel**, all under
+      `.git/pw-scratch/<pkg>` (`UV_CACHE_DIR`/`UV_PYTHON_INSTALL_DIR` pointed there):
+      `uv run --no-project --python 3.14 --with <pkg>==<ver> --with numpy==2.5.3 python repro.py`
+      fails, `numpy==2.3.5` passes, and `--python 3.13` with 2.5.3 passes.
+    - **Backport, don't pin.** Upstream usually has the fix already (cantera#2063 replaced the
+      `resize` with a fresh `np.ndarray`; others pass `refcheck=False`). Pinning `numpy<2.4` in
+      the test env would turn the jobs green while publishing a cp314 wheel that breaks for every
+      user on the numpy pip installs by default — the test failure is a real user-facing bug.

@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (549 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (550 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -1282,6 +1282,10 @@ The porting gotchas (549 of them) live in [`references/gotchas/`](gotchas/), spl
   file: reproduce on x86_64 with PyPI wheels of both versions. mink's trivial-QP `solve_ik` tests
   fail against daqp 0.9.x on every arch (daqp #168 made the proximal shift relative but kept the
   absolute nonconvex check) and pass on the locked 0.8.5 — pin it in `CIBW_TEST_REQUIRES`.
+- **593** — cp314/cp314t-only `cannot resize an array that may be referenced by another object`
+  is NumPy >= 2.4's Python 3.14 `ndarray.resize` refcheck (`PyUnstable_Object_IsUniquelyReferenced`),
+  which any C/Cython caller fails; reproduce on x86_64 with upstream's PyPI wheel and backport
+  upstream's fix rather than pinning numpy<2.4 in tests (the cantera case).
 - **589** — A library with its own runtime CPU dispatch and an override knob reproduces a
   riscv64-only test failure on x86_64 in minutes: force its non-SIMD path with upstream's own
   wheel (kiwipiepy's `KIWI_ARCH_TYPE=none`).
