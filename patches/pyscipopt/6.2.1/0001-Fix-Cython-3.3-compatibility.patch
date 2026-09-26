@@ -1,0 +1,54 @@
+From ca6631b551db2e915632232963a68383936afa43 Mon Sep 17 00:00:00 2001
+From: Ben Beasley <code@musicinmybrain.net>
+Date: Thu, 27 Aug 2026 14:37:02 +0100
+Subject: [PATCH] Fix Cython 3.3 compatibility
+
+Upstream-Status: Backport [https://github.com/scipopt/PySCIPOpt/commit/ca6631b551db2e915632232963a68383936afa43]
+
+PySCIPOpt 6.2.1 requires an unpinned "cython >=0.21" at build time, so a
+fresh build pulls Cython 3.3.0, which rejects the annotated re-assignment
+of the `axis` parameter in _core_sum():
+
+  src/pyscipopt/matrix.pxi:236:4: 'axis' redeclared
+
+This fails on every architecture and interpreter. Upstream fixed it in
+scipopt/PySCIPOpt#1248 (issue #1247) by binding the normalized tuple to a
+new name; this backports the matrix.pxi part of that commit (the
+CHANGELOG.md hunk is dropped).
+---
+ src/pyscipopt/matrix.pxi | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/src/pyscipopt/matrix.pxi b/src/pyscipopt/matrix.pxi
+index d1d4ad7..b60e23c 100644
+--- a/src/pyscipopt/matrix.pxi
++++ b/src/pyscipopt/matrix.pxi
+@@ -233,10 +233,10 @@ def _core_sum(
+         a np.ndarray.
+ 
+     """
+-    axis: Tuple[int, ...] = normalize_axis_tuple(
++    axis_tuple: Tuple[int, ...] = normalize_axis_tuple(
+         range(a.ndim) if axis is None else axis, a.ndim
+     )
+-    if len(axis) == a.ndim:
++    if len(axis_tuple) == a.ndim:
+         res = quicksum(a.flat)
+         return (
+             np.array([res], dtype=object).reshape([1] * a.ndim)
+@@ -244,12 +244,12 @@ def _core_sum(
+             else res
+         )
+ 
+-    keep_axes = tuple(i for i in range(a.ndim) if i not in axis)
++    keep_axes = tuple(i for i in range(a.ndim) if i not in axis_tuple)
+     shape = (
+-        tuple(1 if i in axis else a.shape[i] for i in range(a.ndim))
++        tuple(1 if i in axis_tuple else a.shape[i] for i in range(a.ndim))
+         if keepdims
+         else tuple(a.shape[i] for i in keep_axes)
+     )
+     return np.apply_along_axis(
+-        quicksum, -1, a.transpose(keep_axes + axis).reshape(shape + (-1,))
++        quicksum, -1, a.transpose(keep_axes + axis_tuple).reshape(shape + (-1,))
+     )

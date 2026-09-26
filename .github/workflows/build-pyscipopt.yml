@@ -1,0 +1,295 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/scipopt/PySCIPOpt/blob/v6.2.1/.github/workflows/build_wheels.yml
+# and https://github.com/scipopt/scipoptsuite-deploy/blob/v0.12.0/.github/workflows/scripts/linux.bash,
+# which builds the libscip-linux*.zip that upstream's before-all downloads (no riscv64 build exists).
+name: Build pyscipopt wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyscipopt.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyscipopt.yml'
+      - 'docs/packages/pyscipopt.yaml'
+      - 'patches/pyscipopt/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyscipopt.yml'
+      - 'docs/packages/pyscipopt.yaml'
+      - 'patches/pyscipopt/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # scipoptsuite-deploy v0.12.0's build inputs, the release PySCIPOpt's pyproject.toml pins.
+  SCIP_VERSION: '10.0.2'
+  SOPLEX_VERSION: '8.0.2'
+  IPOPT_VERSION: '3.14.19'
+  # linux.bash clones these at HEAD; pinned to the revisions that produced MUMPS 5.8.2 in v0.12.0.
+  THIRDPARTY_MUMPS_REF: 'releases/3.0.12'
+  LAPACK_REF: 'v3.12.1'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyscipopt
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyscipopt ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    env:
+      PYSCIPOPT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout PySCIPOpt ${{ env.PYSCIPOPT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: scipopt/PySCIPOpt
+          ref: v${{ env.PYSCIPOPT_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch PySCIPOpt source
+        run: git apply python-wheels/patches/pyscipopt/${{ env.PYSCIPOPT_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT_PASS_LINUX: PIP_EXTRA_INDEX_URL
+          PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+          # Upstream's before-all unzips a prebuilt SCIP; this builds it with scipoptsuite-deploy's
+          # recipe instead, minus GCG (not linked by PySCIPOpt) and the component test suites.
+          CIBW_BEFORE_ALL_LINUX: |
+            set -ex
+            project=$(pwd)
+            ws=/tmp/scipoptsuite
+            export CMAKE_POLICY_VERSION_MINIMUM=3.5
+            mkdir -p $ws
+            cd $ws
+            # libgfortran-static/libstdc++-static: config.site links statically; Rocky 10's system GCC splits them out.
+            yum install gcc gcc-c++ libgfortran libgfortran-static libstdc++-static git patch wget lapack-static unzip zip make glibc-static -y
+            rm -f /usr/lib64/liblapack.s*
+            rm -f /usr/lib64/libblas.*
+            rm -rf /usr/include/boost
+            mkdir /usr/include/boost
+
+            wget -q https://archives.boost.io/release/1.82.0/source/boost_1_82_0.tar.gz
+            tar -xf boost_1_82_0.tar.gz
+            cd boost_1_82_0
+            ./bootstrap.sh --prefix=/usr/include/boost --with-libraries=program_options,serialization,iostreams,regex
+            ./b2 --prefix=/usr/include/boost -j$(nproc) install
+            cd ..
+
+            git clone --depth 1 --branch ${{ env.LAPACK_REF }} https://github.com/Reference-LAPACK/lapack.git
+            cp lapack/LICENSE $project/LICENSE.lapack
+            cd lapack
+            mkdir build
+            cd build
+            cmake .. -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+            make -j$(nproc) blas
+            mv lib/libblas.a /usr/lib64/.
+
+            cd $ws
+            mkdir scip_install
+            mkdir scip_install/share
+            wget -q https://github.com/coin-or/Ipopt/archive/refs/tags/releases/${{ env.IPOPT_VERSION }}.zip
+            unzip -q ${{ env.IPOPT_VERSION }}.zip
+            cp Ipopt-releases-${{ env.IPOPT_VERSION }}/LICENSE $project/LICENSE.ipopt
+            echo "enable_shared=no
+            enable_java=no
+            enable_sipopt=no
+            with_pic=yes
+            with_metis_cflags=\"-I$ws/metis/include/\"
+            with_metis_lflags=\"-L$ws/metis/lib -lmetis -lm\"
+            with_lapack_lflags=\"-llapack_pic -lblas -lgfortran -lm\"
+            LT_LDFLAGS=-all-static
+            LDFLAGS=-static" > $ws/scip_install/share/config.site
+
+            cd $ws
+            wget -q https://github.com/KarypisLab/METIS/archive/refs/tags/v5.1.1-DistDGL-v0.5.tar.gz
+            tar -xf v5.1.1-DistDGL-v0.5.tar.gz
+            wget -q https://github.com/KarypisLab/GKlib/archive/refs/tags/METIS-v5.1.1-DistDGL-0.5.tar.gz
+            tar -xf METIS-v5.1.1-DistDGL-0.5.tar.gz
+            mkdir $ws/metis
+            cd GKlib-METIS-v5.1.1-DistDGL-0.5
+            cp LICENSE.txt $project/LICENSE.gklib
+            sed -i 's/^CONFIG_FLAGS =/CONFIG_FLAGS = -DCMAKE_POLICY_VERSION_MINIMUM=3.5/' Makefile
+            # GCC rejects -march=native on riscv64, and it would tie METIS to the build host anyway.
+            sed -i 's/ -march=native//' GKlibSystem.cmake
+            make config prefix=$ws/GKlib-METIS-v5.1.1-DistDGL-0.5
+            make
+            make install
+
+            cd $ws
+            cd METIS-5.1.1-DistDGL-v0.5
+            cp LICENSE $project/LICENSE.metis
+            sed -i 's/^CONFIG_FLAGS =/CONFIG_FLAGS = -DCMAKE_POLICY_VERSION_MINIMUM=3.5/' Makefile
+            make config prefix=$ws/metis gklib_path=$ws/GKlib-METIS-v5.1.1-DistDGL-0.5
+            make
+            make install
+
+            cd $ws
+            git clone --depth 1 --branch ${{ env.THIRDPARTY_MUMPS_REF }} https://github.com/coin-or-tools/ThirdParty-Mumps.git
+            cd ThirdParty-Mumps
+            ./get.Mumps
+            cp MUMPS/LICENSE $project/LICENSE.mumps
+            ./configure --enable-shared=no --enable-static=yes --prefix=$ws/scip_install
+            make -j$(nproc)
+            make install
+
+            cd $ws
+            cd Ipopt-releases-${{ env.IPOPT_VERSION }}
+            mkdir build
+            cd build
+            ../configure --prefix=$ws/scip_install/
+            make -j$(nproc)
+            make install
+            cd ..
+            cd ..
+            wget -q https://github.com/scipopt/soplex/archive/refs/tags/v${{ env.SOPLEX_VERSION }}.zip
+            unzip -q v${{ env.SOPLEX_VERSION }}.zip
+            cd soplex-${{ env.SOPLEX_VERSION }}
+            cp LICENSE $project/LICENSE.soplex
+            cp src/soplex/external/fmt/LICENSE.rst $project/LICENSE.fmt
+            mkdir build
+            cd build
+            cmake .. -DCMAKE_INSTALL_PREFIX=$ws/scip_install -DCMAKE_BUILD_TYPE=Release -DGMP=false -DPAPILO=false -DBOOST=true
+            make -j$(nproc)
+            make install
+
+            cd $ws
+            wget -q https://github.com/scipopt/scip/archive/refs/tags/v${{ env.SCIP_VERSION }}.zip
+            unzip -q v${{ env.SCIP_VERSION }}.zip
+            cd scip-${{ env.SCIP_VERSION }}
+            cp LICENSE $project/LICENSE.scip
+            cp src/amplmp/LICENSE.rst $project/LICENSE.amplmp
+            cp src/cppad/COPYING $project/LICENSE.cppad
+            cp src/dejavu/LICENSE $project/LICENSE.dejavu
+            cp src/nauty/COPYRIGHT $project/LICENSE.nauty
+            cp src/tinycthread/COPYRIGHT $project/LICENSE.tinycthread
+            mkdir build
+            cd build
+            cmake .. --preset interface -DCMAKE_INSTALL_PREFIX=$ws/scip_install -DCMAKE_BUILD_TYPE=Release -DSHARED=ON -DLPS=spx -DSYM=snauty -DSOPLEX_DIR=$ws/scip_install -DPAPILO=false -DZIMPL=false -DGMP=false -DREADLINE=false -DIPOPT=true -DIPOPT_DIR=$ws/scip_install -DTPI=tny -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+            make -j$(nproc)
+            make install
+
+            cd $ws
+            mkdir -p scip_install/lib
+            rm -rf scip_install/lib64/cmake
+            mv scip_install/lib64/* scip_install/lib/.
+            # Ship only what upstream's libscip-linux.zip holds: an empty lib64/ makes setup.py link against it.
+            mkdir $project/scip
+            mv scip_install/lib scip_install/include scip_install/bin $project/scip/
+          CIBW_BEFORE_TEST: "pip install -r {project}/requirements/test.txt"
+          CIBW_TEST_COMMAND: "pytest {project}/tests"
+
+      - name: Check the wheel ships the extension and all licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("pyscipopt/scip.") and n.endswith(".so") for n in names), whl
+              assert any(n.startswith("pyscipopt.libs/libscip") for n in names), whl
+              licences = {n.rsplit("/", 1)[1]
+                          for n in names if ".dist-info/licenses/" in n} - {""}
+              expected = {"LICENSE"} | {f"LICENSE.{d}" for d in (
+                  "scip", "soplex", "fmt", "ipopt", "mumps", "metis", "gklib", "lapack",
+                  "amplmp", "cppad", "dejavu", "nauty", "tinycthread")}
+              assert licences == expected, (whl, licences ^ expected)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyscipopt-${{ env.PYSCIPOPT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources (gcc) for pyscipopt ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+    env:
+      PYSCIPOPT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # auditwheel vendors the image's libgfortran (MUMPS and LAPACK are Fortran).
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyscipopt-${{ env.PYSCIPOPT_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyscipopt ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyscipopt-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: pyscipopt-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
