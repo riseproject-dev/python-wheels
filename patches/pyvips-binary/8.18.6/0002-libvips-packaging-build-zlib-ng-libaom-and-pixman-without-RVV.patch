@@ -1,0 +1,54 @@
+From fee92a24384fa939441cad60a98a7ab7a52f9670 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sat, 26 Sep 2026 11:45:18 +0000
+Subject: [PATCH 2/2] Build zlib-ng, libaom and pixman without RVV kernels
+
+Upstream-Status: Inappropriate [works around riscv64 hosts that advertise V but trap on RVV 1.0 code, as the python-wheels riscv64 runners do]
+
+zlib-ng, libaom and pixman each compile RVV 1.0 kernels whenever the
+compiler supports them and pick them at runtime from AT_HWCAP (or
+hwprobe). On hosts whose kernel reports V while the core only
+implements a pre-1.0 vector extension, the first vsetvli raises
+SIGILL, so the dispatch is not a safe guard there. Keep the rv64gc
+scalar paths instead; libaom's -DENABLE_RVV=0 is what
+lovell/sharp-libvips already passes for its linux-riscv64 build.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ build/posix.sh | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/build/posix.sh b/build/posix.sh
+index c455c85..1b9b83a 100755
+--- a/build/posix.sh
++++ b/build/posix.sh
+@@ -138,7 +138,7 @@ $CURL https://github.com/zlib-ng/zlib-ng/archive/${VERSION_ZLIB_NG}.tar.gz | tar
+ cd ${DEPS}/zlib-ng
+ CFLAGS="${CFLAGS} -O3" cmake -G"Unix Makefiles" \
+   -DCMAKE_TOOLCHAIN_FILE=${ROOT}/Toolchain.cmake -DCMAKE_INSTALL_PREFIX=${TARGET} -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_BUILD_TYPE=Release \
+-  -DBUILD_SHARED_LIBS=FALSE -DBUILD_TESTING=FALSE -DZLIB_COMPAT=TRUE -DWITH_ARMV6=FALSE
++  -DBUILD_SHARED_LIBS=FALSE -DBUILD_TESTING=FALSE -DZLIB_COMPAT=TRUE -DWITH_ARMV6=FALSE -DWITH_RVV=FALSE
+ make install/strip
+ 
+ mkdir ${DEPS}/ffi
+@@ -188,7 +188,7 @@ cd aom_build
+ AOM_AS_FLAGS="${FLAGS}" cmake -G"Unix Makefiles" \
+   -DCMAKE_TOOLCHAIN_FILE=${ROOT}/Toolchain.cmake -DCMAKE_INSTALL_PREFIX=${TARGET} -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_BUILD_TYPE=MinSizeRel \
+   -DBUILD_SHARED_LIBS=FALSE -DENABLE_DOCS=0 -DENABLE_TESTS=0 -DENABLE_TESTDATA=0 -DENABLE_TOOLS=0 -DENABLE_APPS=0 -DENABLE_EXAMPLES=0 \
+-  -DCONFIG_PIC=1 -DENABLE_NASM=1 \
++  -DCONFIG_PIC=1 -DENABLE_NASM=1 -DENABLE_RVV=0 \
+   -DCONFIG_AV1_HIGHBITDEPTH=1 -DCONFIG_WEBM_IO=0 \
+   ..
+ make install/strip
+@@ -309,7 +309,7 @@ mkdir ${DEPS}/pixman
+ $CURL https://cairographics.org/releases/pixman-${VERSION_PIXMAN}.tar.gz | tar xzC ${DEPS}/pixman --strip-components=1
+ cd ${DEPS}/pixman
+ meson setup _build --default-library=static --buildtype=release --strip --prefix=${TARGET} ${MESON} \
+-  -Dlibpng=disabled -Dgtk=disabled -Dopenmp=disabled -Dtests=disabled -Ddemos=disabled
++  -Dlibpng=disabled -Dgtk=disabled -Dopenmp=disabled -Dtests=disabled -Ddemos=disabled -Drvv=disabled
+ meson install -C _build --tag devel
+ 
+ mkdir ${DEPS}/cairo
+-- 
+2.43.0
+
