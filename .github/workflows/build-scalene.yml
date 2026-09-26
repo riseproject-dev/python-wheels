@@ -1,0 +1,142 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build-and-upload` job of
+# https://github.com/plasma-umass/scalene/blob/v2.3.0/.github/workflows/build-and-upload.yml
+# and the test steps of
+# https://github.com/plasma-umass/scalene/blob/v2.3.0/.github/workflows/tests.yml
+name: Build scalene wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/scalene.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-scalene.yml'
+      - 'docs/packages/scalene.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-scalene.yml'
+      - 'docs/packages/scalene.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: scalene
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build scalene ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      SCALENE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout scalene v${{ env.SCALENE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: plasma-umass/scalene
+          ref: v${{ env.SCALENE_VERSION }}
+          persist-credentials: false
+
+      # `make vendor-deps` clones Heap-Layers at HEAD; pin the commit the released sdist ships.
+      - name: Checkout Heap-Layers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: emeryberger/Heap-Layers
+          ref: 0ccf5bee31e6527bb1d5987b43be1ad22f273790
+          path: vendor/Heap-Layers
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch scalene source
+        run: git apply python-wheels/patches/scalene/${{ env.SCALENE_VERSION }}/*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Upstream's wheels ship only scalene's LICENSE; stage the notices of the code linked into them.
+          CIBW_BEFORE_ALL_LINUX: >-
+            make -C {project} vendor-deps &&
+            cp {project}/vendor/libunwind/COPYING {project}/LICENSE.libunwind &&
+            cp {project}/vendor/printf/LICENSE {project}/LICENSE.printf &&
+            cp {project}/vendor/Heap-Layers/COPYING {project}/LICENSE.Heap-Layers
+          # The `test` extra adds tensorflow and jax, which have no riscv64 wheels; their tests skip without them.
+          CIBW_TEST_REQUIRES: pytest pytest-asyncio hypothesis
+          CIBW_TEST_SOURCES: pytest.ini tests test
+          # test_native_stacks re-runs sys._base_executable, which is outside the test venv.
+          # test_scalene_cpu_count starts a profiler in-process that wraps sys.executable in a scalene launcher for every later test.
+          # test/test_timers.py holds no tests; importing it arms a repeating SIGALRM that kills pytest during its slower riscv64 exit.
+          # Timing-bound on riscv64: a BLAS workload under a 300 s timeout, and a memory sample landing on make_small's def line.
+          # Upstream's test_freethreaded_parity.py is skipped: its 8-thread scaling phase overruns a fixed 180 s budget on the runner.
+          CIBW_TEST_COMMAND: >-
+            PYTHONPATH="$(python -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
+            python -m pytest
+            --ignore test/test_timers.py
+            --deselect tests/test_coverup_30.py::test_scalene_cpu_count
+            --deselect tests/test_issue1032_core_utilization_clamp.py::test_core_utilization_within_bounds_under_blas_load
+            --deselect tests/test_memory_stacks_bigmem.py::test_memory_stacks_split_across_two_callers
+            --deselect tests/test_combined_stacks_gui.py::test_bundle_contains_new_render_helpers
+            --deselect tests/test_combined_stacks_gui.py::test_ts_source_contains_timeline_axis_helpers
+            --deselect tests/test_combined_stacks_gui.py::test_ts_source_contains_memory_axis_helpers
+            --deselect tests/test_combined_stacks_gui.py::test_timeline_tooltips_use_source_lookup
+            && python -c "import importlib.metadata as m;
+            lic = {p.name for p in m.files('scalene') if '.dist-info/licenses/' in str(p)};
+            assert {'LICENSE', 'LICENSE.libunwind', 'LICENSE.printf', 'LICENSE.Heap-Layers'} <= lic, lic"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: scalene-${{ env.SCALENE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish scalene ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: scalene-${{ matrix.version }}-*-manylinux_riscv64
