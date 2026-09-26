@@ -678,6 +678,12 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
   image's real floor (`abi3-py38` → `abi3-py39`), verified locally with `cargo check` plus
   a `maturin build --release` whose printed floor and wheel filename both track the patch
   (the baseten-performance-client case).
+- **587** — A hybrid Cython+Rust build (poetry build script running `cargo build` for Rust
+  staticlibs linked into every Cython module, plus a non-abi3 pyo3 cdylib) rebuilds every
+  workspace crate that depends on `pyo3` once per interpreter: price it with a reverse walk of
+  `Cargo.lock` from `pyo3` and the released wheel's per-module sizes, not the crate count;
+  Tier 2 riscv64 Rust needs no build-std, and a `*-proto` crate's `tonic-buf-build` build
+  script can be dead code behind a regeneration env var (the nautilus-trader case).
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 

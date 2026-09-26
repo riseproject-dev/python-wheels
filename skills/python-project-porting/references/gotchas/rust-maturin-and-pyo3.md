@@ -86,6 +86,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
   no asm, no `cmake` and no perl; plus `pcre2-sys` keeps a real riscv64 JIT.
 - **555** — Gotcha 181's unconditional `abi3-pyNN` has no flag to override when `NN` is an
   interpreter the riscv64 image doesn't ship — patch the Cargo feature instead.
+- **587** — A hybrid Cython+Rust build (a build script running `cargo build` for staticlibs
+  linked into every Cython module, plus a non-abi3 pyo3 cdylib) is priced by the pyo3
+  reverse-dependency closure in `Cargo.lock`, not by "one extension per interpreter".
 
 ---
 
@@ -1404,3 +1407,37 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
     the pinned pyo3 version, and `maturin build --release` prints `Built wheel for abi3
     Python >= 3.9` and produces a `cp39-abi3` filename that tracks the patched feature, not
     whichever interpreter ran the build.
+
+587. **A hybrid Cython+Rust build is priced by the pyo3 reverse-dependency closure, not by
+    "one extension per interpreter" (the nautilus-trader case).** nautilus-trader is neither
+    maturin nor setuptools-rust: a poetry-core `[tool.poetry.build] script = "build.py"` runs
+    `cargo build --lib -p <6 crates> --release --features python,ffi,…` itself, then links the
+    resulting Rust *staticlibs* into each of 110 Cython extensions and ships the pyo3 cdylib
+    beside them. Two things make that shape far more expensive than its crate count suggests:
+    - **Non-abi3 pyo3 rebuilds the whole own workspace per interpreter, not one crate.** Every
+      workspace crate with a `python` feature depends on `pyo3`, whose build script keys on the
+      interpreter, so all of them recompile for cp312, cp313 and cp314. Measure it before
+      pricing the port: walk `Cargo.lock`'s `dependencies` in reverse from `pyo3` (a 20-line
+      `tomllib` script; no index fetch, no checkout). Here it was all 40 `nautilus-*` crates —
+      57.9 MB of first-party Rust (`git ls-tree -r -l HEAD crates`) — plus
+      `pyo3-async-runtimes`/`pyo3-stub-gen`; only the ~860 third-party crates (datafusion 54,
+      arrow/parquet at *two* major versions, alloy, sqlx, aws-lc-sys) are shared across legs.
+    - **The staticlibs are linked N times.** The released aarch64 cp313 wheel (read over HTTP
+      range requests, gotcha 41) is 526 MB uncompressed: a 144 MB *stripped* fat-LTO
+      `nautilus_pyo3.so` and a 105 MB Cython `backtest/engine` module, with several more
+      Cython modules at 20–30 MB each because each links the Rust archives statically.
+    Against this fleet's calibration (gotcha 141: deltalake's ~840-crate graph 8.1 h, lancedb's
+    ~750-crate abi3 build ~9.5 h, both at `CARGO_BUILD_JOBS=2` with LTO overridden down), that
+    is a ≥ 9–10 h job *per interpreter* before tests, ~30 runner-hours per version, with the
+    144 MB link a gotcha 228 OOM risk — and upstream's own CI admits the cost: its untrusted-PR
+    leg drops to a dedicated `ci-pr-wheel` profile at `opt-level = 0` with `CARGO_BUILD_JOBS=2`,
+    and even its 8-core depot ARM runners get 8 GB of extra swap and are kept off PRs entirely.
+    Parked on runner-hours, not on architecture: `riscv64gc-unknown-linux-gnu` is Tier 2 with
+    host tools, so a pinned `rust-toolchain.toml` channel needs no nightly or `-Z build-std` —
+    confirm by a 1-byte range GET of `static.rust-lang.org/dist/rust-std-<ver>-riscv64gc-unknown-linux-gnu.tar.xz`
+    (206) against a bogus-triple control (404) — and neither the own tree (`git grep
+    'target_arch|std::arch'` finds nothing) nor the native crates (`ring`, `aws-lc-sys`,
+    `secp256k1-sys`, `zstd-sys`, `blake3`) block it. A `*-proto` crate whose build script
+    pulls in `tonic-buf-build`/`prost-build` (dydx-proto) is also no protoc/`buf` requirement
+    when the script returns early unless a regeneration env var (`V4_PROTO_REBUILD`) is set —
+    read the `build.rs` before adding a toolchain for it.
