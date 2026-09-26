@@ -1115,6 +1115,11 @@ The porting gotchas (549 of them) live in [`references/gotchas/`](gotchas/), spl
 - **513** — The wheel ships the tests but not the `<pkg>.tests` helpers they import: stage the
   helper modules with `test-sources` and copy them into the installed package from
   `test-command` (the pytype case).
+- **592** — One in-process profiler test wraps `sys.executable` in a launcher, so every later
+  memory test silently skips (x86_64 too) and subprocess tests overrun fixed timeouts on
+  riscv64: find the polluter with a teardown hook and deselect it; a collected demo script
+  arming a repeating `SIGALRM` kills pytest at exit (142) only on riscv64's slower shutdown;
+  put the venv's platlib on `PYTHONPATH` for `sys._base_executable` helpers (the scalene case).
 
 ### Testing: pytest config, servers & test selection — [`gotchas/pytest-config-servers-and-selection.md`](gotchas/pytest-config-servers-and-selection.md)
 

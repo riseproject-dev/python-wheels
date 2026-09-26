@@ -33,6 +33,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
   `git apply` the build job has, or the failure you just fixed comes back unchanged.
 - **513** — The wheel ships the tests but not the test *helpers* they import — copy the helper
   package into the installed package from `test-command`.
+- **592** — A profiler's own suite rewrites the pytest process it runs in: one in-process test
+  wraps `sys.executable` in a profiler launcher and every later subprocess test silently skips
+  or times out; a collected demo script can leave a repeating `SIGALRM` that kills pytest at
+  exit; `sys._base_executable` helpers escape the test venv.
 
 ---
 
@@ -594,3 +598,48 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
       non-root user.** `tool_utils_test.TestMakeDirsOrDie.test_die` expects
       `makedirs_or_die('/nonexistent/path')` to raise `SystemExit`; the build container runs
       as root, where it simply creates the directory.
+
+592. **A profiler's own test suite rewrites the pytest process it runs in, so a green
+    `CIBW_TEST_COMMAND` can hide the very feature the port exists for (the scalene case).**
+    Four traps; only the timing ones are riscv64-specific:
+    - **One in-process test wraps `sys.executable` for the rest of the session.**
+      `tests/test_coverup_30.py::test_scalene_cpu_count` constructs the profiler in-process;
+      its `redirect_python` replaces `sys.executable` (and the head of `PATH`) with a
+      `/tmp/scaleneXXXX/python` launcher that re-runs everything under scalene. Every later
+      `subprocess.run([sys.executable, "-m", "scalene", ...])` then nests a profiler inside a
+      profiler. The `--memory` tests fail to start (`Failed to initialize memory profiling:
+      [Errno 2] No such file or directory: '/tmp/scalene-malloc-signal<pid>'`) and, because
+      upstream wraps them in a "suspected subprocess startup flake" retry helper, **skip** —
+      all 24 of them, on x86_64 as much as riscv64. The suite is green and proves nothing about
+      memory profiling; only `pytest -rs` shows it. On riscv64 the same nesting also pushes the
+      `--on`/`--off` integration and per-thread native-stack tests past their hard-coded 60 s
+      timeouts (5-18 s each in a clean session).
+    - **Find the polluter, don't quarantine the victims.** A throwaway `-p` plugin whose
+      `pytest_runtest_teardown` logs when `sys.executable`/`PATH[0]`/`LD_PRELOAD` change names
+      the one test in a single local run; `--deselect` it. Deselecting the victims instead
+      grows with every release and still leaves the rest of the session under the launcher.
+    - **A `test_*.py` demo script can arm a process-wide timer at import.** scalene's
+      `test/test_timers.py` has no test functions: at module level it installs a `SIGALRM`
+      handler and calls `setitimer(ITIMER_REAL, 5, 1)`, loops until ten ticks, and leaves the
+      1 s interval running. pytest imports it during collection, so the whole session ticks
+      (the tell: bare floats like `0.9997586710378528` interleaved with the progress dots and
+      one more printed after the summary). When the interpreter tears the handler down at exit,
+      the next tick takes the default action: the job fails with `exit code 142` (128 +
+      `SIGALRM`) four seconds after a fully green `448 passed` summary, which reads like the
+      next command in the `&&` chain failing. x86_64 finishes shutdown inside the one-second
+      window, riscv64 does not — deterministic on all three interpreters. `--ignore` the file;
+      it is a manual demo, not a test.
+    - **`sys._base_executable` is outside cibuildwheel's test venv.** `test_native_stacks`
+      deliberately spawns its helpers with `sys._base_executable` (falling back to
+      `/proc/self/exe`) to dodge that same launcher; in a venv that is
+      `/opt/python/cp3XX-cp3XX/bin/python3.X`, which has no scalene installed, so every helper
+      dies `ModuleNotFoundError`. Upstream never sees it because it tests `pip install -e .`
+      into a setup-python interpreter. Keep the tests (they are the unwinder's, the most
+      architecture-sensitive in the suite) and prefix the run with
+      `PYTHONPATH="$(python -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"` —
+      same interpreter version, so the base interpreter imports the wheel's extensions fine.
+    - **Why it mattered here:** scalene gates `--memory` on a pure-Python
+      `platform.machine()` allowlist (`x86_64/amd64/arm64/aarch64`) that silently turns it off
+      elsewhere with a warning. With the memory tests skipping, the patch adding `riscv64`
+      looked unnecessary; with the polluter isolated they fail without it and pass with it.
+
