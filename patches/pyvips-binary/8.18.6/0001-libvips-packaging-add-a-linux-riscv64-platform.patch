@@ -1,0 +1,178 @@
+From 64ca2bd38804131beb1e75bdd933a5fec595f356 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sat, 26 Sep 2026 11:45:09 +0000
+Subject: [PATCH 1/2] Add a linux-riscv64 platform
+
+Upstream-Status: To upstream [not yet submitted; python-wheels does not open issues/PRs on third-party repos]
+
+Build the same shared libraries natively on a riscv64 host, in a
+Rocky Linux 10 (glibc 2.39) container, the way linux-arm64 is built
+natively in a Rocky Linux 8 container. The platform files are the
+linux-arm64 ones with the RISC-V triplet, Rust host and -march=rv64gc
+baseline swapped in, and Rocky 10's own GCC 14 in place of
+gcc-toolset-15. The rv64gc baseline matches what lovell/sharp-libvips'
+linux-riscv64 platform uses.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ README.md                                     |  1 +
+ build.sh                                      |  5 +-
+ platforms/linux-riscv64/Dockerfile            | 60 +++++++++++++++++++
+ platforms/linux-riscv64/Toolchain.cmake       |  5 ++
+ platforms/linux-riscv64/meson.ini             | 10 ++++
+ .../linux-riscv64/riscv64-linux-gnu-pkgconf   | 12 ++++
+ 6 files changed, 91 insertions(+), 2 deletions(-)
+ create mode 100644 platforms/linux-riscv64/Dockerfile
+ create mode 100644 platforms/linux-riscv64/Toolchain.cmake
+ create mode 100644 platforms/linux-riscv64/meson.ini
+ create mode 100755 platforms/linux-riscv64/riscv64-linux-gnu-pkgconf
+
+diff --git a/README.md b/README.md
+index 6ebf369..a2827f3 100644
+--- a/README.md
++++ b/README.md
+@@ -26,6 +26,7 @@ the same shared libraries within multiple containers.
+ * [x64 musl](platforms/linux-musl-x64/Dockerfile)
+ * [ARMv7-A glibc](platforms/linux-arm/Dockerfile)
+ * [ARM64v8-A glibc](platforms/linux-arm64/Dockerfile)
++* [RISC-V 64-bit glibc](platforms/linux-riscv64/Dockerfile)
+ * [ARM64v8-A musl](platforms/linux-musl-arm64/Dockerfile)
+ 
+ ### Windows
+diff --git a/build.sh b/build.sh
+index 5e34e67..48c0f4f 100755
+--- a/build.sh
++++ b/build.sh
+@@ -16,6 +16,7 @@ if [ $# -lt 1 ]; then
+   echo "- linux-x64"
+   echo "- linux-arm"
+   echo "- linux-arm64"
++  echo "- linux-riscv64"
+   echo "- linux-musl-x64"
+   echo "- linux-musl-arm64"
+   echo "- win-x64"
+@@ -84,8 +85,8 @@ for flavour in win-x64 win-x64.net462 win-x86 win-x86.net462 win-arm64 win-arm64
+   fi
+ done
+ 
+-# Linux (x64, ARMv7 and ARM64v8)
+-for flavour in linux-x64 linux-arm linux-arm64 linux-musl-x64 linux-musl-arm64; do
++# Linux (x64, ARMv7, ARM64v8 and RISC-V 64-bit)
++for flavour in linux-x64 linux-arm linux-arm64 linux-riscv64 linux-musl-x64 linux-musl-arm64; do
+   if [ $PLATFORM = "all" ] || [ $PLATFORM = $flavour ]; then
+     echo "Building $flavour..."
+     docker build --pull --cache-from vips-dev-$flavour --build-arg BUILDKIT_INLINE_CACHE=1 -t vips-dev-$flavour platforms/$flavour
+diff --git a/platforms/linux-riscv64/Dockerfile b/platforms/linux-riscv64/Dockerfile
+new file mode 100644
+index 0000000..04f1d6b
+--- /dev/null
++++ b/platforms/linux-riscv64/Dockerfile
+@@ -0,0 +1,60 @@
++FROM --platform=linux/riscv64 rockylinux/rockylinux:10-ubi-init
++
++## Copyright 2017 Lovell Fuller and others.
++## SPDX-License-Identifier: Apache-2.0
++
++# Create Rocky Linux 10 (glibc 2.39) container suitable for building Linux RISC-V 64-bit binaries
++
++# Path settings
++ENV \
++  RUSTUP_HOME="/usr/local/rustup" \
++  CARGO_HOME="/usr/local/cargo" \
++  PATH="/usr/local/cargo/bin:$PATH"
++
++# Build dependencies
++RUN \
++  dnf update -y && \
++  dnf install -y dnf-plugins-core && \
++  dnf config-manager --set-enabled crb && \
++  dnf install -y --setopt=tsflags=nodocs \
++    autoconf \
++    automake \
++    bzip2 \
++    cmake \
++    diffutils \
++    findutils \
++    gcc \
++    gcc-c++ \
++    gettext \
++    git \
++    gperf \
++    jq \
++    libcurl-devel \
++    make \
++    openssl-devel \
++    patch \
++    pkgconf \
++    python3-pip \
++    tar \
++    xz \
++    && \
++  curl https://sh.rustup.rs -sSf | sh -s -- -y \
++    --no-modify-path \
++    --profile minimal \
++    --default-host riscv64gc-unknown-linux-gnu \
++    --default-toolchain nightly \
++    && \
++  cargo install cargo-c --locked && \
++  pip3 install meson ninja
++
++# Compiler settings
++ENV \
++  PKG_CONFIG="riscv64-linux-gnu-pkgconf --static" \
++  PLATFORM="linux-riscv64" \
++  FLAGS="-march=rv64gc" \
++  RUSTFLAGS="-Zlocation-detail=none -Zfmt-debug=none" \
++  MESON="--cross-file=/root/meson.ini"
++
++COPY Toolchain.cmake /root/
++COPY meson.ini /root/
++COPY riscv64-linux-gnu-pkgconf /usr/bin
+diff --git a/platforms/linux-riscv64/Toolchain.cmake b/platforms/linux-riscv64/Toolchain.cmake
+new file mode 100644
+index 0000000..96ed502
+--- /dev/null
++++ b/platforms/linux-riscv64/Toolchain.cmake
+@@ -0,0 +1,5 @@
++set(CMAKE_FIND_ROOT_PATH $ENV{TARGET_SYSROOT})
++set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
++set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
++set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
++set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+diff --git a/platforms/linux-riscv64/meson.ini b/platforms/linux-riscv64/meson.ini
+new file mode 100644
+index 0000000..2f9d2ad
+--- /dev/null
++++ b/platforms/linux-riscv64/meson.ini
+@@ -0,0 +1,10 @@
++[binaries]
++strip = 'strip'
++
++[built-in options]
++libdir = 'lib'
++datadir = '/usr/share'
++localedir = '/usr/share/locale'
++sysconfdir = '/etc'
++localstatedir = '/var'
++wrap_mode = 'nofallback'
+diff --git a/platforms/linux-riscv64/riscv64-linux-gnu-pkgconf b/platforms/linux-riscv64/riscv64-linux-gnu-pkgconf
+new file mode 100755
+index 0000000..84b5ae9
+--- /dev/null
++++ b/platforms/linux-riscv64/riscv64-linux-gnu-pkgconf
+@@ -0,0 +1,12 @@
++#!/bin/bash
++
++# Workaround for https://github.com/mesonbuild/meson/issues/5402
++for arg in "$@"; do
++  if [[ "$arg" == "--version" ]]; then
++    exec pkgconf --version
++    exit 0
++  fi
++done
++
++exec pkgconf "$@"
++exit $?
+-- 
+2.43.0
+

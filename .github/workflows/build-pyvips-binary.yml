@@ -1,0 +1,342 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on:
+# https://github.com/kleisauke/pyvips-binary/blob/v8.18.6/.github/workflows/ci.yml
+# https://github.com/kleisauke/libvips-packaging/blob/v8.18.6/.github/workflows/ci.yml
+name: Build pyvips-binary wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyvips-binary.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyvips-binary.yml'
+      - 'docs/packages/pyvips-binary.yaml'
+      - 'patches/pyvips-binary/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyvips-binary.yml'
+      - 'docs/packages/pyvips-binary.yaml'
+      - 'patches/pyvips-binary/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyvips-binary
+      version: ${{ inputs.version }}
+
+  # pyvips-binary's before-build downloads a libvips-packaging release tarball,
+  # which has no linux-riscv64 asset, so build it with libvips-packaging's own build.sh.
+  build_libvips:
+    name: Build libvips ${{ matrix.version }} linux-riscv64
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      PYVIPS_BINARY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout libvips-packaging v${{ env.PYVIPS_BINARY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: kleisauke/libvips-packaging
+          ref: v${{ env.PYVIPS_BINARY_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch libvips-packaging source
+        run: |
+          git apply python-wheels/patches/pyvips-binary/${{ env.PYVIPS_BINARY_VERSION }}/0001-*.patch
+          git apply python-wheels/patches/pyvips-binary/${{ env.PYVIPS_BINARY_VERSION }}/0002-*.patch
+
+      - name: Build linux-riscv64
+        run: ./build.sh linux-riscv64
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyvips-binary-${{ env.PYVIPS_BINARY_VERSION }}-libvips-linux-riscv64
+          path: libvips-*-linux-riscv64.tar.gz
+          compression-level: 0
+          if-no-files-found: error
+
+  # The bundled libvips statically links LGPL libraries (libvips, GLib, Pango,
+  # librsvg, libheif, libexif, FriBidi), so their sources ship with the release.
+  vendor_sources:
+    name: Collect pyvips-binary ${{ matrix.version }} vendored libvips sources
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      PYVIPS_BINARY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout libvips-packaging v${{ env.PYVIPS_BINARY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: kleisauke/libvips-packaging
+          ref: v${{ env.PYVIPS_BINARY_VERSION }}
+          persist-credentials: false
+          path: libvips-packaging
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch libvips-packaging source
+        working-directory: libvips-packaging
+        run: |
+          git apply ../python-wheels/patches/pyvips-binary/${{ env.PYVIPS_BINARY_VERSION }}/0001-*.patch
+          git apply ../python-wheels/patches/pyvips-binary/${{ env.PYVIPS_BINARY_VERSION }}/0002-*.patch
+
+      - name: Download the vendored sources and extract their licences
+        run: |
+          cat > "$RUNNER_TEMP/collect-vendor-sources.py" <<'PY'
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          """Collect the sources and licence texts of what libvips-packaging bundles.
+
+          build/posix.sh fetches every dependency with `$CURL <url> | tar` (plus a
+          few `| patch` fixes) right after `mkdir ${DEPS}/<name>`, with the versions
+          pinned in versions.properties, which is what this reads.
+          """
+
+          import argparse
+          import re
+          import subprocess
+          import tarfile
+          from pathlib import Path
+
+          LICENCE_RE = re.compile(r"^(COPYING|COPYRIGHT|LICEN[CS]E|NOTICE|PATENTS)", re.IGNORECASE)
+          MKDIR_RE = re.compile(r"^\s*mkdir \$\{DEPS\}/(\S+)")
+          FETCH_RE = re.compile(r"\$CURL (https://.+?) \| (tar|patch)")
+          # posix.sh only builds this for musl and macOS.
+          NOT_LINUX_GLIBC = {"proxy-libintl"}
+
+
+          def expand(packaging: Path, url: str) -> str:
+              script = (
+                  "source ./versions.properties\n"
+                  'without_patch() { echo "${1%.[[:digit:]]*}"; }\n'
+                  'without_prerelease() { echo "${1%-[[:alnum:]]*}"; }\n'
+                  f'printf "%s" "{url}"\n'
+              )
+              return subprocess.run(["bash", "-c", script], cwd=packaging, check=True,
+                                    capture_output=True, text=True).stdout
+
+
+          def fetches(packaging: Path):
+              name = None
+              patches = 0
+              for line in (packaging / "build" / "posix.sh").read_text().splitlines():
+                  if m := MKDIR_RE.match(line):
+                      name, patches = m.group(1), 0
+                      continue
+                  m = FETCH_RE.search(line)
+                  if not m or name in NOT_LINUX_GLIBC:
+                      continue
+                  url, kind = expand(packaging, m.group(1)), m.group(2)
+                  if kind == "patch":
+                      patches += 1
+                      yield name, url, f"{name}-{patches}.patch", False
+                  else:
+                      suffix = "".join(Path(url).suffixes[-2:])
+                      yield name, url, f"{name}-{Path(url).name.removesuffix(suffix)}{suffix}", True
+
+
+          def licences(name: str, tarball: Path, dest: Path) -> None:
+              chunks = []
+              with tarfile.open(tarball) as tar:
+                  for member in tar.getmembers():
+                      parts = Path(member.name).parts
+                      if not member.isfile() or len(parts) > 3 or not LICENCE_RE.match(parts[-1]):
+                          continue
+                      text = tar.extractfile(member).read().decode("utf-8", "replace")
+                      chunks.append(f"===== {'/'.join(parts[1:])} =====\n\n{text}")
+              if not chunks:
+                  raise SystemExit(f"{name}: no licence file found in {tarball.name}")
+              (dest / f"LICENSE.{name}").write_text(
+                  f"Licence texts for {name}, linked into the bundled libvips.\n\n"
+                  + "\n\n".join(chunks))
+              print(f"{name}: {len(chunks)} licence file(s)")
+
+
+          def main() -> None:
+              parser = argparse.ArgumentParser()
+              parser.add_argument("--packaging-dir", type=Path, required=True)
+              parser.add_argument("--sources-dir", type=Path, required=True)
+              parser.add_argument("--licenses-dir", type=Path, required=True)
+              args = parser.parse_args()
+              args.sources_dir.mkdir(parents=True, exist_ok=True)
+              args.licenses_dir.mkdir(parents=True, exist_ok=True)
+              for name, url, filename, is_source in fetches(args.packaging_dir):
+                  path = args.sources_dir / filename
+                  subprocess.run(["curl", "--location", "--fail", "--silent", "--show-error",
+                                  "--retry", "5", "--output", str(path), url], check=True)
+                  print(f"{name}: {filename} ({path.stat().st_size} bytes)")
+                  if is_source:
+                      licences(name, path, args.licenses_dir)
+
+
+          if __name__ == "__main__":
+              main()
+          PY
+          python3 "$RUNNER_TEMP/collect-vendor-sources.py" \
+            --packaging-dir libvips-packaging --sources-dir sources --licenses-dir licenses
+          cp libvips-packaging/THIRD-PARTY-NOTICES.md licenses/NOTICE.libvips-packaging.md
+          tar -czf "sources/libvips-packaging-v${PYVIPS_BINARY_VERSION}-riscv64.tar.gz" \
+            --exclude=.git libvips-packaging
+          tar -cf gpl-sources.tar -C sources .
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyvips-binary-${{ env.PYVIPS_BINARY_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyvips-binary-${{ env.PYVIPS_BINARY_VERSION }}-vendor-licenses
+          path: licenses/
+          if-no-files-found: error
+
+  build_wheels:
+    name: Build pyvips-binary ${{ matrix.version }} manylinux_riscv64
+    needs: [setup, build_libvips, vendor_sources]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      PYVIPS_BINARY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyvips-binary v${{ env.PYVIPS_BINARY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: kleisauke/pyvips-binary
+          ref: v${{ env.PYVIPS_BINARY_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pyvips-binary source
+        run: |
+          git apply python-wheels/patches/pyvips-binary/${{ env.PYVIPS_BINARY_VERSION }}/0003-*.patch
+          git apply python-wheels/patches/pyvips-binary/${{ env.PYVIPS_BINARY_VERSION }}/0004-*.patch
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: pyvips-binary-${{ env.PYVIPS_BINARY_VERSION }}-libvips-linux-riscv64
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: pyvips-binary-${{ env.PYVIPS_BINARY_VERSION }}-vendor-licenses
+          path: vendor-licenses
+
+      # setuptools' default license-files glob picks these up from the project root.
+      - name: Stage the licence texts for packaging
+        run: cp vendor-licenses/* .
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: cp314-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT_PASS_LINUX: RUNNER_OS LIBVIPS_TARBALL PIP_EXTRA_INDEX_URL
+          LIBVIPS_TARBALL: /project/libvips-${{ env.PYVIPS_BINARY_VERSION }}-linux-riscv64.tar.gz
+          PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest
+          # Upstream's smoke test, then pyvips' own suite (its tox `commands = pytest`) against the bundled libvips.
+          CIBW_TEST_COMMAND: >-
+            python -c "import _libvips; assert _libvips.lib.vips_version(0) == 8" &&
+            cd {project}/pyvips &&
+            python -c "import pyvips; assert pyvips.API_mode" &&
+            python -m pytest
+
+      - name: Check the wheel ships the extension, libvips and the vendored licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import pathlib, sys, zipfile
+          expected = {p.name for p in pathlib.Path("vendor-licenses").iterdir()} | {"LICENSE"}
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              libs = [n for n in names if n.startswith("pyvips_binary.libs/")]
+              shipped = {n.rsplit("/", 1)[1] for n in names
+                         if ".dist-info/licenses/" in n and not n.endswith("/")}
+              assert "_libvips.abi3.so" in names, f"no _libvips.abi3.so in {whl}"
+              assert any("libvips" in n for n in libs), f"no bundled libvips in {whl}"
+              assert expected <= shipped, f"{whl} is missing {sorted(expected - shipped)}"
+              print(f"{whl}: {len(libs)} bundled libraries, {len(shipped)} licence files")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyvips-binary-${{ env.PYVIPS_BINARY_VERSION }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyvips-binary ${{ matrix.version }}
+    needs: [setup, vendor_sources, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyvips-binary-${{ matrix.version }}-manylinux_riscv64
+      gpl-sources-artifact: pyvips-binary-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: libvips, GLib, Pango, librsvg, libheif, libexif, FriBidi
