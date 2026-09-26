@@ -414,6 +414,9 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
   link first; then diff the binding's `#include "..."` list against its own tree, because an
   open wrapper that includes vendor headers it does not ship is build-time locked to the
   vendor SDK (the dmpython case).
+- **585** — A CUDA library with no CUDA `Requires-Dist`, no `libcudart`/`libcuda` `DT_NEEDED`,
+  no `.nv_fatbin` and no `.cu` sources can still be hard CUDA-blocked by `CUDA::cudart_static`:
+  `strings` for "CUDA driver" and grep CMake for `cudart_static` (the librmm-cu12 case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

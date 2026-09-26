@@ -268,6 +268,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   link first; then diff the binding's `#include "..."` list against its own tree, because an
   open wrapper that includes vendor headers it does not ship is build-time locked to the
   vendor SDK (the dmpython case).
+- **585** — A CUDA library with no CUDA `Requires-Dist`, no `libcudart`/`libcuda` `DT_NEEDED`,
+  no `.nv_fatbin` and no `.cu` sources can still be hard CUDA-blocked by `CUDA::cudart_static`:
+  `strings` for "CUDA driver" and grep CMake for `cudart_static` (the librmm-cu12 case).
 
 ---
 
@@ -4784,3 +4787,25 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       offers only "X86" and unnamed "信创" (domestic-CPU) packages, with other platforms by
       phone request. No riscv64 DM8 or DPI build is published anywhere. Park it: the source
       is open, but there is nothing to link it against.
+
+585. **A CUDA library can show no CUDA anywhere the cheap checks look and still be hard
+    CUDA-blocked, because it links `CUDA::cudart_static` (the librmm-cu12 case).** librmm-cu12
+    26.8.0 passes every quick "is this really GPU code?" filter. Its METADATA `Requires-Dist` is
+    only `rapids-logger==0.2.*`, with no `cuda-toolkit`/`nvidia-*` pin. `readelf -d` on
+    `librmm/lib64/librmm.so` (1.2 MB) lists no `libcudart`/`libcuda`, only libc/libstdc++/
+    libdl/librt/`librapids_logger.so`. It has zero `.nv_fatbin`/`.nv_info` sections, and upstream
+    `cpp/CMakeLists.txt` declares `project(RMM ... LANGUAGES CXX)` over 46 `.cpp` and 0 `.cu`
+    library sources. It looks like gotcha 284's dlopen design, but it is not:
+    - **`strings` shows the static runtime.** `Failed to load CUDA driver!`, `CUDA driver is a
+      stub library`, `/cudart.shm.%x.%x.%llx` and the `cuMemAlloc*`/`cuMemFree*` driver-API
+      names are compiled into the `.so`. That is `libcudart_static.a` linked in, which itself
+      `dlopen`s `libcuda.so.1`. CMake says so directly: `rapids_find_package(CUDAToolkit
+      REQUIRED)` and `target_link_libraries(rmm PUBLIC ... CUDA::cudart_static)`.
+    - **The static archive is a harder wall than gotcha 560's headers.** Headers are
+      arch-independent text, but `libcudart_static.a` is a per-arch NVIDIA binary shipped in
+      the `cuda_cudart` redist component. `redistrib_<latest>.json` lists that component for
+      `linux-x86_64`/`linux-sbsa`/`windows-*` only (gotcha 387), so the link step has no
+      riscv64 input even if `cuda_runtime_api.h` were supplied.
+    - **Settle it with two greps:** `grep -n 'CUDAToolkit\|cudart_static' CMakeLists.txt` in the
+      source, and `strings -a <lib>.so | grep 'CUDA driver'` in the wheel. Either hit means the
+      empty `Requires-Dist` and `DT_NEEDED` only mean CUDA was folded in statically.
