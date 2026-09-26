@@ -1,0 +1,174 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/arvidn/libtorrent/blob/v2.1.1/.github/workflows/cibuildwheel.yml
+name: Build libtorrent wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/libtorrent.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-libtorrent.yml'
+      - 'docs/packages/libtorrent.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-libtorrent.yml'
+      - 'docs/packages/libtorrent.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: libtorrent
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build libtorrent ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # No cp314t: upstream's pinned Boost 1.83 Boost.Python reads PyObject::ob_refcnt.
+        python: ["cp312", "cp313", "cp314"]
+        libc: [manylinux, musllinux]
+
+    env:
+      LIBTORRENT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout libtorrent v${{ env.LIBTORRENT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: arvidn/libtorrent
+          ref: v${{ env.LIBTORRENT_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Stage licences beside bindings/python/setup.py
+        # setup.py builds from bindings/python, so setuptools' default licence glob
+        # never sees the root LICENSE; upstream's wheel ships no licence at all.
+        run: |
+          . tools/cibuildwheel/manylinux/openssl-version.sh
+          cp LICENSE bindings/python/
+          cp deps/try_signal/LICENSE bindings/python/LICENSE.try_signal
+          cp deps/libdatachannel/LICENSE bindings/python/LICENSE.libdatachannel
+          cp deps/libdatachannel/deps/libjuice/LICENSE bindings/python/LICENSE.libjuice
+          cp deps/libdatachannel/deps/usrsctp/LICENSE.md bindings/python/LICENSE.usrsctp
+          cp deps/libdatachannel/deps/plog/LICENSE bindings/python/LICENSE.plog
+          curl -fsSL -o bindings/python/LICENSE.openssl \
+            "https://raw.githubusercontent.com/openssl/openssl/${OPENSSL_ROOT}/LICENSE.txt"
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # The image's OpenSSL 3.5 makes setup_openssl.sh skip its static build, and
+          # Rocky 10 ships no libssl.a, so build upstream's pinned OpenSSL here instead.
+          CIBW_BEFORE_BUILD_LINUX: >-
+            ${{ matrix.libc == 'manylinux' && 'yum install -y perl-core &&
+            . {project}/tools/cibuildwheel/manylinux/openssl-version.sh &&
+            curl -fsSL -o /tmp/openssl.tar.gz "$OPENSSL_DOWNLOAD_URL/$OPENSSL_ROOT.tar.gz" &&
+            echo "$OPENSSL_HASH  /tmp/openssl.tar.gz" | sha256sum -c &&
+            tar -xzf /tmp/openssl.tar.gz -C /tmp &&
+            cd /tmp/$OPENSSL_ROOT &&
+            ./Configure no-shared --prefix=/usr/local --libdir=lib &&
+            make -j"$(nproc)" build_sw && make install_sw' || '' }}
+          # setup_ccache_on_manylinux.sh skips riscv64, so upstream's `ccache -s` has no ccache.
+          CIBW_BEFORE_TEST_LINUX: ${{ matrix.libc == 'musllinux' && 'ccache -s' || '' }}
+
+      - name: Check the wheel carries the extension and the licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("libtorrent/__init__.") and n.endswith(".so") for n in names), whl
+              licences = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+              assert licences == {
+                  "LICENSE", "LICENSE.try_signal", "LICENSE.libdatachannel", "LICENSE.libjuice",
+                  "LICENSE.usrsctp", "LICENSE.plog", "LICENSE.openssl",
+              }, (whl, licences)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: libtorrent-${{ env.LIBTORRENT_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      LIBTORRENT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # auditwheel's musllinux policy vendors libstdc++/libgcc_s into the musllinux wheels.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: libtorrent-${{ env.LIBTORRENT_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish libtorrent ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: libtorrent-${{ matrix.version }}-*riscv64
+      gpl-sources-artifact: libtorrent-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
