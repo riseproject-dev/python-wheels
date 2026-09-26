@@ -271,6 +271,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **585** — A CUDA library with no CUDA `Requires-Dist`, no `libcudart`/`libcuda` `DT_NEEDED`,
   no `.nv_fatbin` and no `.cu` sources can still be hard CUDA-blocked by `CUDA::cudart_static`:
   `strings` for "CUDA driver" and grep CMake for `cudart_static` (the librmm-cu12 case).
+- **591** — A pip-installable CPython JIT (pyston "lite") replaces the eval loop, so it is
+  locked to CPython 3.7–3.10 internals and to DynASM x86_64/aarch64 codegen with `#error "unknown
+  arch"`. There is no interpreter-only fallback, so riscv64 would need a new code generator (the pyston case).
 
 ---
 
@@ -4809,3 +4812,32 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     - **Settle it with two greps:** `grep -n 'CUDAToolkit\|cudart_static' CMakeLists.txt` in the
       source, and `strings -a <lib>.so | grep 'CUDA driver'` in the wheel. Either hit means the
       empty `Requires-Dist` and `DT_NEEDED` only mean CUDA was folded in statically.
+
+591. **A pip-installable CPython JIT is an eval-loop replacement, so it is locked twice: to the
+    exact CPython minors it copies and to the CPUs its code generator emits (the pyston case).**
+    `pyston` 2.3.5 on PyPI is not an alternate interpreter bundled as a wheel. Each ~450 KB
+    wheel holds one extension, `pyston.cpython-3XX-<arch>-linux-gnu.so`, that needs only
+    libc/libpthread. It is Pyston "lite" (`pyston/pyston_lite/setup.py` with
+    `PYSTON_LITE_NAME=pyston`). On import it swaps in its own `_PyEval_EvalFrame_AOT` for the
+    running CPython's frame evaluator and JITs hot code with DynASM. Neither lock has a
+    fallback:
+    - **The Python minor.** `setup.py` raises unless `(3, 7) <= sys.version_info[:2] <= (3, 10)`.
+      The tree carries per-minor copies of CPython internals (`ceval_gil37/39/310.h`,
+      `opcode_targets3X.h`, `condvar3X.h`) and builds with `Py_BUILD_CORE` against
+      `include/internal`. That is a hard ABI wall like gotcha 318, not gotcha 248's stale
+      classifiers, and it shares nothing with this repo's cp312+ matrix.
+    - **The CPU.** `dynasm_preprocess.py` maps `platform.machine()` through
+      `ARCHS = {"aarch64": "ARM", "x86_64": "X86"}`, so it raises `KeyError` on riscv64 before
+      any C compiles. `aot_ceval_jit.c` has 222 `@X86`/`@ARM` template lines, and its code-memory
+      allocator ends `#else #error "unknown arch"`. `aot_ceval_jit_helper.c` pins the eval state
+      in global register variables (`asm("r12")`/`asm("x23")`). Even the pinned LuaJIT submodule
+      (`e2c312e`, 2022) ships DynASM backends only for arm/arm64/mips/ppc/x86/x64. There is no
+      interpreter-only switch: `JIT_USE_AOT`/`JIT_USE_ICS` tune the JIT but never compile it
+      out. Unlike gotcha 276's isal, riscv64 support would mean writing a new code generator.
+    - **Check the wheel first.** `unzip -l` plus `strings -a *.so | grep -E 'dasm_|_PyEval_'`
+      tells a JIT extension from a bundled interpreter in one step. Then grep the codegen for its
+      arch table and `#error`. Also check upstream status: here the repo is not archived, but its
+      description reads "(No longer maintained)", the last code commit is 2023-02-28 (only
+      issue-template commits in 2024-08), and there is no sdist on PyPI. Park the `-autoload`
+      sibling too (gotcha 150/382). `pyston-autoload` 2.3.5 is a ~1.5 KB `.pth` that requires
+      `pyston==2.3.5`.

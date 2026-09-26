@@ -417,6 +417,9 @@ The porting gotchas (549 of them) live in [`references/gotchas/`](gotchas/), spl
 - **585** — A CUDA library with no CUDA `Requires-Dist`, no `libcudart`/`libcuda` `DT_NEEDED`,
   no `.nv_fatbin` and no `.cu` sources can still be hard CUDA-blocked by `CUDA::cudart_static`:
   `strings` for "CUDA driver" and grep CMake for `cudart_static` (the librmm-cu12 case).
+- **591** — A pip-installable CPython JIT (pyston "lite") replaces the eval loop, so it is
+  locked to CPython 3.7–3.10 internals and to DynASM x86_64/aarch64 codegen with `#error "unknown
+  arch"`. There is no interpreter-only fallback, so riscv64 would need a new code generator (the pyston case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
