@@ -1,0 +1,298 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# This workflow is based on: https://github.com/cel-expr/cel-python/blob/v0.1.3/release/kokoro/release_linux.sh
+---
+name: Build cel-expr-python wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cel-expr-python.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cel-expr-python.yml'
+      - 'docs/packages/cel-expr-python.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cel-expr-python.yml'
+      - 'docs/packages/cel-expr-python.yaml'
+
+run-name: build-cel-expr-python ${{ inputs.version && format('- {0}', inputs.version) || '' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Upstream's .bazelversion. Bazel publishes no riscv64 binary, so bootstrap one from
+  # the dist archive; 8.2.0+ bootstraps on riscv64 unpatched (gotcha 47).
+  BAZEL_VERSION: '8.5.1'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cel-expr-python
+      version: ${{ inputs.version }}
+
+  bazel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Bootstrap bazel (riscv64)
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+
+    steps:
+      - name: Restore bazel binary
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: bazel-bin
+          key: bazel-${{ env.BAZEL_VERSION }}-manylinux_riscv64
+
+      - name: Bootstrap bazel ${{ env.BAZEL_VERSION }}
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p bazel-bin
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e BAZEL_VERSION="${BAZEL_VERSION}" \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+
+          mkdir -p /tmp/bazel-src
+          cd /tmp/bazel-src
+          curl -fsSLo dist.zip "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-dist.zip"
+          unzip -q dist.zip
+
+          EXTRA_BAZEL_ARGS="--tool_java_runtime_version=local_jdk" bash ./compile.sh
+          install -m 0755 output/bazel /work/bazel-bin/bazel
+          SCRIPT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin/bazel
+          if-no-files-found: error
+
+  build_wheels:
+    name: Build cel-expr-python ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    needs: [setup, bazel]
+    if: needs.setup.outputs.versions != '[]'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream publishes cp311-cp314 and no free-threaded wheel. setup.py points
+        # rules_python's hermetic toolchain at the building interpreter, so each one is
+        # a full bazel build (gotcha 456).
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      CEL_EXPR_PYTHON_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout cel-python v${{ matrix.version }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: cel-expr/cel-python
+          ref: v${{ env.CEL_EXPR_PYTHON_VERSION }}
+          path: cel-python
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download bazel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin
+
+      - name: Build wheel
+        env:
+          PYTHON_TAG: ${{ matrix.python }}
+        run: |
+          mkdir -p wheelhouse
+          set -o pipefail
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work/cel-python \
+            -e PYTHON_TAG \
+            -e CEL_EXPR_PYTHON_VERSION \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT' 2>&1 | tee build.log
+          set -euxo pipefail
+
+          dnf install -y --setopt=install_weak_deps=False java-21-openjdk-devel
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+          install -m 0755 /work/bazel-bin/bazel /usr/local/bin/bazel
+
+          python_dir="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin"
+          export PATH="${python_dir}:${PATH}"
+          python_exe="${python_dir}/python"
+          "${python_exe}" -m pip install -q -U setuptools wheel auditwheel
+
+          cp release/pyproject.toml release/setup.py release/cel_basic_test.py .
+          rm -f cel_expr_python/*_test.py
+          sed -i "s/\$VERSION/${CEL_EXPR_PYTHON_VERSION}/g" pyproject.toml
+
+          # CEL_BAZEL_FLAGS is setup.py's own hook (upstream passes its remote cache
+          # through it). No remote JDK is published for riscv64, and cel-cpp runs the
+          # ANTLR tool as a java_binary. A long build's default curses progress output is
+          # large enough that GitHub drops the job log, taking the failure with it.
+          export CEL_BAZEL_FLAGS="--java_runtime_version=local_jdk --tool_java_runtime_version=local_jdk --curses=no --show_progress_rate_limit=60 --local_ram_resources=HOST_RAM*.5"
+
+          # First pass populates bazel's external repositories so their licences can be
+          # collected; the second pass is served from bazel's cache.
+          "${python_exe}" -m pip wheel . --no-deps --no-build-isolation -w /tmp/wheelbuild
+
+          # The extensions statically link every C++ dependency; upstream ships none of
+          # their licences, so collect them from the repositories bazel linked.
+          OUTPUT_BASE="$(bazel info output_base)"
+          targets="//cel_expr_python:cel"
+          for ext in bindings encoders math optional proto strings; do
+            targets="${targets} + //cel_expr_python/ext:ext_${ext}"
+          done
+          # shellcheck disable=SC2086
+          bazel cquery --compilation_mode=opt ${CEL_BAZEL_FLAGS} --output=label --consistent_labels \
+            "kind('cc_library|proto_library', deps(${targets}))" > /tmp/deps.txt
+          # --consistent_labels prints external repos as @@<canonical>// and the main repo
+          # as @@//, which the non-empty capture leaves out.
+          sed -nE 's|^@@([^@/]+)//.*|\1|p' /tmp/deps.txt | sort -u \
+            | grep -vE '^(rules_|bazel_tools|platforms|local_config_)' > /tmp/repos.txt
+          cat /tmp/repos.txt
+          while read -r repo; do
+            name="${repo%+}"
+            name="${name##*+}"
+            dir="${OUTPUT_BASE}/external/${repo}"
+            file=""
+            if [ -d "${dir}" ]; then
+              file="$(find "${dir}" -maxdepth 1 -type f \( -iname 'LICENSE*' -o -iname 'COPYING*' \) | sort | head -1)"
+            fi
+            if [ -n "${file}" ]; then
+              cp "${file}" "LICENSE.${name}"
+            else
+              echo "::warning::no licence file at the root of ${repo}"
+            fi
+          done < /tmp/repos.txt
+          ls LICENSE*
+          for name in abseil-cpp cel-cpp cel-spec protobuf pybind11 re2; do
+            test -f "LICENSE.${name}"
+          done
+
+          # setuptools' namespace package discovery follows bazel's convenience symlinks
+          # into the execroot, which is how upstream's wheels come to carry a bazel-project/
+          # tree; clear them so the second pass packages only cel_expr_python.
+          find . -maxdepth 1 -name 'bazel-*' -type l -delete
+          rm -rf build ./*.egg-info
+
+          "${python_exe}" -m pip wheel . --no-deps --no-build-isolation -w /tmp/wheelhouse
+          auditwheel repair --plat manylinux_2_39_riscv64 -w /work/wheelhouse /tmp/wheelhouse/*.whl
+          SCRIPT
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cel-expr-python-${{ env.CEL_EXPR_PYTHON_VERSION }}-${{ matrix.python }}-build-log
+          path: build.log
+
+      - name: Check the wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              tops = {n.split("/", 1)[0] for n in names}
+              assert all(t == "cel_expr_python" or t.endswith(".dist-info") for t in tops), tops
+              assert not any(".libs/" in n for n in names), whl
+              sos = sorted(n for n in names if n.endswith(".so"))
+              assert len(sos) == 7, sos
+              print(whl, "ok", *sos, sep="\n  ")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cel-expr-python-${{ env.CEL_EXPR_PYTHON_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+      - name: Test wheel
+        env:
+          PYTHON_TAG: ${{ matrix.python }}
+        run: |
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -e PYTHON_TAG \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          python_exe="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin/python"
+          "${python_exe}" -m pip install /work/wheelhouse/*.whl
+
+          # /work/cel-python holds the checkout, whose cel_expr_python/ would join the
+          # installed namespace package if the tests ran from there.
+          cd /tmp
+          "${python_exe}" /work/cel-python/release/cel_basic_test.py
+
+          "${python_exe}" - <<'PY'
+          import importlib
+          import importlib.metadata
+
+          for name in ["cel_expr_python.cel"] + [
+              "cel_expr_python.ext.ext_" + ext
+              for ext in ("bindings", "encoders", "math", "optional", "proto", "strings")
+          ]:
+              module = importlib.import_module(name)
+              assert module.__file__.endswith(".so"), module.__file__
+
+          licenses = {
+              str(f).rsplit("/", 1)[1]
+              for f in importlib.metadata.files("cel-expr-python")
+              if ".dist-info/licenses/" in str(f)
+          }
+          print(sorted(licenses))
+          expected = {"LICENSE"} | {
+              "LICENSE." + name
+              for name in ["abseil-cpp", "cel-cpp", "cel-spec", "protobuf", "pybind11", "re2"]
+          }
+          assert expected <= licenses, expected - licenses
+          PY
+          SCRIPT
+
+  publish:
+    name: Publish cel-expr-python ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: cel-expr-python-${{ matrix.version }}-*-manylinux_riscv64
