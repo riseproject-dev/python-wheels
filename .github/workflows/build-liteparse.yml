@@ -1,0 +1,311 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-wheels` + `test-wheels` jobs of
+# https://github.com/run-llama/liteparse/blob/python-v2.14.2/.github/workflows/release-python.yml
+# and, for the libpdfium it bundles, the `build` job of
+# https://github.com/run-llama/pdfium-binaries/blob/chromium/8028/.github/workflows/build.yml
+name: Build liteparse wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/liteparse.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-liteparse.yml'
+      - 'docs/packages/liteparse.yaml'
+      - 'patches/liteparse/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-liteparse.yml'
+      - 'docs/packages/liteparse.yaml'
+      - 'patches/liteparse/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: liteparse
+      version: ${{ inputs.version }}
+
+  # run-llama/pdfium-binaries publishes no linux-riscv64 asset, so its own recipe is run
+  # for riscv64, cross-compiling from x64 exactly as it does for its linux-arm64 asset.
+  build_pdfium:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pdfium for liteparse ${{ matrix.version }} linux-riscv64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+
+    env:
+      LITEPARSE_VERSION: ${{ matrix.version }}
+      PDFium_TARGET_OS: linux
+      PDFium_TARGET_CPU: riscv64
+      PDFium_ENABLE_V8: false
+      PDFium_IS_DEBUG: false
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: pdfium-binaries
+
+    steps:
+      - name: Checkout liteparse python-v${{ env.LITEPARSE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: run-llama/liteparse
+          ref: python-v${{ env.LITEPARSE_VERSION }}
+          path: liteparse
+          persist-credentials: false
+
+      - name: Read the pdfium release liteparse pins
+        working-directory: liteparse
+        run: |
+          tag=$(sed -nE 's/^const PDFIUM_RELEASE_TAG: &str = "(chromium\/[0-9]+)";$/\1/p' crates/pdfium-sys/build.rs)
+          test -n "${tag}"
+          echo "PDFIUM_RELEASE_TAG=${tag}" >> "${GITHUB_ENV}"
+          echo "PDFium_BRANCH=${tag}" >> "${GITHUB_ENV}"
+
+      - name: Checkout pdfium-binaries ${{ env.PDFIUM_RELEASE_TAG }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: run-llama/pdfium-binaries
+          ref: ${{ env.PDFIUM_RELEASE_TAG }}
+          path: pdfium-binaries
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Set environment variables
+        run: steps/00-environment.sh
+
+      - name: Install (1/2)
+        run: steps/01-install.sh
+
+      - name: Checkout PDFium
+        run: steps/02-checkout.sh
+        timeout-minutes: 15
+
+      - name: Apply patches
+        run: steps/03-patch.sh
+
+      - name: Apply riscv64 patches
+        working-directory: pdfium-binaries/pdfium
+        run: git apply -v ../../python-wheels/patches/liteparse/${{ env.LITEPARSE_VERSION }}/*.patch
+
+      - name: Install Extras
+        run: steps/04-install-extras.sh
+
+      - name: Configure
+        run: |
+          steps/05-configure.sh
+          cat pdfium/out/args.gn
+
+      - name: Build
+        run: steps/06-build.sh
+
+      - name: Stage
+        run: steps/07-stage.sh
+
+      - name: Collect licenses
+        run: steps/08-licenses.sh
+
+      - name: Check the llamaparse API is exported and the glibc floor fits manylinux_2_39
+        run: |
+          readelf --dyn-syms --wide staging/lib/libpdfium.so | grep -w FPDFText_GetCharInfoBatch
+          glibc=$(readelf --version-info --wide staging/lib/libpdfium.so | grep -o 'GLIBC_2\.[0-9]*' | sort -uV | tail -n 1)
+          echo "libpdfium.so needs ${glibc}"
+          test "$(printf '%s\nGLIBC_2.39\n' "${glibc}" | sort -V | tail -n 1)" = GLIBC_2.39
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: liteparse-${{ env.LITEPARSE_VERSION }}-pdfium-linux-riscv64
+          path: pdfium-binaries/staging/
+          if-no-files-found: error
+
+  build_wheel:
+    needs: [setup, build_pdfium]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build liteparse ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    env:
+      LITEPARSE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout liteparse python-v${{ env.LITEPARSE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: run-llama/liteparse
+          ref: python-v${{ env.LITEPARSE_VERSION }}
+          persist-credentials: false
+
+      # crates/pdfium-sys/build.rs takes vendor/pdfium/release ahead of its download.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: liteparse-${{ env.LITEPARSE_VERSION }}-pdfium-linux-riscv64
+          path: vendor/pdfium/release
+
+      - name: Stage pdfium for wheel inclusion
+        run: cp vendor/pdfium/release/lib/libpdfium.so packages/python/liteparse/libpdfium.so
+
+      # Upstream ships no licence text for the bundled pdfium or the statically linked
+      # tesseract/leptonica (versions pinned by tesseract-rs 0.2.0's build.rs).
+      - name: Stage licences
+        run: |
+          cp LICENSE packages/python/LICENSE
+          cp vendor/pdfium/release/LICENSE packages/python/LICENSE.pdfium
+          for f in vendor/pdfium/release/licenses/*; do
+            cp "${f}" "packages/python/LICENSE.pdfium-$(basename "${f}")"
+          done
+          curl -fsSL -o packages/python/LICENSE.tesseract https://raw.githubusercontent.com/tesseract-ocr/tesseract/5.3.4/LICENSE
+          curl -fsSL -o packages/python/LICENSE.leptonica https://raw.githubusercontent.com/DanBloomberg/leptonica/1.84.1/leptonica-license.txt
+
+      - name: Build wheels (glibc)
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --out dist --find-interpreter
+          manylinux: '2_39'
+          working-directory: packages/python
+          before-script-linux: |
+            if command -v yum &> /dev/null; then
+              yum install -y tesseract-devel leptonica-devel openssl-devel pkgconfig perl-IPC-Cmd || true
+            elif command -v apt-get &> /dev/null; then
+              apt-get update && apt-get install -y libtesseract-dev libleptonica-dev libssl-dev pkg-config || true
+            elif command -v apk &> /dev/null; then
+              apk add tesseract-ocr-dev leptonica-dev openssl-dev pkgconf || true
+            fi
+
+      - name: Check wheel contents
+        run: |
+          python3 - packages/python/dist/*.whl <<'EOF'
+          import sys, zipfile
+
+          (whl,) = sys.argv[1:]
+          assert whl.endswith("-cp310-abi3-manylinux_2_39_riscv64.whl"), whl
+          names = zipfile.ZipFile(whl).namelist()
+          for member in ("liteparse/_liteparse.abi3.so", "liteparse/libpdfium.so"):
+              assert member in names, (member, names)
+          licences = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+          for licence in ("LICENSE", "LICENSE.pdfium", "LICENSE.pdfium-freetype.txt", "LICENSE.tesseract", "LICENSE.leptonica"):
+              assert licence in licences, (licence, sorted(licences))
+          print(whl, sorted(licences))
+          EOF
+
+      # The extension falls back to the libpdfium directory baked in at build time;
+      # remove it so the tests can only load the copy bundled in the wheel.
+      - name: Remove the build-time pdfium
+        run: rm -rf vendor
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --no-index --find-links packages/python/dist liteparse
+
+      - name: Smoke test
+        run: |
+          python -c "
+          from liteparse import LiteParse, ParseResult, ParsedPage, TextItem, ScreenshotResult
+          parser = LiteParse(ocr_enabled=False, quiet=True)
+          print('LiteParse loaded successfully')
+          print(repr(parser))
+          "
+
+      - name: Parse test
+        run: |
+          python -c "
+          from liteparse import LiteParse
+          parser = LiteParse(ocr_enabled=False, quiet=True, max_pages=2)
+          result = parser.parse('demo/docs/apple-10k-2024.pdf')
+          assert result.num_pages == 2, f'Expected 2 pages, got {result.num_pages}'
+          assert len(result.text) > 0, 'Expected non-empty text'
+          page = result.get_page(1)
+          assert page is not None, 'Expected page 1'
+          assert len(page.text_items) > 0, 'Expected text items'
+          print(f'Parsed {result.num_pages} pages, {len(result.text)} chars')
+          "
+
+      - name: Bytes parse test
+        run: |
+          python -c "
+          from liteparse import LiteParse
+          parser = LiteParse(ocr_enabled=False, quiet=True, max_pages=1)
+          with open('demo/docs/apple-10k-2024.pdf', 'rb') as f:
+              data = f.read()
+          result = parser.parse(data)
+          assert result.num_pages == 1
+          assert len(result.text) > 0
+          print('Bytes parse test passed')
+          "
+
+      - name: Screenshot test
+        run: |
+          python -c "
+          from liteparse import LiteParse
+          parser = LiteParse(ocr_enabled=False, quiet=True)
+          screenshots = parser.screenshot('demo/docs/apple-10k-2024.pdf', page_numbers=[1])
+          assert len(screenshots) == 1
+          assert screenshots[0].page_num == 1
+          assert len(screenshots[0].image_bytes) > 0
+          print(f'Screenshot: {screenshots[0].width}x{screenshots[0].height}, {len(screenshots[0].image_bytes)} bytes')
+          "
+
+      - name: CLI test
+        run: |
+          lit --version
+          lit parse demo/docs/apple-10k-2024.pdf --no-ocr --max-pages 1 -q | head -5
+          echo "CLI test passed"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: liteparse-${{ env.LITEPARSE_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: packages/python/dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish liteparse ${{ matrix.version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: liteparse-${{ matrix.version }}-*-manylinux_riscv64
