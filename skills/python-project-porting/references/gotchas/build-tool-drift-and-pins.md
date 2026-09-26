@@ -25,6 +25,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
 - **346** — The `clang` PyPI package (LLVM's own `cindex.py` bindings, repackaged per release)
 - **361** — Gotcha 29's `pkg_resources` removal also bites `CIBW_TEST_REQUIRES`, not just a
 - **367** — A `setup.py`'s own "distributor customization" import hook can go silently
+- **588** — setuptools-scm >= 10.2 breaks every cp39 build whose in-tree backend declares
 
 ---
 
@@ -584,3 +585,36 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
       `customize_build_default`, say) — their presence in the actual `gcc`/cythonize
       invocation proves the import silently failed, before spending a cycle on any other
       theory.
+
+588. **setuptools-scm >= 10.2 breaks every cp39 build whose in-tree backend declares
+    `backend-path = ["."]` — `TypeError: expected string or bytes-like object` in
+    `egg_info` (the libuuu case; see `build-libuuu.yml`).** The traceback runs
+    `egg_info.run` → `metadata.entry_points(group='egg_info.writers')` →
+    `compat/py39.py normalized_name` → `AttributeError: 'PathDistribution' object has no
+    attribute '_normalized_name'` → `Prepared.normalize(None)`. It is not riscv64: a
+    plain `python3.9 -m build --wheel` of the same checkout on x86_64 fails identically,
+    and cp310+ builds clean. Three pieces have to line up:
+    - **pyproject-hooks' `_BackendPathFinder` has its own `find_distributions`** that
+      returns the *stdlib* `importlib.metadata` view of every `backend-path` entry.
+      importlib_metadata's `disable_stdlib_finder()` only strips the
+      `_frozen_importlib_external` finder, so these stdlib distributions reach setuptools'
+      vendored `entry_points()` anyway. That only happens with an in-tree backend — the
+      plain `setuptools.build_meta` never puts the project directory on the finder list
+      (which is gotcha 367's flip side).
+    - **On 3.9 a stdlib `PathDistribution` has no `_normalized_name`** (3.10 derives it
+      from the directory stem), so the fallback reads `Name` from the metadata — and a
+      half-written `<pkg>.egg-info` has none.
+    - **setuptools preloads the writers precisely to avoid that window**
+      (pypa/pyproject-hooks#206: `egg_info.run` lists the entry points *before*
+      `mkpath`), but setuptools-scm 10.2.0's `ScmEggInfoMixin.run()` does
+      `mkpath(egg_info)` and writes `scm_version.json`/`scm_file_list.json` *before*
+      calling `super().run()`, reopening it. 10.0.x–10.1.x declared
+      `Requires-Python >=3.10`, so cp39 kept resolving 9.2.2 until 10.2.0 (2026-06-25)
+      widened it back to `>=3.8` — which is why an upstream that released on cp39 before
+      then was green and the identical rebuild today is not.
+    Fix: `setuptools-scm<10.2` via gotcha 175's constraint file
+    (`PIP_CONSTRAINT` + `PIP_BUILD_CONSTRAINT`), bisected 9.2.2 good / 10.2.0–10.3.4 bad.
+    Building on cp310 instead also works for a `py3-none` wheel, but pinning reproduces
+    the release-era toolchain without changing upstream's interpreter. `ls <pkg>.egg-info`
+    after the failure shows only the two `scm_*.json` files — no `PKG-INFO` — which
+    confirms it in one command.

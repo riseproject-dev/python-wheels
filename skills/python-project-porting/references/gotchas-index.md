@@ -1079,6 +1079,7 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
 - **346** — The `clang` PyPI package gained a `File.__eq__` with no matching `__hash__` in the
 - **361** — Gotcha 29's `pkg_resources` removal also bites `CIBW_TEST_REQUIRES`, not just a
 - **367** — A `setup.py`'s own "distributor customization" import hook can go silently
+- **588** — setuptools-scm >= 10.2 breaks every cp39 build whose in-tree backend declares
 
 ### Testing: test-sources & shadowing — [`gotchas/testing-and-shadowing.md`](gotchas/testing-and-shadowing.md)
 
