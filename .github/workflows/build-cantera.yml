@@ -1,0 +1,372 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on:
+#   https://github.com/Cantera/pypi-packages/blob/2083aa7f2ac76f2cdfc1652e559ad530d5765132/.github/workflows/python-package.yml
+#   https://github.com/Cantera/cantera-base-manylinux/blob/1fcd379a9ef6d2ecf14f69575ff42c9386f9b9c1/Dockerfile
+name: Build cantera wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cantera.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cantera.yml'
+      - 'docs/packages/cantera.yaml'
+      - 'patches/cantera/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cantera.yml'
+      - 'docs/packages/cantera.yaml'
+      - 'patches/cantera/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cantera
+      version: ${{ inputs.version }}
+
+  sdist:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cantera ${{ matrix.version }} sdist
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    env:
+      CANTERA_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout cantera v${{ env.CANTERA_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Cantera/cantera
+          ref: v${{ env.CANTERA_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch cantera source
+        run: git apply python-wheels/patches/cantera/${{ env.CANTERA_VERSION }}/*.patch
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install dependencies
+        run: uv pip install scons build
+
+      - name: Build the sdist
+        run: python3 `which scons` sdist
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cantera-${{ env.CANTERA_VERSION }}-sdist
+          path: build/python_sdist/dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, sdist]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cantera ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 480
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+    env:
+      CANTERA_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Download pre-built sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: cantera-${{ env.CANTERA_VERSION }}-sdist
+          path: ${{ runner.temp }}/sdist
+
+      - name: Extract the sdist tarball
+        run: tar -xvf "$RUNNER_TEMP"/sdist/*.tar.gz --strip-components=1
+
+      - name: Download the test files
+        run: |
+          curl -fsSL "https://github.com/Cantera/cantera/archive/refs/tags/v${CANTERA_VERSION}.tar.gz" -o cantera.tar.gz
+          tar -xzf cantera.tar.gz --strip-components=1 "cantera-${CANTERA_VERSION}/test"
+          rm cantera.tar.gz
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BUILD_FRONTEND: build
+          # Upstream builds in ghcr.io/cantera/cantera-base-manylinux_2_28-<arch>, which has
+          # no riscv64 variant, so its Dockerfile and superbuild are replayed here instead.
+          CIBW_BEFORE_ALL_LINUX: |
+            set -ex
+            dnf -y install openblas-devel
+            pipx install ninja
+            mkdir -p /tmp/cantera-base
+            cat > /tmp/cantera-base/CMakeLists.txt <<'EOF'
+            cmake_minimum_required(VERSION 3.24.0)
+
+            project(cantera-dependency-superbuild)
+
+            include(ExternalProject)
+
+            set(DOWNLOAD_DIR "/cache")
+
+            set(BOOST_VERSION 1.88.0)
+            ExternalProject_Add(
+                boost
+                URL https://github.com/boostorg/boost/releases/download/boost-${BOOST_VERSION}/boost-${BOOST_VERSION}-cmake.tar.xz
+                URL_HASH SHA256=f48b48390380cfb94a629872346e3a81370dc498896f16019ade727ab72eb1ec
+                CMAKE_GENERATOR Ninja
+                CMAKE_CACHE_ARGS
+                    -DCMAKE_BUILD_TYPE:STRING=Release
+                    -DCMAKE_INSTALL_LIBDIR:STRING=lib
+                    -DBOOST_INCLUDE_LIBRARIES:STRING=algorithm;dll;stacktrace;core;math;numeric/ublas;serialization;multi_array
+                DOWNLOAD_DIR ${DOWNLOAD_DIR}
+            )
+
+            set(LIBHDF5_VERSION 1.14.6)
+            set(ZLIB_VERSION 1.3.1)
+            set(LIBAEC_VERSION 1.1.4)
+            ExternalProject_Add(
+                libhdf5
+                URL https://github.com/HDFGroup/hdf5/releases/download/hdf5_${LIBHDF5_VERSION}/hdf5-${LIBHDF5_VERSION}.tar.gz
+                URL_HASH SHA256=e4defbac30f50d64e1556374aa49e574417c9e72c6b1de7a4ff88c4b1bea6e9b
+                CMAKE_GENERATOR Ninja
+                CMAKE_CACHE_ARGS
+                    -DCMAKE_BUILD_TYPE:STRING=Release
+                    -DCMAKE_INSTALL_PREFIX:STRING=/usr/local
+                    -DHDF5_ENABLE_Z_LIB_SUPPORT:BOOL=ON
+                    -DHDF5_ENABLE_SZIP_SUPPORT:BOOL=ON
+                    -DHDF5_BUILD_EXAMPLES:BOOL=OFF
+                    -DHDF5_BUILD_TOOLS:BOOL=OFF
+                    -DBUILD_TESTING:BOOL=OFF
+                    -DHDF5_ALLOW_EXTERNAL_SUPPORT:STRING=TGZ
+                    -DZLIB_PACKAGE_NAME:STRING=zlib
+                    -DZLIB_TGZ_NAME:STRING=zlib-${ZLIB_VERSION}.tar.gz
+                    -DZLIB_TGZ_ORIGPATH:STRING=https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}
+                    -DZLIB_USE_LOCALCONTENT:BOOL=OFF
+                    -DLIBAEC_PACKAGE_NAME:STRING=libaec
+                    -DLIBAEC_TGZ_NAME:STRING=libaec-${LIBAEC_VERSION}.tar.gz
+                    -DLIBAEC_TGZ_ORIGPATH:STRING=https://github.com/MathisRosenhauer/libaec/releases/download/v${LIBAEC_VERSION}
+                    -DLIBAEC_USE_LOCALCONTENT:BOOL=OFF
+                    -DHDF_PACKAGE_NAMESPACE:STRING=ct
+                DOWNLOAD_DIR ${DOWNLOAD_DIR}
+            )
+
+            set(EIGEN_VERSION 3.4.0)
+            ExternalProject_Add(
+                eigen
+                URL https://gitlab.com/libeigen/eigen/-/archive/${EIGEN_VERSION}/eigen-${EIGEN_VERSION}.tar.bz2
+                URL_HASH SHA256=b4c198460eba6f28d34894e3a5710998818515104d6e74e5cc331ce31e46e626
+                CMAKE_GENERATOR Ninja
+                CMAKE_CACHE_ARGS
+                    -DCMAKE_BUILD_TYPE:STRING=Release
+                    -DEIGEN_BUILD_DOC:BOOL=OFF
+                    -DBUILD_TESTING:BOOL=OFF
+                DOWNLOAD_DIR ${DOWNLOAD_DIR}
+            )
+
+            set(YAML_CPP_VERSION 0.8.0)
+            ExternalProject_Add(
+                yamlcpp
+                URL https://github.com/jbeder/yaml-cpp/archive/refs/tags/${YAML_CPP_VERSION}.tar.gz
+                URL_HASH SHA256=fbe74bbdcee21d656715688706da3c8becfd946d92cd44705cc6098bb23b3a16
+                CMAKE_GENERATOR Ninja
+                CMAKE_ARGS
+                    -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+                CMAKE_CACHE_ARGS
+                    -DCMAKE_BUILD_TYPE:STRING=Release
+                    -DCMAKE_INSTALL_LIBDIR:STRING=lib
+                    -DYAML_CPP_FORMAT_SOURCE:BOOL=OFF
+                    -DBUILD_TESTING:BOOL=OFF
+                    -DBUILD_SHARED_LIBS:BOOL=ON
+                DOWNLOAD_DIR ${DOWNLOAD_DIR}
+            )
+
+            set(SUNDIALS_VERSION 7.4.0)
+            ExternalProject_Add(
+                sundials
+                URL https://github.com/LLNL/sundials/releases/download/v${SUNDIALS_VERSION}/sundials-${SUNDIALS_VERSION}.tar.gz
+                URL_HASH SHA256=679ddacdd77610110e613164e8297d6d0cd35bae8e9c3afc8e8ff6f99a1c2a7b
+                CMAKE_GENERATOR Ninja
+                CMAKE_CACHE_ARGS
+                    -DCMAKE_BUILD_TYPE:STRING=Release
+                    -DCMAKE_INSTALL_LIBDIR:STRING=lib
+                    -DBUILD_SHARED_LIBS:BOOL=OFF
+                    -DEXAMPLES_ENABLE_C:BOOL=OFF
+                    -DEXAMPLES_INSTALL:BOOL=OFF
+                    -DBUILD_ARKODE:BOOL=OFF
+                    -DBUILD_CVODE:BOOL=OFF
+                    -DBUILD_IDA:BOOL=OFF
+                    -DBUILD_KINSOL:BOOL=OFF
+                    -DBUILD_CPODES:BOOL=OFF
+                    -DENABLE_LAPACK:BOOL=ON
+                    -DBLA_VENDOR:STRING=OpenBLAS
+                DOWNLOAD_DIR ${DOWNLOAD_DIR}
+            )
+
+            set(FMT_VERSION 11.2.0)
+            ExternalProject_Add(
+                fmt
+                URL https://github.com/fmtlib/fmt/releases/download/${FMT_VERSION}/fmt-${FMT_VERSION}.zip
+                URL_HASH SHA256=203eb4e8aa0d746c62d8f903df58e0419e3751591bb53ff971096eaa0ebd4ec3
+                CMAKE_GENERATOR Ninja
+                CMAKE_CACHE_ARGS
+                    -DCMAKE_BUILD_TYPE:STRING=Release
+                    -DCMAKE_INSTALL_LIBDIR:STRING=lib
+                    -DFMT_DOC:BOOL=OFF
+                    -DFMT_TEST:BOOL=OFF
+                    -DBUILD_SHARED_LIBS:BOOL=ON
+                DOWNLOAD_DIR ${DOWNLOAD_DIR}
+            )
+
+            # The dot before the 3 is a typo in the tag on the GitHub repo
+            set(HIGHFIVE_VERSION .3.1.1)
+            ExternalProject_Add(
+                highfive
+                URL https://github.com/highfive-devs/highfive/archive/refs/tags/v${HIGHFIVE_VERSION}.tar.gz
+                URL_HASH SHA256=c0bc76b01868a133bf4550a07321923c5582fe3967edc102864b082e40799914
+                CMAKE_GENERATOR Ninja
+                CMAKE_ARGS
+                    -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+                CMAKE_CACHE_ARGS
+                    -DCMAKE_BUILD_TYPE:STRING=Release
+                    -DHIGHFIVE_UNIT_TESTS:BOOL=OFF
+                    -DHIGHFIVE_USE_BOOST:BOOL=ON
+                    -DHIGHFIVE_USE_EIGEN:BOOL=ON
+                    -DHIGHFIVE_EXAMPLES:BOOL=OFF
+                    -DHIGHFIVE_BUILD_DOCS:BOOL=OFF
+                    -DBoost_NO_BOOST_CMAKE:BOOL=OFF
+                DEPENDS boost eigen libhdf5
+                DOWNLOAD_DIR ${DOWNLOAD_DIR}
+            )
+            EOF
+            cmake -G Ninja -S /tmp/cantera-base -B /tmp/cantera-base/build
+            cmake --build /tmp/cantera-base/build
+            cd /tmp/cantera-base/build
+            cp boost-prefix/src/boost/LICENSE_1_0.txt {project}/License.boost.txt
+            cp eigen-prefix/src/eigen/COPYING.MPL2 {project}/License.eigen.txt
+            cp fmt-prefix/src/fmt/LICENSE {project}/License.fmt.txt
+            cp libhdf5-prefix/src/libhdf5/COPYING {project}/License.hdf5.txt
+            cp highfive-prefix/src/highfive/LICENSE {project}/License.highfive.txt
+            cp libhdf5-prefix/src/libhdf5-build/_deps/szip-src/LICENSE.txt {project}/License.libaec.txt
+            cp /usr/share/licenses/openblas/LICENSE {project}/License.openblas.txt
+            cp sundials-prefix/src/sundials/LICENSE {project}/License.sundials.txt
+            cp yamlcpp-prefix/src/yamlcpp/LICENSE {project}/License.yaml-cpp.txt
+            cp libhdf5-prefix/src/libhdf5-build/_deps/hdf5_zlib-src/LICENSE {project}/License.zlib.txt
+          # Upstream mounts the test tree through /host; stage it with test-sources instead.
+          CIBW_ENVIRONMENT: >-
+            CT_SKIP_SLOW=1
+            CANTERA_TEST_DIR=.
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,pandas
+          CIBW_TEST_SOURCES: test
+          # pandas has no free-threaded riscv64 wheel.
+          CIBW_TEST_EXTRAS: ${{ matrix.python == 'cp314t' && 'units,graphviz' || 'pandas,units,graphviz' }}
+
+      - name: Check the wheel ships the extension and the bundled licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert any(n.startswith("cantera/_cantera.") and n.endswith(".so") for n in names), names
+          licences = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+          deps = {"boost", "eigen", "fmt", "hdf5", "highfive", "libaec", "openblas",
+                  "sundials", "yaml-cpp", "zlib"}
+          assert licences == {"License.txt"} | {f"License.{d}.txt" for d in deps}, licences
+          libs = {n.split("/")[1].split("-")[0] for n in names if n.startswith("cantera.libs/")} - {""}
+          assert libs <= {"libfmt", "libgfortran", "libhdf5", "libopenblas", "libyaml"}, libs
+          print(sys.argv[1], sorted(libs), "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cantera-${{ env.CANTERA_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      CANTERA_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # OpenBLAS is compiled with gfortran, so auditwheel vendors the image's libgfortran.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cantera-${{ env.CANTERA_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish cantera ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: cantera-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: cantera-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
