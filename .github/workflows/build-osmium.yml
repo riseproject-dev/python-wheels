@@ -1,0 +1,206 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel builder:
+#   https://github.com/osmcode/pyosmium/blob/v4.3.1/.github/workflows/build_wheels.yml
+name: Build osmium wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/osmium.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-osmium.yml'
+      - 'docs/packages/osmium.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-osmium.yml'
+      - 'docs/packages/osmium.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: osmium
+      version: ${{ inputs.version }}
+
+  build_sdist:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build osmium ${{ matrix.version }} sdist
+    runs-on: ubuntu-latest
+    env:
+      OSMIUM_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyosmium v${{ env.OSMIUM_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: osmcode/pyosmium
+          ref: v${{ env.OSMIUM_VERSION }}
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.14'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Get dependencies via sdist
+        run: |
+          uv pip install build
+          python -m build --sdist
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: osmium-${{ env.OSMIUM_VERSION }}-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_sdist]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build osmium ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      OSMIUM_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyosmium v${{ env.OSMIUM_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: osmcode/pyosmium
+          ref: v${{ env.OSMIUM_VERSION }}
+          persist-credentials: false
+
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: osmium-${{ env.OSMIUM_VERSION }}-sdist
+          path: dist/
+
+      # Upstream builds from the checkout once its sdist step has fetched libosmium and
+      # protozero into contrib/; the test fixtures (*.pbf, *.osc) are not in the sdist.
+      - name: Stage contrib/ and the licences of what the wheel carries
+        run: |
+          tar xzf dist/osmium-*.tar.gz --strip-components=1 --wildcards '*/contrib/*'
+          cp contrib/libosmium/LICENSE LICENSE.libosmium
+          # upstream's sdist include list names a contrib/protozero/LICENSE that protozero
+          # does not have, so fetch its licences at the commit CMakeLists.txt pins
+          protozero=$(grep -A1 'mapbox/protozero' CMakeLists.txt | grep -oE '[0-9a-f]{40}')
+          for f in LICENSE.md LICENSE.from_folly; do
+            curl -fsSL -o "LICENSE.protozero.$f" "https://raw.githubusercontent.com/mapbox/protozero/$protozero/$f"
+          done
+          cat > collect-licenses.sh <<'COLLECT_EOF'
+          #!/bin/bash
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # Stage, at the project root, the licence of every image library auditwheel
+          # vendors into the wheel (zlib and expat are on the manylinux allowlist and stay external).
+          set -euo pipefail
+
+          project="${1:?usage: collect-licenses.sh <project-dir>}"
+
+          for pkg in bzip2-libs lz4-libs; do
+              mapfile -t files < <(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
+
+              # Some packages mark it %doc rather than %license, and the image installs no docs.
+              if [ -z "${files[0]:-}" ]; then
+                  dnf -y --disablerepo=extras reinstall --setopt=tsflags= "$pkg" >/dev/null
+                  mapfile -t files < <(rpm -qd "$pkg" | grep -iE '/(LICEN[CS]E|COPYING)')
+              fi
+
+              for f in "${files[@]}"; do
+                  [ -f "$f" ] || continue
+                  cp "$f" "$project/LICENSE.${pkg}.$(basename "$f")"
+              done
+              compgen -G "$project/LICENSE.$pkg.*" >/dev/null ||
+                  { echo "no licence file found for $pkg" >&2; exit 1; }
+          done
+
+          ls -1 "$project"/LICENSE.*
+          COLLECT_EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_REQUIRES: pytest pytest-httpserver
+          CIBW_TEST_COMMAND: pytest {project}/test
+          CIBW_BUILD_FRONTEND: build
+          CIBW_BEFORE_BUILD_LINUX: >-
+            yum install -y expat-devel zlib-devel bzip2-devel lz4-devel &&
+            bash {project}/collect-licenses.sh {project}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+
+      - name: Check the extensions and licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              sos = {n.split("/")[-1].split(".")[0] for n in names if n.startswith("osmium/") and n.endswith(".so")}
+              assert {"_osmium", "geom", "index", "io", "area", "filter", "_osm", "_replication"} <= sos, sos
+              grafted = sorted(n.split("/")[-1] for n in names if n.startswith("osmium.libs/") and not n.endswith("/"))
+              assert [g.split("-")[0] for g in grafted] == ["libbz2", "liblz4"], grafted
+              licences = {n.split("/")[-1] for n in names if ".dist-info/licenses/" in n} - {""}
+              pkgs = {f.split(".")[1] for f in licences if f.startswith("LICENSE.")}
+              assert {"LICENSE.TXT", "LICENSE.libosmium"} <= licences, licences
+              assert {"protozero", "bzip2-libs", "lz4-libs"} <= pkgs, licences
+              print(whl, "ok", grafted, sorted(licences))
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: osmium-${{ env.OSMIUM_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish osmium ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: osmium-${{ matrix.version }}-*-manylinux_riscv64
