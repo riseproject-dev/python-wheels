@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 25 Sep 2026 00:00:00 +0000
+Subject: [PATCH] storage: shrink the VMRegion reservation until it fits
+
+Upstream-Status: To upstream [kuzudb/kuzu is archived and accepts no pull requests]
+
+Every Database reserves its buffer-manager region with one mmap of
+max_db_size bytes, and the Python API defaults that to 1 << 43 (8TB).
+riscv64 Sv39 gives a process 256GB of user address space (the T-Head
+C910/C920 cores the riscv64 runners use only implement Sv39), so the
+reservation fails with ENOMEM and every Database() created with the
+default settings throws "Mmap for size 8796093022208 failed." The same
+happens under a 39-bit VA arm64 kernel, or on x86-64 under
+`ulimit -v 268435456`.
+
+On ENOMEM, halve the reservation until it fits. Where the full region
+fits nothing changes; elsewhere the database is capped at the largest
+power-of-two region the address space can hold, the limit
+max_db_size already expresses.
+---
+diff --git a/src/storage/buffer_manager/vm_region.cpp b/src/storage/buffer_manager/vm_region.cpp
+index bf987b8..a0a81ae 100644
+--- a/src/storage/buffer_manager/vm_region.cpp
++++ b/src/storage/buffer_manager/vm_region.cpp
+@@ -10,6 +10,8 @@
+ #include <memoryapi.h>
+ #else
+ #include <sys/mman.h>
++
++#include <cerrno>
+ #endif
+ 
+ #include "common/exception/buffer_manager.h"
+@@ -38,6 +40,13 @@ VMRegion::VMRegion(PageSizeClass pageSizeClass, uint64_t maxRegionSize) : numFra
+     // backed by any file, and its content are initialized to zero.
+     region = static_cast<uint8_t*>(mmap(NULL, getMaxRegionSize(), PROT_READ | PROT_WRITE,
+         MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1 /* fd */, 0 /* offset */));
++    // The default 8TB region does not fit in a smaller user address space (256GB under riscv64
++    // Sv39, 512GB under a 39-bit VA arm64 kernel), so halve the reservation until it does.
++    while (region == MAP_FAILED && errno == ENOMEM && maxNumFrameGroups > 1) {
++        maxNumFrameGroups /= 2;
++        region = static_cast<uint8_t*>(mmap(NULL, getMaxRegionSize(), PROT_READ | PROT_WRITE,
++            MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1 /* fd */, 0 /* offset */));
++    }
+     if (region == MAP_FAILED) {
+         throw BufferManagerException(
+             "Mmap for size " + std::to_string(getMaxRegionSize()) + " failed.");

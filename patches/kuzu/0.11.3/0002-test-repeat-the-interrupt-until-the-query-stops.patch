@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 25 Sep 2026 00:00:00 +0000
+Subject: [PATCH] test: repeat the interrupt until the query stops
+
+Upstream-Status: To upstream [kuzudb/kuzu is archived and accepts no pull requests]
+
+test_connection_interrupt starts a long query on a thread, sleeps 5s,
+calls conn.interrupt() once and expects the thread to end within 100s.
+Binding constant-folds each RANGE(1, 1000000) into a million-element
+list literal (and names it by its toString()), and executeNoLock()
+calls resetActiveQuery(), which clears the interrupted flag, only once
+compilation is done. On the riscv64 runners compiling that query takes
+longer than 5s, so the interrupt lands during compilation, is wiped,
+and the query runs to completion (~2 hours) instead of raising
+"Interrupted": the assertion fails after 100s and the interpreter then
+blocks at exit on the non-daemon thread.
+
+Re-issue the interrupt every second until the thread ends, within the
+same 100s budget. On a fast machine the first interrupt still sticks
+and the test behaves as before.
+---
+diff --git a/tools/python_api/test/test_connection.py b/tools/python_api/test/test_connection.py
+index 4206516..0632591 100644
+--- a/tools/python_api/test/test_connection.py
++++ b/tools/python_api/test/test_connection.py
+@@ -44,6 +44,11 @@ def test_connection_interrupt(conn_db_readwrite: ConnDB) -> None:
+     execute_thread = threading.Thread(target=run_long_query, args=(conn,))
+     execute_thread.start()
+     time.sleep(5)
+-    conn.interrupt()
+-    execute_thread.join(timeout=100)
++    # Binding folds each RANGE(1, 1000000) into a million-element list literal, which can take
++    # longer than the sleep on a slow machine, and the interrupt flag is cleared when execution
++    # starts, so an interrupt that lands during compilation is lost; repeat it until one sticks.
++    deadline = time.monotonic() + 100
++    while execute_thread.is_alive() and time.monotonic() < deadline:
++        conn.interrupt()
++        execute_thread.join(timeout=1)
+     assert not execute_thread.is_alive()
