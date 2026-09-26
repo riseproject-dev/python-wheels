@@ -174,19 +174,30 @@ jobs:
           done
           # shellcheck disable=SC2086
           bazel cquery --compilation_mode=opt ${CEL_BAZEL_FLAGS} --output=label --consistent_labels \
-            "kind('cc_library|proto_library', deps(${targets}))" \
-            | sed -nE 's|^@@?([^/]+)//.*|\1|p' | sort -u | grep -vE '^(rules_|bazel_tools|platforms|local_config_)' \
-            | while read -r repo; do
+            "kind('cc_library|proto_library', deps(${targets}))" > /tmp/deps.txt
+          # --consistent_labels prints external repos as @@<canonical>// and the main repo
+          # as @@//, which the non-empty capture leaves out.
+          sed -nE 's|^@@([^@/]+)//.*|\1|p' /tmp/deps.txt | sort -u \
+            | grep -vE '^(rules_|bazel_tools|platforms|local_config_)' > /tmp/repos.txt
+          cat /tmp/repos.txt
+          while read -r repo; do
             name="${repo%+}"
             name="${name##*+}"
-            file="$(find "${OUTPUT_BASE}/external/${repo}" -maxdepth 1 -type f \( -iname 'LICENSE*' -o -iname 'COPYING*' \) | sort | head -1)"
+            dir="${OUTPUT_BASE}/external/${repo}"
+            file=""
+            if [ -d "${dir}" ]; then
+              file="$(find "${dir}" -maxdepth 1 -type f \( -iname 'LICENSE*' -o -iname 'COPYING*' \) | sort | head -1)"
+            fi
             if [ -n "${file}" ]; then
               cp "${file}" "LICENSE.${name}"
             else
               echo "::warning::no licence file at the root of ${repo}"
             fi
-          done
+          done < /tmp/repos.txt
           ls LICENSE*
+          for name in abseil-cpp cel-cpp cel-spec protobuf pybind11 re2; do
+            test -f "LICENSE.${name}"
+          done
 
           # setuptools' namespace package discovery follows bazel's convenience symlinks
           # into the execroot, which is how upstream's wheels come to carry a bazel-project/
