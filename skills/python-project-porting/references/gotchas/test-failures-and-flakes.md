@@ -85,6 +85,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **593** — cp314/cp314t-only `ValueError: cannot resize an array that may be referenced by
   another object` is NumPy >= 2.4's Python 3.14 `ndarray.resize` refcheck, which a Cython caller
   always trips; same numpy on every leg, so not gotcha 583's drift — backport upstream's fix.
+- **594** — A C++ (doctest) load-generator test that compares request counters against
+  wall-clock sleeps flakes on the busy riscv64 runner: prove it with a pass on an earlier
+  run of the same sources, a logged snapshot that satisfies the failed check, and the
+  deterministic arithmetic's own passing tests — then `--subcase-exclude` the narrowest name.
 - **571** — On free-threaded CPython (cp314t), an object whose last reference is dropped on
   a native (non-Python) thread isn't freed there and then — freeing is deferred to whichever
   thread next runs Python bytecode. A test that drops the last reference on a native
@@ -1589,3 +1593,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       `resize` with a fresh `np.ndarray`; others pass `refcheck=False`). Pinning `numpy<2.4` in
       the test env would turn the jobs green while publishing a cp314 wheel that breaks for every
       user on the numpy pip installs by default — the test failure is a real user-facing bug.
+
+594. **A C++ unit test that counts requests against a wall-clock sleep flakes on the busy
+    riscv64 runner; three cheap checks separate it from an arch bug before you pay for
+    another multi-hour rebuild (the perf-analyzer case).** perf_analyzer's
+    `perf_analyzer_unit_tests` (doctest) passed 145/146 on the first run (the one failure a
+    deterministic RapidJSON error-code assertion) and 144/146 on the second with the same
+    sources: `concurrency_sequence` (`CHECK( 522 == Approx( 600.0 ) )`, ±10%, from 500 ms of
+    sleep over mocked 10 ms requests) and `custom_load_sequences` (`Sequence request counts
+    were not balanced: 15,13,15,13,15,13,15,13,14,`).
+    - **Same sources passed before.** A timing test that passed on an earlier run of the
+      identical build, then failed with counts short by 1-2 of dozens (or ~13% of a
+      throughput target), is the runner, not riscv64 arithmetic. Read which test the "first
+      run's one failure" actually was before calling it a flake: here it was deterministic.
+    - **A logged snapshot that satisfies the failed check proves a live read.**
+      `CheckSequenceBalance()` iterates the mock's `std::map` of per-sequence counts without
+      its mutex while the workers are still sending (the test sleeps 20 ms, checks, *then*
+      stops the threads — the sibling `request_rate_serial_sequences` pauses first). The
+      second failure logged `45,44,44`, which passes the n/n+1 rule: the counters moved
+      between the comparison and the message.
+    - **Find the deterministic tests of the arithmetic you suspect.** The split of sequences
+      and schedule slots across threads (`num_seqs / threads`, remainder to the first threads)
+      has its own unit tests (`request rate manager - Configure threads`, `Calculate thread
+      ids`); both passed on riscv64, which rules out a division/rounding difference.
+    - **doctest filters are whole-name wildcards, comma-separated, case-insensitive.**
+      `--subcase-exclude="invalid json,serial_sequences"` drops exactly the subcase named
+      `serial_sequences` (not `not serial_sequences`, not another file's `serial_sequences
+      on`), and an excluded subcase is never registered, so its sibling runs in the same pass
+      — the test body never runs with the excluded branch's setup missing. Prove a filter in
+      a minute by compiling a stub `TEST_CASE` against the project's vendored `doctest.h`.
+      Use `--test-case-exclude` only when the timing assertion is in the test's shared body,
+      as in `concurrency_sequence`.

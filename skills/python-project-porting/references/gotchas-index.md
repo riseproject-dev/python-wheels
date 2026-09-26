@@ -1289,6 +1289,10 @@ The porting gotchas (550 of them) live in [`references/gotchas/`](gotchas/), spl
 - **589** — A library with its own runtime CPU dispatch and an override knob reproduces a
   riscv64-only test failure on x86_64 in minutes: force its non-SIMD path with upstream's own
   wheel (kiwipiepy's `KIWI_ARCH_TYPE=none`).
+- **594** — A doctest C++ load-generator test comparing request counters against wall-clock
+  sleeps flakes on the busy runner: an earlier pass on the same sources, a logged snapshot that
+  satisfies the failed check (unlocked live read), and the arithmetic's own passing tests rule
+  out riscv64; `--subcase-exclude` the narrowest whole name (the perf-analyzer case).
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
