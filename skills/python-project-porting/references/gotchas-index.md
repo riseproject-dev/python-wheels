@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (549 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -1322,6 +1322,10 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
   `setup.py` cmdclass that `os.chdir()`s into a CMake build tree makes a correct relative entry
   fail with `[Errno 2] No such file or directory: 'LICENSE.txt'` after the whole compile; absolute
   paths are rejected, so copy the files into the chdir target (the dynet38 case).
+- **590** — gotcha 538's `SKBUILD_WHEEL_LICENSE_FILES` override makes scikit-build-core fail
+  (`Both project.license-files and tool.scikit-build.wheel.license-files are set`) when the project
+  declares PEP 639 `project.license-files`; patch that list to a glob like `License*` that the sdist
+  alone still matches (the cantera case).
 
 ### Local validation & the aarch64/QEMU rehearsal — [`gotchas/local-validation-and-rehearsal.md`](gotchas/local-validation-and-rehearsal.md)
 

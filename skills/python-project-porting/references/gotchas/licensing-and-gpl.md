@@ -37,6 +37,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
   an explicit list that leaves the vendored notices out needs no patch.
 - **578** — setuptools resolves `license_files` against the *working directory* at
   `bdist_wheel` time, so a `setup.py` whose cmdclass `os.chdir()`s breaks a relative entry.
+- **590** — gotcha 538's `SKBUILD_WHEEL_LICENSE_FILES` override is refused when the project
+  declares PEP 639 `project.license-files`; widen that list with a patch instead.
 
 ---
 
@@ -730,3 +732,20 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
       (current setuptools). It fails with the identical `Errno 2` without the copy and ships
       both files under `dist-info/licenses/` with it. Grep the upstream `setup.py` for
       `os.chdir` whenever you touch its `license_files`.
+
+590. **Gotcha 538's environment override does not work when the project declares PEP 639
+    `[project] license-files` — scikit-build-core refuses to build (the cantera case).**
+    `scikit_build_core/build/wheel.py` checks `if metadata.license_files is not None and
+    settings.wheel.license_files:` and raises `Both project.license-files and
+    tool.scikit-build.wheel.license-files are set, use only one`, and the
+    `SKBUILD_WHEEL_LICENSE_FILES` env source feeds exactly that setting. So check which key the
+    project uses before reaching for 538: `[tool.scikit-build] wheel.license-files` → env
+    override, no patch; `[project] license-files = ["License.txt"]` → a one-line patch.
+    - **Make the patched entry a glob that the sdist alone still satisfies**
+      (`["License*"]`, next to staged `License.<dep>.txt` files). PEP 639 requires every pattern
+      to match at least one file, and the sdist is built before `before-all` stages anything, so
+      a separate `licenses/*` pattern fails the sdist build while `License*` matches
+      `License.txt` there and the dependency notices in the wheel build.
+    - **When `pyproject.toml` is generated** (cantera renders
+      `interfaces/python_sdist/pyproject.toml.in` in `scons sdist`), patch the template in the
+      upstream checkout before the sdist is built, not the extracted sdist.
