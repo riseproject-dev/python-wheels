@@ -917,6 +917,10 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
   but that library ships in the separate CRB `turbojpeg` package, so any
   `find_package(libjpeg-turbo)` (OpenImageIO's included) fails at configure until `turbojpeg` is
   installed too (the pycolmap case).
+- **586** — An upstream `before-all` that unpacks a GNU release with `lzip` (`.tar.lz`) fails on
+  riscv64 because `lzip` is in no Rocky 10 repo and there is no EPEL; fetch the same release's
+  `.tar.xz` on the host, checksum it, and `tar xJf` it in `before-all`. GMP's `--enable-fat` is
+  a no-op off x86 and needs no edit (the chiavdf case).
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 

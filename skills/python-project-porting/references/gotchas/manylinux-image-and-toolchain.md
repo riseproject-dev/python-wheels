@@ -111,6 +111,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **576** — Rocky 10's `libjpeg-turbo-devel` CMake config declares a `turbojpeg` target whose
   library lives in the separate CRB `turbojpeg` package, so `find_package(libjpeg-turbo)` fails
   until you install it.
+- **586** — An inherited `curl … .tar.lz | tar x --lzip` fails on riscv64: `lzip` is in no Rocky 10
+  repo and there is no EPEL; fetch the same GNU release's `.tar.xz` instead.
 ---
 
 26. **The riscv64 runners ship GCC 13; some packages need GCC 14 or later.** The compiler
@@ -1770,3 +1772,23 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
        with no change on our side: take the upstream patch release that re-pins it rather than
        `-D<Project>_DEPENDENCY_BUILD_ALLOW_UNVERIFIED_TAGS=ON`, which builds whatever the branch
        holds that day.
+
+586. **An upstream `before-all` that unpacks a GNU release as `.tar.lz` (`yum install epel-release
+     lzip` … `| tar x --lzip`) cannot run on riscv64: `lzip` is in none of Rocky 10's
+     baseos/appstream/crb and manylinux installs no EPEL there (gotcha 51) — swap the
+     download for the same release's `.tar.xz`, which the image already unpacks (the chiavdf
+     case; see `build-chiavdf.yml`).** GNU publishes every release as `.tar.gz`/`.tar.xz` next
+     to the `.tar.lz`, so the fix changes only the extension and the `tar` flag; `xz` is in the
+     image's runtime packages. Checked against the repodata (gotcha 369), not guessed.
+     - **Fetch it on the host and checksum it** (`sha256sum -c`) rather than `curl | tar` in the
+       container: the same file then feeds licence staging (GMP's `COPYING.LESSERv3` +
+       `COPYINGv3` to `LICENSE.gmp` at the checkout root) and the `gpl_sources` job, and
+       `before-all` just runs `tar xJf` from `/project`.
+     - **GMP's `./configure --enable-fat` needs no edit on riscv64.** Fat binaries exist only
+       for x86/x86_64 in GMP's `configure.ac`; on any other host `fat_path` stays empty and
+       it builds the normal `mpn/riscv/64` assembly path. GMP 6.2.1 builds with the image's
+       GCC 14, is installed to `/usr/local/lib` (already in the image's `ld.so.conf`), and
+       auditwheel grafts `libgmp`/`libgmpxx` without help.
+     - **Leave upstream's other `yum install` names alone once checked**: `boost-devel` is in
+       AppStream on riscv64; only `epel-release` and `lzip` had to go.
+
