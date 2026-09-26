@@ -1,0 +1,103 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/angr/ci-settings/blob/0b2428c46c155584d3029761adcd9b6138ab85d0/.github/workflows/angr-release.yml
+name: Build pyvex wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyvex.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyvex.yml'
+      - 'docs/packages/pyvex.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyvex.yml'
+      - 'docs/packages/pyvex.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyvex
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        libc: [manylinux, musllinux]
+    name: Build pyvex ${{ matrix.version }} cp312-abi3-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    env:
+      PYVEX_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyvex ${{ env.PYVEX_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: angr/pyvex
+          ref: v${{ env.PYVEX_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_BUILD: cp312-${{ matrix.libc }}_riscv64 cp313-${{ matrix.libc }}_riscv64 cp314-${{ matrix.libc }}_riscv64
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair --exclude libpyvex.so -w {dest_dir} {wheel}"
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # cffi and bitarray have riscv64 wheels on our registry for manylinux
+          # only, so musllinux builds them from sdist; tibs stays binary-only so
+          # bitstring resolves to the same 4.3.1 on both legs.
+          CIBW_TEST_ENVIRONMENT: ${{ matrix.libc == 'manylinux' && 'PIP_ONLY_BINARY=:all:' || 'PIP_ONLY_BINARY=tibs' }}
+          CIBW_TEST_GROUPS: dev
+          CIBW_TEST_COMMAND: pytest {project}/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyvex-${{ env.PYVEX_VERSION }}-cp312-abi3-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyvex ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyvex-${{ matrix.version }}-*riscv64
