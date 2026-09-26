@@ -98,6 +98,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
   ceiling is below what upstream assumed safe to over-reserve. Fix: shrink the reservation
   (halving on an mmap failure until it fits) rather than hardcoding 256GB, since Sv48 riscv64
   hardware exists and a hardcoded cap would under-provision there.
+- **589** — A library with its own runtime CPU dispatch and an override knob reproduces a
+  riscv64-only test failure on x86_64 in minutes: force its non-SIMD path with upstream's own
+  wheel (kiwipiepy's `KIWI_ARCH_TYPE=none`).
 
 ---
 
@@ -1533,3 +1536,31 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       of the dependency passes on the same arch, the test is fine and the environment
       is not.
 
+589. **A library that does its own runtime CPU dispatch usually exposes an override knob,
+    and that knob reproduces a riscv64-only test failure on x86_64 with upstream's own
+    wheel — no QEMU, no rebuild (the kiwipiepy `KIWI_ARCH_TYPE=none` case).** riscv64 has
+    no SIMD tier in most such libraries, so it lands on the generic path, which upstream's
+    CI never exercises on x86_64/aarch64 because the dispatcher always picks SSE/AVX/NEON
+    there. kiwipiepy 0.23.2 built cleanly and passed 66/68 tests on riscv64;
+    `test_space_issue_189` (`'담아 1 팩 무료'` for `'담아 1팩 무료'`) and `test_template`
+    (`'묻인다'` for `'묻는다'`) failed on both the abi3 and cp314t legs.
+    - **The check:** `pip install <pkg>==<ver>` (upstream's x86_64 wheel) plus its runtime
+      deps into a scratch venv, then run just the failing tests once per dispatch level.
+      Kiwi reads `KIWI_ARCH_TYPE` (`none`, `balanced`, `sse2`, `sse4_1`, `avx2`, ...):
+      `none` fails the same two tests with the same strings, every other level passes.
+      Same output on x86_64 as on riscv64 means an upstream bug in the portable path, not
+      a porting or toolchain bug. Look for the knob with
+      `grep -rn getenv` near the dispatcher (`getBestArch`, `cpu_features`, `get_cpu_*`).
+    - **Grep how the non-SIMD path is chosen before assuming "scalar == reference".** Kiwi
+      has *two* portable tiers: `none` (what `getBestArch()` returns when cpuinfo finds no
+      x86/ARM feature, so riscv64 gets it) and `balanced` (never auto-selected, but passes
+      the whole suite). They differ at least in their sorted-key search (`search.cpp`), so
+      "the generic path is the same code upstream tests" was false here.
+    - **Deselect, don't patch, when the reproduction is upstream's wheel:** the wheel we
+      ship behaves exactly like upstream's own under the same dispatch level, so name the
+      tests in `--deselect` with a one-line reason and say which knob reproduces it in the
+      PR. Flipping the riscv64 default to another tier would be a behavioural patch nobody
+      upstream has reviewed.
+    - **It costs a cheap rehearsal, not a CI cycle:** each kiwipiepy leg spends ~75 min
+      compiling and ~37 min per interpreter in the suite on the riscv runner; the x86_64
+      check took two minutes.

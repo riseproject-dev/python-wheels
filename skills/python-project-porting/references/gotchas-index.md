@@ -1274,6 +1274,9 @@ The porting gotchas (548 of them) live in [`references/gotchas/`](gotchas/), spl
   file: reproduce on x86_64 with PyPI wheels of both versions. mink's trivial-QP `solve_ik` tests
   fail against daqp 0.9.x on every arch (daqp #168 made the proximal shift relative but kept the
   absolute nonconvex check) and pass on the locked 0.8.5 — pin it in `CIBW_TEST_REQUIRES`.
+- **589** — A library with its own runtime CPU dispatch and an override knob reproduces a
+  riscv64-only test failure on x86_64 in minutes: force its non-SIMD path with upstream's own
+  wheel (kiwipiepy's `KIWI_ARCH_TYPE=none`).
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
