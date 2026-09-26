@@ -1,0 +1,246 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/LadybugDB/ladybug/blob/v0.19.1/.github/workflows/python-wheel-workflow.yml
+# and the Linux compat leg of https://github.com/LadybugDB/ladybug/blob/v0.19.1/.github/workflows/precompiled-bin-workflow.yml
+name: Build ladybug wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ladybug.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ladybug.yml'
+      - 'docs/packages/ladybug.yaml'
+      - 'patches/ladybug/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ladybug.yml'
+      - 'docs/packages/ladybug.yaml'
+      - 'patches/ladybug/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: ladybug
+      version: ${{ inputs.version }}
+
+  package_python_sdist:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Package ladybug ${{ matrix.version }} sdist
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      LADYBUG_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout ladybug v${{ env.LADYBUG_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: LadybugDB/ladybug
+          ref: v${{ env.LADYBUG_VERSION }}
+          persist-credentials: false
+
+      - name: Update submodules
+        run: git submodule update --init --recursive tools/python_api
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Package Python sdist
+        working-directory: scripts/pip-package
+        run: |
+          uv pip install setuptools
+          python package_tar.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ladybug-${{ env.LADYBUG_VERSION }}-sdist
+          path: scripts/pip-package/*.tar.gz
+          if-no-files-found: error
+
+  build_precompiled_bin:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build liblbug ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      LADYBUG_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout ladybug v${{ env.LADYBUG_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: LadybugDB/ladybug
+          ref: v${{ env.LADYBUG_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply python-wheels/patches/ladybug/${{ env.LADYBUG_VERSION }}/*.patch
+
+      # Rocky 10's openssl-devel is OpenSSL 3 and its default GCC 14 replaces gcc-toolset-13.
+      - name: Build
+        run: |
+          docker run --rm -v "$(pwd):/work" -w /work "${MANYLINUX_RISCV64_IMAGE}" bash -c '
+            set -euxo pipefail
+            dnf install -y ninja-build openssl-devel
+            make GEN=Ninja
+            make install
+            mkdir precompiled-liblbug
+            cp install/include/lbug.h install/include/lbug.hpp precompiled-liblbug/
+            cp -L install/lib*/liblbug.a precompiled-liblbug/
+          '
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ladybug-${{ env.LADYBUG_VERSION }}-liblbug-static
+          path: precompiled-liblbug/
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, package_python_sdist, build_precompiled_bin]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build ladybug ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      LADYBUG_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout ladybug v${{ env.LADYBUG_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: LadybugDB/ladybug
+          ref: v${{ env.LADYBUG_VERSION }}
+          persist-credentials: false
+
+      - name: Update submodules
+        run: git submodule update --init --depth 1 dataset tools/python_api
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ladybug-${{ env.LADYBUG_VERSION }}-sdist
+          path: scripts/pip-package/
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ladybug-${{ env.LADYBUG_VERSION }}-liblbug-static
+          path: precompiled-liblbug/
+
+      - name: Prepare wheel source tree
+        run: |
+          mkdir -p scripts/pip-package/cibw-source
+          tar -xzf scripts/pip-package/ladybug-${{ env.LADYBUG_VERSION }}.tar.gz -C scripts/pip-package/cibw-source
+
+      # The wheel statically links the vendored third_party libraries but upstream ships only ladybug's own LICENSE.
+      - name: Add the vendored libraries' licences
+        working-directory: scripts/pip-package/cibw-source/sdist
+        run: |
+          for f in ladybug-source/third_party/*/LICENSE*; do
+            cp "$f" "LICENSE.$(basename "$(dirname "$f")")"
+          done
+          ls LICENSE*
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: scripts/pip-package/cibw-source/sdist
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: dnf install -y openssl-devel pkg-config
+          CIBW_ENVIRONMENT_LINUX: >-
+            LBUG_API_PRECOMPILED_LIB_PATH=/project/precompiled-liblbug/liblbug.a
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: auditwheel repair --exclude libssl.so.3 --exclude libcrypto.so.3 -w {dest_dir} {wheel}
+          # Not PIP_ONLY_BINARY: torch-geometric is pure Python.
+          CIBW_TEST_ENVIRONMENT: LBUG_PYTHON_BACKEND=pybind PIP_PREFER_BINARY=1
+          CIBW_TEST_SOURCES: dataset tools/python_api/test
+          # Upstream's [dev] test deps; pyarrow 25 is the only riscv64 build, and cp314t has no pandas/polars.
+          CIBW_TEST_REQUIRES: >-
+            pytest pytest-asyncio~=1.0 networkx~=3.0 numpy~=2.0 pyarrow torch torch-geometric>=2.5.0
+            ${{ matrix.python != 'cp314t' && 'pandas~=2.2 polars~=1.30' || '' }}
+          # test_fsm.py fails the same way with upstream's own x86_64 0.19.1 wheel.
+          CIBW_TEST_COMMAND: >-
+            python -m pytest -vv tools/python_api/test
+            --ignore=tools/python_api/test/test_fsm.py
+            ${{ matrix.python == 'cp314t' && '--ignore=tools/python_api/test/test_arrow.py --ignore=tools/python_api/test/test_arrow_memory_backed_table.py --ignore=tools/python_api/test/test_df.py --ignore=tools/python_api/test/test_networkx.py --ignore=tools/python_api/test/test_scan_pandas.py --ignore=tools/python_api/test/test_scan_pandas_pyarrow.py --ignore=tools/python_api/test/test_scan_polars.py --ignore=tools/python_api/test/test_udf.py -k "not test_get_as_df_json"' || '' }}
+
+      - name: Check the extension module and licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("ladybug/_lbug.") and n.endswith(".so") for n in names), f"no compiled extension in {whl}"
+              licences = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+              assert {"LICENSE", "LICENSE.zstd", "LICENSE.re2", "LICENSE.pybind11"} <= licences, licences
+              print(whl, sorted(licences))
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ladybug-${{ env.LADYBUG_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish ladybug ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: ladybug-${{ matrix.version }}-*-manylinux_riscv64
