@@ -1,0 +1,273 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/bloomberg/pystack/blob/v1.7.1/.github/workflows/build_wheels.yml
+name: Build pystack wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pystack.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pystack.yml'
+      - 'docs/packages/pystack.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pystack.yml'
+      - 'docs/packages/pystack.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pystack
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pystack ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp314t"]
+
+    env:
+      PYSTACK_VERSION: ${{ matrix.version }}
+
+    steps:
+      # Upstream builds from its sdist; the checkout is the same tree.
+      - name: Checkout pystack v${{ env.PYSTACK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: bloomberg/pystack
+          ref: v${{ env.PYSTACK_VERSION }}
+          persist-credentials: false
+
+      - name: Stage the licence-collection script
+        run: |
+          cat > collect-licenses.sh <<'COLLECT_EOF'
+          #!/bin/bash
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # Stage, at the project root, the licence of everything that ends up inside the
+          # wheel: the elfutils built by upstream's before-all and every shared library
+          # auditwheel vendors out of the build image alongside it.
+          # scikit-build-core's default LICEN[CS]E* glob copies them into the wheel.
+          set -euo pipefail
+
+          project="${1:?usage: collect-licenses.sh <project-dir>}"
+
+          # The extension must link the elfutils before-all built, not a packaged one.
+          vers=$(pkg-config --modversion libdw)
+          [ -d "/elfutils-$vers" ] ||
+              { echo "libdw $vers is not the elfutils built by before-all" >&2; exit 1; }
+          libdir=$(pkg-config --variable=libdir libdw)
+
+          for f in "/elfutils-$vers"/COPYING*; do
+              cp "$f" "$project/LICENSE.elfutils.$(basename "$f")"
+          done
+
+          mapfile -t libs < <(
+              ldd "$libdir/libdw.so" "$libdir/libelf.so" |
+                  awk '$2 == "=>" && $3 ~ /^\// { print $3 }' |
+                  xargs -r readlink -f | sort -u
+          )
+
+          # glibc, the gcc runtime and zlib are on auditwheel's manylinux allowlist and
+          # are never vendored into the wheel.
+          mapfile -t pkgs < <(
+              rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null |
+                  grep -E '^[A-Za-z0-9._+-]+$' | sort -u |
+                  grep -vE '^(glibc|libgcc|libstdc\+\+|gcc|zlib-ng-compat)$' || true
+          )
+
+          for pkg in "${pkgs[@]}"; do
+              mapfile -t files < <(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
+
+              if [ -z "${files[0]:-}" ]; then
+                  srpm=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg")
+                  mapfile -t files < <(
+                      rpm -qa --qf '%{SOURCERPM} %{NAME}\n' |
+                          awk -v s="$srpm" '$1 == s { print $2 }' |
+                          xargs -r rpm -q --licensefiles 2>/dev/null | sort -u
+                  )
+              fi
+
+              for f in "${files[@]}"; do
+                  [ -f "$f" ] || continue
+                  cp "$f" "$project/LICENSE.${pkg}.$(basename "$f")"
+              done
+              compgen -G "$project/LICENSE.$pkg.*" >/dev/null ||
+                  { echo "no licence file found for $pkg" >&2; exit 1; }
+          done
+
+          ls -1 "$project"/LICENSE.* | sed "s|$project/||"
+          COLLECT_EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_BUILD_LINUX: bash {project}/collect-licenses.sh {project}
+
+      - name: Verify the wheel ships the compiled extension and its licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = sorted(n for n in names if n.endswith(".so") or ".so." in n)
+          print("\n".join(sos))
+          assert any(n.startswith("pystack/_pystack.") for n in sos), sos
+          assert any(n.startswith("pystack.libs/libdw-") for n in sos), sos
+          lic = sorted(n.split("/")[-1] for n in names if ".dist-info/licenses/" in n and not n.endswith("/"))
+          print("\n".join(lic))
+          assert "LICENSE" in lic, lic
+          assert any(n.startswith("LICENSE.elfutils.") for n in lic), lic
+          assert any(n.startswith("LICENSE.libzstd.") for n in lic), lic
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pystack-${{ env.PYSTACK_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  test_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    name: Test pystack ${{ matrix.version }} on Python ${{ matrix.python_version }}
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python_version: ["3.12", "3.13", "3.14", "3.14t"]
+
+    env:
+      PYSTACK_VERSION: ${{ matrix.version }}
+      UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+
+    steps:
+      - name: Checkout pystack v${{ env.PYSTACK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: bloomberg/pystack
+          ref: v${{ env.PYSTACK_VERSION }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: pystack-${{ env.PYSTACK_VERSION }}-*-manylinux_riscv64
+          merge-multiple: true
+          path: dist
+
+      - name: Set up Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python_version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Set up dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -qy gdb
+
+      - name: Install Python dependencies
+        run: |
+          uv pip install --group test
+          uv pip install --no-index --find-links=dist/ --only-binary=pystack pystack
+
+      - name: Disable ptrace security restrictions
+        run: |
+          echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope
+
+      - name: Run pytest
+        env:
+          PYTHON_TEST_VERSION: "auto"
+        run: python -m pytest tests -n auto -vvv
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources for pystack ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      PYSTACK_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc libzstd
+          output: gpl-sources.tar
+
+      - name: Add the elfutils sources built by upstream's before-all
+        run: |
+          curl -fsSLo pyproject.toml \
+            "https://raw.githubusercontent.com/bloomberg/pystack/v${PYSTACK_VERSION}/pyproject.toml"
+          vers=$(sed -n 's/^ *"VERS=\([0-9.]*\)",$/\1/p' pyproject.toml | sort -u)
+          [ "$(printf '%s\n' "$vers" | wc -l)" -eq 1 ] && [ -n "$vers" ]
+          curl -fsSLO "https://sourceware.org/elfutils/ftp/${vers}/elfutils-${vers}.tar.bz2"
+          tar -rf gpl-sources.tar "elfutils-${vers}.tar.bz2"
+          tar -tf gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pystack-${{ env.PYSTACK_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish pystack ${{ matrix.version }}
+    needs: [setup, build_wheels, test_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pystack-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: pystack-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc, elfutils and zstd
