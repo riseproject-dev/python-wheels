@@ -50,6 +50,7 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        tag: [cp310-abi3, cp314t]
         include:
           # pyo3/abi3-py310 is an opt-in feature upstream's own release job adds
           # only on top of a `pyo3/extension-module`-only build (its second
@@ -82,17 +83,62 @@ jobs:
       - name: Replace tests/conftest.py to drop the pyvoy-based local server
         # The real conftest.py imports pyvoy unconditionally to run a local
         # Envoy-based test server; pyvoy bundles Envoy and ships no riscv64
-        # wheel anywhere. This keeps only the client_type fixture (copied
+        # wheel anywhere. This keeps only the anyio backend fixtures, the
+        # asyncio_only deselection hook and the client_type fixture (copied
         # verbatim) needed by the self-contained subset of tests below --
-        # none of them open a socket or need a live server.
+        # none of them need the live server.
         run: |
           cat > tests/conftest.py <<'EOF'
           from __future__ import annotations
 
           import pytest
+          import sniffio
 
 
-          @pytest.fixture(params=["async", "sync", "async_asgi", "sync_wsgi"])
+          @pytest.fixture(scope="session", params=["asyncio", "trio"])
+          def anyio_backend(request: pytest.FixtureRequest) -> str:
+              return request.param
+
+
+          @pytest.fixture(autouse=True)
+          def no_stale_runner(request: pytest.FixtureRequest) -> None:
+              callspec = getattr(request.node, "callspec", None)
+              expected = callspec.params.get("anyio_backend") if callspec is not None else None
+              if expected is None:
+                  return
+              try:
+                  running = sniffio.current_async_library()
+              except sniffio.AsyncLibraryNotFoundError:
+                  return
+              if running != expected:
+                  pytest.fail(f"a {running} runner is still alive for this {expected} test")
+
+
+          def pytest_collection_modifyitems(
+              config: pytest.Config, items: list[pytest.Item]
+          ) -> None:
+              kept: list[pytest.Item] = []
+              dropped: list[pytest.Item] = []
+              for item in items:
+                  callspec = getattr(item, "callspec", None)
+                  backend = callspec.params.get("anyio_backend") if callspec is not None else None
+                  if backend not in (None, "asyncio") and item.get_closest_marker("asyncio_only"):
+                      dropped.append(item)
+                  else:
+                      kept.append(item)
+              if dropped:
+                  config.hook.pytest_deselected(items=dropped)
+                  items[:] = kept
+
+
+          @pytest.fixture(
+              params=[
+                  "async",
+                  "sync",
+                  pytest.param("async_asgi", marks=pytest.mark.asyncio_only),
+                  pytest.param("sync_wsgi", marks=pytest.mark.asyncio_only),
+              ]
+          )
           def client_type(request: pytest.FixtureRequest) -> str:
               return request.param
           EOF
@@ -114,7 +160,7 @@ jobs:
           CIBW_ENVIRONMENT_LINUX: >-
             PATH="$PATH:$HOME/.cargo/bin"
             MATURIN_PEP517_ARGS="${{ matrix.features }}"
-          CIBW_TEST_REQUIRES: pytest pytest-asyncio pytest-benchmark
+          CIBW_TEST_REQUIRES: pytest pytest-benchmark anyio trio outcome sniffio
           CIBW_TEST_SOURCES: >-
             tests/__init__.py tests/_util.py tests/conftest.py
             tests/test_common.py tests/test_multipart_encode.py
