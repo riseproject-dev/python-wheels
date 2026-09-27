@@ -1,0 +1,132 @@
+From 8b64e2e85baff0f1e96beb7b3ad4d25ac8cbd82e Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 20 Sep 2026 12:00:00 +0000
+Subject: [PATCH 1/4] Add riscv64 to the build and packaging platform tables
+
+Upstream-Status: To upstream [no riscv64 CI runner or prebuilt Clang/LLVM SDK upstream yet]
+
+machine_architecture() in warp/_src/build_architecture.py (shared by
+build_lib.py, build_llvm.py, build_dll.py and setup.py) raises
+"Unrecognized machine architecture 'riscv64'", which aborts build_lib.py before
+anything is compiled.
+
+setup.py's `platforms` table is what WarpBDistWheel.get_tag() reads to stamp the
+wheel's platform tag, so riscv64 needs an entry there as well. manylinux_2_39 is
+the flavour of the image these wheels are built in
+(quay.io/pypa/manylinux_2_39_riscv64, Rocky Linux 10, glibc 2.39).
+
+build_llvm.py picks LLVM_TARGETS_TO_BUILD from the same canonical architecture
+string and otherwise falls back to X86, which would build an LLVM unable to emit
+code for the machine it runs on; RISCV is the matching backend name.
+
+Nothing else in the tree is architecture-specific: warp/native carries no SIMD
+intrinsics and the Linux compile flags are a generic -O3 -fPIC --std=c++17.
+---
+ build_llvm.py                   |  4 +++-
+ setup.py                        | 11 ++++++-----
+ warp/_src/build_architecture.py |  5 +++--
+ 3 files changed, 12 insertions(+), 8 deletions(-)
+
+diff --git a/build_llvm.py b/build_llvm.py
+index 46cc828..7ac9c9b 100644
+--- a/build_llvm.py
++++ b/build_llvm.py
+@@ -166,7 +166,7 @@ def build_llvm_clang_from_source_for_arch(args, arch: str, llvm_source: str) ->
+ 
+     Args:
+         args: Command line arguments
+-        arch: Architecture to build for ("aarch64" or "x86_64")
++        arch: Architecture to build for ("aarch64", "riscv64" or "x86_64")
+         llvm_source: Path to the LLVM source code
+     """
+ 
+@@ -224,6 +224,8 @@ def build_llvm_clang_from_source_for_arch(args, arch: str, llvm_source: str) ->
+ 
+     if arch == "aarch64":
+         target_backend = "AArch64"
++    elif arch == "riscv64":
++        target_backend = "RISCV"
+     else:
+         target_backend = "X86"
+ 
+diff --git a/setup.py b/setup.py
+index 327bae0..998d9da 100644
+--- a/setup.py
++++ b/setup.py
+@@ -29,14 +29,14 @@ parser.add_argument(
+     "-P",
+     type=str,
+     default="",
+-    help="Wheel platform: windows-x86_64|windows-aarch64|linux-x86_64|linux-aarch64|macos-aarch64",
++    help="Wheel platform: windows-x86_64|windows-aarch64|linux-x86_64|linux-aarch64|linux-riscv64|macos-aarch64",
+ )
+ parser.add_argument(
+     "--manylinux",
+     "-M",
+     type=str,
+     default="manylinux_2_28",
+-    help="Manylinux flavor for Linux wheels: manylinux_2_28|manylinux_2_34",
++    help="Manylinux flavor for Linux wheels: manylinux_2_28|manylinux_2_34|manylinux_2_39",
+ )
+ args = parser.parse_known_args()[0]
+ 
+@@ -73,6 +73,7 @@ platforms = [
+     Platform("windows", "aarch64", "Windows ARM64", ".dll", "win_arm64"),
+     Platform("linux", "x86_64", "Linux x86-64", ".so", "manylinux_2_28_x86_64"),
+     Platform("linux", "aarch64", "Linux AArch64", ".so", "manylinux_2_34_aarch64"),
++    Platform("linux", "riscv64", "Linux RISC-V 64", ".so", "manylinux_2_39_riscv64"),
+     Platform("macos", "aarch64", "macOS ARM64", ".dylib", "macosx_11_0_arm64"),
+ ]
+ 
+@@ -129,7 +130,7 @@ if args.command == "bdist_wheel":
+         if len(detected_platforms) > 1:
+             print("Libraries for multiple platforms were detected.")
+             print("Run `python -m build --wheel -C--build-option=-P<platform>` to select a specific one.")
+-            print("Available platforms: windows-x86_64, windows-aarch64, linux-x86_64, linux-aarch64, macos-aarch64")
++            print("Available platforms: windows-x86_64, windows-aarch64, linux-x86_64, linux-aarch64, linux-riscv64, macos-aarch64")
+             # Select the libraries corresponding with the this machine's platform
+             for p in platforms:
+                 if p.os == machine_os() and p.arch == machine_architecture():
+@@ -151,8 +152,8 @@ class WarpBDistWheel(bdist_wheel):
+     # setuptools.Command can validate the command line options.
+     user_options: ClassVar[list[tuple[str, str, str]]] = [
+         *bdist_wheel.user_options,
+-        ("platform=", "P", "Wheel platform: windows-x86_64|windows-aarch64|linux-x86_64|linux-aarch64|macos-aarch64"),
+-        ("manylinux=", "M", "Manylinux flavor for Linux wheels: manylinux_2_28|manylinux_2_34"),
++        ("platform=", "P", "Wheel platform: windows-x86_64|windows-aarch64|linux-x86_64|linux-aarch64|linux-riscv64|macos-aarch64"),
++        ("manylinux=", "M", "Manylinux flavor for Linux wheels: manylinux_2_28|manylinux_2_34|manylinux_2_39"),
+     ]
+ 
+     def initialize_options(self):
+diff --git a/warp/_src/build_architecture.py b/warp/_src/build_architecture.py
+index 9df7173..68775d4 100644
+--- a/warp/_src/build_architecture.py
++++ b/warp/_src/build_architecture.py
+@@ -3,7 +3,7 @@
+ 
+ """Detect and normalize architectures used by Warp builds.
+ 
+-This module maps platform-specific x86-64 and ARM64 names to the
++This module maps platform-specific x86-64, ARM64 and RV64 names to the
+ canonical identifiers shared by Warp's build, packaging, and runtime code.
+ """
+ 
+@@ -12,13 +12,14 @@ from __future__ import annotations
+ import platform
+ from typing import Literal
+ 
+-Architecture = Literal["x86_64", "aarch64"]
++Architecture = Literal["x86_64", "aarch64", "riscv64"]
+ 
+ _ARCHITECTURE_ALIASES: dict[str, Architecture] = {
+     "amd64": "x86_64",
+     "x86_64": "x86_64",
+     "arm64": "aarch64",
+     "aarch64": "aarch64",
++    "riscv64": "riscv64",
+ }
+ 
+ 
+-- 
+2.43.0
+
