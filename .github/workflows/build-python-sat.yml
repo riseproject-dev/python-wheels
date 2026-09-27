@@ -90,7 +90,16 @@ jobs:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
           CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          CIBW_BEFORE_TEST: pip install -r {project}/requirements.txt
+          # pypblib (a test-only requirement) has no riscv64 wheel and builds from
+          # its sdist. Its PBParser.h uses the BSD `uint` typedef without including
+          # <sys/types.h>: glibc's libstdc++ headers pull that in transitively, musl's
+          # do not, so every musllinux leg failed with "'uint' was not declared in
+          # this scope". Force-include it (musl defines `uint` there under
+          # _GNU_SOURCE, which g++ always sets); CPPFLAGS reaches both the C and
+          # C++ compile lines of setuptools' build_ext.
+          CIBW_BEFORE_TEST: >-
+            ${{ matrix.libc == 'musllinux' && 'CPPFLAGS="-include sys/types.h"' || '' }}
+            pip install -r {project}/requirements.txt
           CIBW_TEST_REQUIRES: pytest
           CIBW_TEST_SOURCES: tests
           CIBW_TEST_COMMAND: >-
