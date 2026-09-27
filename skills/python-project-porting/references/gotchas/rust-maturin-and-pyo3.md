@@ -420,7 +420,13 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       Restate the project's own `[tool.maturin] features` on the CLI (here the crate's
       `extension-module`, which is `["pyo3/extension-module"]`) exactly as upstream does —
       a CLI `--features` may replace rather than extend the pyproject list, and losing
-      `extension-module` links libpython into the wheel.
+      `extension-module` links libpython into the wheel. It does replace it, and the same
+      holds for `PyO3/maturin-action`'s `args:` (zen-engine, `build-zen-engine.yml`): adding
+      `--features zen-engine/bindgen` dropped `[tool.maturin] features =
+      ["pyo3/extension-module"]`, so pyo3 0.25 linked `-lpython3.12` and the final link died
+      with `cannot find -lpython3.12` after a 90-minute compile. The cargo command maturin
+      prints on failure lists the features it actually passed; check it before blaming the
+      image's missing `libpython`.
     - **The build interpreter is gotcha 96's question, and the answer is upstream's, not
       ours.** The tag comes from the abi3 floor the feature names (`cp311-abi3`), so the
       wheel must be built on cp311 even though this repo's floor is cp312 — `CIBW_BUILD`

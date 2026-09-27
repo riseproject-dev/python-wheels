@@ -89,6 +89,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
   wall-clock sleeps flakes on the busy riscv64 runner: prove it with a pass on an earlier
   run of the same sources, a logged snapshot that satisfies the failed check, and the
   deterministic arithmetic's own passing tests — then `--subcase-exclude` the narrowest name.
+- **596** — `cannot open shared object file: No such file or directory` for a file that exists
+  is glibc's ENOENT for a foreign-machine ELF: a platform-string fallback mapped riscv64 to
+  `amd64` and downloaded x86-64 plugins (ladybug `INSTALL json`) — patch it, deselect the tests.
 - **571** — On free-threaded CPython (cp314t), an object whose last reference is dropped on
   a native (non-Python) thread isn't freed there and then — freeing is deferred to whichever
   thread next runs Python bytecode. A test that drops the last reference on a native
@@ -1512,6 +1515,18 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
     re-signal in a bounded loop. (2) When `CIBW_TEST_SOURCES` copies the tests from a
     separate checkout (not the sdist), a test patch applied only to the sdist is a silent
     no-op: also `git apply --include='<tests dir>/*'` the series to that checkout.
+    - **The same lost interrupt can surface as a segfault in the *next* test** (ladybug
+      0.19.1, the kuzu fork, `build-ladybug.yml`). There the `conn_db_readwrite` fixture's
+      teardown closes the database, and close waits for the running query with the GIL held,
+      so `test_connection_interrupt FAILED` was only printed ~4h later, when the query ended;
+      the abandoned thread then crashed freeing its `FactorizedTable` into the closed buffer
+      manager while `test_database_close` ran (exit 139, `MemoryBuffer::~MemoryBuffer` on top
+      of the C stack). Read the faulthandler dump for *which* thread faulted: a
+      `run_long_query` thread under a later test means the previous test's cleanup, not the
+      later test, is the bug. The kuzu patch carries over unchanged, and it reproduces on
+      x86-64 with upstream's wheel by shortening the sleep below the compile time. When the
+      tests sit in a git submodule the liblbug build does not initialise, apply the series
+      with `--exclude='<tests dir>/*'` there and `--include` in the test job.
 
 583. **A test failing on riscv64 only because our registry carries a newer dependency
     than upstream's lock file is version drift, not an arch bug — reproduce it on
@@ -1624,3 +1639,20 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       a minute by compiling a stub `TEST_CASE` against the project's vendored `doctest.h`.
       Use `--test-case-exclude` only when the timing assertion is in the test's shared body,
       as in `concurrency_sequence`.
+
+596. **`cannot open shared object file: No such file or directory` for a file that exists is
+    glibc rejecting an ELF built for another machine — look for a platform-string fallback
+    that maps riscv64 to `amd64` (ladybug 0.19.1, see `build-ladybug.yml`).** Four
+    `test_json.py` tests run `INSTALL json; LOAD json;`, which downloads a prebuilt extension
+    from upstream's server into `~/.lbdb/extension/<ver>/<platform>/`, and `LOAD` failed on
+    riscv64 with `Failed to load library: .../linux_amd64/json/libjson.lbug_extension ...
+    cannot open shared object file: No such file or directory`. The path names the wrong
+    platform: `getArch()` starts from `"amd64"` and only overrides it for x86 and arm64, so
+    riscv64 downloads the x86-64 build. `dlopen` then reports ENOENT, not "wrong ELF class",
+    because glibc's `open_verify` sets ENOENT for an `e_machine` mismatch so a search can
+    move on; `ctypes.CDLL()` on an aarch64 `.so` gives the same message on x86-64, a
+    one-minute proof. Two separate fixes: patch the fallback so riscv64 names its own
+    platform (the download then 404s cleanly instead of caching foreign binaries), and
+    deselect the tests that need a downloaded plugin upstream does not publish for riscv64
+    (kuzu's `test_extension.py` ignore is the same call). Grep any plugin/extension
+    downloader for `amd64`/`x86_64` defaults before trusting its `<os>_<arch>` string.

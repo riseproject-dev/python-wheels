@@ -1281,7 +1281,8 @@ The porting gotchas (550 of them) live in [`references/gotchas/`](gotchas/), spl
   the thread ends — check the summary's timestamp first. Kuzu's case: a single fixed-delay
   `interrupt()` lost because the engine clears the flag when execution starts, after a slow
   compile; re-signal in a bounded loop, and apply test patches to the `CIBW_TEST_SOURCES`
-  checkout, not just the sdist.
+  checkout, not just the sdist. Ladybug's variant: teardown's close waits on the query, so
+  `FAILED` prints hours late and the abandoned thread segfaults under the next test.
 - **583** — A riscv64-only test failure can be drift from a dependency newer than upstream's lock
   file: reproduce on x86_64 with PyPI wheels of both versions. mink's trivial-QP `solve_ik` tests
   fail against daqp 0.9.x on every arch (daqp #168 made the proximal shift relative but kept the
@@ -1297,6 +1298,9 @@ The porting gotchas (550 of them) live in [`references/gotchas/`](gotchas/), spl
   sleeps flakes on the busy runner: an earlier pass on the same sources, a logged snapshot that
   satisfies the failed check (unlocked live read), and the arithmetic's own passing tests rule
   out riscv64; `--subcase-exclude` the narrowest whole name (the perf-analyzer case).
+- **596** — `cannot open shared object file: No such file or directory` for a file that exists is
+  glibc rejecting a foreign-machine ELF: ladybug's `getArch()` falls back to `amd64`, so riscv64
+  `INSTALL` fetched x86-64 extensions. Patch the fallback; deselect tests needing upstream plugins.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
