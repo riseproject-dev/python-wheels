@@ -74,7 +74,8 @@ jobs:
           path: python-wheels
           persist-credentials: false
 
-      # auditwheel bundles the image's libev, whose notice the wheel would otherwise drop.
+      # auditwheel bundles the image's libev (and, from 3.29.12, liblz4), whose notices the
+      # wheel would otherwise drop.
       - name: Patch scylla-driver source
         run: git apply python-wheels/patches/scylla-driver/${{ env.SCYLLA_DRIVER_VERSION }}/00*.patch
 
@@ -87,7 +88,8 @@ jobs:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           CIBW_BUILD_FRONTEND: build  # upstream's build[uv] needs a host uv the runner has none of (gotcha 13)
           # Upstream's before-build, minus the AlmaLinux key and the packages Rocky 10 preinstalls.
-          CIBW_BEFORE_BUILD: rm -rf ~/.pyxbld && yum install -y libev libev-devel
+          # lz4-devel is for the cassandra.cython_lz4 extension 3.29.12 added.
+          CIBW_BEFORE_BUILD: rm -rf ~/.pyxbld && yum install -y libev libev-devel lz4-devel
           # The three CASS_DRIVER/CFLAGS values are upstream's [tool.cibuildwheel] environment,
           # which this replaces; EXTENSIONS_ARE_MUST is what fails a degraded pure-Python build.
           CIBW_ENVIRONMENT: >-
@@ -113,7 +115,7 @@ jobs:
           # 3.29.12 dropped the gevent reactor and its test file, so that run is skipped
           # when the file is absent.
           CIBW_TEST_COMMAND: >-
-            python -c "import importlib.metadata as m; f=[str(p) for p in m.files('scylla-driver')]; assert any(s.endswith('licenses/LICENSE.libev') for s in f), f" &&
+            python -c "import importlib.metadata as m; f=[str(p) for p in m.files('scylla-driver')]; assert any(s.endswith('licenses/LICENSE.libev') for s in f), f; assert not any('/liblz4' in s for s in f) or any(s.endswith('licenses/LICENSE.lz4') for s in f), f" &&
             python -m pytest tests/unit
             ${{ matrix.python == 'cp314t' && '' || '&& { [ ! -f tests/unit/io/test_geventreactor.py ] || EVENT_LOOP_MANAGER=gevent python -m pytest tests/unit/io/test_geventreactor.py; }' }}
 
