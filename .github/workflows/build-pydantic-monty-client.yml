@@ -97,16 +97,21 @@ jobs:
           CIBW_TEST_REQUIRES: >-
             anyio>=4.0 dirty-equals>=0.11 inline-snapshot>=0.31.1
             opentelemetry-proto>=1.0.0 opentelemetry-sdk>=1.39.0
-            pytest>=9.0.2 pytest-pretty>=1.3.0
-          CIBW_TEST_SOURCES: crates/monty-python/tests crates/monty-python/pyproject.toml
-          # test_readme_examples.py needs `ruff` (via pytest-examples) and
-          # test_websocket.py needs `websockets`; neither has a riscv64 wheel
-          # on this registry and porting them is out of scope here.
+            pytest>=9.0.2 pytest-pretty>=1.3.0 websockets>=14
+          CIBW_TEST_SOURCES: >-
+            crates/monty-python/tests crates/monty-python/pyproject.toml
+            scripts/websocket_relay.py
+          # test_readme_examples.py lints and runs the snippets of the repo's
+          # README/docs tree, not the wheel.
+          # cp312 only: this test's child interpreter races its own shutdown (a
+          # tokio thread re-enters Python during Py_FinalizeEx; 3.12 answers with
+          # pthread_exit, whose unwind through Rust frames aborts). Reproduces on
+          # x86_64 with upstream's PyPI wheel under `taskset -c 0`.
           CIBW_TEST_COMMAND: >-
             python -c "import pydantic_monty._monty as n; assert n.__file__.endswith('.so'), n.__file__" &&
             python -m pytest -v crates/monty-python/tests
             --ignore=crates/monty-python/tests/test_readme_examples.py
-            --ignore=crates/monty-python/tests/test_websocket.py
+            ${{ matrix.python == 'cp312' && '-k "not test_callback_context_telemetry_fallback"' || '' }}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
