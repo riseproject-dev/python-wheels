@@ -1,0 +1,145 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/basetenlabs/truss/blob/main/.github/workflows/build-maturin.yml
+# (called from truss-transfer-build-maturin.yml) and on
+# https://github.com/basetenlabs/truss/blob/main/.github/workflows/truss-transfer-test.yml
+name: Build truss-transfer wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/truss-transfer.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-truss-transfer.yml'
+      - 'docs/packages/truss-transfer.yaml'
+      - 'patches/truss-transfer/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-truss-transfer.yml'
+      - 'docs/packages/truss-transfer.yaml'
+      - 'patches/truss-transfer/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # basetenlabs/truss is a monorepo that never tags truss-transfer releases.
+  # This is the commit whose truss-transfer/Cargo.toml reads 0.0.43 ("Bump
+  # truss-transfer to 0.0.43 and truss to 0.18.5rc0", #2482); every source
+  # file, Cargo.lock and pyproject.toml in the released sdist is
+  # byte-identical to it. Move it together with TRUSS_TRANSFER_VERSION.
+  TRUSS_TRANSFER_REF: f8b024d9457c631d1b474ebb60eccf0c1f9f1e36
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: truss-transfer
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build truss-transfer ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        include:
+          # Upstream's cp38-abi3 floor is bumped to cp39 by patches/ (no cp38 in
+          # the riscv64 image, gotcha 96). Upstream's cp313t leg is dropped: the
+          # image ships no cp313t and the pinned pyo3 0.24.2 rejects cp314t
+          # (gotcha 326, same wall as build-baseten-performance-client.yml).
+          - tag: cp39-abi3
+            build: >-
+              cp39-manylinux_riscv64 cp310-manylinux_riscv64
+              cp311-manylinux_riscv64 cp312-manylinux_riscv64
+              cp313-manylinux_riscv64 cp314-manylinux_riscv64
+
+    env:
+      TRUSS_TRANSFER_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout truss ${{ env.TRUSS_TRANSFER_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: basetenlabs/truss
+          ref: ${{ env.TRUSS_TRANSFER_REF }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch truss-transfer source
+        run: git apply python-wheels/patches/truss-transfer/${{ env.TRUSS_TRANSFER_VERSION }}/00*.patch
+
+      - name: Stage LICENSE beside truss-transfer's pyproject.toml
+        # maturin only globs LICEN[CS]E* next to pyproject.toml, so upstream's wheel ships no licence text.
+        run: cp LICENSE truss-transfer/LICENSE
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: truss-transfer
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream's yum install of openssl-devel/perl-IPC-Cmd is dropped: Cargo.lock has no openssl-sys (reqwest uses rustls/ring).
+          CIBW_BEFORE_ALL_LINUX: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_TEST_SOURCES: truss-transfer/example-bptr-manifest.json
+          CIBW_TEST_COMMAND: >-
+            python -c "import truss_transfer, truss_transfer.truss_transfer as m; assert m.__file__.endswith('.so'), m.__file__; print(truss_transfer.__version__)" &&
+            mkdir -p /static-bptr /cache &&
+            cp truss-transfer/example-bptr-manifest.json /static-bptr/static-bptr-manifest.json &&
+            rm -rf tmp_no_cache tmp_fs_enabled tmp_range_enabled &&
+            BASETEN_FS_ENABLED=0 python -c "import truss_transfer; truss_transfer.lazy_data_resolve('./tmp_no_cache/test')" &&
+            test -d tmp_no_cache/test &&
+            BASETEN_FS_ENABLED=1 TRUSS_TRANSFER_USE_RANGE_DOWNLOAD=0 python -c "import truss_transfer; truss_transfer.lazy_data_resolve('./tmp_fs_enabled/test')" &&
+            BASETEN_FS_ENABLED=1 TRUSS_TRANSFER_USE_RANGE_DOWNLOAD=0 python -c "import truss_transfer; truss_transfer.lazy_data_resolve('./tmp_fs_enabled/test')" &&
+            BASETEN_FS_ENABLED=0 TRUSS_TRANSFER_USE_RANGE_DOWNLOAD=1 python -c "import truss_transfer; truss_transfer.lazy_data_resolve('./tmp_range_enabled/test')" &&
+            test -d tmp_fs_enabled/test &&
+            test -d tmp_range_enabled/test
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: truss-transfer-${{ env.TRUSS_TRANSFER_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish truss-transfer ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: truss-transfer-${{ matrix.version }}-*-manylinux_riscv64
