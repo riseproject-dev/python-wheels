@@ -50,6 +50,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
   (`liburing.so.2.14`), never its SONAME symlink, so auditwheel can't locate `liburing.so.2` —
   install the meson project system-wide + `ldconfig` in before-all, as upstream does (the
   nixl-cu12 case).
+- **595** — A non-PIE executable shipped in a wheel links at riscv64's default base 0x10000,
+  which is also `vm.mmap_min_addr`; the segment auditwheel's patchelf prepends for the RPATH
+  lands below it and the binary is killed at exec, often silently — link with
+  `-Wl,-Ttext-segment=0x200000` (or PIE) (the pygraphviz / python-gdcm / perf-analyzer case).
 ---
 
 16. **All-static BUNDLED build + a dep the project can't bundle = link failure.**
@@ -823,3 +827,32 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
        `/usr/local/<pkg>` on the loader path, a missing graft would still import. A fresh image
        plus `pip install --no-deps` of the repaired wheel, then loading the backend that
        needs the library (NIXL's POSIX plugin links liburing), proves the graft.
+
+595. **A non-PIE executable in a wheel dies at exec after `auditwheel repair` on riscv64, and
+    a console-script wrapper can make it die silently (the pygraphviz / python-gdcm /
+    perf-analyzer case).** GNU ld's default riscv64 linker script puts a non-PIE
+    (`ET_EXEC`) executable's first `PT_LOAD` at 0x10000 (x86_64/aarch64 use 0x400000). When
+    auditwheel grafts a library (libssl/libcrypto, libgvc...) it runs `patchelf --set-rpath`
+    on the executable; an `ET_EXEC` can't move its code, so patchelf grows the file at the
+    front and maps the rewritten headers in a new first segment one shift *below* the old
+    base — 0xc000 in perf_analyzer's case (`readelf -lW`: `LOAD 0x000000 0x000000000000c000`).
+    Ubuntu's `vm.mmap_min_addr` is 65536 (0x10000), so the kernel can't map it and kills the
+    process with SIGSEGV after the point of no return in `execve`: no loader error, no output.
+    - **Symptoms.** A bundled CLI segfaults at startup in the wheel test while the same binary
+      ran fine *before* repair (e.g. the in-build unit tests passed). Behind a Python wrapper
+      that does `subprocess.run([bin] + argv)` without checking the return code (upstream
+      perf_analyzer's `cli.py`), the console script exits 0 with nothing on stdout or stderr
+      — only a downstream `grep` of its output fails.
+    - **Prove it from the artifact, no rerun needed.** Download the wheel artifact, unzip it,
+      `readelf -lW <pkg>/bin/<exe>`: `Elf file type is EXEC` plus a first `LOAD` with a
+      `VirtAddr` below 0x10000 is the whole diagnosis. A `RPATH` of
+      `$ORIGIN/../../<pkg>.libs` and the grafted `<pkg>.libs/*.so` confirm patchelf touched it.
+    - **Fix at link time, not in patchelf.** Raise the base with
+      `LDFLAGS="-Wl,-Ttext-segment=0x200000"` (build-pygraphviz.yml, build-perf-analyzer.yml),
+      or link PIE (`-fPIE` in the compile flags plus `-pie`, build-python-gdcm.yml; a PIE is
+      `ET_DYN`, so patchelf's extra segment goes anywhere). An exported `LDFLAGS` also reaches
+      CMake `ExternalProject` superbuilds, which read it at their own first configure. CMake's
+      `POSITION_INDEPENDENT_CODE ON` alone only adds `-fPIE`; without
+      `check_pie_supported()` it never passes `-pie`, so the result is still `ET_EXEC`.
+    - Unrelated but seen alongside it: a CLI's `--version` may print to stderr
+      (perf_analyzer's `PrintVersion()` uses `std::cerr`); capture `2>&1` before grepping it.

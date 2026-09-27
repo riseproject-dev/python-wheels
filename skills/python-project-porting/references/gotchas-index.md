@@ -982,6 +982,10 @@ The porting gotchas (550 of them) live in [`references/gotchas/`](gotchas/), spl
   (`liburing.so.2.14`), never the `liburing.so.2` symlink, so `auditwheel repair` can't locate it —
   install the meson project system-wide and `ldconfig` it in before-all, as upstream's wheel
   Dockerfile does (the nixl-cu12 case).
+- **595** — A non-PIE executable in a wheel links at riscv64's 0x10000 (= `vm.mmap_min_addr`);
+  the segment auditwheel's patchelf prepends for the RPATH lands below it and the binary is
+  killed at exec, silently behind a `subprocess.run` wrapper — `readelf -lW` the artifact, then
+  link with `-Wl,-Ttext-segment=0x200000` or PIE (pygraphviz / python-gdcm / perf-analyzer).
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 
