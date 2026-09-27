@@ -1,0 +1,323 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the wheel:linux-* jobs of
+# https://git.ligo.org/lscsoft/lalsuite/-/blob/lalsuite-v7.26.15/.gitlab/ci_yaml/wheel_build.yml
+# (recipe: .gitlab/ci_scripts/wheel.sh), which run in the prebuilt
+# lscsoft/lalsuite-manylinux images; the deps job replays that image's
+# Dockerfile (https://git.ligo.org/lscsoft/lalsuite-manylinux, 333f452c).
+name: Build lalsuite wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/lalsuite.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-lalsuite.yml'
+      - 'docs/packages/lalsuite.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-lalsuite.yml'
+      - 'docs/packages/lalsuite.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  CFITSIO_URL: https://heasarc.gsfc.nasa.gov/FTP/software/fitsio/c/cfitsio-4.6.2.tar.gz
+  CFITSIO_SHA512: fb987b28b56e686fee80bb9cef87e8bb0b5094c425008b12fa3748c772479995c38cc16a15ba662c9ca9d5b295cfd49392bf81512446e1ecbea40760a065f091
+  HDF5_URL: https://github.com/HDFGroup/hdf5/releases/download/hdf5_1.14.6/hdf5-1.14.6.tar.gz
+  HDF5_SHA512: d93194ad8f48acf110aae317f4c37104b9042f89ef72919aac887817e4c2713449c4cb2ab6a163c61ab1c12811170d7611cdf69322b0e0f96420fcc7f99fdd67
+  FRAMEL_URL: https://git.ligo.org/virgo/virgoapp/Fr/-/archive/8.48.4/Fr-8.48.4.tar.bz2
+  FRAMEL_SHA512: 0b842d7149f8e2b04142135fa99ec0cc5af0361192df8ac8983853f4bd1ce0f65b36d4c396c59605b02bcc69eb15fe2259bfb92c49f82a2bbeb114eed500dfc3
+  METAIO_URL: https://software.ligo.org/lscsoft/source/metaio-8.5.1.tar.gz
+  METAIO_SHA512: f7c5d7f8862e088c0b7b7050f95af5e8c65234988f8cd337c32a2c2ad7b40030b881b0ae768a66c7f8e0646e1b6a2f64714a66bee6527514af6be60f824b038b
+  GSL_URL: https://ftp.gnu.org/gnu/gsl/gsl-2.8.tar.gz
+  GSL_SHA512: 4427f6ce59dc14eabd6d31ef1fcac1849b4d7357faf48873aef642464ddf21cc9b500d516f08b410f02a2daa9a6ff30220f3995584b0a6ae2f73c522d1abb66b
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: lalsuite
+      version: ${{ inputs.version }}
+
+  deps:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build lalsuite native dependencies (riscv64)
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    steps:
+      # chealpix, also in the upstream image, is not used by any lalsuite 7.26 configure script.
+      - name: Build dependencies
+        run: |
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e CFITSIO_URL -e CFITSIO_SHA512 \
+            -e HDF5_URL -e HDF5_SHA512 \
+            -e FRAMEL_URL -e FRAMEL_SHA512 \
+            -e METAIO_URL -e METAIO_SHA512 \
+            -e GSL_URL -e GSL_SHA512 \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -euxo pipefail
+
+          build() {
+              local name=$1 hash=$2 url=$3
+              shift 3
+              rm -rf /tmp/build /tmp/src
+              curl -fLs -o /tmp/src "$url"
+              echo "$hash  /tmp/src" | sha512sum --check
+              mkdir /tmp/build
+              pushd /tmp/build
+              tar --transform 's,^\(\./\)*,,' --strip-components 1 -xf ../src
+              if [ -e configure ]; then
+                  ./configure --prefix=/usr --libdir=/usr/lib64
+              else
+                  cmake -DCMAKE_INSTALL_PREFIX:PATH=/usr .
+              fi
+              make -j"$(nproc)"
+              make install DESTDIR=/tmp/deps-root
+              install -Dm644 -t "/tmp/deps-root/usr/share/licenses/${name}" "$@"
+              popd
+          }
+
+          build cfitsio "$CFITSIO_SHA512" "$CFITSIO_URL" licenses/License.txt
+          build hdf5 "$HDF5_SHA512" "$HDF5_URL" COPYING COPYING_LBNL_HDF5
+          build framel "$FRAMEL_SHA512" "$FRAMEL_URL" LICENSE
+          build metaio "$METAIO_SHA512" "$METAIO_URL" COPYING
+          build gsl "$GSL_SHA512" "$GSL_URL" COPYING
+
+          tar -czf /work/lalsuite-deps.tar.gz -C /tmp/deps-root .
+          SCRIPT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lalsuite-deps-riscv64
+          path: lalsuite-deps.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, deps]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build lalsuite ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      LALSUITE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: lalsuite-deps-riscv64
+
+      - name: Build and test
+        run: |
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e LALSUITE_VERSION \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            -e PIP_PREFER_BINARY=1 \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -exo pipefail
+
+          dnf install -y git-lfs fftw3-devel libxml2-devel mpich-devel
+          tar -xzf /work/lalsuite-deps.tar.gz -C /
+          ldconfig
+          source /usr/share/Modules/init/bash
+          module load mpi
+          # Upstream's image pins this: newer patchelf breaks lalsuite's binaries (lalsuite#626).
+          pipx install --force 'patchelf<0.16.1'
+
+          git lfs install
+          git clone --depth 1 --branch "lalsuite-v${LALSUITE_VERSION}" https://git.ligo.org/lscsoft/lalsuite.git /tmp/lalsuite
+          cd /tmp/lalsuite
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+
+          case "$PYTHON_TAG" in
+              *t) PYTHON="/opt/python/${PYTHON_TAG%t}-${PYTHON_TAG}/bin/python" ;;
+              *) PYTHON="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin/python" ;;
+          esac
+          for venv in venv-build venv-test; do
+              "$PYTHON" -m venv "/tmp/${venv}"
+              "/tmp/${venv}/bin/python" -m pip install --upgrade pip
+          done
+
+          source /tmp/venv-build/bin/activate
+          python -m pip install --only-binary numpy 'numpy>=2.0.0' setuptools wheel
+          python -m pip list installed
+
+          sse="solar_system_ephemerides/ephemerides"
+          ./00boot
+          ./configure \
+              PYTHON="${VIRTUAL_ENV}/bin/python" \
+              --with-fallback-data-path="../lalapps/data:../${sse}/earth:../${sse}/sun:../${sse}/time" \
+              --disable-doxygen \
+              --enable-mpi \
+              --without-ephem \
+              --enable-strict-defs \
+              --with-doxygen-version-suffix=
+
+          # Licences of the libraries auditwheel bundles; setuptools' default LICEN[CS]E* glob picks them up.
+          for dir in /usr/share/licenses/{cfitsio,hdf5,framel,metaio,gsl}; do
+              for f in "$dir"/*; do
+                  cp "$f" "wheel/LICENSE.$(basename "$dir").$(basename "$f")"
+              done
+          done
+          for f in $(rpm -q --licensefiles fftw-libs-double); do
+              cp "$f" "wheel/LICENSE.fftw.$(basename "$f")"
+          done
+
+          make -j"$(nproc)" wheel
+          auditwheel repair wheel/*.whl
+
+          rm -rf wheel/build/
+          deactivate
+          source /tmp/venv-test/bin/activate
+
+          # astropy (also required by solar-system-ephemerides) ships only abi3 wheels, which free-threaded CPython cannot install.
+          if [ "$PYTHON_TAG" = cp314t ]; then
+              python -m pip install --no-deps solar-system-ephemerides wheelhouse/*
+              python -m pip install igwn-ligolw igwn-segments lscsoft-glue matplotlib 'numpy>=1.19' python-dateutil scipy
+          else
+              python -m pip install solar-system-ephemerides
+              python -m pip install wheelhouse/*
+          fi
+
+          python -m pip show lalsuite
+
+          python - wheelhouse/*.whl <<'EOF'
+          import re, sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          libs = sorted(n.split("/")[-1] for n in names if re.match(r"lalsuite\.libs/[^/]+\.so", n))
+          licenses = {n.split("/")[-1].split(".")[1] for n in names if ".dist-info/licenses/LICENSE." in n}
+          print("\n".join(libs))
+          print(sorted(licenses))
+          owner = {"cfitsio": "cfitsio", "fftw3": "fftw", "fftw3f": "fftw", "framel": "framel",
+                   "gsl": "gsl", "gslcblas": "gsl", "hdf5": "hdf5", "hdf5_hl": "hdf5", "metaio": "metaio"}
+          missing = []
+          for lib in libs:
+              stem = re.match(r"lib(.+?)-[0-9a-f]{8}\.so", lib).group(1)
+              if stem.startswith("lal"):
+                  continue
+              if owner.get(stem) not in licenses:
+                  missing.append(lib)
+          assert not missing, f"bundled libraries without a licence in the wheel: {missing}"
+          EOF
+
+          env LAL_DEBUG_LEVEL=info python - <<EOF
+          import lal
+          import lalframe
+          import lalmetaio
+          import lalsimulation
+          import lalpulsar
+          series = lal.CreateREAL8FrequencySeries('psd', 0, 0, 1, None, 4096)
+          lalsimulation.SimNoisePSDaLIGOAPlusDesignSensitivityT1800042(series, 10)
+          lalpulsar.InitBarycenter("earth00-40-DE405.dat.gz", "sun00-40-DE405.dat.gz")
+          EOF
+
+          lal_path2cache --help
+
+          lalapps_version
+          env LAL_DEBUG_LEVEL=info lalsim-detector-noise --official --aligo-nsnsopt --duration 1 >/dev/null
+          env LAL_DEBUG_LEVEL=info lalpulsar_PrintDetectorState --detector H1 --Alpha 4.65 --Delta -0.51 --timeGPS 1100000000 >/dev/null
+
+          rm -rf /work/wheelhouse
+          mkdir /work/wheelhouse
+          cp wheelhouse/*.whl /work/wheelhouse/
+          SCRIPT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lalsuite-${{ env.LALSUITE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources for lalsuite ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      LALSUITE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc fftw
+          output: rpm-gpl-sources.tar
+
+      # GSL (GPLv3), metaio (GPLv2) and the frame library (LGPLv2.1) are built from these pinned tarballs in the deps job.
+      - name: Fetch pinned GSL, metaio and framel sources
+        run: |
+          set -euo pipefail
+          mkdir gpl-sources
+          tar xf rpm-gpl-sources.tar -C gpl-sources
+          for dep in GSL METAIO FRAMEL; do
+              url_var="${dep}_URL"
+              sha_var="${dep}_SHA512"
+              file="gpl-sources/$(basename "${!url_var}")"
+              curl -fLs -o "$file" "${!url_var}"
+              echo "${!sha_var}  $file" | sha512sum --check
+          done
+          tar cf gpl-sources.tar -C gpl-sources .
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lalsuite-${{ env.LALSUITE_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish lalsuite ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: lalsuite-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: lalsuite-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc, fftw, gsl, metaio, framel
