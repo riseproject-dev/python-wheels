@@ -89,6 +89,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
 - **587** — A hybrid Cython+Rust build (a build script running `cargo build` for staticlibs
   linked into every Cython module, plus a non-abi3 pyo3 cdylib) is priced by the pyo3
   reverse-dependency closure in `Cargo.lock`, not by "one extension per interpreter".
+- **597** — A riscv64 `cargo check` of a tree whose `-sys` crates compile C needs no riscv64
+  sysroot: host clang plus x86_64 glibc headers and two stub headers.
 
 ---
 
@@ -1447,3 +1449,35 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
     pulls in `tonic-buf-build`/`prost-build` (dydx-proto) is also no protoc/`buf` requirement
     when the script returns early unless a regeneration env var (`V4_PROTO_REBUILD`) is set —
     read the `build.rs` before adding a toolchain for it.
+
+597. **A riscv64 `cargo check` of a Rust tree whose `-sys` crates compile C works with no
+    riscv64 sysroot, gcc cross toolchain or container: use host `clang`, the host's x86_64
+    glibc headers and two stub headers (the foxglove-sdk case; see `build-foxglove-sdk.yml`).**
+    Gotchas 179/182 do the pre-flight inside a `rust:trixie` container with
+    `gcc-riscv64-linux-gnu`. On a host with no container disk budget, where no packages may
+    be installed, but with the `riscv64gc-unknown-linux-gnu` rust-std already there
+    (`rustup target list --installed`), the one thing missing is a C compiler for
+    build scripts like `lz4-sys`/`zstd-sys`. `check` does not link, so those objects only
+    have to *compile*. `clang --target=riscv64-linux-gnu` does that when you point it at the
+    host's own headers, after you fix the two places where x86 glibc keys on
+    `__x86_64__`, which is undefined for this target:
+    ```bash
+    mkdir -p stubs/gnu stubs/bits && : > stubs/gnu/stubs-32.h
+    sed 's/__attribute__ ((__regparm__ (1)))//' \
+      /usr/include/x86_64-linux-gnu/bits/pthreadtypes-arch.h > stubs/bits/pthreadtypes-arch.h
+    export CC_riscv64gc_unknown_linux_gnu=clang-18 AR_riscv64gc_unknown_linux_gnu=llvm-ar-18 \
+      CFLAGS_riscv64gc_unknown_linux_gnu="--target=riscv64-linux-gnu -isystem $PWD/stubs \
+        -isystem /usr/include -isystem /usr/include/x86_64-linux-gnu"
+    cargo check --release --locked --target riscv64gc-unknown-linux-gnu \
+      --manifest-path <crate>/Cargo.toml --features pyo3/extension-module
+    ```
+    The errors show up in this order: `gnu/stubs-32.h` not found (glibc's multilib
+    selector, the same trap gotcha 412 hits with `-U__x86_64__`), then
+    `'regparm' is not valid on this platform` from `pthread.h`. With both stubbed, the
+    123-crate foxglove-sdk tree type-checked in 17 s, and CI's real build then went green on
+    the first cycle. Set `CARGO_HOME`/`CARGO_TARGET_DIR` under `.git/pw-scratch/<pkg>/`
+    (the registry came to ~450 MB, the target dir to ~230 MB) and delete both afterwards.
+    - **It proves the Rust side only.** The C objects are built against x86 struct layouts,
+      so they say nothing about riscv64 C codegen. That matters little for the well-trodden
+      `lz4-sys`/`zstd-sys`, but it is no substitute for gotcha 412's generic-path check when
+      the C is the unknown.

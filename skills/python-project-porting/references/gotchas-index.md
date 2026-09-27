@@ -687,6 +687,10 @@ The porting gotchas (550 of them) live in [`references/gotchas/`](gotchas/), spl
   `Cargo.lock` from `pyo3` and the released wheel's per-module sizes, not the crate count;
   Tier 2 riscv64 Rust needs no build-std, and a `*-proto` crate's `tonic-buf-build` build
   script can be dead code behind a regeneration env var (the nautilus-trader case).
+- **597** — A riscv64 `cargo check` of a tree whose `-sys` crates compile C needs no riscv64
+  sysroot or container: host `clang --target=riscv64-linux-gnu` with the x86_64 glibc
+  headers, plus stubs for `gnu/stubs-32.h` and the `regparm` in `pthreadtypes-arch.h`
+  (the foxglove-sdk case).
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
