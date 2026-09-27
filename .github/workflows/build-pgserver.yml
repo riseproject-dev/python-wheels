@@ -51,6 +51,10 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
+        include:
+          # The test extra's psycopg2-binary publishes no free-threaded wheel for any platform (gotcha 149).
+          - python: "cp314t"
+            test_skip: "*"
 
     env:
       PGSERVER_VERSION: ${{ matrix.version }}
@@ -79,9 +83,11 @@ jobs:
           only: ${{ matrix.python }}-manylinux_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PYTEST_ADDOPTS="--timeout=300"
-          # gotcha 563/564: bounds a crashed initdb (riscv64-only, unresolved) to a fast per-test failure instead of a 180-minute hang.
-          CIBW_TEST_REQUIRES: pytest-timeout
+          # initdb/postgres are non-PIE; keep their base above vm.mmap_min_addr once auditwheel's patchelf prepends a segment (gotcha 595).
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            LDFLAGS="-Wl,-Ttext-segment=0x200000"
+          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
 
       - name: Verify the wheel ships the compiled postgres server, pgvector and their licences
         run: |
@@ -94,6 +100,12 @@ jobs:
           lic = {n.split("/")[-1] for n in names if ".dist-info/licenses/" in n and not n.endswith("/")}
           assert {"LICENSE", "LICENSE.postgresql", "LICENSE.pgvector"} <= lic, lic
           EOF
+          mkdir wheel-check
+          python3 -m zipfile -e wheelhouse/*.whl wheel-check
+          for exe in initdb postgres pg_ctl; do
+            chmod +x "wheel-check/pgserver/pginstall/bin/$exe"
+            "wheel-check/pgserver/pginstall/bin/$exe" --version
+          done
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
