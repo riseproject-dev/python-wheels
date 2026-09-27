@@ -97,11 +97,12 @@ jobs:
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
           # Upstream's dev group, minus ccm (a git dependency only the integration tests use)
           # and minus gevent on cp314t, which it has no build for. setuptools is what gives
-          # pyximport a distutils on 3.12+ (gotcha 211).
+          # pyximport a distutils on 3.12+ (gotcha 211). jsonschema is imported at module
+          # level by tests/unit/test_driver_config_schema.py from 3.29.12 on.
           CIBW_TEST_GROUPS: ''
           CIBW_TEST_REQUIRES: >-
             pytest~=8.0 PyYAML pure-sasl twisted[tls] eventlet>=0.33.3 cython>=3.2
-            packaging>=25.0 futurist numpy objgraph setuptools
+            packaging>=25.0 futurist numpy objgraph setuptools jsonschema>=4.18
             ${{ matrix.python == 'cp314t' && '' || 'gevent' }}
           # PIP_PREFER_BINARY keeps pip on our registry's gevent instead of compiling
           # PyPI's newer release.
@@ -109,10 +110,12 @@ jobs:
           # cassandra/ would shadow the installed wheel, so only the two .pyx files
           # tests/unit/cython/types_testhelper.pyx includes by relative path are staged.
           CIBW_TEST_SOURCES: tests cassandra/ioutils.pyx cassandra/cython_marshal.pyx
+          # 3.29.12 dropped the gevent reactor and its test file, so that run is skipped
+          # when the file is absent.
           CIBW_TEST_COMMAND: >-
             python -c "import importlib.metadata as m; f=[str(p) for p in m.files('scylla-driver')]; assert any(s.endswith('licenses/LICENSE.libev') for s in f), f" &&
             python -m pytest tests/unit
-            ${{ matrix.python == 'cp314t' && '' || '&& EVENT_LOOP_MANAGER=gevent python -m pytest tests/unit/io/test_geventreactor.py' }}
+            ${{ matrix.python == 'cp314t' && '' || '&& { [ ! -f tests/unit/io/test_geventreactor.py ] || EVENT_LOOP_MANAGER=gevent python -m pytest tests/unit/io/test_geventreactor.py; }' }}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
