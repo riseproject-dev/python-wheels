@@ -1,0 +1,57 @@
+From 868a9985403b2c1d24944e1280b2c65e6cbbd66b Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 25 Sep 2026 10:51:26 +0000
+Subject: [PATCH 2/3] mem: fall back to posix_memalign when <mm_malloc.h> is
+ missing
+
+CPUAllocator gets its 32-byte-aligned blocks from _mm_malloc()/_mm_free(),
+declared in <mm_malloc.h>. GCC installs that header for x86 targets only;
+riscv64 GCC has none, so mem.cc fails to compile:
+
+  dynet/mem.cc:13:10: fatal error: mm_malloc.h: No such file or directory
+
+Keep including the header wherever it exists (or wherever __has_include
+cannot tell), and otherwise define _mm_malloc()/_mm_free() in terms of
+posix_memalign()/free() -- the same pair GCC's own x86 <mm_malloc.h>
+wraps -- so the allocator behaves identically on every target.
+
+Upstream-Status: To upstream [not yet submitted; clab/dynet has had no commit since 2022, so this belongs in the taishi-i/dynet fork that publishes the dynet38 wheels]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ dynet/mem.cc | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/dynet/mem.cc b/dynet/mem.cc
+index 700da14c..10460cd3 100644
+--- a/dynet/mem.cc
++++ b/dynet/mem.cc
+@@ -10,7 +10,25 @@
+ 
+ #include <fcntl.h>
+ #if !_WINDOWS
++#if defined(__has_include)
++#if __has_include(<mm_malloc.h>)
++#define DYNET_HAVE_MM_MALLOC_H 1
++#endif
++#else
++#define DYNET_HAVE_MM_MALLOC_H 1
++#endif
++#if DYNET_HAVE_MM_MALLOC_H
+ #include <mm_malloc.h>
++#else
++// No <mm_malloc.h> on this target (GCC ships it for x86 only): use the same
++// posix_memalign()/free() pair that GCC's x86 <mm_malloc.h> wraps.
++static inline void* _mm_malloc(size_t size, size_t align) {
++  void* ptr;
++  if (align < sizeof(void*)) align = sizeof(void*);
++  return posix_memalign(&ptr, align, size) == 0 ? ptr : nullptr;
++}
++static inline void _mm_free(void* ptr) { free(ptr); }
++#endif
+ #endif
+ #include "dynet/except.h"
+ #include "dynet/devices.h"
+-- 
+2.43.0
+
