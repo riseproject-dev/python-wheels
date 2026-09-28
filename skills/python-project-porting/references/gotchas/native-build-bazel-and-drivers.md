@@ -76,6 +76,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
   `ld` unless `lld` is installed, so an upstream `-Wl,--icf=all` (which assumes the hermetic
   clang+lld toolchain) only fails at the final `.so` link, hours in. `dnf install lld` and
   Bazel's own linker probe switches every link to `-fuse-ld=lld`.
+- **610** — google-cloud-cpp's Bazel `crc32c.BUILD` leaves `HAVE_SSE42`/`HAVE_ARM64_CRC32C`
+  as bare `#define`s on any CPU but x86_64/arm64, so crc32c fails to preprocess on riscv64.
+  Carry the one-line default as an `http_archive(patches=)` on `google_cloud_cpp`; stage
+  licences per external repo from `bazel cquery 'deps(<target>)'`.
 
 ---
 
@@ -1174,3 +1178,28 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       `grep -rn -- '-Wl,--icf\|fuse-ld\|--start-lib' <checkout>` for gold/lld-only linker
       flags, and in the image run `clang++ -fPIC -shared -fuse-ld=lld -Wl,--icf=all x.cc`
       vs. the same without `-fuse-ld` — the bfd failure reproduces under QEMU instantly.
+
+610. **google-cloud-cpp (2.37.0, still on main) cannot build its bundled crc32c on riscv64
+    under Bazel: `bazel/crc32c.BUILD`'s `configure_template` first rewrites every
+    `#cmakedefine01 X` to `#define X`, then appends the value per key — but `HAVE_SSE42` and
+    `HAVE_ARM64_CRC32C` only get one under `@platforms//cpu:x86_64`/`:arm64`, and the
+    `//conditions:default` branch is `{}`.** On riscv64 both become bare `#define HAVE_SSE42`,
+    and crc32c's `#if HAVE_SSE42 && ...` dies with `operator '&&' has no left operand`
+    (`#if HAVE_ARM64_CRC32C`: `#if with no expression`). Reproduce in a second with
+    `printf '#define H\n#if H\n#endif\n' | gcc -E -x c++ -`. Any WORKSPACE project that
+    `http_archive`s `google_cloud_cpp` and links `@google_cloud_cpp//:storage` hits it
+    (runai-model-streamer-gcs, PR #2406).
+    - **Fix without touching google-cloud-cpp's archive by hand:** add
+      `patches = [Label("//third_party:<name>.patch")], patch_args = ["-p1"]` to the project's
+      own `google_cloud_cpp` `http_archive`, with the patch giving the default branch
+      `" HAVE_SSE42": " HAVE_SSE42 0", " HAVE_ARM64_CRC32C": " HAVE_ARM64_CRC32C 0"`
+      (crc32c's portable path). The project patch then *adds* that inner `.patch` file —
+      `git apply` handles a diff-inside-a-diff fine. Everything else in the google-cloud-cpp
+      world (gRPC 1.69, protobuf 29, BoringSSL, c-ares, bazel-built curl 7.69) compiled on
+      riscv64 unmodified; the whole `libstreamergcs.so` took 4.3h (5,125 actions) natively.
+    - **Licences for a Bazel static `.so`:** after the build, `bazel cquery
+      'deps(<target>)' --config=<cfg> --output=label`, strip each `@repo//` prefix, drop
+      `bazel_tools|platforms|rules_*|local_config_*|...`, and copy each remaining
+      `$(bazel info output_base)/external/<repo>/{LICENSE*,COPYING*,NOTICE*}` next to
+      `setup.py` as `LICENSE.<repo>` — it finds repos a hand list misses (gRPC pulled in
+      `envoy_api`, `com_github_cncf_xds`, `com_envoyproxy_protoc_gen_validate`).

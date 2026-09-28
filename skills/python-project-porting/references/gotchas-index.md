@@ -821,6 +821,10 @@ The porting gotchas (551 of them) live in [`references/gotchas/`](gotchas/), spl
   Bazel's `local_config_cc` probe falls back to GNU `ld`, so an upstream `-Wl,--icf=all`
   (lld/gold-only; gold has no riscv64) fails at the final `CppLink` hours in. `dnf install
   lld` next to `clang` and Bazel adds `-fuse-ld=lld` itself (the xprof case).
+- **610** — google-cloud-cpp's Bazel `crc32c.BUILD` leaves `HAVE_SSE42`/`HAVE_ARM64_CRC32C`
+  as bare `#define`s on any CPU but x86_64/arm64, so crc32c fails to preprocess on riscv64.
+  Carry the one-line default as an `http_archive(patches=)` on `google_cloud_cpp`; stage
+  licences per external repo from `bazel cquery 'deps(<target>)'`.
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
