@@ -1,0 +1,133 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow mirrors the `build_wheels` job of upstream's own
+# .github/workflows/wheels.yml, narrowed to Linux (cibuildwheel options live in
+# upstream's pyproject.toml, [tool.cibuildwheel]).
+name: Build imgui-bundle wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/imgui-bundle.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-imgui-bundle.yml'
+      - 'docs/packages/imgui-bundle.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-imgui-bundle.yml'
+      - 'docs/packages/imgui-bundle.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: imgui-bundle
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build imgui-bundle ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 480
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream's own cibuildwheel build list is cp311-cp314 (no free-threaded
+        # variants); cp311 is dropped to match this repo's numpy-driven cp312 floor.
+        python: ["cp312", "cp313", "cp314"]
+        libc: [manylinux, musllinux]
+
+    env:
+      IMGUI_BUNDLE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout imgui-bundle v${{ env.IMGUI_BUNDLE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pthom/imgui_bundle
+          ref: v${{ env.IMGUI_BUNDLE_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # external/{imgui,hello_imgui}/bindings' own pybind_*.cpp call nanobind's
+          # ndarray_export() with its pre-3.0 signature; pyproject.toml's
+          # build-system.requires has no upper bound (CLAUDE.md gotcha 107 shape,
+          # see build-gemmi.yml). CIBW_BEFORE_ALL replaces (not merges with)
+          # pyproject's own before-all (same gotcha 107 shape as CIBW_ENVIRONMENT
+          # below), which installs the X11/GL dev headers GLFW's CMake needs -
+          # repeat that command here per libc.
+          CIBW_BEFORE_ALL: >-
+            ${{ matrix.libc == 'musllinux' && 'apk add xorg-server-dev libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev mesa-dev mesa-gl cmake curl bash' || 'yum install -y libXcursor-devel libXi-devel libXinerama-devel libXrandr-devel mesa-libGL-devel' }} &&
+            echo 'nanobind<3' > /nanobind-constraint.txt
+          # scikit-build-core provisions cmake/ninja from PyPI when not already on
+          # PATH; both are published to our registry for riscv64, so pin pip/uv to
+          # binary wheels of them (and of the numpy test dependency) from there.
+          # CIBW_ENVIRONMENT replaces (not merges with) pyproject's own environment
+          # table (CLAUDE.md gotcha 107), which for *-musllinux* sets CMAKE_ARGS to
+          # disable the OpenGL2 backend (musl's loader has no lazy binding - see
+          # pyproject.toml) - repeat it here for musllinux legs only.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,cmake,ninja
+            PIP_CONSTRAINT=/nanobind-constraint.txt
+            PIP_BUILD_CONSTRAINT=/nanobind-constraint.txt
+            UV_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            UV_INDEX_STRATEGY=unsafe-best-match
+            UV_ONLY_BINARY=numpy,cmake,ninja
+            UV_CONSTRAINT=/nanobind-constraint.txt
+            UV_BUILD_CONSTRAINT=/nanobind-constraint.txt
+            ${{ matrix.libc == 'musllinux' && 'CMAKE_ARGS=-DIMGUI_BUNDLE_PYTHON_DISABLE_OPENGL2=ON' || '' }}
+          # Upstream's test-requires (pytest, pytest-asyncio, numpy) needs numpy, which
+          # has no riscv64 musllinux wheel in our registry (manylinux_riscv64 only) -
+          # skip the test-install/test-command on musllinux legs, keeping the build.
+          CIBW_TEST_SKIP: "*-musllinux*"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: imgui-bundle-${{ env.IMGUI_BUNDLE_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish imgui-bundle ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: imgui-bundle-${{ matrix.version }}-*riscv64
