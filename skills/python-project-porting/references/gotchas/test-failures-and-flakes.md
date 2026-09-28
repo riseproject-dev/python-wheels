@@ -118,6 +118,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
   every CPython version's eval-loop/GC frame on riscv64 except 3.13+, where the exact same 28
   tests fail identically on 3.13, 3.14 *and* 3.14t while 3.12 is fully green — deselect per
   interpreter, don't skip the whole suite.
+- **613** — A torch multiprocessing test's `RuntimeError: ... No space left on device (28)`
+  pickling tensors through `_share_fd_cpu_()` is `/dev/shm` exhaustion from Docker's 64MB
+  default, not disk space or a riscv64 bug — raise it with `CIBW_CONTAINER_ENGINE`'s
+  `create_args` (same knob as gotcha 552) rather than deselecting an addressable failure.
 
 ---
 
@@ -1736,3 +1740,31 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
     gotcha-33 way: deselect exactly those tests, generated once in the `run:` step from
     `matrix.python_version` (`if [ "$v" != "3.12" ]; then deselect+=(--deselect ...); fi`) so
     3.12 keeps exercising all of them and the list isn't tripled across the matrix.
+
+613. **A torch multiprocessing test failing with `RuntimeError: unable to allocate shared
+    memory(shm) ... No space left on device (28)` is `/dev/shm` exhaustion, not disk space
+    or an riscv64-specific bug — raise the container's shm size, don't deselect first (the
+    spacy-transformers 1.4.0 `test_multiprocessing` case).** `Language.pipe(texts,
+    n_process=2, ...)` spawns worker processes and torch's default `file_descriptor` sharing
+    strategy pickles the model's tensor storage into `/dev/shm`-backed anonymous fds
+    (`torch/multiprocessing/reductions.py::reduce_storage` → `_share_fd_cpu_()`) to hand
+    across the fork/spawn boundary. Docker containers default `/dev/shm` to 64MB regardless
+    of the host's real memory, and cibuildwheel's manylinux container is exactly that: a
+    plain `docker run` with no `--shm-size` override. Serializing a non-trivial transformer
+    (spacy-transformers' default is `roberta-base`, ~500MB in fp32) for two workers blows
+    through 64MB immediately — errno 28 (`ENOSPC`) from a *tmpfs*, unrelated to the runner's
+    actual disk. Only `cp314` showed it in the first run; that is scheduling/timing luck
+    (heavier concurrent load, or a GC/allocator sweep landing badly), not evidence the other
+    interpreters are immune — the same 64MB ceiling applies to every one of them and this
+    should reproduce on a bad enough day for any of them too. **Fix:** raise the container's
+    shm size via `CIBW_CONTAINER_ENGINE`'s `create_args` (same knob as gotcha 552, which
+    fixes a different Docker-default limitation the identical way) —
+    `CIBW_CONTAINER_ENGINE: "docker; create_args: --shm-size=2g"`. This is the *same*
+    container instance cibuildwheel uses for both the build and the test phase (one
+    `docker run`, `container.call()` for each step), so the `create_args` take effect for
+    `CIBW_TEST_COMMAND` without any separate test-container wiring. Sized at roughly 4x the
+    model's estimated footprint for headroom, not computed exactly from a live measurement.
+    Prefer this over deselecting `test_multiprocessing`: unlike gotcha 14's torch flakes
+    (an unfixable runner/libcpuinfo mismatch or a hard timeout), this failure has an
+    addressable root cause in the test environment's config, so skipping coverage here would
+    be trading a real fix for a permanent gap.

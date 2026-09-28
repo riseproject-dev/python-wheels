@@ -1375,6 +1375,12 @@ The porting gotchas (551 of them) live in [`references/gotchas/`](gotchas/), spl
   except 3.13+, where 28 identical tests fail on 3.13/3.14/3.14t and 3.12 is fully green —
   a documented per-arch native-unwind gap (pystack's `elfutils-aarch64-signal-frame.patch`
   exists only for AArch64), so deselect per interpreter rather than skip the whole suite.
+- **613** — A torch multiprocessing test's `RuntimeError: unable to allocate shared memory
+  ... No space left on device (28)` is `/dev/shm` exhaustion from Docker's 64MB default, not
+  disk space or a riscv64 bug (`Language.pipe(n_process=2)` pickling a transformer's tensors
+  through `_share_fd_cpu_()`, spacy-transformers 1.4.0's `test_multiprocessing`) — raise it
+  with `CIBW_CONTAINER_ENGINE`'s `create_args` (same knob, same container, as gotcha 552)
+  rather than deselecting a test with an addressable root cause.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
