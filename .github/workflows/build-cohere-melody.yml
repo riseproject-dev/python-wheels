@@ -1,0 +1,111 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/cohere-ai/melody/blob/v0.13.4/.github/workflows/python-build-wheels.yml
+name: Build cohere-melody wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cohere-melody.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cohere-melody.yml'
+      - 'docs/packages/cohere-melody.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cohere-melody.yml'
+      - 'docs/packages/cohere-melody.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cohere-melody
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cohere-melody ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # No abi3 feature on pyo3 in Cargo.toml, so upstream ships one wheel
+        # per interpreter (matches PyPI's cp3xx-cp3xx tags, cp310 through
+        # cp314t). The riscv64 manylinux image has cp310/cp311 too.
+        python: ["cp310", "cp311", "cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      COHERE_MELODY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout cohere-melody v${{ env.COHERE_MELODY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: cohere-ai/melody
+          ref: v${{ env.COHERE_MELODY_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # musllinux is out of reach: rustup publishes rust-std but no
+          # rustc/cargo host toolchain for riscv64gc-unknown-linux-musl.
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # cohere-melody ships no [tool.cibuildwheel], so the Rust toolchain
+          # its maturin backend needs is installed in-container.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+            sh -s -- -y --profile minimal
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests pyproject.toml
+          CIBW_TEST_COMMAND: >-
+            python -c "import cohere_melody; assert cohere_melody.__file__.endswith('.so'), cohere_melody.__file__" &&
+            python -m pytest -v --ignore=tests/templating/jinja/python
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cohere-melody-${{ env.COHERE_MELODY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cohere-melody ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: cohere-melody-${{ matrix.version }}-*-manylinux_riscv64
