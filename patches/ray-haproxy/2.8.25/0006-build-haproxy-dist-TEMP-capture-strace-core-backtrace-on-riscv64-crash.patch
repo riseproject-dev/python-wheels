@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 28 Sep 2026 00:00:00 +0000
+Subject: [PATCH] ci/build: TEMP capture strace/core backtrace on riscv64
+ haproxy -v crash
+
+Two fixes so far (ldd's self-exec quirk, then vendoring our own OpenSSL
+instead of Rocky 10's system one) have not resolved the `haproxy -v`
+segfault at the end of the build:
+
+    Verifying all deps resolve:
+    All NEEDED entries are allowlisted or vendored
+    ./ci/build/build-haproxy-dist.sh: line 321: 18518 Segmentation fault  LD_LIBRARY_PATH="$STAGE_DIR/lib" "$STAGE_DIR/haproxy" -v
+
+Both fixes were made by inference from log text alone, without access to
+riscv64 hardware to actually run the binary and inspect the crash. This
+adds a TEMPORARY, riscv64-only diagnostic around that exact invocation:
+`ulimit -c unlimited`, run it under `strace -f` (printing the tail of the
+trace on failure), and if a core file turns up, run `gdb -batch -ex bt`
+(plus registers and the faulting instructions) against it. `gdb`/`strace`
+are installed on demand since neither is guaranteed present in
+manylinux_2_39_riscv64.
+
+This patch exists to get a real crash signal from an actual CI run on the
+riscv64 runner; it is not a fix and is meant to be removed (or replaced by
+the real fix) once that signal is in hand.
+
+Upstream-Status: Inappropriate [temporary riscv64 CI diagnostic, not meant to be carried or upstreamed]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/ci/build/build-haproxy-dist.sh b/ci/build/build-haproxy-dist.sh
+--- a/ci/build/build-haproxy-dist.sh
++++ b/ci/build/build-haproxy-dist.sh
+@@ -318,7 +318,43 @@ else
+     echo "    Stack canary: NO — consider -fstack-protector-strong"
+ fi
+
+-LD_LIBRARY_PATH="$STAGE_DIR/lib" "$STAGE_DIR/haproxy" -v
++if [ "$ARCH_LABEL" = "riscv64" ]; then
++    # TEMPORARY diagnostic (not a real fix): capture a backtrace/strace from
++    # this exact invocation on the real riscv64 runner, since this segfaults
++    # with zero output and no prior local riscv64 hardware access has been
++    # available to reproduce it directly.
++    dnf install -y gdb strace 2>/dev/null || true
++    ulimit -c unlimited
++    echo "  core_pattern: $(cat /proc/sys/kernel/core_pattern 2>/dev/null || echo unknown)"
++    set +e
++    strace -f -o /tmp/haproxy-v-strace.log \
++        env LD_LIBRARY_PATH="$STAGE_DIR/lib" "$STAGE_DIR/haproxy" -v
++    STATUS=$?
++    set -e
++    echo "  haproxy -v exit status: $STATUS"
++    if [ "$STATUS" -ne 0 ]; then
++        echo "==> DIAGNOSTIC: haproxy -v failed (status $STATUS); last strace lines:"
++        tail -n 80 /tmp/haproxy-v-strace.log 2>/dev/null || echo "  (no strace log)"
++        echo "==> DIAGNOSTIC: searching for a core dump"
++        CORE=""
++        for d in . /workspace /tmp "$STAGE_DIR"; do
++            for f in "$d"/core "$d"/core.*; do
++                [ -f "$f" ] && CORE="$f" && break 2
++            done
++        done
++        if [ -n "$CORE" ]; then
++            echo "  found core: $CORE"
++            gdb -batch -ex 'set pagination off' -ex bt -ex 'info registers' \
++                -ex 'x/20i $pc-40' -ex 'info sharedlibrary' \
++                "$STAGE_DIR/haproxy" "$CORE" 2>&1
++        else
++            echo "  no core dump found"
++        fi
++        exit "$STATUS"
++    fi
++else
++    LD_LIBRARY_PATH="$STAGE_DIR/lib" "$STAGE_DIR/haproxy" -v
++fi
+
+ # ---------------------------------------------------------------------------
+ # 6. Package
