@@ -1206,6 +1206,11 @@ The porting gotchas (551 of them) live in [`references/gotchas/`](gotchas/), spl
   `Queue.get()` with no timeout turns one segfault into a full job hang; bound it with
   `CIBW_TEST_REQUIRES: pytest-timeout` plus `PYTEST_ADDOPTS="--timeout=<n>"` folded into
   `CIBW_ENVIRONMENT`, which applies to both the build and test phases.
+- **607** — grpc's own `grpcio_tests` harness hard-imports `coverage` from
+  `tests/__init__.py` regardless of whether the run uses it, so any grpc-family port
+  staging that file via `CIBW_TEST_SOURCES` needs `coverage` in `CIBW_TEST_REQUIRES`;
+  name the compiled test dep in `PIP_ONLY_BINARY` (e.g. `grpcio`) instead of `:all:` so
+  coverage's sdist-only riscv64 install isn't blocked (gotcha 488).
 
 ### Test failures, flakes & arch-specific bugs — [`gotchas/test-failures-and-flakes.md`](gotchas/test-failures-and-flakes.md)
 
