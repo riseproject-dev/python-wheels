@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (550 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (551 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -439,6 +439,12 @@ The porting gotchas (550 of them) live in [`references/gotchas/`](gotchas/), spl
   whole release history, no riscv64 wheel anywhere) blocks `pip install` on riscv64 outright,
   even when the package's own extension is an ordinary portable C build — check `requires_dist`
   for zero-sdist exact pins before reading any build script (the openbricks/mpy-cross case).
+- **605** — Gotcha 601's closed-Cython-core finding is Cisco's build practice for the whole
+  pyATS suite, not just `unicon`: `pyats` and its `pyats.*` siblings (kleenex, easypy,
+  topology, datastructures, aetest, async, …) each have zero sdist/`py3-none-any` ever, no
+  per-package repo in the `CiscoTestAutomation` org, and wheels that are 100% Cython `.so`
+  even for the most pure-Python-sounding one (`pyats.datastructures`) — confirm per package
+  with two curl calls rather than re-deriving from scratch (the pyats family case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

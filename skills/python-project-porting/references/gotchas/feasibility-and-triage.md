@@ -5016,3 +5016,42 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     `mpy-cross` C tool for riscv64 from scratch and packaging it as a new `mpy-cross`
     wheel, a separate, substantial, out-of-scope undertaking with no upstream recipe to
     mirror.
+
+605. **Gotcha 601's closed-Cython-core finding isn't specific to `unicon` — it's Cisco's
+    build practice for the *entire* pyATS suite, confirmed package-by-package, not
+    inferred from one (the pyats family case).** Triaging `pyats` 26.7 itself (not just
+    its `unicon` dependency) turned up the identical shape, independently: PyPI's
+    `https://pypi.org/pypi/pyats/json` lists 90 releases back to 4.0.0/19.7 and **zero**
+    are `sdist` and **zero** are `py3-none-any` — every single file across every release is
+    a CPython-ABI-tagged `bdist_wheel`. The `CiscoTestAutomation/pyats` GitHub repo (the
+    only public hit for the plain `pyats` name) is docs-only — a Sphinx tree (`docs/`,
+    `conf.py`, `index.rst`) with no `setup.py`/`src/` at all — and no `pyats.aetest`,
+    `pyats.easypy`, `pyats.kleenex`, `pyats.topology`, `pyats.datastructures`,
+    `pyats.async`, `aetest`, `easypy`, `kleenex`, `topology`, `datastructures`, or `async`
+    repo exists in that org either (each checked individually, all 404). Downloading the
+    actual wheels confirms it's not just a metadata gap: `pyats-26.7-*.whl` is 100% Cython
+    `.so` (`pyats/cli/*.so`, `pyats/manifest/*.so`, `pyats/configuration.cpython-*.so`, …)
+    with only empty `__init__.py` stubs and a 6-line compat shim (`ats/__init__.py`) as
+    actual `.py` source — and the *most* pure-Python-sounding sibling,
+    `pyats.datastructures` (`attrdict`, `treenode`, `weaklist`, `orderabledict` — the kind
+    of module a metapackage would ship as plain `.py`), is **also** 100% `.so` with zero
+    `.py` beyond a one-line `__init__.py`. The manylinux2014_aarch64 wheel is consistently
+    4-6x the manylinux2014_x86_64 wheel's size across every one of `pyats`,
+    `pyats.kleenex`, `pyats.easypy`, `pyats.topology`, `pyats.datastructures`,
+    `pyats.aetest` and `pyats.async` (e.g. `pyats.aetest` 26.7: 1.66 MB x86_64 vs 9.3 MB
+    aarch64) — a signature of unstripped/less-optimized Cython codegen per target, not
+    something a pure orchestrator package would show. **Consequence for triaging any other
+    `pyats.*`/`genie.*` sibling: don't re-derive this from scratch per package — check
+    `.../json` for sdist/`none-any` history and pull one wheel to confirm `.so`-only
+    content (2 curl calls), and if confirmed, park it with the same reasoning as `unicon`
+    (gotcha 601) rather than treating it as a fresh infeasibility category.** Note the
+    license classifier reads `Apache 2.0` / `License :: OSI Approved :: Apache Software
+    License` on every one of these — permissive-sounding, but irrelevant when zero source
+    has ever been published under it; don't let an OSI classifier substitute for checking
+    an actual sdist exists. Separately, `pyats` itself pulls in `unicon` **transitively**
+    (`pyats` → `pyats.connections` → `unicon`, the last a hard non-extra
+    `Requires-Dist`), so even a hypothetical from-source build of every compiled `pyats.*`
+    piece would still dead-end on `unicon` — but that transitive path is a secondary,
+    reinforcing reason here, not the primary one: `pyats` is independently closed-source
+    on its own compiled code, the same as `unicon` itself, not merely
+    blocked-on-dependency through it.
