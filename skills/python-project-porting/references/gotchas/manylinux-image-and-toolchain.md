@@ -1816,3 +1816,24 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
        bare file name, or `compile_protos(path)` with a parentless path, leave it unset.
        Setting it cost one ~35-minute riscv64 cycle, spent compiling ~300 crates before
        `build.rs` ran.
+
+606. **Pre-generating protobuf output on the host before cibuildwheel copies the checkout
+     in (gotcha 201) does not exempt the per-interpreter container from needing `protoc`
+     too — a `setup.py` command can gate on the tool's mere *presence* in `PATH` even
+     when that command never calls it (the valkey-glide-sync case; see
+     `build-valkey-glide-sync.yml`).** glide-sync's custom `build_py.run()` does
+     `shutil.which("protoc")` and raises `RuntimeError: Failed to find protoc in PATH` if
+     it is missing, unconditionally, before ever checking whether the `.proto`-derived
+     `.py` files already exist — its own vendoring step (`vendor_dependencies()`) is a
+     plain `shutil.copytree`, not a `protoc` invocation. Generating those files on the
+     host with `docker run` against the same manylinux image (so gotcha 100's
+     `protobuf-compiler` package is proven installable) is not enough: cibuildwheel still
+     builds the wheel in a *fresh* per-interpreter container that never ran that step, and
+     `python -m build` fails in `build_py` before reaching any vendoring logic. The fix is
+     gotcha 100's `yum install -y protobuf-compiler` again, but in `CIBW_BEFORE_ALL_LINUX`
+     this time (not `CIBW_BEFORE_BUILD`, which upstream's own pyproject.toml leaves empty
+     on unsupported architectures) — `protobuf-devel` is not needed since nothing in the
+     container actually invokes `protoc`, only checks for it. Read a build script's tool
+     gate all the way through before assuming a host-side pre-step satisfies it: a
+     presence check and an actual invocation impose different requirements on where the
+     tool has to live.

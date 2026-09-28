@@ -963,6 +963,11 @@ The porting gotchas (551 of them) live in [`references/gotchas/`](gotchas/), spl
   a bare `compile_protos("x.proto")` fails "does not reside within any --proto_path"; CRB's protoc
   finds `/usr/include` itself via `<bindir>/../include`, so leave it unset (the
   databricks-zerobus-ingest-sdk case).
+- **606** — Pre-generating protobuf output on the host before cibuildwheel copies the checkout
+  in (gotcha 201) doesn't exempt the per-interpreter container from needing `protoc` too: a
+  `setup.py` command can gate on the tool's mere presence in `PATH` even when it never calls
+  it, so gotcha 100's `yum install -y protobuf-compiler` still has to go in
+  `CIBW_BEFORE_ALL_LINUX` (the valkey-glide-sync case).
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
