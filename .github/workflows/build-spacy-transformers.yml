@@ -1,0 +1,145 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `setup.py`/`pyproject.toml` cibuildwheel config of
+# https://github.com/explosion/spacy-transformers/blob/release-v1.4.0/pyproject.toml
+# and the test invocation of
+# https://github.com/explosion/spacy-transformers/blob/release-v1.4.0/.github/workflows/tests.yml
+name: Build spacy-transformers wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/spacy-transformers.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-spacy-transformers.yml'
+      - 'docs/packages/spacy-transformers.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-spacy-transformers.yml'
+      - 'docs/packages/spacy-transformers.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: spacy-transformers
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build spacy-transformers ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream's [tool.cibuildwheel] skips `cp3??t-*` (no free-threaded
+        # wheels) and builds cp310/cp311 too, but torch - a hard runtime
+        # dependency - has no riscv64 wheel on our registry or public PyPI for
+        # cp310/cp311, only cp312-cp314t.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+
+    env:
+      SPACY_TRANSFORMERS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout spacy-transformers ${{ env.SPACY_TRANSFORMERS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: explosion/spacy-transformers
+          ref: release-v${{ env.SPACY_TRANSFORMERS_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # test_multiprocessing's Language.pipe(n_process=2) pickles the transformer's
+          # tensors through /dev/shm, overrunning Docker's 64MB default (gotcha 613).
+          CIBW_CONTAINER_ENGINE: "docker; create_args: --shm-size=2g"
+          # numpy (build and runtime) and spacy/srsly/torch (runtime) have no
+          # riscv64 wheels on public PyPI; both environments resolve them from
+          # our registry. spacy-alignments (runtime) has no riscv64 wheel
+          # anywhere yet, so its sdist is compiled instead - it needs a Rust
+          # toolchain, installed below, but is never actually imported by this
+          # package or its tests.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PATH=$PATH:$HOME/.cargo/bin
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          # Upstream leaves cibuildwheel's test-command empty and runs the
+          # suite from tests.yml instead; this is that invocation, minus the
+          # sdist build/mypy steps, which check packaging and typing, not the
+          # wheel. tests.yml installs requirements.txt's
+          # transformers[sentencepiece], an extra setup.cfg's install_requires
+          # omits; one test needs that backend, so it's added explicitly here.
+          CIBW_TEST_REQUIRES: pytest pytest-cov sentencepiece
+          CIBW_TEST_COMMAND: python -m pytest --pyargs spacy_transformers
+          # transformers<4.53.3 (spacy-transformers' own pin) requires
+          # tokenizers>=0.21,<0.22; unconstrained, pip picks the highest
+          # matching point release (0.21.2/0.21.4), which has no riscv64
+          # wheel anywhere, and source-builds it, where rustc SIGABRTs on
+          # these runners (gotcha 228). Forcing binary-only makes pip fall
+          # back to our registry's 0.21.1 wheel instead.
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=tokenizers
+
+      - name: Check the extension modules made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          expected = {"spacy_transformers/align"}
+          for whl in sys.argv[1:]:
+              found = {n.split(".", 1)[0] for n in zipfile.ZipFile(whl).namelist()
+                       if n.endswith(".so")}
+              assert found == expected, (whl, found)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: spacy-transformers-${{ env.SPACY_TRANSFORMERS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish spacy-transformers ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: spacy-transformers-${{ matrix.version }}-*-manylinux_riscv64
