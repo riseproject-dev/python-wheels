@@ -420,6 +420,10 @@ The porting gotchas (550 of them) live in [`references/gotchas/`](gotchas/), spl
 - **591** — A pip-installable CPython JIT (pyston "lite") replaces the eval loop, so it is
   locked to CPython 3.7–3.10 internals and to DynASM x86_64/aarch64 codegen with `#error "unknown
   arch"`. There is no interpreter-only fallback, so riscv64 would need a new code generator (the pyston case).
+- **600** — A pyo3 wrapper's own git repo can hold only the binding layer, with the real native
+  engine reached through Cargo path dependencies into a private monorepo that is never checked
+  out — zero sdist ever, no `.github/` in the repo, and the wheel's own bundled CycloneDX SBOM
+  names every engine crate `LicenseRef-<vendor>-Proprietary` (the daily-python case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

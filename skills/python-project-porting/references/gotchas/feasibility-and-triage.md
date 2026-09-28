@@ -274,6 +274,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **591** — A pip-installable CPython JIT (pyston "lite") replaces the eval loop, so it is
   locked to CPython 3.7–3.10 internals and to DynASM x86_64/aarch64 codegen with `#error "unknown
   arch"`. There is no interpreter-only fallback, so riscv64 would need a new code generator (the pyston case).
+- **600** — A pyo3 wrapper's own git repo can hold only the binding layer, with the real native
+  engine reached through Cargo path dependencies into a private monorepo that is never checked
+  out — zero sdist ever, no `.github/` in the repo, and the wheel's own bundled CycloneDX SBOM
+  names every engine crate `LicenseRef-<vendor>-Proprietary` (the daily-python case).
 
 ---
 
@@ -4841,3 +4845,58 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       issue-template commits in 2024-08), and there is no sdist on PyPI. Park the `-autoload`
       sibling too (gotcha 150/382). `pyston-autoload` 2.3.5 is a ~1.5 KB `.pth` that requires
       `pyston==2.3.5`.
+
+600. **A pyo3 wrapper's own public git repo can hold only the binding layer — the real native
+    engine reached through Cargo `path = "../…"` dependencies into a sibling directory that is
+    part of a private monorepo, never checked out anywhere public (the daily-python case).**
+    `daily-python`'s `Cargo.toml` (checked at both the target tag `v0.32.0` and current `main`)
+    depends on `daily-core = { path = "../daily-core" }` and
+    `webrtc-daily = { path = "../webrtc-daily" }` — plain path dependencies, not git or
+    crates.io. `Cargo.lock` confirms both resolve with no `source = "..."` line at all (the
+    signature of a local-only package), and the public repo's own tree has no `daily-core/` or
+    `webrtc-daily/` directory one level up, no `.gitmodules`, and no `.github/` workflow of any
+    kind — there is no CI in this repo to read for how the wheel actually gets built. A repo
+    comment gives the reason away: "daily-python is not a member of the larger `daily-x`
+    workspace" — `daily-core`/`webrtc-daily` live in Daily's internal `daily-x` monorepo, which
+    is not published anywhere public (no matching repo in the `daily-co` GitHub org, no
+    crates.io entries for either name). This is gotcha 157/246's closed-source-vendor shape one
+    layer earlier than either: 157/246 at least have an installer script or a git-committed
+    binary blob to name a platform table from; here there is nothing in the checkout that even
+    *attempts* to reach the native engine, because the checkout was never meant to build
+    standalone.
+    - **The wheel's own bundled SBOM is the fastest, most authoritative confirmation — read it
+      before concluding from the `Cargo.toml` alone.** Every wheel PyPI publishes for this
+      package includes `<dist>.dist-info/sboms/<pkg>.cyclonedx.json` (a build-time artifact,
+      not something upstream wrote by hand). Its `components` list carries `daily-core`,
+      `webrtc-daily`, `webrtc-sys`, and 19 further Daily-internal crates (`daily-core-types`,
+      `daily-settings-helpers`, `mediasoupclient`/`mediasoupclient-sys`, …), every one licensed
+      `LicenseRef-Daily-co-Proprietary` — an explicit proprietary-license declaration, not an
+      inferred one — with a `purl` of the form
+      `pkg:cargo/daily-core@0.40.0?download_url=file:///__w/daily-x/daily-x/daily-core`. That
+      `/__w/daily-x/daily-x/...` path is GitHub Actions' own `$GITHUB_WORKSPACE` convention
+      (`/__w/<owner>/<repo>/...`), so the SBOM is independent, upstream-generated proof that the
+      wheel was built inside a private `daily-x` Actions run, not from this public checkout.
+      Generalizes past this one vendor: `unzip -l *.whl | grep -i sbom`, then grep the JSON's
+      `licenses[].expression` for `Proprietary`/`LicenseRef-` and its `purl`/`bom-ref` for a
+      `file:///` or `/__w/<org>/<repo>/` path — a maturin/setuptools-rust project that ships a
+      CycloneDX SBOM answers the whole triage from one file already sitting in the wheel, no
+      `strings`/`readelf` archaeology needed.
+    - **Zero sdist across every release is the corroborating signal, not the primary one.**
+      `curl -s https://pypi.org/pypi/daily-python/json` shows 80 releases and 0
+      `packagetype == 'sdist'` entries (gotcha 431's check) — consistent with "there is no
+      public source tree this could be built from," but the path-dependency + SBOM evidence
+      above is what actually proves it; a missing sdist alone only proves upstream chose not to
+      publish one.
+    - **A 41 MB `.so` for one small pyo3 binding module is worth confirming, but is not itself
+      the blocker.** `daily/daily.abi3.so` in the `manylinux_2_28_x86_64` wheel is 41 MB
+      uncompressed against ~15 KB of Python source (`daily/__init__.py` + a `.pyi` stub) — the
+      whole WebRTC engine (mediasoup-client plus Daily's own layer) statically linked into one
+      extension module. That size is consistent with a real WebRTC stack and would be normal
+      for an honest from-source port; it is the missing source, not the binary's size, that
+      parks this one.
+    - **Don't stop at "no riscv64 target support for WebRTC codec SIMD" as the reason.** The
+      task framing this port was queued under (vendored codec assembly, no riscv64 rustc target)
+      never gets reached — there is no source tree to check `cargo metadata
+      --filter-platform riscv64gc-unknown-linux-gnu` against in the first place. Read the
+      dependency graph shape before assuming an architecture-support investigation is the next
+      step.
