@@ -1,0 +1,175 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_linux` + `test_linux` jobs of
+# https://github.com/pymc-devs/nutpie/blob/v0.16.11/.github/workflows/ci.yml
+name: Build nutpie wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/nutpie.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-nutpie.yml'
+      - 'docs/packages/nutpie.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-nutpie.yml'
+      - 'docs/packages/nutpie.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: nutpie
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build nutpie ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 480
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      NUTPIE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout nutpie v${{ env.NUTPIE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pymc-devs/nutpie
+          ref: v${{ env.NUTPIE_VERSION }}
+          persist-credentials: false
+
+      # nuts-rs/faer/zarrs are all pure Rust (no BLAS/LAPACK), so the riscv64gc
+      # target resolves the same dependency tree as x86_64/aarch64. bridgestan's
+      # build.rs only runs bindgen over a header (no Stan compilation at build
+      # time), which needs libclang.
+      #
+      # No `--locked` (matching upstream's own ci.yml, which never passes it):
+      # the v0.16.11 tag's committed Cargo.lock still lists the "nutpie" crate
+      # itself as version 0.16.10 (a stale self-entry left by their release
+      # tooling), so cargo needs to update that one line and --locked forbids
+      # it.
+      - name: Build wheels
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --out dist --interpreter 3.12 3.13 3.14
+          manylinux: '2_39'
+          before-script-linux: dnf install -y clang-libs clang || apt install -y llvm-dev libclang-dev clang
+
+      - name: Verify the wheels ship the compiled extension
+        run: |
+          set -euo pipefail
+          for whl in dist/*.whl; do
+            python3 - "$whl" <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = [n for n in names if n.endswith(".so")]
+          assert any("_lib" in n for n in sos), sos
+          assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
+          print(sys.argv[1], "->", sos)
+          EOF
+          done
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: false
+
+      # Upstream gates its release on the "stan" pytest suite, but that needs
+      # stanc3 (github.com/stan-dev/stanc3 releases), which ships no riscv64
+      # build; "pymc"/"flow" need numba (-> llvmlite, parked, gotcha
+      # feasibility-and-triage.md) or jax. None of upstream's own suites can
+      # run here, so this drives the compiled sampler directly through
+      # nutpie's dependency-free `compiled_pyfunc` API instead (gotcha 187).
+      - name: Sample a toy model with each wheel
+        env:
+          UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+          UV_INDEX_STRATEGY: unsafe-best-match
+          UV_ONLY_BINARY: numpy,scipy,pandas,pyarrow
+        run: |
+          set -euo pipefail
+          for py in 3.12 3.13 3.14; do
+            venv="$RUNNER_TEMP/venv-$py"
+            uv venv --python "$py" "$venv"
+            tag="cp$(echo "$py" | tr -d '.')"
+            uv pip install --python "$venv/bin/python" dist/nutpie-*-"$tag"-*.whl
+            "$venv/bin/python" - <<'EOF'
+          import numpy as np
+          import nutpie
+          from nutpie.compiled_pyfunc import from_pyfunc
+
+          def make_logp_fn():
+              def logp(x):
+                  return float(-0.5 * x[0] ** 2), np.array([-x[0]], dtype="float64")
+
+              return logp
+
+          def make_expand_fn(seed1, seed2, chain):
+              def expand(x):
+                  return {"x": np.asarray(x, dtype="float64", order="C")}
+
+              return expand
+
+          model = from_pyfunc(
+              ndim=1,
+              make_logp_fn=make_logp_fn,
+              make_expand_fn=make_expand_fn,
+              expanded_dtypes=[np.dtype("float64")],
+              expanded_shapes=[(1,)],
+              expanded_names=["x"],
+          )
+          trace = nutpie.sample(
+              model, chains=2, tune=300, draws=300, cores=1, seed=42, progress_bar=False
+          )
+          draws = trace.posterior["x"].to_numpy()
+          mean = draws.mean()
+          std = draws.std()
+          assert abs(mean) < 0.3, mean
+          assert 0.6 < std < 1.4, std
+          print("sampled standard normal via compiled_pyfunc: mean", mean, "std", std)
+          EOF
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: nutpie-${{ env.NUTPIE_VERSION }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish nutpie ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: nutpie-${{ matrix.version }}-manylinux_riscv64

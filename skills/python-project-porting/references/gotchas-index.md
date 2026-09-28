@@ -716,6 +716,10 @@ The porting gotchas (551 of them) live in [`references/gotchas/`](gotchas/), spl
   sysroot or container: host `clang --target=riscv64-linux-gnu` with the x86_64 glibc
   headers, plus stubs for `gnu/stubs-32.h` and the `regparm` in `pthreadtypes-arch.h`
   (the foxglove-sdk case).
+- **608** — A tagged release's own committed `Cargo.lock` can be stale by one version bump in
+  the crate's own self-entry (release tooling bumps `Cargo.toml` before regenerating the
+  lock), which only `--locked` turns into a build failure; drop `--locked` to match upstream's
+  own CI rather than patching or regenerating `Cargo.lock` (the nutpie 0.16.11 case).
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
