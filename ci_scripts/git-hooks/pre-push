@@ -7,7 +7,7 @@
 # catches a commit made before the hook was installed, an amend/rebase that
 # reintroduced one, or a merge commit whose own message was never run through
 # commit-msg. Scans every commit about to be pushed that the remote doesn't
-# already have.
+# already have - both its message and its author/committer identity.
 
 set -eu
 
@@ -45,7 +45,15 @@ while read -r local_ref local_sha remote_ref remote_sha; do
         if ! printf '%s' "$msg" | "$checker" - 2>/tmp/check_no_ai_attribution.$$; then
             echo "check_no_ai_attribution: blocked in commit $(git rev-parse --short "$commit") ($local_ref):" >&2
             cat /tmp/check_no_ai_attribution.$$ >&2
-            rm -f /tmp/check_no_ai_attribution.$$
+            status=1
+        fi
+        rm -f /tmp/check_no_ai_attribution.$$
+
+        # Author AND committer: a bad identity can slip in via either field.
+        idents="$(git log --format='%an <%ae>|%cn <%ce>' -1 "$commit" | tr '|' '\n')"
+        if ! printf '%s\n' "$idents" | "$checker" --identity - 2>/tmp/check_no_ai_attribution.$$; then
+            echo "check_no_ai_attribution: blocked in commit $(git rev-parse --short "$commit") ($local_ref):" >&2
+            cat /tmp/check_no_ai_attribution.$$ >&2
             status=1
         fi
         rm -f /tmp/check_no_ai_attribution.$$
