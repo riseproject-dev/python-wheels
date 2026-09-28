@@ -41,6 +41,12 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
   entirely, and the suite selected as the complement of the modules that read it.
 - **512** — `--ignore`/`--ignore-glob` do nothing under `pytest --pyargs <pkg>`; cut tests with
   `--deselect`, whose nodeids are relative to the package dir, not the printed rootdir.
+- **565** — A crashed `multiprocessing.Process` child's parent blocking forever on
+  `Queue.get()` with no timeout turns one segfault into a full job hang; bound it with
+  `pytest-timeout` and `PYTEST_ADDOPTS="--timeout=<n>"`.
+- **607** — grpc's own `grpcio_tests` harness hard-imports `coverage` from
+  `tests/__init__.py` regardless of whether the run uses it; needs `coverage` in
+  `CIBW_TEST_REQUIRES`, named (not `:all:`) in `PIP_ONLY_BINARY`.
 
 ---
 
@@ -809,3 +815,39 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
     `Timeout` traceback instead of the job sitting idle. This bounds the symptom, not the
     underlying crash (see gotcha 566 for that) — it turns an unknown number of silent hours
     into a known number of minutes so the next CI cycle is cheap to iterate on.
+
+607. **grpc's own `grpcio_tests` harness hard-imports `coverage` from `tests/__init__.py`
+    regardless of whether the run actually uses it — staging that file via
+    `CIBW_TEST_SOURCES` needs `coverage` in `CIBW_TEST_REQUIRES` even for a plain
+    `pytest tests/<suite>/*_test.py` invocation (the grpcio-observability case; applies to
+    every grpcio_tests-based grpc-family port — grpcio, grpcio-tools,
+    grpcio-observability, grpcio-csm-observability, …).** `tests/__init__.py` does
+    `from tests import _loader` unconditionally, to make `python setup.py test_lite`'s
+    custom `unittest.TestLoader` importable; `tests/_loader.py` in turn does
+    `import coverage` at module scope for the `coverage.Coverage()` instrumentation that
+    loader wraps its collection in. Plain pytest never touches that `Loader` class — it
+    collects the given file paths directly — but the bare `import coverage` still runs at
+    collection time the moment `tests/__init__.py` is on the import path, so the whole run
+    dies before any test executes: `ImportError while importing test module … :
+    tests/__init__.py:15: in <module> from tests import _loader` →
+    `ModuleNotFoundError: No module named 'coverage'`.
+    - **Fix is one line**: add `coverage` to `CIBW_TEST_REQUIRES`. grpc's own top-level
+      `requirements.txt` pins `coverage>=7.9.0` — match that pin, it costs nothing and is
+      what upstream's own CI installs before running this exact test tree.
+    - **coverage.py has no riscv64 wheel anywhere** (checked its PyPI file list: only
+      `manylinux`/`musllinux`/`win`/`macos` `cpNN` wheels plus an sdist, no
+      `py3-none-any`), so a `CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=:all:` fail-fast knob
+      (gotcha 12 — here stopping the wheel's own `grpcio==<ver>` install_requires from
+      silently falling back to a from-source grpcio build when the registry lags) blocks
+      its sdist install outright with `ERROR: Could not find a version that satisfies the
+      requirement coverage`. Don't reach for `PIP_ONLY_BINARY=:all: PIP_NO_BINARY=coverage`
+      to route around it — gotcha 488 already found that pairing's outcome depends on
+      `os.environ` iteration order. Name the actual compiled dependency instead
+      (`PIP_ONLY_BINARY=grpcio`, add other shipped compiled test-requires like `protobuf`
+      if the port pulls them); `coverage`/`opentelemetry-sdk`/`pytest` are then free to
+      resolve normally, sdist and all — the container already has the C toolchain that
+      built the wheel itself, so coverage's optional C tracer extension compiles in
+      seconds.
+    - **This is a harness-level import, not a per-ABI build artifact**, so it hits every
+      interpreter in the matrix identically (cp312/cp313/cp314/cp314t alike) — one CI
+      cycle confirming the fix on any single leg is enough to close the rest.
