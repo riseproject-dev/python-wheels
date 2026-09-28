@@ -28,6 +28,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
   different path in the git checkout than in the PyPI sdist.
 - **259** — A maturin `bindings = "bin"` project can declare two `[[bin]]` targets where
 - **260** — `puccinialin` (and similar rust-bootstrap-on-demand helpers) has no riscv64 entry
+- **608** — A tagged release's own committed `Cargo.lock` can be stale by one version bump in
+  the crate's own self-entry, which only `--locked` turns into a build failure.
 - **371** — pyo3 0.22's version ceiling (gotcha 306) is a hard ceiling for a non-abi3,
   per-interpreter build too, one minor above its own release-time latest — the
   `PYO3_USE_ABI3_FORWARD_COMPATIBILITY` escape hatch works without turning abi3 on.
@@ -91,6 +93,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
   reverse-dependency closure in `Cargo.lock`, not by "one extension per interpreter".
 - **597** — A riscv64 `cargo check` of a tree whose `-sys` crates compile C needs no riscv64
   sysroot: host clang plus x86_64 glibc headers and two stub headers.
+- **608** — A tagged release's committed `Cargo.lock` can have a stale self-version entry
+  (the crate's own `[[package]] version` a release behind its `Cargo.toml`), which only
+  `maturin-action`'s `--locked` turns into a build failure.
 
 ---
 
@@ -1481,3 +1486,30 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       so they say nothing about riscv64 C codegen. That matters little for the well-trodden
       `lz4-sys`/`zstd-sys`, but it is no substitute for gotcha 412's generic-path check when
       the C is the unknown.
+
+608. **A tagged release's own committed `Cargo.lock` can be stale by one version bump, and
+    `maturin-action`'s `args: --locked` turns that into a hard failure even when upstream's
+    own CI never passes `--locked` at all** (nutpie 0.16.11: `cargo metadata`/`cargo build`
+    error `cannot update the lock file ... because --locked was passed`, `💥 maturin failed`).
+    The mismatch isn't a real dependency drift — it's the crate's *own* self-entry: the
+    package's release tooling bumps `Cargo.toml`'s `version` but tags before regenerating
+    `Cargo.lock`, so the lock's `[[package]] name = "<crate>" version = "..."` line still
+    names the previous release. `cargo metadata --locked` (or a plain build) refuses to fix
+    even that one line without `--locked` being dropped or `--offline` with a pre-populated
+    registry being used instead. Diagnose by cloning the upstream tag and comparing:
+    ```bash
+    git clone --depth 1 --branch <tag> <repo> /tmp/x && cd /tmp/x
+    cargo metadata --locked --format-version 1   # reproduces the exact CI error
+    git diff Cargo.lock                          # after a metadata run *without* --locked
+    ```
+    If the diff is a single `version = "..."` line inside the crate's own `[[package]]`
+    block, this is that trap, not a real re-resolution risk (gotcha 10's "floating deps"
+    case is different: there the *whole* tree re-resolves because no lock ships at all).
+    Fix: check whether upstream's own release workflow passes `--locked` to
+    `maturin-action`/`cargo build` — it usually doesn't, because upstream never builds from
+    a lock file this stale — and drop `--locked` from our own `args:` to match (see
+    `build-tombi.yml` for the same pattern from a version-patch step leaving workspace-local
+    `Cargo.lock` entries stale). Regenerating and committing a patched `Cargo.lock` under
+    `patches/<pkg>/<version>/` is unnecessary extra surface for a one-line, upstream-caused
+    mismatch that plain `cargo build` (no `--locked`) fixes on every run without touching any
+    other dependency.
