@@ -6863,7 +6863,7 @@ packages:
     .github/ only has a changelog-entry check) and commits Cargo.lock, so the port
     builds straight from the checked-out git tag with cibuildwheel + maturin (no
     separate sdist job needed, gotcha 325). Matrix trimmed to cp312/cp313/cp314:
-    pyarrow, one of the package's own test dependencies, has no riscv64 wheel below
+    pyarrow, one of the package''s own test dependencies, has no riscv64 wheel below
     cp312 on pypi.riseproject.dev. Rehearsed the full build+test locally on x86_64
     from the released sdist (pip wheel + pytest tests --benchmark-skip): 1880 passed,
     35 skipped, no patches needed. Worktree at .claude/worktrees/neo4j-rust-ext,
@@ -6912,11 +6912,11 @@ packages:
   notes: '2 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: valkey-glide-sync
   version: 2.5.2
-  home: https://pypi.org/project/valkey-glide-sync/
-  repo: https://pypi.org/project/valkey-glide-sync/
-  status: queued
-  pr: null
-  notes: '14 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp39,pp311); no riscv64 on PyPI or pypi.riseproject.dev.'
+  home: https://github.com/valkey-io/valkey-glide
+  repo: https://github.com/valkey-io/valkey-glide
+  status: ci-running
+  pr: 2427
+  notes: '14 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp39,pp311); no riscv64 on PyPI or pypi.riseproject.dev. PyPI records no project URL; upstream located at valkey-io/valkey-glide -- same monorepo, tag and Rust core (ffi/, glide-core/, glide-shared) as the already-published sibling valkey-glide (async client, pr 1678), which already proves the ffi/glide-core dependency graph (tokio-rustls-comp, no openssl-sys) builds on riscv64. The sync client is a different build system though: setuptools + a custom build_ext that runs cargo build directly (no maturin at all) for both the ffi cdylib and glide-shareds _fast_response pyo3 extension (plain extension-module feature, no abi3), driven via cibuildwheel (package-dir python/glide-sync) rather than PyO3/maturin-action. glide-sync/pyproject.tomls own [tool.cibuildwheel] before-build only knows how to install protoc for x86_64/aarch64 and exits 1 elsewhere, so it is cleared (CIBW_BEFORE_BUILD set to an empty string) and rustup is installed once via CIBW_BEFORE_ALL_LINUX instead. setup.py vendors glide-shared/glide_shared (including its protobuf/*.py) into glide-sync as a plain file copy at build time; those generated files are gitignored (upstreams own pypi-cd.yml temporarily un-ignores them before packaging), so per gotcha 201 the protoc codegen runs once on the host, via a one-off docker run against the same manylinux_2_39_riscv64 image (yum install protobuf-compiler + mypy-protobuf), before cibuildwheel copies the checkout into any per-interpreter container -- the sibling ffi/glide-core dirs it also vendors are ordinary git-tracked files (gotcha 262), so no extra staging needed for those. cargo metadata --filter-platform riscv64gc-unknown-linux-gnu on ffi/ resolves cleanly (277 crates; only -sys crates are aws-lc-sys/linux-raw-sys/lz4-sys/zstd-sys, no openssl-sys). ci_scripts/check_riscv64_deps.py confirms cffi/protobuf/typing-extensions all resolve to real riscv64 (or universal) wheels on cp312/cp313/cp314/cp314t, this repos floor (matches the async siblings matrix; pp311 dropped, no riscv64 PyPy). No local cargo build rehearsed (host disk was at roughly 95 percent use throughout this port; the shared ffi/glide-core graph is already CI-proven via the async sibling). PR #2427 (draft), CI running.'
 - pkg: openbricks
   version: 3.1.0
   home: https://openbricks.dev
@@ -6956,16 +6956,47 @@ packages:
   version: 1.25.3
   home: https://github.com/K0lb3/UnityPy
   repo: https://github.com/K0lb3/UnityPy
-  status: queued
+  status: blocked-on-dependency
   pr: null
-  notes: '32 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp38,cp39); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: '32 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp38,cp39); no riscv64 on
+    PyPI or pypi.riseproject.dev. Checked the actual sdist (unitypy-1.25.3.tar.gz, not just
+    metadata): UnityPy''s own native extension, UnityPyBoost/*.cpp (a plain C++20 setuptools
+    Extension despite the "Boost" name -- no Boost.Python, no SIMD/arch-specific code, just
+    portable STL-based type-tree/mesh/archive-decrypt helpers with a compiler-version-gated
+    -std=c++2a/c++20 flag), is not the blocker and would build cleanly on riscv64. The blocker
+    is a HARD, NON-OPTIONAL runtime dependency: pyproject.toml''s [project] dependencies list
+    (not optional-dependencies) requires `fmod_toolkit` unconditionally --
+    UnityPy/export/AudioClipConverter.py does `import fmod_toolkit` at module import time for
+    AudioClip/FSB audio extraction, and UnityPy/export/__init__.py imports that module eagerly.
+    This repo''s own fmod-toolkit entry (status: parked) already established fmod_toolkit is
+    infeasible for riscv64: it vendors Firelight Technologies'' proprietary, closed-source FMOD
+    Core Engine as prebuilt libfmod.{so,dylib}/fmod.dll binaries checked directly into its
+    sdist (fmod_toolkit/libfmod/{Darwin,Linux/{x86,x86_64,arm,arm64},Windows/{x86,x64,arm}}/),
+    confirmed again here by downloading fmod_toolkit-0.1.3.tar.gz directly -- same 8 vendored
+    binaries, no riscv64 among them, and no separate download step to swap a riscv64 build
+    into since they are committed straight into the sdist. Firelight publishes FMOD Engine only
+    as signed prebuilt SDKs from fmod.com (free-account + EULA gated, no public source release
+    at any version), and Firelight''s own platform matrix has never included riscv64. Confirmed
+    independently: pypi.riseproject.dev/simple/fmod_toolkit/ -> 404, and PyPI''s fmod_toolkit
+    0.1.3 (the exact version UnityPy 1.25.3 pins to, both wheels and sdist checked) covers only
+    Linux x86/x86_64/arm/arm64 -- no riscv64 wheel exists and none can be built from source, so
+    `pip install unitypy` cannot resolve its dependency set on riscv64 regardless of what
+    UnityPy''s own C++ extension builds to. UnityPy''s other native deps are NOT blockers:
+    texture2ddecoder, astc-encoder-py, brotli and lz4 already have riscv64 wheels on
+    pypi.riseproject.dev; etcpak (PyPI has aarch64/ppc64le/s390x wheels, so plausibly portable)
+    and tpk_ar (sdist-only on PyPI, no prebuilt wheels at all) are unresolved but moot since
+    fmod_toolkit alone is a full, unconditional stop. Not attempted: no worktree, branch,
+    workflow, docs/packages yaml, patches or PR opened -- would be wasted effort while the
+    fmod_toolkit dependency chain is closed. Revisit only if upstream UnityPy makes
+    fmod_toolkit optional/lazily-imported, or if Firelight ever ships a riscv64 FMOD Engine
+    build (tracked via the fmod-toolkit queue entry).'
 - pkg: pyats
   version: '26.7'
   home: https://developer.cisco.com/pyats/
   repo: https://developer.cisco.com/pyats/
-  status: queued
+  status: parked
   pr: null
-  notes: '11 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'PARKED (closed-source, same as unicon/gotcha 601; new gotcha 605 records this as a suite-wide finding, not unicon-specific). Verified directly for pyats itself, not inferred from unicon: (1) No public source anywhere. Only GitHub hit for CiscoTestAutomation org is `CiscoTestAutomation/pyats`, which is docs-only (Sphinx tree: docs/, conf.py, index.rst, no setup.py/src/). No pyats-core or similar repo exists. (2) Zero sdist, ever. `pypi.org/pypi/pyats/json` lists 90 releases back to 4.0.0/19.7 (26.7 is NOT latest; 26.8 already out) - every file in every release is bdist_wheel, none py3-none-any. (3) Wheel is 100% compiled, no source. Downloaded pyats-26.7-cp312-cp312-manylinux2014_x86_64.whl: 35 files, all `pyats/**/*.cpython-312-x86_64-linux-gnu.so` (cli, manifest, configuration, awesome, package_data, info) plus only empty __init__.py stubs and a 6-line ats/__init__.py compat shim - this is not a thin orchestrator, it is itself a compiled Cython core. Confirmed this is not a fluke by also downloading pyats.datastructures (the most "surely pure Python" sibling - attrdict/treenode/weaklist/orderabledict) - also 100% .so, zero .py beyond one-line __init__.py. License classifier says "Apache 2.0" but that is irrelevant since no source under that license has ever been published - do not let the OSI classifier suggest this is portable. (4) Transitive unicon dependency exists but is secondary: pyats -> pyats.connections (Requires-Dist pyats.connections>=26.7.0,<26.8.0) -> unicon (Requires-Dist unicon>=26.7.0,<26.8.0, hard non-extra). Even if unicon were not already parked, pyats would still be closed-source on its own compiled code, so this is parked as an independent finding (same category as unicon), not filed as blocked-on-dependency. FOR THE 6 SIBLINGS (pyats-kleenex, pyats-easypy, pyats-topology, pyats-datastructures, pyats-aetest, pyats-async), same verdict very likely applies - checked each ones PyPI JSON: all show zero sdist across their entire release history, zero py3-none-any ever, and the same manylinux2014_aarch64-wheel-is-4-6x-larger-than-x86_64 signature of Cython codegen (e.g. pyats.aetest 26.7: 1.66MB x86_64 vs 9.3MB aarch64; pyats.datastructures 26.7: 362KB vs 2.07MB). None of kleenex/easypy/topology/datastructures/aetest/async/aetest has a dedicated repo in CiscoTestAutomation either (checked each individually - all 404). Recommend each sibling agent do the cheap 2-curl confirmation (pypi.org/pypi/<pkg>/json for sdist history + download one wheel to confirm .so-only) rather than re-deriving from scratch, then park with this same reasoning if confirmed - but do not skip the check, since gotcha 605 explicitly warns against assuming identical without per-package verification. pyats-connections in particular (not one of the 7 claimed this session, but a shared dependency) also fits this pattern and additionally has the direct hard unicon dependency.'
 - pkg: pyats-kleenex
   version: '26.7'
   home: https://developer.cisco.com/pyats/
