@@ -1,0 +1,146 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build_wheels` job of
+# https://github.com/pysathq/pysat/blob/master/.github/workflows/build.yml
+# and the test job of
+# https://github.com/pysathq/pysat/blob/master/.github/workflows/test.yml
+name: Build python-sat wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/python-sat.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-python-sat.yml'
+      - 'docs/packages/python-sat.yaml'
+      - 'patches/python-sat/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-python-sat.yml'
+      - 'docs/packages/python-sat.yaml'
+      - 'patches/python-sat/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # Upstream pushes no git tag for its releases; this commit sets
+  # VERSION = (1, 9, 'dev', 15) and its tree is byte-identical to the released
+  # sdist. Move it together with the version in docs/packages/python-sat.yaml.
+  PYTHON_SAT_REF: 152884a6d1889f56a61049aaa773be23f0a8d8c1
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: python-sat
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build python-sat ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        libc: [manylinux, musllinux]
+
+    env:
+      PYTHON_SAT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pysat ${{ env.PYTHON_SAT_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pysathq/pysat
+          ref: ${{ env.PYTHON_SAT_REF }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pysat source
+        run: git apply python-wheels/patches/python-sat/${{ env.PYTHON_SAT_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # pypblib (a test-only requirement of tests/test_encode_pb_conditional.py
+          # and tests/test_integer.py) has no riscv64 wheel and builds from its
+          # 0.0.4 sdist (last release, 2019), which has two musl-only C++ breaks:
+          # - PBParser.h uses the BSD `uint` typedef without including
+          #   <sys/types.h>: glibc's libstdc++ headers pull that in transitively,
+          #   musl's do not ("'uint' was not declared in this scope"). Force-include
+          #   it (musl defines `uint` there under _GNU_SOURCE, which g++ always sets);
+          #   CPPFLAGS reaches both the C and C++ compile lines of build_ext.
+          # - every PyTypeObject initialiser in Modules/pblib/*.cpp passes NULL in the
+          #   old tp_print slot, which is tp_vectorcall_offset (a Py_ssize_t) since
+          #   CPython 3.8. On glibc NULL is GCC's `__null`, which converts to 0 with a
+          #   warning; musl's headers define NULL as `nullptr` in C++11, which cannot
+          #   initialise an integer ("cannot convert 'std::nullptr_t' to 'Py_ssize_t'").
+          #   Rewrite that one slot to 0 in the unpacked sdist before installing it.
+          # The python-sat wheel itself builds unchanged on musllinux; only this
+          # test dependency needs the workaround. Alpine is detected in-container.
+          CIBW_BEFORE_TEST: >-
+            if [ -f /etc/alpine-release ]; then
+            pip download --no-deps --no-binary :all: pypblib==0.0.4 -d /tmp/pypblib &&
+            tar -xzf /tmp/pypblib/pypblib-0.0.4.tar.gz -C /tmp/pypblib &&
+            sed -i 's|NULL\(, */\* tp_print \*/\)|0\1|' /tmp/pypblib/pypblib-0.0.4/Modules/pblib/*.cpp &&
+            CPPFLAGS="-include sys/types.h" pip install /tmp/pypblib/pypblib-0.0.4;
+            fi &&
+            pip install -r {project}/requirements.txt
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m, pysolvers;
+            l = [p.name for p in m.files('python-sat') if '.dist-info/licenses/' in str(p)];
+            assert len(l) == 20 and not hasattr(pysolvers, 'lingeling_new'), l"
+            && python -m pytest tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: python-sat-${{ env.PYTHON_SAT_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish python-sat ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: python-sat-${{ matrix.version }}-*riscv64
