@@ -1,0 +1,163 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on:
+#   https://github.com/activeviam/jdk4py/blob/d50c00c85b49e1ab1c9dd0f8dcfbd54767fc9b00/.github/actions/build-java-runtime/action.yaml
+#   https://github.com/activeviam/jdk4py/blob/d50c00c85b49e1ab1c9dd0f8dcfbd54767fc9b00/.github/actions/build-python-wheel/action.yaml
+name: Build jdk4py wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/jdk4py.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-jdk4py.yml'
+      - 'docs/packages/jdk4py.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-jdk4py.yml'
+      - 'docs/packages/jdk4py.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # Upstream cuts releases by pushing to main and publishing via trusted
+  # publishing; it never pushes a git tag. This commit's pyproject.toml reads
+  # 25.0.2.1 and its src/jdk4py/*.py are byte-identical to the files inside
+  # the released manylinux_2_17_x86_64/aarch64 wheels. Update it alongside
+  # JDK4PY_VERSION.
+  JDK4PY_REF: d50c00c85b49e1ab1c9dd0f8dcfbd54767fc9b00
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: jdk4py
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build jdk4py ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+
+    env:
+      JDK4PY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout jdk4py ${{ env.JDK4PY_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: activeviam/jdk4py
+          ref: ${{ env.JDK4PY_REF }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          version-file: pyproject.toml
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - id: get-java-version
+        run: uv run python -c 'from jdk4py import JAVA_VERSION; print(f"""version={".".join(str(number) for number in JAVA_VERSION)}""")' >> "$GITHUB_OUTPUT"
+
+      # actions/setup-java lists riscv64 as a supported Temurin/linux
+      # architecture; it does not auto-detect it from a self-hosted runner.
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961  # v5.7.0
+        with:
+          distribution: temurin
+          java-version: ${{ steps.get-java-version.outputs.version }}
+          architecture: riscv64
+
+      - run: uv run python build_java_runtime.py
+
+      - run: uv build --wheel
+
+      - run: uv run python -m wheel tags --platform-tag manylinux_2_39_riscv64 --remove dist/*-py3-none-any.whl
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: jdk4py-${{ env.JDK4PY_VERSION }}-py3-none-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test jdk4py ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    env:
+      JDK4PY_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+
+    steps:
+      - name: Checkout jdk4py ${{ env.JDK4PY_REF }} (tests)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: activeviam/jdk4py
+          ref: ${{ env.JDK4PY_REF }}
+          persist-credentials: false
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: jdk4py-${{ env.JDK4PY_VERSION }}-py3-none-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      # `uv run`/`uv sync` would install this checkout itself (pyproject.toml
+      # names the `jdk4py` project) over the wheel under test, so install
+      # directly with `uv pip` instead.
+      - name: Install the wheel and test dependencies
+        run: |
+          uv pip install --reinstall --no-index --find-links . jdk4py
+          uv pip install pytest==9.0.3
+
+      - name: Run upstream's tests
+        run: python -m pytest tests -v
+
+  publish:
+    name: Publish jdk4py ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: jdk4py-${{ matrix.version }}-py3-none-manylinux_riscv64
