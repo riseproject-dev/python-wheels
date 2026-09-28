@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 28 Sep 2026 00:00:00 +0000
+Subject: [PATCH] build the LLVM/CUDA-JIT-free parts of drjit-core on riscv64
+
+Both DRJIT_ENABLE_LLVM and DRJIT_ENABLE_CUDA already resolve their backend
+at runtime via dlopen (DRJIT_DYNAMIC_LLVM/DRJIT_DYNAMIC_CUDA default ON on
+Linux), so building drjit-core needs neither an LLVM install nor the CUDA
+toolkit. Two small preprocessor gaps nonetheless make the plain C++ build
+itself fail on any architecture that is neither x86 nor aarch64:
+
+1. drjit-core/intrin.h assumes "not aarch64" means "must be x86" and
+   unconditionally includes <immintrin.h>:
+
+       fatal error: immintrin.h: No such file or directory
+
+   Every intrinsic actually gated behind this header is itself gated behind
+   a real compiler-predefined macro (__F16C__, __AVX__, etc.), so on riscv64
+   none of it is ever reached -- the header just needs to stop trying to
+   pull in x86-only system headers on non-x86 targets.
+
+2. lock.h's lock_pause() has the same "aarch64 or must be x86" assumption
+   and falls into __builtin_ia32_pause(), an x86-only GCC/Clang builtin:
+
+       error: '__builtin_ia32_pause' was not declared in this scope
+
+   lock_pause() is only ever an optional spin-wait hint (see the
+   "Unknown OS/processor" fallback a few lines above in the same file for
+   thread_id()), so riscv64 (and any other non-x86, non-aarch64 target)
+   can safely fall through to a no-op.
+
+Upstream-Status: To upstream [not yet submitted; drjit does not otherwise support/test riscv64 today, so this needs its own PR against mitsuba-renderer/drjit-core rather than being folded into an unrelated one]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/ext/drjit-core/include/drjit-core/intrin.h b/ext/drjit-core/include/drjit-core/intrin.h
+--- a/ext/drjit-core/include/drjit-core/intrin.h
++++ b/ext/drjit-core/include/drjit-core/intrin.h
+@@ -15,6 +15,10 @@
+ #  if defined(__aarch64__)
+ #    include <arm_neon.h>
+ #    include <arm_fp16.h>
++#  elif !defined(__i386__) && !defined(__x86_64__)
++    // Neither x86 nor aarch64: no intrinsics header needed. Every intrinsic
++    // gated behind this header is itself gated behind a real compiler flag
++    // macro (__F16C__, __AVX__, etc.) that is never defined here.
+ #  elif !defined(DRJIT_DISABLE_AVX512) || !defined(__AVX512F__)
+ #    include <immintrin.h>
+ #  else
+diff --git a/ext/drjit-core/src/lock.h b/ext/drjit-core/src/lock.h
+--- a/ext/drjit-core/src/lock.h
++++ b/ext/drjit-core/src/lock.h
+@@ -102,8 +102,10 @@
+         #endif
+     #elif defined(__aarch64__)
+         __asm__ __volatile__("yield");
+-    #else
++    #elif defined(__i386__) || defined(__x86_64__)
+         __builtin_ia32_pause();
++    #else
++        // No portable spin-wait hint on this architecture.
+     #endif
+ }
+ 
