@@ -14,37 +14,38 @@ segfault at the end of the build:
 
 Both fixes were made by inference from log text alone, without access to
 riscv64 hardware to actually run the binary and inspect the crash. This
-adds a TEMPORARY, riscv64-only diagnostic around that exact invocation:
-run it under `strace -f` (dumping the full trace to the job log on
-failure), and if a core file turns up, also run `gdb -batch -ex bt` (plus
-registers and the faulting instructions) against it. `gdb`/`strace` are
-installed on demand since neither is guaranteed present in
-manylinux_2_39_riscv64.
+adds a TEMPORARY, riscv64-only diagnostic around that exact invocation.
 
-The first attempt at this diagnostic never got that far: it called
-`ulimit -c unlimited` unconditionally, and under this script's
-`set -euxo pipefail`, the runner's core-dump hard limit being locked to 0
-by the outer container runtime made that call itself fail and abort the
-whole script before the crashing command, the core-file search, or the
-gdb backtrace ever ran:
+The first revision of this diagnostic (which wrapped the invocation in
+`strace -f -o ... env ...` unconditionally, deciding STATUS from that
+wrapped command's own exit code) got real CI signal for the first time,
+but it wasn't signal about HAProxy at all:
 
-    ./ci/build/build-haproxy-dist.sh: line 327: ulimit: core file size: cannot modify limit: Operation not permitted
+    haproxy -v exit status: 127
+    ==> DIAGNOSTIC: haproxy -v failed (status 127); full strace log:
+    ./ci/build/build-haproxy-dist.sh: line 338: strace: command not found
 
-This revision makes the `ulimit -c unlimited` call non-fatal (it now runs
-as an `if` condition, which `set -e` does not treat as abort-worthy) and
-logs the hard limit and outcome instead of relying on it. Since core
-dumps may simply be unavailable in this runner/container setup — not just
-this one run — `strace -f`'s own output (last syscalls, mapped files, and
-the signal delivery itself) is now the primary diagnostic signal: the
-full trace is written to a file and dumped to the job log whenever the
-invocation exits nonzero, independent of ulimit or core files. The
-core-file search and gdb backtrace remain as a bonus path if a core does
-happen to appear (e.g. via `/proc/sys/kernel/core_pattern`), but nothing
-here depends on it.
+Exit 127 is bash's own "command not found" status. `dnf install -y gdb
+strace 2>/dev/null || true` had silently not left a working `strace` on
+PATH (redirected stderr and `|| true` hid whatever dnf actually did), so
+the following `strace -f -o ... env LD_LIBRARY_PATH=... "$STAGE_DIR/haproxy"
+-v` line failed at the shell's attempt to exec `strace` itself -- HAProxy
+was never invoked, wrapped or otherwise, and nothing here says anything
+about the original segfault yet.
 
-This patch exists to get a real crash signal from an actual CI run on the
-riscv64 runner; it is not a fix and is meant to be removed (or replaced by
-the real fix) once that signal is in hand.
+Restructure so a missing diagnostic tool can't be mistaken for the thing
+being diagnosed:
+
+  - Run the plain, unwrapped invocation first and on its own; STATUS is
+    always its real exit code, never a wrapper's.
+  - Only if that fails, gather diagnostics afterwards, independently of
+    STATUS: LD_DEBUG=all (glibc's own dynamic-linker trace, built into
+    every glibc, so unlike strace it needs no package install and can't
+    hit this same "tool not on PATH" failure mode), a `set +e`-guarded
+    `ldd`, and `strace` only when `command -v strace` actually finds it
+    on PATH after the install attempt.
+
+Still a TEMPORARY riscv64-only diagnostic, not a fix.
 
 Upstream-Status: Inappropriate [temporary riscv64 CI diagnostic, not meant to be carried or upstreamed]
 
@@ -53,41 +54,74 @@ Signed-off-by: Ludovic Henry <git@ludovic.dev>
 diff --git a/ci/build/build-haproxy-dist.sh b/ci/build/build-haproxy-dist.sh
 --- a/ci/build/build-haproxy-dist.sh
 +++ b/ci/build/build-haproxy-dist.sh
-@@ -318,7 +318,56 @@ else
+@@ -318,7 +318,89 @@ else
      echo "    Stack canary: NO — consider -fstack-protector-strong"
  fi
 
 -LD_LIBRARY_PATH="$STAGE_DIR/lib" "$STAGE_DIR/haproxy" -v
 +if [ "$ARCH_LABEL" = "riscv64" ]; then
-+    # TEMPORARY diagnostic (not a real fix): capture a backtrace/strace from
-+    # this exact invocation on the real riscv64 runner, since this segfaults
-+    # with zero output and no prior local riscv64 hardware access has been
-+    # available to reproduce it directly.
-+    dnf install -y gdb strace 2>/dev/null || true
-+    echo "  core-dump hard limit: $(ulimit -Hc 2>/dev/null || echo unknown)"
-+    # The container runtime may lock the core-dump hard limit to 0, in which
-+    # case raising the soft limit fails with "Operation not permitted". Do
-+    # not let that abort the script under `set -e` (it is inside an `if`
-+    # condition, so a nonzero status here does not trigger errexit): strace
-+    # below is the primary diagnostic signal and does not need core dumps.
-+    if ! ulimit -c unlimited 2>&1; then
-+        echo "  ulimit -c unlimited failed: core dumps are unavailable in this container; strace is the primary signal below"
-+    fi
-+    echo "  core_pattern: $(cat /proc/sys/kernel/core_pattern 2>/dev/null || echo unknown)"
++    # TEMPORARY diagnostic (not a real fix): capture real signal from this
++    # exact invocation on the riscv64 runner. STATUS always reflects the
++    # plain, unwrapped invocation below, run first and on its own -- any
++    # diagnostic tooling (strace, gdb) is gathered afterwards, independently,
++    # and never decides STATUS, so a diagnostic tool that fails to run can't
++    # be mistaken for the thing being diagnosed.
 +    set +e
-+    strace -f -o /tmp/haproxy-v-strace.log \
-+        env LD_LIBRARY_PATH="$STAGE_DIR/lib" "$STAGE_DIR/haproxy" -v
++    LD_LIBRARY_PATH="$STAGE_DIR/lib" "$STAGE_DIR/haproxy" -v
 +    STATUS=$?
 +    set -e
 +    echo "  haproxy -v exit status: $STATUS"
 +    if [ "$STATUS" -ne 0 ]; then
-+        echo "==> DIAGNOSTIC: haproxy -v failed (status $STATUS); full strace log:"
-+        if [ -s /tmp/haproxy-v-strace.log ]; then
-+            wc -l /tmp/haproxy-v-strace.log
-+            cat /tmp/haproxy-v-strace.log
-+        else
-+            echo "  (no strace log, or empty — strace itself may have failed to run)"
++        echo "==> DIAGNOSTIC: haproxy -v failed (status $STATUS); gathering diagnostics"
++        dnf install -y gdb strace 2>/dev/null || true
++        echo "  core-dump hard limit: $(ulimit -Hc 2>/dev/null || echo unknown)"
++        # The container runtime may lock the core-dump hard limit to 0, in
++        # which case raising the soft limit fails with "Operation not
++        # permitted". Do not let that abort the script under `set -e` (it is
++        # inside an `if` condition, so a nonzero status here does not trigger
++        # errexit).
++        if ! ulimit -c unlimited 2>&1; then
++            echo "  ulimit -c unlimited failed: core dumps are unavailable in this container"
 +        fi
++        echo "  core_pattern: $(cat /proc/sys/kernel/core_pattern 2>/dev/null || echo unknown)"
++
++        echo "==> DIAGNOSTIC: LD_DEBUG=all trace (glibc's own dynamic-linker trace;"
++        echo "    built into every glibc, unlike strace, so it needs no package install):"
++        LD_LIBRARY_PATH="$STAGE_DIR/lib" LD_DEBUG=all "$STAGE_DIR/haproxy" -v \
++            > /tmp/haproxy-v-lddebug.log 2>&1
++        echo "  (LD_DEBUG re-run exit status: $?, informational only)"
++        if [ -s /tmp/haproxy-v-lddebug.log ]; then
++            wc -l /tmp/haproxy-v-lddebug.log
++            cat /tmp/haproxy-v-lddebug.log
++        else
++            echo "  (empty LD_DEBUG log)"
++        fi
++
++        echo "==> DIAGNOSTIC: ldd (informational only; may report \"not a dynamic"
++        echo "    executable\" on this riscv64 ld.so per the self-exec quirk above):"
++        set +e
++        LD_LIBRARY_PATH="$STAGE_DIR/lib" ldd "$STAGE_DIR/haproxy"
++        echo "  ldd exit: $?"
++        set -e
++
++        if command -v strace >/dev/null 2>&1; then
++            echo "==> DIAGNOSTIC: strace -f trace:"
++            set +e
++            strace -f -o /tmp/haproxy-v-strace.log \
++                env LD_LIBRARY_PATH="$STAGE_DIR/lib" "$STAGE_DIR/haproxy" -v
++            set -e
++            if [ -s /tmp/haproxy-v-strace.log ]; then
++                wc -l /tmp/haproxy-v-strace.log
++                cat /tmp/haproxy-v-strace.log
++            else
++                echo "  (empty strace log)"
++            fi
++        else
++            echo "==> DIAGNOSTIC: strace not available after install attempt (dnf install"
++            echo "    may have failed, e.g. no network/repo access in this container);"
++            echo "    skipping strace, LD_DEBUG=all above is the primary signal"
++        fi
++
 +        echo "==> DIAGNOSTIC: searching for a core dump (bonus signal only; not required)"
 +        CORE=""
 +        for d in . /workspace /tmp "$STAGE_DIR"; do
