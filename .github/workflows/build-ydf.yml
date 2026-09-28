@@ -1,0 +1,331 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on:
+# https://github.com/google/yggdrasil-decision-forests/blob/main/.github/workflows/python_build_test.yml
+# and yggdrasil_decision_forests/port/python/tools/{build_test_linux.sh,package_linux.sh,collect_pip_files.py}
+name: Build ydf wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ydf.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ydf.yml'
+      - 'docs/packages/ydf.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ydf.yml'
+      - 'docs/packages/ydf.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Upstream cuts PYDF releases without git tags; pin the release commit
+  # ("[YDF] Release PYDF 0.16.1"). Update alongside YDF_VERSION.
+  YDF_REF: cd115b404c35aa3e15879fc64addb50da0fa8aa7
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  BAZEL_VERSION: '7.5.0'
+  RULES_PYTHON_VERSION: '0.33.2'
+  RULES_JAVA_VERSION: '7.6.5'
+  PROJECT_RULES_PYTHON_VERSION: '1.6.0'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: ydf
+      version: ${{ inputs.version }}
+
+  bazel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Bootstrap bazel (riscv64)
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+
+    steps:
+      - name: Restore bazel binary
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: bazel-bin
+          key: bazel-${{ env.BAZEL_VERSION }}-manylinux_riscv64
+
+      - name: Bootstrap bazel ${{ env.BAZEL_VERSION }}
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p bazel-bin
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e BAZEL_VERSION="${BAZEL_VERSION}" \
+            -e RULES_PYTHON_VERSION="${RULES_PYTHON_VERSION}" \
+            -e RULES_JAVA_VERSION="${RULES_JAVA_VERSION}" \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          dnf install -y --disablerepo=extras --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+
+          # rules_python 0.33.2's PLATFORMS has no riscv64 entry, aborting the bootstrap
+          # (bazelbuild/bazel#23018). Any linux entry is a safe stand-in: the toolchain it
+          # names is never selected on a riscv64 host. Fixed in bazel 8.2.0.
+          mkdir -p /tmp/rules_python
+          curl -fsSLo /tmp/rules_python.tar.gz "https://github.com/bazel-contrib/rules_python/releases/download/${RULES_PYTHON_VERSION}/rules_python-${RULES_PYTHON_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_python.tar.gz -C /tmp/rules_python --strip-components=1
+          sed -i 's|fail("No platform declared for host OS {} on arch {}".format(os_name, arch))|return "x86_64-unknown-linux-gnu"|' \
+            /tmp/rules_python/python/private/toolchains_repo.bzl
+
+          # rules_java 7.x maps riscv64 to a stray-colon include path for jni_md.h.
+          mkdir -p /tmp/rules_java
+          curl -fsSLo /tmp/rules_java.tar.gz "https://github.com/bazelbuild/rules_java/releases/download/${RULES_JAVA_VERSION}/rules_java-${RULES_JAVA_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_java.tar.gz -C /tmp/rules_java
+          sed -i 's|\[":include/linux"\]|["include/linux"]|g' /tmp/rules_java/toolchains/BUILD
+
+          mkdir -p /tmp/bazel-src
+          cd /tmp/bazel-src
+          curl -fsSLo dist.zip "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-dist.zip"
+          unzip -q dist.zip
+
+          EXTRA_BAZEL_ARGS="--tool_java_runtime_version=local_jdk \
+            --override_module=rules_python=/tmp/rules_python \
+            --override_module=rules_java=/tmp/rules_java" \
+            bash ./compile.sh
+          install -m 0755 output/bazel /work/bazel-bin/bazel
+          SCRIPT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin/bazel
+          if-no-files-found: error
+
+  build_wheels:
+    name: Build ydf ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
+    needs: [setup, bazel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        include:
+          - {tag: cp312, python: '3.12'}
+          - {tag: cp313, python: '3.13'}
+          - {tag: cp314, python: '3.14'}
+
+    env:
+      YDF_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout yggdrasil-decision-forests ${{ env.YDF_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: google/yggdrasil-decision-forests
+          ref: ${{ env.YDF_REF }}
+          path: yggdrasil-decision-forests
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download bazel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: bazel-${{ env.BAZEL_VERSION }}-riscv64
+          path: bazel-bin
+
+      - name: Restore bazel disk cache
+        id: bazel-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .bazel-cache
+          key: ydf-bazel-cache-${{ matrix.tag }}-manylinux_riscv64-${{ github.sha }}
+          restore-keys: |
+            ydf-bazel-cache-${{ matrix.tag }}-manylinux_riscv64-
+
+      - name: Build and package the wheel
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
+        run: |
+          mkdir -p wheelhouse
+          set -o pipefail
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e PYTHON_VERSION \
+            -e PROJECT_RULES_PYTHON_VERSION \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT' 2>&1 | tee build.log
+          set -eux
+
+          dnf install -y --disablerepo=extras --setopt=install_weak_deps=False java-21-openjdk-devel zip unzip rsync
+          JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          export JAVA_HOME
+          install -m 0755 /work/bazel-bin/bazel /usr/local/bin/bazel
+
+          PYTAG="cp${PYTHON_VERSION/./}"
+          PYTHON_BIN="/opt/python/${PYTAG}-${PYTAG}/bin/python3"
+          export PATH="/opt/python/${PYTAG}-${PYTAG}/bin:${PATH}"
+          ln -sf "${PYTHON_BIN}" /usr/local/bin/python3
+          "${PYTHON_BIN}" -m pip install -q -U pip setuptools build auditwheel
+
+          # protobuf/googletest declare pip hubs for CPython versions
+          # python-build-standalone does not publish for riscv64; rules_python
+          # aborts resolving them even though the build never uses those hubs.
+          mkdir -p /tmp/rules_python
+          curl -fsSLo /tmp/rules_python.tar.gz \
+            "https://github.com/bazel-contrib/rules_python/releases/download/${PROJECT_RULES_PYTHON_VERSION}/rules_python-${PROJECT_RULES_PYTHON_VERSION}.tar.gz"
+          tar -xzf /tmp/rules_python.tar.gz -C /tmp/rules_python --strip-components=1
+          python3 - <<'PATCH'
+          path = "/tmp/rules_python/python/private/pypi/extension.bzl"
+          source = open(path).read()
+          old = "        if python_name not in available_interpreters:\n            fail(("
+          new = (
+              "        if python_name not in available_interpreters:\n"
+              "            python_name = sorted(available_interpreters)[0]\n"
+              "        if False:\n"
+              "            fail(("
+          )
+          assert old in source
+          open(path, "w").write(source.replace(old, new, 1))
+          PATCH
+
+          cd /work/yggdrasil-decision-forests/yggdrasil_decision_forests/port/python
+
+          {
+            echo "build --override_module=rules_python=/tmp/rules_python"
+            echo "common --curses=no --show_progress_rate_limit=60"
+          } >> .bazelrc
+
+          "${PYTHON_BIN}" -m pip install -q --only-binary=:all: \
+            --extra-index-url https://pypi.riseproject.dev/simple/ \
+            -r requirements.txt
+
+          mkdir -p /work/.bazel-cache/disk /work/.bazel-cache/repository
+          bazel build --config=linux_cpp17 --features=-fully_static_link \
+            --disk_cache=/work/.bazel-cache/disk \
+            --repository_cache=/work/.bazel-cache/repository \
+            --action_env PYTHON_BIN_PATH="${PYTHON_BIN}" -- //ydf/...:all
+
+          "${PYTHON_BIN}" tools/collect_pip_files.py
+
+          OUTPUT_BASE="$(bazel info output_base)"
+          mkdir -p tmp_package/licenses
+          for dir in "${OUTPUT_BASE}"/external/*/; do
+            name="$(basename "${dir}")"
+            case "${name}" in
+              rules_*|bazel_skylib*|platforms*|bazel_tools*|googletest*|emsdk*|local_python3*|local_toolchains*|pybind11_bazel*)
+                continue
+                ;;
+            esac
+            file="$(find "${dir}" -maxdepth 1 -type f \( -iname 'LICENSE*' -o -iname 'COPYING*' \) | head -1)"
+            [ -n "${file}" ] || continue
+            clean_name="${name%%~*}"
+            cp "${file}" "tmp_package/licenses/LICENSE.${clean_name}"
+          done
+
+          cd tmp_package
+          cp licenses/LICENSE.* .
+          rm -rf licenses
+          "${PYTHON_BIN}" -m build
+          cd ..
+
+          PACKAGE="$("${PYTHON_BIN}" -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
+          cp tmp_package/dist/ydf-*-cp${PACKAGE}-cp${PACKAGE}*-linux_*.whl .
+          auditwheel repair --plat manylinux_2_39_riscv64 -w /work/wheelhouse ydf-*.whl
+          SCRIPT
+
+      - name: Save bazel disk cache
+        if: always() && steps.bazel-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .bazel-cache
+          key: ydf-bazel-cache-${{ matrix.tag }}-manylinux_riscv64-${{ github.sha }}
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ydf-${{ matrix.version }}-${{ matrix.tag }}-build-log
+          path: build.log
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ydf-${{ matrix.version }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+      - name: Test wheel
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
+        run: |
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -e PYTHON_VERSION \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          PYTAG="cp${PYTHON_VERSION/./}"
+          PYTHON_BIN="/opt/python/${PYTAG}-${PYTAG}/bin/python3"
+          "${PYTHON_BIN}" -m pip install -q /work/wheelhouse/*.whl pandas
+
+          cd /tmp
+          "${PYTHON_BIN}" /work/yggdrasil-decision-forests/yggdrasil_decision_forests/port/python/examples/minimal.py
+
+          "${PYTHON_BIN}" - <<'PY'
+          import importlib.metadata
+
+          import ydf
+          print(ydf.__version__)
+
+          dist = importlib.metadata.distribution("ydf")
+          so = next(f for f in dist.files if str(f).endswith(".so"))
+          with open(dist.locate_file(so), "rb") as f:
+              header = f.read(20)
+          assert header[:4] == b"\x7fELF", header
+          assert header[18] == 0xF3, header  # EM_RISCV
+
+          licenses = {
+              str(f).rsplit("/", 1)[-1]
+              for f in dist.files
+              if ".dist-info/licenses/" in str(f)
+          }
+          print(sorted(licenses))
+          assert "LICENSE" in licenses
+          assert "LICENSE.abseil-cpp" in licenses
+          assert "LICENSE.protobuf" in licenses
+          assert "LICENSE.pybind11" in licenses
+          PY
+          SCRIPT
+
+  publish:
+    name: Publish ydf ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: ydf-${{ matrix.version }}-*-manylinux_riscv64
