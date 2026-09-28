@@ -282,6 +282,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   `unicon`/`unicon.core` repo exists in the upstream org at all, the open-source sibling repo
   just pip-installs it as a plain version range, zero sdist across 113 releases, and the wheel
   is ~60 Cython `.so` files with no matching source (the unicon case).
+- **604** — Gotcha 40's dependency wall doesn't need conda — a `==` pin on a prebuilt-binary-only
+  dependency (`mpy-cross`) with zero sdist across its whole release history and no riscv64
+  wheel anywhere blocks `pip install openbricks` outright, even though openbricks' own C
+  extension is an ordinary portable build (the openbricks case).
 
 ---
 
@@ -4980,3 +4984,74 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       "enterprise", "commercial") and pins an exact `Requires-Dist` on the open one, check its
       *own* license classifier and `COPYING`/`LICENSE` file before assuming the suffix is
       cosmetic — the open sibling's portability tells you nothing about the add-on's.
+
+604. **Gotcha 40's dependency wall doesn't need conda — a `==` pin on a prebuilt-binary-only
+    dependency with zero sdist, ever, is just as final (the openbricks case).** openbricks'
+    own extension (`openbricks_sim._native`, plain C compiled by `setup.py` from sources
+    shared with its MicroPython firmware) is an ordinary, portable build — no SIMD, no
+    endianness or pointer-size assumptions in the files it actually compiles (the
+    endianness comments in `native/user_c_modules/openbricks/icm45686*.c` describe an I2C
+    sensor's wire byte order, not host-CPU endianness, and that file isn't even one of the
+    `Extension(sources=[...])` in `tools/openbricks/setup.py`). The port is blocked one
+    level down anyway: `pyproject.toml`'s hard (non-extra) `dependencies` pins
+    `mpy-cross == 1.28.0.post2` exactly (the version openbricks 3.1.0 needs; later
+    openbricks releases float the pin forward, e.g. 1.29.0.post2 at 4.35.0, same shape
+    every time). `mpy-cross` is a third-party repackaging
+    (`https://gitlab.com/alelec/mpy_cross`) of MicroPython's cross-compiler binary as
+    per-platform wheels (`py2.py3-none-manylinux1_x86_64`, `manylinux2014_aarch64`,
+    `manylinux2014_armv7l`, `macosx_universal2`, `win32`/`win_amd64`) — confirmed via
+    `curl -s https://pypi.org/pypi/mpy-cross/1.28.0.post2/json` — with **no riscv64 wheel**
+    and, checked across every one of its ~45 releases back to 1.7
+    (`https://pypi.org/pypi/mpy-cross/json`, every `releases[v]` entry filtered for
+    `packagetype == sdist`), **no sdist has ever been published**: there is nothing to
+    build from source, unlike gotcha 40's llvmlite (which at least has a build script, just
+    one gated on a conda-only LLVM). `https://pypi.riseproject.dev/simple/mpy-cross/` 404s
+    (not on our registry either). Because the pin is a hard install-time dependency (not an
+    optional extra) and is imported directly by `openbricks_dev/mpycompile.py` to shell out
+    to the `mpy-cross` binary for the `run`/`upload` commands' host-side bytecode
+    compilation, `pip install openbricks` cannot resolve on riscv64 regardless of whether
+    our own `openbricks` wheel builds cleanly — same "no partial win in shipping it"
+    conclusion as gotcha 40, and same "the dependency needs its own port" framing, except
+    here that port isn't a cibuildwheel job at all: it would mean building MicroPython's
+    `mpy-cross` C tool for riscv64 from scratch and packaging it as a new `mpy-cross`
+    wheel, a separate, substantial, out-of-scope undertaking with no upstream recipe to
+    mirror.
+
+605. **Gotcha 601's closed-Cython-core finding isn't specific to `unicon` — it's Cisco's
+    build practice for the *entire* pyATS suite, confirmed package-by-package, not
+    inferred from one (the pyats family case).** Triaging `pyats` 26.7 itself (not just
+    its `unicon` dependency) turned up the identical shape, independently: PyPI's
+    `https://pypi.org/pypi/pyats/json` lists 90 releases back to 4.0.0/19.7 and **zero**
+    are `sdist` and **zero** are `py3-none-any` — every single file across every release is
+    a CPython-ABI-tagged `bdist_wheel`. The `CiscoTestAutomation/pyats` GitHub repo (the
+    only public hit for the plain `pyats` name) is docs-only — a Sphinx tree (`docs/`,
+    `conf.py`, `index.rst`) with no `setup.py`/`src/` at all — and no `pyats.aetest`,
+    `pyats.easypy`, `pyats.kleenex`, `pyats.topology`, `pyats.datastructures`,
+    `pyats.async`, `aetest`, `easypy`, `kleenex`, `topology`, `datastructures`, or `async`
+    repo exists in that org either (each checked individually, all 404). Downloading the
+    actual wheels confirms it's not just a metadata gap: `pyats-26.7-*.whl` is 100% Cython
+    `.so` (`pyats/cli/*.so`, `pyats/manifest/*.so`, `pyats/configuration.cpython-*.so`, …)
+    with only empty `__init__.py` stubs and a 6-line compat shim (`ats/__init__.py`) as
+    actual `.py` source — and the *most* pure-Python-sounding sibling,
+    `pyats.datastructures` (`attrdict`, `treenode`, `weaklist`, `orderabledict` — the kind
+    of module a metapackage would ship as plain `.py`), is **also** 100% `.so` with zero
+    `.py` beyond a one-line `__init__.py`. The manylinux2014_aarch64 wheel is consistently
+    4-6x the manylinux2014_x86_64 wheel's size across every one of `pyats`,
+    `pyats.kleenex`, `pyats.easypy`, `pyats.topology`, `pyats.datastructures`,
+    `pyats.aetest` and `pyats.async` (e.g. `pyats.aetest` 26.7: 1.66 MB x86_64 vs 9.3 MB
+    aarch64) — a signature of unstripped/less-optimized Cython codegen per target, not
+    something a pure orchestrator package would show. **Consequence for triaging any other
+    `pyats.*`/`genie.*` sibling: don't re-derive this from scratch per package — check
+    `.../json` for sdist/`none-any` history and pull one wheel to confirm `.so`-only
+    content (2 curl calls), and if confirmed, park it with the same reasoning as `unicon`
+    (gotcha 601) rather than treating it as a fresh infeasibility category.** Note the
+    license classifier reads `Apache 2.0` / `License :: OSI Approved :: Apache Software
+    License` on every one of these — permissive-sounding, but irrelevant when zero source
+    has ever been published under it; don't let an OSI classifier substitute for checking
+    an actual sdist exists. Separately, `pyats` itself pulls in `unicon` **transitively**
+    (`pyats` → `pyats.connections` → `unicon`, the last a hard non-extra
+    `Requires-Dist`), so even a hypothetical from-source build of every compiled `pyats.*`
+    piece would still dead-end on `unicon` — but that transitive path is a secondary,
+    reinforcing reason here, not the primary one: `pyats` is independently closed-source
+    on its own compiled code, the same as `unicon` itself, not merely
+    blocked-on-dependency through it.
