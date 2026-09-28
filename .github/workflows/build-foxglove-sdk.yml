@@ -1,0 +1,203 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `sdist` and `linux` jobs of
+# https://github.com/foxglove/foxglove-sdk/blob/da80c3b6766630fdd0e43cdded4450c11a0136e9/.github/workflows/python.yml
+name: Build foxglove-sdk wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/foxglove-sdk.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-foxglove-sdk.yml'
+      - 'docs/packages/foxglove-sdk.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-foxglove-sdk.yml'
+      - 'docs/packages/foxglove-sdk.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: foxglove-sdk
+      version: ${{ inputs.version }}
+
+  sdist:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build foxglove-sdk ${{ matrix.version }} sdist
+    runs-on: ubuntu-latest
+    env:
+      FOXGLOVE_SDK_VERSION: ${{ matrix.version }}
+    steps:
+      - name: Checkout foxglove-sdk sdk/v${{ env.FOXGLOVE_SDK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: foxglove/foxglove-sdk
+          ref: sdk/v${{ env.FOXGLOVE_SDK_VERSION }}
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: false
+      - run: corepack enable
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: 22
+          cache: yarn
+      - name: Build sdist
+        run: uv build --sdist
+        working-directory: python/foxglove-sdk
+      - name: Verify notebook widget asset in sdist
+        run: |
+          python - <<'PY'
+          import glob
+          import sys
+          import tarfile
+
+          paths = glob.glob("dist/foxglove_sdk-*.tar.gz")
+          if not paths:
+              sys.exit("No sdist artifact found to validate in dist/")
+
+          tar_path = paths[0]
+          expected_suffix = "python/foxglove/notebook/static/widget.js"
+          with tarfile.open(tar_path, "r:gz") as tar:
+              names = tar.getnames()
+
+          if not any(name.endswith(expected_suffix) for name in names):
+              sys.exit(f"Missing {expected_suffix} in {tar_path}")
+          PY
+        working-directory: python/foxglove-sdk
+      - name: Upload sdist
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: foxglove-sdk-${{ env.FOXGLOVE_SDK_VERSION }}-sdist
+          path: python/foxglove-sdk/dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheel:
+    needs: [setup, sdist]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build foxglove-sdk ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    env:
+      FOXGLOVE_SDK_VERSION: ${{ matrix.version }}
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: foxglove-sdk-${{ env.FOXGLOVE_SDK_VERSION }}-sdist
+      - name: Unpack sdist
+        run: tar xzf foxglove_sdk-*.tar.gz --strip-components 1
+      # Upstream's `manylinux: auto` leg: remote-access needs livekit's prebuilt
+      # WebRTC, which has no linux-riscv64 build.
+      - name: Build wheels
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --out dist -i python3.10
+          sccache: "false"
+          manylinux: '2_39'
+          docker-options: "--env MATURIN_NO_MISSING_BUILD_BACKEND_WARNING=1"
+      - name: Verify the wheel ships the compiled extension
+        run: |
+          set -euo pipefail
+          python3 - dist/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = [n for n in names if n.endswith(".so")]
+          assert "foxglove/_foxglove_py.abi3.so" in sos, sos
+          print(sys.argv[1], "->", sos)
+          EOF
+      - name: Upload wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: foxglove-sdk-${{ env.FOXGLOVE_SDK_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14']
+    name: Test foxglove-sdk ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    env:
+      FOXGLOVE_SDK_VERSION: ${{ matrix.version }}
+      FOXGLOVE_TEST_REQUIRE_REMOTE_ACCESS: '0'
+      UV_PYTHON_PREFERENCE: only-managed
+      UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_ONLY_BINARY: ':all:'
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: foxglove-sdk-${{ env.FOXGLOVE_SDK_VERSION }}-sdist
+      - name: Unpack sdist
+        run: tar xzf foxglove_sdk-*.tar.gz --strip-components 1
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: foxglove-sdk-${{ env.FOXGLOVE_SDK_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: dist
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+      - name: Test wheel
+        run: |
+          set -euxo pipefail
+          uv pip install dist/*.whl
+          uv pip install pytest mcap
+          mkdir wheel-test
+          cp -r python/foxglove/tests wheel-test/
+          cd wheel-test
+          python -m pytest -v tests
+
+  publish:
+    name: Publish foxglove-sdk ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: foxglove-sdk-${{ matrix.version }}-*-manylinux_riscv64
