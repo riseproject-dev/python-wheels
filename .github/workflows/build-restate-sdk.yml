@@ -1,0 +1,135 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/restatedev/sdk-python/blob/v1.0.4/.github/workflows/release.yml
+name: Build restate-sdk wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/restate-sdk.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-restate-sdk.yml'
+      - 'docs/packages/restate-sdk.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-restate-sdk.yml'
+      - 'docs/packages/restate-sdk.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: restate-sdk
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build restate-sdk ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Cargo.toml's `pyo3 = { features = ["extension-module"] }` carries no
+        # abi3-pyNN feature, so every interpreter needs its own build; matches
+        # upstream's own release.yml, which builds with `--find-interpreter`
+        # against every interpreter its runner has. PyPy (pp310/pp311, also
+        # published upstream) is dropped: PyPy has no riscv64 port.
+        python: ['cp310', 'cp311', 'cp312', 'cp313', 'cp314', 'cp314t']
+
+    env:
+      RESTATE_SDK_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout restate-sdk v${{ env.RESTATE_SDK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: restatedev/sdk-python
+          ref: v${{ env.RESTATE_SDK_VERSION }}
+          persist-credentials: false
+
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --locked -i ${{ steps.interp.outputs.value }} --out dist
+          manylinux: '2_39'
+
+      - name: Verify the wheel ships the compiled extension
+        run: |
+          set -euo pipefail
+          python3 - dist/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = [n for n in names if n.endswith(".so")]
+          assert any(n.startswith("restate/_internal") for n in sos), sos
+          print(sys.argv[1], "->", sos)
+          EOF
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ steps.interp.outputs.value }}
+          activate-environment: true
+          enable-cache: false
+
+      # Mirrors upstream's own `just test` (pytest tests/*), minus the three
+      # files that need `restate.create_test_harness`, which always starts a
+      # `docker.io/restatedev/restate` container (python/restate/harness.py):
+      # that image's manifest list (ghcr.io/restatedev/restate) carries only
+      # linux/amd64 and linux/arm64, so it cannot run on this runner's arch
+      # regardless of whether Docker itself is available here. The remaining
+      # files exercise the compiled extension directly against a mocked ASGI
+      # transport, with no external server.
+      - name: Test wheel
+        run: |
+          uv pip install --reinstall dist/*.whl
+          uv pip install pytest hypercorn anyio
+          pytest tests/disconnect_hotloop.py tests/serde.py tests/server.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: restate_sdk-${{ env.RESTATE_SDK_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish restate-sdk ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: restate_sdk-${{ matrix.version }}-*-manylinux_riscv64
