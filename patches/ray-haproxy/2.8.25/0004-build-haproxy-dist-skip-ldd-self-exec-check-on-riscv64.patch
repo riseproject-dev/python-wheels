@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 28 Sep 2026 00:00:00 +0000
+Subject: [PATCH] ci/build: skip ldd's self-exec check on riscv64
+
+After vendoring and `patchelf --set-rpath`, the script's own sanity echo
+re-runs `ldd` on the just-rewritten binary. On manylinux_2_39_riscv64 that
+call fails outright:
+
+    Verifying all deps resolve:
+    not a dynamic executable
+
+`ldd` resolves a binary's dependencies by re-executing it with
+`LD_TRACE_LOADED_OBJECTS=1` set (the dynamic linker intercepts and prints
+the deps instead of running the program). That self-exec trick is what
+reports "not a dynamic executable" here, even though the ELF itself is
+fine: `patchelf --print-rpath` reads the very same file back cleanly one
+line above, and vendoring already collected every non-allowlisted `NEEDED`
+entry into `$STAGE_DIR/lib` via a plain `ldd` call earlier in this same
+script, before `strip`/`patchelf` touched the binary — dependency
+resolution was never in question, only this later ldd self-exec on
+manylinux_2_39_riscv64's still-young riscv64 glibc port. The plain execve a
+few lines further down (`"$STAGE_DIR/haproxy" -v`) runs the identical
+binary directly and is unaffected.
+
+Replace the self-exec check with the equivalent static one on riscv64:
+read the binary's `NEEDED` entries with `readelf -d` and confirm each is
+either manylinux-allowlisted or vendored, without asking `ldd` to
+re-execute the binary at all.
+
+Upstream-Status: Inappropriate [ldd's self-exec check is fine on x86_64/aarch64; this works around manylinux_2_39_riscv64's own riscv64 glibc/ldd, not something upstream's existing targets hit]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/ci/build/build-haproxy-dist.sh b/ci/build/build-haproxy-dist.sh
+--- a/ci/build/build-haproxy-dist.sh
++++ b/ci/build/build-haproxy-dist.sh
+@@ -261,7 +261,28 @@ find "$STAGE_DIR/lib" -name '*.so*' -exec patchelf --set-rpath '$ORIGIN' {} \;
+
+ echo "  RPATH: $(patchelf --print-rpath "$STAGE_DIR/haproxy")"
+ echo "  Verifying all deps resolve:"
+-LD_LIBRARY_PATH="$STAGE_DIR/lib" ldd "$STAGE_DIR/haproxy"
++if [ "$ARCH_LABEL" = "riscv64" ]; then
++    # ldd resolves deps by re-executing the binary with
++    # LD_TRACE_LOADED_OBJECTS=1; on manylinux_2_39_riscv64 that self-exec
++    # trick reports "not a dynamic executable" against a binary patchelf has
++    # just rewritten, even though the ELF itself is fine (patchelf's own
++    # --print-rpath above reads it back cleanly, and the plain execve a few
++    # lines down, "$STAGE_DIR/haproxy" -v, runs it directly). Check NEEDED
++    # entries statically instead of asking ldd to self-exec the binary.
++    MISSING=""
++    for needed in $(readelf -d "$STAGE_DIR/haproxy" | grep NEEDED | sed -E 's/.*\[(.*)\]/\1/'); do
++        echo "$needed" | grep -qE "$MANYLINUX_ALLOWLIST" && continue
++        [ -f "$STAGE_DIR/lib/$needed" ] && continue
++        MISSING="$MISSING $needed"
++    done
++    if [ -n "$MISSING" ]; then
++        echo "ERROR: dependencies not allowlisted or vendored:$MISSING"
++        exit 1
++    fi
++    echo "  All NEEDED entries are allowlisted or vendored"
++else
++    LD_LIBRARY_PATH="$STAGE_DIR/lib" ldd "$STAGE_DIR/haproxy"
++fi
+
+ # ---------------------------------------------------------------------------
+ # 5. Sanity checks
