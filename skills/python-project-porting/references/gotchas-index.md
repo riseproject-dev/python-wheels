@@ -434,6 +434,11 @@ The porting gotchas (550 of them) live in [`references/gotchas/`](gotchas/), spl
   license. See artifex.com for details.", ships closed `_pro.so`/`libsodochandler.so`
   (bundling a second proprietary vendor SDK), needs a runtime activation key, has zero sdist
   ever, and is wheel-gated by the vendor to five named platforms (the pymupdfpro case).
+- **604** — Gotcha 40's dependency wall doesn't need conda: a hard (non-extra) `==` pin on a
+  dependency that is a prebuilt-binary-only repackage (per-platform wheels, no sdist across its
+  whole release history, no riscv64 wheel anywhere) blocks `pip install` on riscv64 outright,
+  even when the package's own extension is an ordinary portable C build — check `requires_dist`
+  for zero-sdist exact pins before reading any build script (the openbricks/mpy-cross case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

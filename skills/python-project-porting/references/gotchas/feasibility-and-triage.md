@@ -282,6 +282,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   `unicon`/`unicon.core` repo exists in the upstream org at all, the open-source sibling repo
   just pip-installs it as a plain version range, zero sdist across 113 releases, and the wheel
   is ~60 Cython `.so` files with no matching source (the unicon case).
+- **604** — Gotcha 40's dependency wall doesn't need conda — a `==` pin on a prebuilt-binary-only
+  dependency (`mpy-cross`) with zero sdist across its whole release history and no riscv64
+  wheel anywhere blocks `pip install openbricks` outright, even though openbricks' own C
+  extension is an ordinary portable build (the openbricks case).
 
 ---
 
@@ -4980,3 +4984,35 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       "enterprise", "commercial") and pins an exact `Requires-Dist` on the open one, check its
       *own* license classifier and `COPYING`/`LICENSE` file before assuming the suffix is
       cosmetic — the open sibling's portability tells you nothing about the add-on's.
+
+604. **Gotcha 40's dependency wall doesn't need conda — a `==` pin on a prebuilt-binary-only
+    dependency with zero sdist, ever, is just as final (the openbricks case).** openbricks'
+    own extension (`openbricks_sim._native`, plain C compiled by `setup.py` from sources
+    shared with its MicroPython firmware) is an ordinary, portable build — no SIMD, no
+    endianness or pointer-size assumptions in the files it actually compiles (the
+    endianness comments in `native/user_c_modules/openbricks/icm45686*.c` describe an I2C
+    sensor's wire byte order, not host-CPU endianness, and that file isn't even one of the
+    `Extension(sources=[...])` in `tools/openbricks/setup.py`). The port is blocked one
+    level down anyway: `pyproject.toml`'s hard (non-extra) `dependencies` pins
+    `mpy-cross == 1.28.0.post2` exactly (the version openbricks 3.1.0 needs; later
+    openbricks releases float the pin forward, e.g. 1.29.0.post2 at 4.35.0, same shape
+    every time). `mpy-cross` is a third-party repackaging
+    (`https://gitlab.com/alelec/mpy_cross`) of MicroPython's cross-compiler binary as
+    per-platform wheels (`py2.py3-none-manylinux1_x86_64`, `manylinux2014_aarch64`,
+    `manylinux2014_armv7l`, `macosx_universal2`, `win32`/`win_amd64`) — confirmed via
+    `curl -s https://pypi.org/pypi/mpy-cross/1.28.0.post2/json` — with **no riscv64 wheel**
+    and, checked across every one of its ~45 releases back to 1.7
+    (`https://pypi.org/pypi/mpy-cross/json`, every `releases[v]` entry filtered for
+    `packagetype == sdist`), **no sdist has ever been published**: there is nothing to
+    build from source, unlike gotcha 40's llvmlite (which at least has a build script, just
+    one gated on a conda-only LLVM). `https://pypi.riseproject.dev/simple/mpy-cross/` 404s
+    (not on our registry either). Because the pin is a hard install-time dependency (not an
+    optional extra) and is imported directly by `openbricks_dev/mpycompile.py` to shell out
+    to the `mpy-cross` binary for the `run`/`upload` commands' host-side bytecode
+    compilation, `pip install openbricks` cannot resolve on riscv64 regardless of whether
+    our own `openbricks` wheel builds cleanly — same "no partial win in shipping it"
+    conclusion as gotcha 40, and same "the dependency needs its own port" framing, except
+    here that port isn't a cibuildwheel job at all: it would mean building MicroPython's
+    `mpy-cross` C tool for riscv64 from scratch and packaging it as a new `mpy-cross`
+    wheel, a separate, substantial, out-of-scope undertaking with no upstream recipe to
+    mirror.
