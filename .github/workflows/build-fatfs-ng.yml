@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own CI:
+#   https://github.com/Jason2866/pyfatfs/blob/v0.1.15/.github/workflows/deploy.yaml
+name: Build fatfs-ng wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/fatfs-ng.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fatfs-ng.yml'
+      - 'docs/packages/fatfs-ng.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fatfs-ng.yml'
+      - 'docs/packages/fatfs-ng.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: fatfs-ng
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build fatfs-ng ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # cp38 dropped: the manylinux_2_39_riscv64 image ships cp39-cp315
+        # only (gotcha 11), even though upstream itself still builds cp38.
+        # cp314t not built: upstream builds no free-threaded wheel either.
+        python: ["cp39", "cp310", "cp311", "cp312", "cp313", "cp314"]
+
+    env:
+      FATFS_NG_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyfatfs v${{ env.FATFS_NG_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Jason2866/pyfatfs
+          ref: v${{ env.FATFS_NG_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # No pyproject.toml, so setup.py's setup_requires=['cython'] is a
+          # no-op under build isolation; install it the same way upstream's
+          # own CIBW_BEFORE_BUILD does.
+          CIBW_BEFORE_BUILD: pip install "cython>=3.0.0"
+          CIBW_ENVIRONMENT: CYTHONIZE=1
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests
+          # 4 of test_esp32_wl.py's tests fail identically on every platform
+          # (confirmed on x86_64 too, not riscv64-specific): ESP32WearLeveling
+          # never sets self.wl_state_size/wl_temp_size in __init__, a
+          # pre-existing upstream bug unrelated to this port.
+          CIBW_TEST_COMMAND: >-
+            python -m pytest {project}/tests -k
+            "not test_wl_state_creation and not test_overhead_calculation
+            and not test_wl_state_invalid_crc and not test_fat_data_too_large"
+
+      - name: Check the wrapper extension made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("fatfs/wrapper") and n.endswith(".so") for n in names), names
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fatfs-ng-${{ env.FATFS_NG_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish fatfs-ng ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: fatfs-ng-${{ matrix.version }}-*-manylinux_riscv64
