@@ -1,0 +1,107 @@
+From a47c062213910e0d38a4c00bec5f63be23b56f21 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 28 Sep 2026 07:55:34 +0000
+Subject: [PATCH] use schedule(static) for the dynamic and guided OpenMP
+ loops
+
+Upstream-Status: Inappropriate [works around a libgomp defect on the riscv64 runners, riseproject-dev/python-wheels#617]
+
+Same libgomp defect as patches/lightgbm/4.7.0/0002-*: the dynamic and
+guided work-share schedules fault inside gomp_iter_dynamic_next()/
+gomp_iter_guided_next() on the riscv64 machines these wheels are built
+and tested on, while schedule(static) on the same loops is clean.
+
+cp314-manylinux_riscv64 segfaulted (exit 139) on run 36389716255,
+inside tests/recommender_base_test.py::test_fit_non_csr_matrix, at
+implicit/cpu/als.py:164 (AlternatingLeastSquares.fit -> the CG solver).
+The crash is in the ALS OpenMP core, not the test: that test is simply
+the first one whose model.fit() reaches implicit.cpu._als's
+prange(..., schedule='dynamic', chunksize=8) loops, so any fit() call
+is equally exposed. The backtrace faults inside
+implicit.libs/libgomp-*.so.1.0.0, called from implicit/cpu/_als.so,
+called back into libgomp - the same shape as the lightgbm case (fault
+frame in libgomp itself, sibling frame in the project's compiled
+parallel region).
+
+implicit already uses schedule='static' for the BPR and LMF solvers
+(implicit/cpu/bpr.pyx, implicit/cpu/lmf.pyx); only ALS
+(implicit/cpu/_als.pyx, 4 loops), the nearest-neighbours all-pairs KNN
+(implicit/_nearest_neighbours.pyx, 1 loop) and top-k (implicit/cpu/topk.pyx,
+1 guided loop) ask for dynamic/guided. Moving those 6 loops to static
+costs load balancing on the (mostly similar-cost) per-user/per-item
+iterations and buys a wheel that does not crash. Revert once the
+runners' toolchain is fixed.
+---
+ implicit/_nearest_neighbours.pyx | 2 +-
+ implicit/cpu/_als.pyx            | 8 ++++----
+ implicit/cpu/topk.pyx            | 2 +-
+ 3 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/implicit/_nearest_neighbours.pyx b/implicit/_nearest_neighbours.pyx
+index 85f32f0..67b11ae 100644
+--- a/implicit/_nearest_neighbours.pyx
++++ b/implicit/_nearest_neighbours.pyx
+@@ -142,7 +142,7 @@ def all_pairs_knn(users, unsigned int K=100, int num_threads=0, show_progress=Tr
+         topk = new TopK[int, double](K)
+
+         try:
+-            for i in prange(item_count, schedule='dynamic', chunksize=8):
++            for i in prange(item_count, schedule='static'):
+                 for index1 in range(item_indptr[i], item_indptr[i+1]):
+                     u = item_indices[index1]
+                     w1 = item_data[index1]
+diff --git a/implicit/cpu/_als.pyx b/implicit/cpu/_als.pyx
+index 630e3f1..0601e02 100644
+--- a/implicit/cpu/_als.pyx
++++ b/implicit/cpu/_als.pyx
+@@ -93,7 +93,7 @@ def _least_squares(YtY, integral[:] indptr, integral[:] indices, float[:] data,
+         A = <floating *> malloc(sizeof(floating) * factors * factors)
+         b = <floating *> malloc(sizeof(floating) * factors)
+         try:
+-            for u in prange(users, schedule='dynamic', chunksize=8):
++            for u in prange(users, schedule='static'):
+                 # if we have no items for this user, skip and set to zero
+                 if indptr[u] == indptr[u+1]:
+                     memset(&X[u, 0], 0, sizeof(floating) * factors)
+@@ -174,7 +174,7 @@ def _least_squares_cg(integral[:] indptr, integral[:] indices, float[:] data,
+         p = <floating *> malloc(sizeof(floating) * N)
+         r = <floating *> malloc(sizeof(floating) * N)
+         try:
+-            for u in prange(users, schedule='dynamic', chunksize=8):
++            for u in prange(users, schedule='static'):
+                 # start from previous iteration
+                 x = &X[u, 0]
+
+@@ -274,7 +274,7 @@ def _calculate_loss(Cui, integral[:] indptr, integral[:] indices, float[:] data,
+     with nogil, parallel(num_threads=num_threads):
+         r = <floating *> malloc(sizeof(floating) * N)
+         try:
+-            for u in prange(users, schedule='dynamic', chunksize=8):
++            for u in prange(users, schedule='static'):
+                 # calculates (A.dot(Xu) - 2 * b).dot(Xu), without calculating A
+                 temp = 1.0
+                 symv(b"U", &N, &temp, &YtY[0, 0], &N, &X[u, 0], &one, &zero, r, &one)
+@@ -298,7 +298,7 @@ def _calculate_loss(Cui, integral[:] indptr, integral[:] indices, float[:] data,
+                 loss += dot(&N, r, &one, &X[u, 0], &one)
+                 user_norm += dot(&N, &X[u, 0], &one, &X[u, 0], &one)
+
+-            for i in prange(items, schedule='dynamic', chunksize=8):
++            for i in prange(items, schedule='static'):
+                 item_norm += dot(&N, &Y[i, 0], &one, &Y[i, 0], &one)
+
+         finally:
+diff --git a/implicit/cpu/topk.pyx b/implicit/cpu/topk.pyx
+index 05dca11..35911ad 100644
+--- a/implicit/cpu/topk.pyx
++++ b/implicit/cpu/topk.pyx
+@@ -34,7 +34,7 @@ def topk(items, query, int k, item_norms=None, filter_query_items=None, filter_i
+
+     cdef int startidx, endidx, batch
+
+-    for batch in prange(batches, schedule="guided", num_threads=num_threads, nogil=True):
++    for batch in prange(batches, schedule="static", num_threads=num_threads, nogil=True):
+         startidx = batch * batch_size
+         endidx = min(startidx + batch_size, query_rows)
+         with gil:
+--
+2.43.0
