@@ -968,6 +968,11 @@ The porting gotchas (551 of them) live in [`references/gotchas/`](gotchas/), spl
   `setup.py` command can gate on the tool's mere presence in `PATH` even when it never calls
   it, so gotcha 100's `yum install -y protobuf-compiler` still has to go in
   `CIBW_BEFORE_ALL_LINUX` (the valkey-glide-sync case).
+- **608** — `cmake` built from source as a `pip`-installed build dependency (no riscv64 wheel
+  published for the pinned version) needs `openssl-devel`: its own bootstrap's
+  `Utilities/cmcurl/CMakeLists.txt` runs `find_package(OpenSSL)` and the image ships no dev
+  headers by default — `CIBW_BEFORE_ALL_LINUX: dnf -y install openssl-devel` fixes it,
+  independent of gotcha 207's unrelated CMake-policy-floor case (the executorch case).
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
@@ -1402,6 +1407,10 @@ The porting gotchas (551 of them) live in [`references/gotchas/`](gotchas/), spl
   (`Both project.license-files and tool.scikit-build.wheel.license-files are set`) when the project
   declares PEP 639 `project.license-files`; patch that list to a glob like `License*` that the sdist
   alone still matches (the cantera case).
+- **609** — `check_patch.py`'s `Upstream-Status: Inappropriate [...]` check has no `re.DOTALL`, so
+  it only reads the tag's first physical line; a bracketed reason wrapped across multiple
+  commit-message lines fails "Incorrect format" even though it looks correctly bracketed —
+  keep the whole `[reason]` on the tag's own line (the executorch case).
 
 ### Local validation & the aarch64/QEMU rehearsal — [`gotchas/local-validation-and-rehearsal.md`](gotchas/local-validation-and-rehearsal.md)
 

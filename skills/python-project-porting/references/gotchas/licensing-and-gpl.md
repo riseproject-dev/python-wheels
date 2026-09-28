@@ -39,6 +39,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
   `bdist_wheel` time, so a `setup.py` whose cmdclass `os.chdir()`s breaks a relative entry.
 - **590** — gotcha 538's `SKBUILD_WHEEL_LICENSE_FILES` override is refused when the project
   declares PEP 639 `project.license-files`; widen that list with a patch instead.
+- **609** — `check_patch.py`'s `Upstream-Status: Inappropriate [...]` regex only reads the
+  first physical line of the tag, so a reason wrapped across multiple commit-message lines
+  fails the check even though it looks bracketed.
 
 ---
 
@@ -749,3 +752,20 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
     - **When `pyproject.toml` is generated** (cantera renders
       `interfaces/python_sdist/pyproject.toml.in` in `scons sdist`), patch the template in the
       upstream checkout before the sdist is built, not the extracted sdist.
+
+609. **`check_patch.py`'s `Upstream-Status: Inappropriate [...]` regex only reads the first
+    physical line of the tag, so a reason wrapped across multiple commit-message lines fails
+    the check even though it looks bracketed on inspection (the executorch case).** The
+    script matches the tag line with `re.MULTILINE` but no `re.DOTALL`, so `^Upstream-Status:
+    *(.*)$` stops at the first `\n`; a value like `Inappropriate [only relevant to a
+    distributor …` that closes its `]` two lines further down never reaches the
+    `^\[.+\]$` check against the *whole* reason — only its first line is tested, which has
+    no closing bracket at all, so it fails as "Incorrect format" even though every other
+    detail (the type name, the brackets once joined) is correct.
+    - **Keep the entire bracketed reason on the tag's own line.** Every other `Inappropriate`
+      patch in this repo (`grep -rn 'Upstream-Status: Inappropriate' patches/`) does this;
+      wrap the surrounding commit-message prose instead, and only fold the reason itself if
+      it still fits `Upstream-Status: Inappropriate [...]` as one line.
+    - **Reproduce locally before a CI cycle**: paste the patch's commit message through the
+      same two `re.search` calls `check_upstream_status()` uses — a one-line repro is faster
+      than waiting on `check_patches` to fail again.

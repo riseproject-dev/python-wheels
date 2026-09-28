@@ -116,6 +116,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **599** — `PROTOC_INCLUDE` (gotcha 100) is not free: it replaces protoc's implicit `-I.`, so a
   `build.rs` that passes a bare `compile_protos("x.proto")` then fails "does not reside within any
   --proto_path"; CRB protoc finds `/usr/include` on its own, so leave it unset there.
+- **608** — `cmake` built from source as a build dependency (no riscv64 wheel yet for the
+  required version) needs `openssl-devel` installed — its own CMake bootstrap looks for
+  OpenSSL for `cmcurl` and the image ships no dev headers by default.
 ---
 
 26. **The riscv64 runners ship GCC 13; some packages need GCC 14 or later.** The compiler
@@ -1837,3 +1840,25 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
      gate all the way through before assuming a host-side pre-step satisfies it: a
      presence check and an actual invocation impose different requirements on where the
      tool has to live.
+
+608. **`cmake` built from source as a `pip`-installed build dependency needs `openssl-devel`
+     installed in the container — its own bootstrap looks for OpenSSL for `Utilities/cmcurl`,
+     and the manylinux_riscv64 image ships no development headers by default (the executorch
+     case; see `build-executorch.yml`).** cibuildwheel resolves `cmake` (a declared
+     `build-system.requires`) from our registry first; when no riscv64 wheel is published for
+     the pinned version, pip falls back to building CMake's own sdist from source, and that
+     build runs CMake's bundled bootstrap CMakeLists, not the project's. That bootstrap's
+     `find_package(OpenSSL)` fails with `Could not find OpenSSL … (missing:
+     OPENSSL_CRYPTO_LIBRARY OPENSSL_INCLUDE_DIR)` at `Utilities/cmcurl/CMakeLists.txt` — the
+     image carries `openssl-libs` (the runtime `.so`) but not the `-devel` headers/archive
+     `find_package` needs, the same shape as gotcha 46/51 for other host tooling gaps.
+     - **The fix is a one-line `CIBW_BEFORE_ALL_LINUX: dnf -y install openssl-devel`**,
+       independent of anything the *project's own* `pyproject.toml` sets for its own build —
+       this OpenSSL gap belongs to `cmake`'s bootstrap, not to executorch's extensions.
+     - **This is different from gotcha 207**: 207 is a CMake new enough to enforce a policy
+       floor a vendored dependency's `cmake_minimum_required` violates; this is CMake itself
+       having no riscv64 wheel to install and needing to compile, which pulls in its own
+       unrelated native dependency (OpenSSL) that the image doesn't have by default. Check
+       which failure you have from the CMake **configure** log path before reaching for either
+       fix: `Utilities/cmcurl/CMakeLists.txt` (this gotcha) vs a vendored third-party
+       `CMakeLists.txt` three levels down (207).
