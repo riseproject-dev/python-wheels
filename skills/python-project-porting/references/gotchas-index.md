@@ -1220,6 +1220,13 @@ The porting gotchas (551 of them) live in [`references/gotchas/`](gotchas/), spl
   staging that file via `CIBW_TEST_SOURCES` needs `coverage` in `CIBW_TEST_REQUIRES`;
   name the compiled test dep in `PIP_ONLY_BINARY` (e.g. `grpcio`) instead of `:all:` so
   coverage's sdist-only riscv64 install isn't blocked (gotcha 488).
+- **611** — A Bazel `py_test`'s `absltest.main()` parses `FLAGS` via `app.run()` before any
+  test runs; plain `pytest` parses nothing, so `FLAGS.test_tmpdir`/`test_srcdir` access
+  raises `UnparsedFlagAccessError` — run each `*_test.py` as its own `python <file>.py`
+  subprocess instead (gotcha 439's process-per-target model, for a different reason); a
+  `unittest`-based file's own relative test-data path can fail separately from a cwd
+  mismatch (`cd {project}/tests` vs `{project}`), surfacing as an unrelated-looking read
+  error, not a flags error.
 
 ### Test failures, flakes & arch-specific bugs — [`gotchas/test-failures-and-flakes.md`](gotchas/test-failures-and-flakes.md)
 

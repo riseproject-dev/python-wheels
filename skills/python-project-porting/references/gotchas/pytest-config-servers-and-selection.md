@@ -45,6 +45,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
   `Queue.get()` with no timeout turns one segfault into a full job hang; bound it with
   `pytest-timeout` and `PYTEST_ADDOPTS="--timeout=<n>"`.
 - **607** — grpc's own `grpcio_tests` harness hard-imports `coverage` from
+- **611** — absltest's `app.run()` normally parses `FLAGS` before tests run; plain `pytest`
   `tests/__init__.py` regardless of whether the run uses it; needs `coverage` in
   `CIBW_TEST_REQUIRES`, named (not `:all:`) in `PIP_ONLY_BINARY`.
 
@@ -851,3 +852,36 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
     - **This is a harness-level import, not a per-ABI build artifact**, so it hits every
       interpreter in the matrix identically (cp312/cp313/cp314/cp314t alike) — one CI
       cycle confirming the fix on any single leg is enough to close the rest.
+
+611. **A Bazel `py_test`'s `absltest.main()` normally parses `sys.argv` into `FLAGS` via
+    `app.run()` before any test runs; a bare `pytest` invocation parses nothing, so every
+    absltest-based class that reads `FLAGS.test_tmpdir`/`test_srcdir` (directly, or via
+    `self.create_tempfile()`) dies with `UnparsedFlagAccessError` even though the identical
+    file passes if run as its own script (the pynini case; see `build-pynini.yml`, and
+    gotcha 439 for the sibling issue of collecting a whole Bazel suite into one pytest
+    process).** Symptom: `absl.flags._exceptions.UnparsedFlagAccessError: Trying to access
+    flag --test_tmpdir before flags were parsed` (or `--test_srcdir`), one per affected
+    file/class, plus downstream failures in any test whose body needed the resulting
+    tempdir.
+    - **Fix is gotcha 439's process-per-target model, for a different reason**: run each
+      `*_test.py` as its own `python <file>.py` subprocess
+      (`for t in tests/*_test.py; do python "$t" || rc=1; done`) instead of
+      `python -m pytest tests/`. Each file's own
+      `if __name__ == "__main__": absltest.main()` calls `app.run()` → `FLAGS(sys.argv)`,
+      populating `test_tmpdir` (a fresh `mkdtemp`) and `test_srcdir` (from `$TEST_SRCDIR`,
+      else `''`) before any test body runs — the same effect Bazel's own test runner gets
+      for free, and it needs no new file under this repo's added-paths rule since it's
+      just the `CIBW_TEST_COMMAND` string.
+    - **A plain-`unittest` file in the same suite (no absl import) is immune to the flags
+      error, but can still fail for a related reason** — read its own
+      `setUp`/`setUpClass` before assuming the flags fix covers it. pynini's
+      `pynini_test.py` holds a *relative* test-data path
+      (`cls.map_file = "tests/testdata/str.map"`) that resolves under Bazel because the
+      runner's cwd is the workspace root; a `CIBW_TEST_COMMAND` that does
+      `cd {project}/tests && pytest .` puts cwd one level too deep, doubling the path to
+      `tests/tests/...`, and the read fails as `_pywrapfst.FstIOError: Read failed` — a
+      different exception from the same underlying mismatch, not a second bug. Running
+      from `{project}` (not `{project}/tests`) fixes both at once.
+    - **Drop `pytest` from `CIBW_TEST_REQUIRES`** once nothing in the test command calls
+      it — leaner, and it mirrors upstream, which never runs pytest either (goal 2: a
+      workflow that diverges from upstream for no reason is a defect).
