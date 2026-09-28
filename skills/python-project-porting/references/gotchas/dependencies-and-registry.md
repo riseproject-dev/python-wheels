@@ -933,3 +933,44 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       catch a failed `build_ext`). When a musllinux leg source-builds a dependency the
       manylinux leg got as a wheel, compare the two wheels' sizes in the log before
       trusting that they are equivalent.
+
+615. **An unbounded floor pin (`torch>=X.Y.0a0`) on a package that vendors its own
+    frozen copy of torch's low-level `c10`/ATen headers resolves to whatever is newest
+    on the registry, not to the version the package was actually built against, and the
+    two header sets collide in the same translation unit (the executorch 1.4.1 case).**
+    executorch's own `torch_pin.py` declares `TORCH_VERSION = "2.13.0"` — the exact
+    release its C++ is written against — but `build-executorch.yml`'s
+    `CIBW_BEFORE_BUILD` installed `torch>=2.13.0a0` with no ceiling, a floor pin copied
+    from gotcha 375's style for a *forward-compatible* ABI (torchaudio's
+    `TORCH_TARGET_VERSION`). executorch's CMake also unconditionally adds
+    `runtime/core/portable_type/c10` (a vendored, header-only snapshot of `c10`/
+    `torch/headeronly`, frozen to match 2.13.0) to the include path alongside the real
+    installed torch's own headers. Once `pypi.riseproject.dev` started serving torch
+    2.14.0 for every interpreter, the unbounded floor picked it up everywhere, and the
+    compiler started resolving some `#include`s to the newer real headers and others to
+    the older vendored copy in the same file:
+    - `c10/util/TypeCast.h` (real, 2.14.0) tries to build a `c10::complex<BFloat16>`
+      from a `c10::complex<float>`; the constructor that resolves is the vendored,
+      2.13.0-era `c10::complex<T>` (`runtime/core/portable_type/c10/torch/headeronly/
+      util/complex.h`), whose only cross-type constructors are a `float`/`double` SFINAE
+      pair — no overload matches, `error: no matching function for call to
+      'c10::complex<c10::BFloat16>::complex(c10::complex<float>)'`.
+    - `ArrayRef.h`/`TensorAccessor.h`/`core/Tensor.h` (real, 2.14.0) annotate signatures
+      with `C10_LIFETIMEBOUND`, a macro `torch/headeronly/macros/Macros.h` only gained
+      between 2.13.0 and 2.14.0; when that particular `#include` resolves to the
+      vendored, pre-macro copy instead, the identifier is never `#define`d and the
+      compiler chokes on it verbatim (`expected ',' or '...' before
+      'C10_LIFETIMEBOUND'`).
+    Diffing `torch/headeronly/macros/Macros.h` between the `v2.13.0` and `v2.14.0` tags
+    confirms it: 741 lines with no `LIFETIMEBOUND` token in 2.13.0 (matching the
+    vendored copy verbatim) versus 750 lines defining `C10_LIFETIMEBOUND` in 2.14.0. The
+    registry serving 2.14.0+cpu for every interpreter equally means this is not a
+    per-interpreter compatibility gap (contrast gotcha 614): it is a floor pin that
+    stopped tracking the exact version the vendored headers were frozen against.
+    - **Fix: pin the `CIBW_BEFORE_BUILD` torch install to the exact version the
+      package's own pin file names** (`torch==2.13.0` here, matching `torch_pin.py`)
+      instead of an unbounded floor, and only widen it again once the vendored header
+      snapshot is refreshed to a newer release. Do not "fix" this by dropping the
+      affected interpreter (gotcha 614's pattern) — the registry has a wheel for every
+      interpreter in the matrix at the pin the package actually wants; the resolver was
+      simply never told to stop there.

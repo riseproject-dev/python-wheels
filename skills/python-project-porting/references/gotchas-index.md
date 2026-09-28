@@ -1114,6 +1114,12 @@ The porting gotchas (551 of them) live in [`references/gotchas/`](gotchas/), spl
 - **577** — A musllinux leg that source-builds PyYAML (riscv64 wheels are manylinux-only)
   silently gets a pure-Python build with no `CSafeLoader` when libyaml headers are absent —
   `apk add yaml-dev` in `CIBW_BEFORE_TEST` on musllinux and set `PYYAML_FORCE_LIBYAML=1`.
+- **615** — An unbounded `torch>=X.Y.0a0` floor pin resolves to the registry's newest torch
+  for a package that vendors its own frozen `c10`/ATen header snapshot (executorch's
+  `torch_pin.py` names `2.13.0`) — the vendored and real headers collide in the same
+  translation unit (`c10::complex<BFloat16>` constructor mismatch, undefined
+  `C10_LIFETIMEBOUND`) once the registry serves 2.14.0. Pin the install to the exact
+  version the package's own pin file names instead of dropping the interpreter.
 
 ### Build-tool drift & pins — [`gotchas/build-tool-drift-and-pins.md`](gotchas/build-tool-drift-and-pins.md)
 
