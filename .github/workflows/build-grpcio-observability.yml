@@ -1,0 +1,165 @@
+name: Build grpcio-observability wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/grpcio-observability.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-grpcio-observability.yml'
+      - 'docs/packages/grpcio-observability.yaml'
+      - 'patches/grpcio-observability/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-grpcio-observability.yml'
+      - 'docs/packages/grpcio-observability.yaml'
+      - 'patches/grpcio-observability/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: grpcio-observability
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build grpcio-observability ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 480
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Mirrors build-grpcio.yml/build-grpcio-tools.yml: grpcio-observability
+        # shares python_version.py's supported-version list with grpcio and
+        # doesn't declare free-threaded support either.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      GRPCIO_OBSERVABILITY_VERSION: ${{ matrix.version }}
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: "/project"
+      CCACHE_COMPILERCHECK: "content"
+
+    steps:
+      - name: Checkout grpc v${{ env.GRPCIO_OBSERVABILITY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: grpc/grpc
+          ref: v${{ env.GRPCIO_OBSERVABILITY_VERSION }}
+          submodules: true
+          fetch-depth: 1  # grpc's submodules (abseil-cpp, protobuf, ...) are large; skip history
+          persist-credentials: false
+
+      # grpcio_observability's setup.py builds its Cython extension against
+      # copies of include/, src/core and the abseil-cpp/protobuf submodules
+      # staged under src/python/grpcio_observability/ (grpc_root/,
+      # third_party/, both gitignored). It also (re)populates
+      # observability_lib_deps.py via a bazel query, which fails without
+      # bazel installed - that failure is non-fatal, falling back to the
+      # dependency list already committed for this tag (same as
+      # make_grpcio_tools.py in build-grpcio-tools.yml).
+      - name: Generate grpcio_observability build sources
+        run: python3 src/python/grpcio_observability/make_grpcio_observability.py
+
+      # The vendored C++ sources are identical across cp312/cp313/cp314;
+      # share ccache across builds.
+      - name: Restore compilation cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-wheels-grpcio-observability-v${{ env.GRPCIO_OBSERVABILITY_VERSION }}-manylinux_riscv64-${{ matrix.python }}
+          restore-keys: |
+            ccache-wheels-grpcio-observability-v${{ env.GRPCIO_OBSERVABILITY_VERSION }}-manylinux_riscv64-
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: src/python/grpcio_observability
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL: |
+            set -eux
+            CCACHE_VERSION=4.13.6
+            curl -fsSL https://github.com/ccache/ccache/releases/download/v${CCACHE_VERSION}/ccache-${CCACHE_VERSION}-linux-$(uname -m)-musl-static.tar.gz | \
+              tar -xvzf - --strip-components 1 -C /usr/local/bin ccache-${CCACHE_VERSION}-linux-$(uname -m)-musl-static/ccache
+            ccache --version
+            ccache --zero-stats
+          # setup.py falls back to expecting a pre-generated _cyobservability.cpp
+          # without this flag; matches install_all_python_modules.sh.
+          CIBW_ENVIRONMENT: GRPC_PYTHON_BUILD_WITH_CYTHON=1 PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Fail fast rather than fall back to a from-source grpcio build if
+          # our registry doesn't yet carry a matching riscv64 wheel (same
+          # reasoning as build-grpcio.yml/build-grpcio-tools.yml). Named
+          # rather than `:all:` because coverage (below) has no riscv64
+          # wheel anywhere and must build from sdist (gotcha 488).
+          CIBW_TEST_ENVIRONMENT: "PIP_ONLY_BINARY=grpcio"
+          CIBW_ENVIRONMENT_PASS_LINUX: >-
+            CCACHE_BASEDIR
+            CCACHE_COMPILERCHECK
+          CIBW_CONTAINER_ENGINE: "docker; create_args: --volume ${{ env.CCACHE_DIR }}:/root/.ccache"
+          CIBW_REPAIR_WHEEL_COMMAND: auditwheel repair --strip -w {dest_dir} {wheel}
+          # tests/__init__.py (staged below) unconditionally imports
+          # tests/_loader.py, which imports coverage even for a plain
+          # pytest run (gotcha 607).
+          CIBW_TEST_REQUIRES: protobuf opentelemetry-sdk pytest coverage>=7.9.0
+          CIBW_TEST_SOURCES: >-
+            src/python/grpcio_tests/tests/__init__.py
+            src/python/grpcio_tests/tests/observability
+          # Mirrors upstream's own BUILD.bazel test targets for this package
+          # (_open_telemetry_observability_test, _observability_plugin_test);
+          # the other two tests in the same directory additionally need
+          # grpcio_csm_observability, which isn't ported here.
+          CIBW_TEST_COMMAND: >-
+            cd {project}/src/python/grpcio_tests &&
+            python -m pytest
+            tests/observability/_open_telemetry_observability_test.py
+            tests/observability/_observability_plugin_test.py
+
+      - name: Save compilation cache
+        if: always() && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-wheels-grpcio-observability-v${{ env.GRPCIO_OBSERVABILITY_VERSION }}-manylinux_riscv64-${{ matrix.python }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: grpcio-observability-${{ env.GRPCIO_OBSERVABILITY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish grpcio-observability ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: grpcio-observability-${{ matrix.version }}-*-manylinux_riscv64
