@@ -1,0 +1,133 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# Upstream (contrib/heptapod-ci.yml, contrib/build-one-linux-wheel.sh) builds Linux
+# wheels with plain `python -m build` + `auditwheel repair` from an hg checkout.
+# mercurial-scm.org is not on git (CLAUDE.md gotcha 43), so this fetches the same
+# official release tarball from mercurial-scm.org/release/ instead of
+# `actions/checkout` (byte-identical to the PyPI sdist, confirmed by sha256).
+---
+name: Build mercurial wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/mercurial.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mercurial.yml'
+      - 'docs/packages/mercurial.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mercurial.yml'
+      - 'docs/packages/mercurial.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: mercurial
+      version: ${{ inputs.version }}
+
+  fetch_source:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Fetch mercurial ${{ matrix.version }} source
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    env:
+      MERCURIAL_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Download official release tarball
+        run: |
+          mkdir -p dist
+          curl -fsSL -o dist/mercurial-${MERCURIAL_VERSION}.tar.gz \
+            "https://mercurial-scm.org/release/mercurial-${MERCURIAL_VERSION}.tar.gz"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mercurial-${{ env.MERCURIAL_VERSION }}-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, fetch_source]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build mercurial ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      MERCURIAL_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: mercurial-${{ env.MERCURIAL_VERSION }}-sdist
+          path: dist/
+
+      - id: sdist_path
+        run: echo "path=$(echo dist/*.tar.gz)" >> "$GITHUB_OUTPUT"
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: ${{ steps.sdist_path.outputs.path }}
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Mirrors upstream's own [tool.cibuildwheel] environment (pyproject.toml);
+          # the riscv64 image ships no msgfmt (CLAUDE.md gotcha 532).
+          CIBW_BEFORE_ALL_LINUX: dnf install -y gettext
+          CIBW_ENVIRONMENT: MERCURIAL_SETUP_FORCE_TRANSLATIONS=1
+          CIBW_TEST_COMMAND: >-
+            hg version -v &&
+            python -c "from mercurial import policy; assert policy.policy == b'c', policy.policy"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mercurial-${{ env.MERCURIAL_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish mercurial ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: mercurial-${{ matrix.version }}-*-manylinux_riscv64
