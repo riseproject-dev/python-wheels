@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on upstream's own cibuildwheel-driven
+# https://github.com/pydicom/pylibjpeg-libjpeg/blob/v2.4.0/.github/workflows/release-wheels.yml,
+# narrowed to Linux riscv64.
+name: Build pylibjpeg-libjpeg wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pylibjpeg-libjpeg.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pylibjpeg-libjpeg.yml'
+      - 'docs/packages/pylibjpeg-libjpeg.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pylibjpeg-libjpeg.yml'
+      - 'docs/packages/pylibjpeg-libjpeg.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pylibjpeg-libjpeg
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pylibjpeg-libjpeg ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream ships no cp314t wheel, has no free-threaded CI env and its
+        # classifiers don't mention free threading; the Cython extension has
+        # no Py_mod_gil slot either, so cp314t is left out rather than shipped
+        # untested (gotcha 33/127).
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      PYLIBJPEG_LIBJPEG_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pylibjpeg-libjpeg v${{ env.PYLIBJPEG_LIBJPEG_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pydicom/pylibjpeg-libjpeg
+          ref: v${{ env.PYLIBJPEG_LIBJPEG_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy is a build-time requirement (headers, via pyproject.toml's
+          # build-system.requires) and a runtime one too (the compiled
+          # extension calls numpy's C API at import time). Only our registry
+          # has it for riscv64; only-binary keeps a newer PyPI release from
+          # winning the resolution and then compiling from sdist.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+          CIBW_TEST_REQUIRES: pillow
+          CIBW_TEST_COMMAND: >-
+            python -c "import io;
+            import numpy as np;
+            from PIL import Image;
+            import libjpeg, _libjpeg;
+            assert _libjpeg.__file__.endswith('.so'), _libjpeg.__file__;
+            src = np.arange(64 * 64, dtype=np.uint8).reshape(64, 64);
+            buf = io.BytesIO();
+            Image.fromarray(src).save(buf, format='JPEG', quality=100);
+            out = libjpeg.decode(buf.getvalue());
+            assert out.shape == (64, 64), out.shape;
+            assert out.dtype == np.uint8, out.dtype
+            "
+
+      - name: Check the wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("_libjpeg") and n.endswith(".so") for n in names), whl
+              # poetry-core <2 (this project's floor) copies legal files to
+              # <dist-info>/LICENSE, not the PEP 639 licenses/ subdirectory.
+              assert any(n.endswith(".dist-info/LICENSE") for n in names), whl
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pylibjpeg-libjpeg-${{ env.PYLIBJPEG_LIBJPEG_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pylibjpeg-libjpeg ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pylibjpeg-libjpeg-${{ matrix.version }}-*-manylinux_riscv64
