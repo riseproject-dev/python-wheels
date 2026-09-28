@@ -1,0 +1,148 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/Init7/pyicu/blob/v2.15.2/.github/workflows/build.yml
+name: Build pyicu-wheels wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyicu-wheels.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyicu-wheels.yml'
+      - 'docs/packages/pyicu-wheels.yaml'
+      - 'patches/pyicu-wheels/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyicu-wheels.yml'
+      - 'docs/packages/pyicu-wheels.yaml'
+      - 'patches/pyicu-wheels/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_ONLY_BINARY: ':all:'
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyicu-wheels
+      version: ${{ inputs.version }}
+
+  linux:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyicu-wheels ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      PYICU_WHEELS_VERSION: ${{ matrix.version }}
+      # A container-local ICU prefix; upstream's /host/tmp/.build only exists to feed its actions/cache.
+      _LIBICU_DIR: "/tmp/.build"
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Init7/pyicu
+          ref: v${{ env.PYICU_WHEELS_VERSION }}
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply riscv64 patches
+        run: git apply -v python-wheels/patches/pyicu-wheels/${{ env.PYICU_WHEELS_VERSION }}/*.patch
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install Hatch
+        run: uv pip install --upgrade hatch
+
+      - name: Export PYICU_VERSION and LIBICU_VERSION
+        run: |
+          python - >> "$GITHUB_ENV" <<'EOF'
+          import tomllib
+          env = tomllib.load(open("pyproject.toml", "rb"))["tool"]["hatch"]["envs"]["default"]["env-vars"]
+          for key in ("PYICU_VERSION", "LIBICU_VERSION"):
+              print(f"{key}={env[key]}")
+          EOF
+
+      - name: Fetch pyicu source
+        run: hatch run pyicu:clone
+
+      - name: Copy src and tests
+        run: |
+          hatch run pyicu:src
+          hatch run pyicu:tests
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: MAKEFLAGS="-j$(nproc)"
+
+      - name: Check the wheel bundles ICU and its licences
+        run: |
+          python - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("icu/_icu_") and n.endswith(".so") for n in names), (whl, names)
+              assert any(n.startswith("pyicu_wheels.libs/libicudata") for n in names), (whl, names)
+              for lic in ("LICENSE.txt", "licenses/icu.txt", "licenses/pyicu.txt"):
+                  assert any(n.endswith(".dist-info/licenses/" + lic) for n in names), (whl, lic, names)
+              print(whl, "OK")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyicu-wheels-${{ env.PYICU_WHEELS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyicu-wheels ${{ matrix.version }}
+    needs: [setup, linux]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyicu-wheels-${{ matrix.version }}-*-manylinux_riscv64
