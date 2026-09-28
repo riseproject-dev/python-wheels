@@ -428,6 +428,12 @@ The porting gotchas (550 of them) live in [`references/gotchas/`](gotchas/), spl
   `unicon`/`unicon.core` repo exists in the upstream org at all, the open-source sibling repo
   just pip-installs it as a plain version range, zero sdist across 113 releases, and the wheel
   is ~60 Cython `.so` files with no matching source (the unicon case).
+- **603** — A commercial "Pro" add-on package that `Requires-Dist`s an already-open sibling on
+  PyPI is still closed-source on its own: check its own license classifier/`COPYING`, not the
+  open sibling's — `pymupdfpro` pins `PyMuPDF==1.28.2` (open) but is itself "Commercial
+  license. See artifex.com for details.", ships closed `_pro.so`/`libsodochandler.so`
+  (bundling a second proprietary vendor SDK), needs a runtime activation key, has zero sdist
+  ever, and is wheel-gated by the vendor to five named platforms (the pymupdfpro case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

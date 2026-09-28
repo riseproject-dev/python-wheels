@@ -4944,3 +4944,39 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       CI workspace — Cisco's internal build simply never touches anything that reaches the
       published artifact. Conclude closed-source from the negative space (no org repo + zero
       sdist ever + all-`.so` payload) rather than waiting for a smoking gun that won't appear.
+
+603. **A commercial "Pro" add-on package that sits beside an already-open sibling on PyPI is
+    still closed-source — its `Requires-Dist` on the open package proves nothing about its own
+    payload (the pymupdfpro case).** `pymupdfpro` depends on `PyMuPDF==1.28.2` (fully open,
+    AGPL/commercial-dual-licensed, already portable) and it would be easy to assume the "Pro"
+    layer just adds pure-Python glue over the same open MuPDF core. It doesn't: PyPI's own JSON
+    metadata gives `"license": "Commercial license. See artifex.com for details."` and
+    classifier `License :: Other/Proprietary License`; the wheel's `dist-info/COPYING` file
+    contains only that same one-line pointer to the vendor's site, not license text. The
+    long description is explicit that this is a paid product: usage is "restricted without a
+    key" and the docs point to `https://pymupdf.io/try-pro` to obtain one
+    (`import pymupdf.pro; pymupdf.pro.unlock(my_key)`) — a runtime activation-key gate, not a
+    build-time one.
+    - **The wheel payload confirms it's compiled, not glue.** Unzipping
+      `pymupdfpro-1.28.2-cp310-abi3-manylinux_2_28_x86_64.whl` shows a `pymupdf/` package
+      containing two closed binaries: `_pro.so` and `libsodochandler.so` — the latter is the
+      "SmartOffice" document handler the changelog names directly ("Uses SmartOffice tag
+      v3.16.79"), a *second*, separately-licensed vendor SDK (SmartOffice/document-conversion
+      engine) bundled inside what looks like a one-package dependency bump. No `.py`/`.pyx`
+      source for either ships anywhere in the wheel or on PyPI.
+    - **Zero sdist across the release history** (gotcha 431's check) — `curl -s
+      https://pypi.org/pypi/pymupdfpro/json` lists every 1.28.2 release as `bdist_wheel` only,
+      consistent with "never buildable from source," not an oversight.
+    - **The vendor gates the platform table itself, not "no riscv64 support yet."** The
+      description states plainly: "Available for these platforms only: Windows x86_64, Linux
+      x86_64 (glibc), Linux aarch64 (glibc), MacOS x86_64, MacOS arm64" — five wheels, chosen by
+      Artifex's own release process, not a gap this repo's build could close even in principle;
+      there is no source to build riscv64 from regardless.
+    - **Generalizes gotcha 600/601 one step further**: those two were standalone packages whose
+      *name* implied an open wrapper; this one is an explicit paid upsell tier of a package
+      that is already open and already portable, published as a separate PyPI project so it is
+      easy to queue and triage as if it were just another distribution of the same open
+      project. Whenever a package name is `<already-open-package><suffix>` ("pro", "plus",
+      "enterprise", "commercial") and pins an exact `Requires-Dist` on the open one, check its
+      *own* license classifier and `COPYING`/`LICENSE` file before assuming the suffix is
+      cosmetic — the open sibling's portability tells you nothing about the add-on's.
