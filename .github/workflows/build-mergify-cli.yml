@@ -1,0 +1,168 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-wheels`/`build-sdist` jobs of
+# https://github.com/Mergifyio/mergify-cli/blob/2026.8.11.1/.github/workflows/build-wheels.yml
+name: Build mergify-cli wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/mergify-cli.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mergify-cli.yml'
+      - 'docs/packages/mergify-cli.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mergify-cli.yml'
+      - 'docs/packages/mergify-cli.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: mergify-cli
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build mergify-cli ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+
+    env:
+      MERGIFY_CLI_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout mergify-cli ${{ env.MERGIFY_CLI_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Mergifyio/mergify-cli
+          ref: ${{ env.MERGIFY_CLI_VERSION }}
+          persist-credentials: false
+
+      # `pyproject.toml`'s `version` stays at the "0.0.0" placeholder in every
+      # tagged commit; upstream's own `build-wheels.yml` stamps the real value
+      # right before `maturin` runs, same sed line, so the wheel filename and
+      # `mergify --version` both carry the released version instead of the
+      # placeholder.
+      - name: Stamp wheel version
+        run: |
+          set -eu
+          sed -i.bak -E "s/^version = \".*\"\$/version = \"${MERGIFY_CLI_VERSION}\"/" pyproject.toml
+          rm -f pyproject.toml.bak
+          grep '^version = ' pyproject.toml
+          echo "MERGIFY_RELEASE_VERSION=${MERGIFY_CLI_VERSION}" >> "${GITHUB_ENV}"
+
+      # `[tool.maturin] bindings = "bin"`: the wheel is one compiled executable
+      # with no ABI tag, so a single native build covers every interpreter.
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --strip --locked --out dist
+          manylinux: '2_39'
+          # maturin-action's container only forwards env vars matching an
+          # allowlist of prefixes (CARGO_*, GITHUB_*, MATURIN_*, ...);
+          # MERGIFY_RELEASE_VERSION doesn't match any, so it needs forwarding
+          # by hand the same way upstream's own workflow does.
+          docker-options: -e MERGIFY_RELEASE_VERSION
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mergify-cli-${{ env.MERGIFY_CLI_VERSION }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test mergify-cli ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 15
+    env:
+      MERGIFY_CLI_VERSION: ${{ matrix.version }}
+      # Without this uv would reuse the runner image's system CPython for 3.12
+      # and download a standalone build for the others.
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # This repo's default interpreter matrix; the wheel is
+        # interpreter-agnostic (bindings = "bin"), so every interpreter --
+        # including free-threaded -- exercises the same binary.
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Checkout mergify-cli ${{ env.MERGIFY_CLI_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Mergifyio/mergify-cli
+          ref: ${{ env.MERGIFY_CLI_VERSION }}
+          persist-credentials: false
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: mergify-cli-${{ env.MERGIFY_CLI_VERSION }}-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . mergify_cli
+
+      # Upstream's own `smoke-test-binary` job in `ci.yaml`: install the
+      # wheel and run `mergify --help`. Extended with `--version` (checks the
+      # stamp above actually reached the binary) and `config validate`
+      # against the repo's own `.mergify.yml`, upstream's only CLI subcommand
+      # that needs no auth token.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          [ "$(mergify --version)" = "mergify ${MERGIFY_CLI_VERSION}" ]
+          mergify --help >/dev/null
+          file "$(command -v mergify)" | grep -q ELF
+          mergify completions bash >/dev/null
+          mergify config validate -f .mergify.yml
+
+  publish:
+    name: Publish mergify-cli ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: mergify-cli-${{ matrix.version }}-manylinux_riscv64
