@@ -1385,6 +1385,13 @@ The porting gotchas (551 of them) live in [`references/gotchas/`](gotchas/), spl
   through `_share_fd_cpu_()`, spacy-transformers 1.4.0's `test_multiprocessing`) — raise it
   with `CIBW_CONTAINER_ENGINE`'s `create_args` (same knob, same container, as gotcha 552)
   rather than deselecting a test with an addressable root cause.
+- **614** — A cp314-only `Fatal Python error: Segmentation fault` deep inside
+  `pybind11_protobuf`'s proto-caster machinery, after a from-source Bazel build that ran for
+  hours, was upstream ydf 0.16.1 never supporting cp314 in the first place: PyPI ships no
+  cp314 wheel for it on any platform, `config/setup.py`'s classifiers stop at 3.13, and
+  upstream's own CI matrix is a single `['3.12']` entry marked `# Currently unused` — drop
+  `cp314` from the port's matrix instead of chasing the C++ (gotcha 322's pattern, settled by
+  upstream signals per gotcha 149/468/542, not by debugging the crash).
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 

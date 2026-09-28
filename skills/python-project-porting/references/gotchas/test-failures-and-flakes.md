@@ -23,6 +23,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **170** — `np.linalg.eig` on a symmetric matrix returns *real* eigenvalues on x86_64 and
 - **205** — A follow-up commit that fixes a broken `Upstream-Status:` line does not clear
 - **282** — A matplotlib `image_comparison` test failing only on riscv64 is a font-rendering
+- **614** — A cp314-only segfault deep inside a pybind11/proto binding after a from-source
+  Bazel build is upstream not shipping/testing that interpreter yet, not a riscv64 bug.
 - **283** — A `cp314t`-only `PicklingError` from a `multiprocessing.Process(target=<local
 - **286** — A vendored-ARPACK eigensolver test failing only on musllinux, not manylinux, can
 - **297** — A test harness's own unbounded `readline()`-until-marker wait turns any slow or
@@ -1768,3 +1770,36 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
     (an unfixable runner/libcpuinfo mismatch or a hard timeout), this failure has an
     addressable root cause in the test environment's config, so skipping coverage here would
     be trading a real fix for a permanent gap.
+
+614. **A cp314-only `Fatal Python error: Segmentation fault` deep inside a pybind11/proto
+    binding, arriving only after a from-source Bazel build that took hours, is not a riscv64
+    bug to chase — check whether upstream even ships/tests that interpreter before touching
+    the C++ (the ydf 0.16.1 case; see `build-ydf.yml`).** ydf's cp314 job finally got past its
+    gcc/highway build failure (gotcha 567), compiled cleanly for ~6.5h, and then segfaulted in
+    upstream's own `examples/minimal.py` smoke test, inside `pybind11_protobuf`'s
+    `proto_caster_load_impl`/`PyProtoSerializePartialToString` (the machinery that round-trips
+    a Python proto message through C++ serialization) — a stack shape that looks exactly like
+    gotcha 322's "native binding hasn't caught up with a newer CPython's internals" pattern.
+    Three independent upstream signals settled it without touching pybind11_protobuf's source:
+    - **PyPI ships no cp314 wheel for this release, on any platform.** `pypi.org/pypi/ydf/
+      0.16.1/json` lists cp39/cp310/cp311/cp312/cp313 wheels for both
+      `manylinux_2_27_x86_64` and `macosx_12_0_arm64` — zero cp314 entries anywhere, not just
+      on Linux. If upstream's own x86_64/macOS builds don't run under 3.14, riscv64 was never
+      going to be the exception.
+    - **Upstream's `setup.py` classifiers stop at 3.13.** `yggdrasil_decision_forests/port/
+      python/config/setup.py`'s `classifiers=[...]` lists `Programming Language :: Python ::
+      3.9` through `3.13` and `python_requires=">=3.9"` — 3.14 is absent, not just untested.
+    - **Upstream's own CI never exercises 3.14 either.** `.github/workflows/build_test.yml`'s
+      `python-build-test-matrix` job sets `matrix: python_version: ['3.12']  # Currently
+      unused` — a single-entry matrix upstream itself flags as not really wired up, so there
+      is no green cp313/cp314 upstream run to diff against in the first place.
+    - **The dependency lags too, for context, not as the fix.** `port/python/MODULE.bazel`
+      pins `pybind11_protobuf` to `0.0.0-20250210-f02a2b7` (Feb 2025, months before CPython
+      3.14's October 2025 release), and pybind11_protobuf's own tracker had an open, unanswered
+      "when will you update to pybind11 3.0" issue as late as mid-2026 — this is a slow-moving
+      dependency, not a repo that ships fixes fast enough to chase with a version bump.
+    - **Fix: drop `cp314` from this port's matrix**, the same way gotcha 149/468/542 trim a
+      matrix entry that upstream itself doesn't support, rather than opening an issue against
+      pybind11_protobuf or trying to bisect the C++ — there is no upstream fix to pin to, and
+      the crash reproduces on any architecture, so it is not this port's bug to own. Re-add
+      `cp314` only once upstream's own release starts shipping a cp314 wheel.
