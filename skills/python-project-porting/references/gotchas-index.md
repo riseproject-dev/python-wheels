@@ -1171,6 +1171,12 @@ The porting gotchas (551 of them) live in [`references/gotchas/`](gotchas/), spl
   riscv64: find the polluter with a teardown hook and deselect it; a collected demo script
   arming a repeating `SIGALRM` kills pytest at exit (142) only on riscv64's slower shutdown;
   put the venv's platlib on `PYTHONPATH` for `sys._base_executable` helpers (the scalene case).
+- **612** — A same-run `importlib.metadata` check shadows to a checkout's leftover
+  `<pkg>.egg-info/` instead of the installed wheel, not just `import <pkg>` (extends gotcha
+  25): a licence-file assertion via `importlib.metadata.files('<pkg>')` reads as an empty
+  set with no exception, because `python -c` puts the checkout root's stale egg-info ahead
+  of site-packages on `sys.path` — not because `auditwheel repair` dropped anything (the
+  pyscf case).
 
 ### Testing: pytest config, servers & test selection — [`gotchas/pytest-config-servers-and-selection.md`](gotchas/pytest-config-servers-and-selection.md)
 

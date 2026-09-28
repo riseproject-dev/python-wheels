@@ -37,6 +37,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
   wraps `sys.executable` in a profiler launcher and every later subprocess test silently skips
   or times out; a collected demo script can leave a repeating `SIGALRM` that kills pytest at
   exit; `sys._base_executable` helpers escape the test venv.
+- **612** — A same-run `importlib.metadata` check can shadow to a checkout's leftover
+  `egg-info` instead of the installed wheel, not just `import <pkg>` (extends gotcha 25).
 
 ---
 
@@ -643,3 +645,35 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
       elsewhere with a warning. With the memory tests skipping, the patch adding `riscv64`
       looked unnecessary; with the polluter isolated they fail without it and pass with it.
 
+612. **A same-run `importlib.metadata` check can shadow to a checkout's leftover `egg-info`
+    instead of the installed wheel, not just `import <pkg>` (extends gotcha 25; the pyscf
+    case).** Gotcha 25's shadowing is about `import <pkg>` resolving to the source tree
+    because cwd is on `sys.path[0]`. The same trigger breaks a *metadata* check that never
+    imports the package at all: a build step's `pip wheel . --no-clean` (or any PEP 517
+    `build_wheel` invoked against a local directory — build isolation only isolates the
+    build *environment*, not where setuptools' `egg_info` command writes) leaves
+    `<pkg>.egg-info/` sitting in the checkout root, and that checkout root is the very
+    directory a *later, separate* `docker run -w <checkout>` reuses as cwd for the test
+    step. `python -c "..."` prepends `''` (cwd) to `sys.path` unconditionally, so
+    `importlib.metadata.distribution('<pkg>')`/`.files('<pkg>')` resolves the stale
+    `egg-info` there before ever consulting the properly `pip install`ed `*.dist-info` in
+    site-packages — and classic egg-info metadata predates PEP 639, so it has no
+    `licenses/` subdirectory at all. A licence-file assertion built the gotcha-44 way
+    (`{p.name for p in importlib.metadata.files('<pkg>') if '.dist-info/licenses/' in
+    str(p)}`) then asserts against an empty set with no exception raised — reads exactly
+    like the licence files never made it into the wheel, when the wheel (and its
+    `auditwheel`-repaired copy, RECORD included) is fine.
+    - **Verify by relocating, not by inspecting auditwheel.** `auditwheel repair` was the
+      obvious suspect (it does rewrite `RECORD` and retag the wheel) but is not the culprit
+      here: repairing a minimal dummy wheel with a `licenses/*` glob and inspecting the
+      output directly shows the `dist-info/licenses/` files and their `RECORD` entries
+      untouched. The tell that it's shadowing instead: `importlib.metadata.distribution(
+      '<pkg>')._path` names the local `egg-info`, not the site-packages `dist-info`, and
+      the file list it returns includes checkout-only names like `setup.py`/`pyproject.toml`
+      that the installed wheel never ships.
+    - **Fix by moving the check past a `cd` to a directory with no `<pkg>` on disk** — `/tmp`
+      inside the test container is fresh per `docker run` and already the convention this
+      same script uses one step later, before `import pyscf`, for the plainer gotcha-25
+      reason. Run the metadata check *after* that `cd`, not before it: writing the check
+      first (chronologically, before the later `import <pkg>` smoke test was added) is why
+      it alone stayed exposed.
