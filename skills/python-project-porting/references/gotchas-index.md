@@ -1305,6 +1305,9 @@ The porting gotchas (550 of them) live in [`references/gotchas/`](gotchas/), spl
 - **596** — `cannot open shared object file: No such file or directory` for a file that exists is
   glibc rejecting a foreign-machine ELF: ladybug's `getArch()` falls back to `amd64`, so riscv64
   `INSTALL` fetched x86-64 extensions. Patch the fallback; deselect tests needing upstream plugins.
+- **598** — A single long build-then-test job's test step inherits the rest of the job's
+  `timeout-minutes`, so a hang (openvino's cp314t pytest) holds the runner ~11h and ends `cancelled`;
+  cap the test step with its own `timeout-minutes`, upload wheels first, reproduce from the artifact.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 

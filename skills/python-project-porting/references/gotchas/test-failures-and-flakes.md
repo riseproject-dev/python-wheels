@@ -92,6 +92,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **596** — `cannot open shared object file: No such file or directory` for a file that exists
   is glibc's ENOENT for a foreign-machine ELF: a platform-string fallback mapped riscv64 to
   `amd64` and downloaded x86-64 plugins (ladybug `INSTALL json`) — patch it, deselect the tests.
+- **598** — A single long build-then-test job gives its test step whatever is left of the
+  job's `timeout-minutes`, so a hang holds the runner for hours (openvino cp314t: 11h22m, then
+  `cancelled`): put a step-level `timeout-minutes` on the test step and upload wheels before it.
 - **571** — On free-threaded CPython (cp314t), an object whose last reference is dropped on
   a native (non-Python) thread isn't freed there and then — freeing is deferred to whichever
   thread next runs Python bytecode. A test that drops the last reference on a native
@@ -1656,3 +1659,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
     deselect the tests that need a downloaded plugin upstream does not publish for riscv64
     (kuzu's `test_extension.py` ignore is the same call). Grep any plugin/extension
     downloader for `amd64`/`x86_64` defaults before trusting its `<os>_<arch>` string.
+
+598. **In a single job that builds for many hours and then tests, the test step inherits
+    whatever is left of the job's `timeout-minutes`, so a test hang holds the runner for
+    that remainder — give the test step its own `timeout-minutes` (the openvino 2026.3.1
+    case, PR #2122).** `build-openvino.yml` builds the C++ world once (12-16.5h) and then
+    runs a `Test wheels` step, all under `timeout-minutes: 1440` sized for the build. On
+    run 36145686942 the cp312/cp313/cp314 test legs took ~3 min each, then cp314t's pytest
+    hung after `test_async_infer_request.py::test_start_async[True]` (a Python callback run
+    on an inference worker thread) and printed nothing for 11h22m. The runner stopped it at
+    24h, and the job was reported `cancelled` (gotcha 456's signature), not failed at the
+    test that hung.
+    - **Fix: a step-level cap.** `timeout-minutes: 60` on the `Test wheels` step, sized from
+      upstream's own test job (openvino's `job_python_api_tests.yml` caps at 30) and the
+      measured green legs, with margin for the slower runner. The runner enforces it no
+      matter what hung (pytest, a native deadlock, `pip`, the container), so it fails the
+      step that stalled after an hour, not after the rest of the day.
+    - **Why not gotcha 565's `pytest-timeout`:** it adds a test dependency, only covers
+      pytest, and its default `signal` method needs the main thread to return to the
+      interpreter. A main thread parked in a native wait with the GIL released (e.g. a C++
+      `request.wait()`) never does. The two are complementary: `pytest-timeout` names the
+      test, and the step cap bounds everything else.
+    - **Upload the wheels artifact *before* the test step** (as this workflow does), so a
+      hung or capped test step does not discard a 12h build. The hang can then be
+      reproduced against the artifact with `python -X faulthandler` and
+      `faulthandler.dump_traceback_later` (gotcha 473), with no rebuild.
+    - **Narrowing the hung leg is a stop-gap, not a verdict.** Here cp314t is still built,
+      published and smoke-tested (it imports, enumerates `CPU` and runs an inference). Only
+      its pytest run is skipped, because at a 12h+ build per round the root cause is cheaper
+      to find from the artifact than from CI. If the frame turns out to be a test-side
+      free-threading race, gotcha 571's advice applies: patch the test, don't drop the
+      interpreter.
