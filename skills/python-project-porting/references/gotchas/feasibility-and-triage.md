@@ -5055,3 +5055,16 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     reinforcing reason here, not the primary one: `pyats` is independently closed-source
     on its own compiled code, the same as `unicon` itself, not merely
     blocked-on-dependency through it.
+    - **The vendor says so in writing — one `curl` settles the whole suite before any
+      wheel download.** `raw.githubusercontent.com/CiscoTestAutomation/pyats/main/README.md`
+      calls the repo a "place-holder repository used only so there's a bug
+      tracking/forum/wiki", and its FAQ answers "Is pyATS Open Source?" with *"Not yet. At
+      the moment the core of pyATS is still closed-source … Through DevNet we are only
+      releasing the Cythonized, binary format of pyATS core framework"*, while naming the
+      open-source parts (Unicon plugins, parser libraries, YANG/REST connectors) — which is
+      why `unicon.plugins`, `genieparser`, `genielibs`, `yang`, `rest` and `pyats.contrib`
+      have repos and `pyats.*` core does not. The wheels' `WHEEL` file adds a second tell:
+      `Generator: setuptools (79.0.1+cisco.1)`, a vendor-patched build backend (gotcha 385's
+      "vendor-named generator"), here leading nowhere public. Cite the README quote in the
+      park note; still pull one wheel per package (e.g. `pyats.results` 26.7 is three `.so`
+      plus a re-export `__init__.py`) to confirm it is not one of the open-source parts.
