@@ -90,15 +90,29 @@ jobs:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
           CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # pypblib (a test-only requirement) has no riscv64 wheel and builds from
-          # its sdist. Its PBParser.h uses the BSD `uint` typedef without including
-          # <sys/types.h>: glibc's libstdc++ headers pull that in transitively, musl's
-          # do not, so every musllinux leg failed with "'uint' was not declared in
-          # this scope". Force-include it (musl defines `uint` there under
-          # _GNU_SOURCE, which g++ always sets); CPPFLAGS reaches both the C and
-          # C++ compile lines of setuptools' build_ext.
+          # pypblib (a test-only requirement of tests/test_encode_pb_conditional.py
+          # and tests/test_integer.py) has no riscv64 wheel and builds from its
+          # 0.0.4 sdist (last release, 2019), which has two musl-only C++ breaks:
+          # - PBParser.h uses the BSD `uint` typedef without including
+          #   <sys/types.h>: glibc's libstdc++ headers pull that in transitively,
+          #   musl's do not ("'uint' was not declared in this scope"). Force-include
+          #   it (musl defines `uint` there under _GNU_SOURCE, which g++ always sets);
+          #   CPPFLAGS reaches both the C and C++ compile lines of build_ext.
+          # - every PyTypeObject initialiser in Modules/pblib/*.cpp passes NULL in the
+          #   old tp_print slot, which is tp_vectorcall_offset (a Py_ssize_t) since
+          #   CPython 3.8. On glibc NULL is GCC's `__null`, which converts to 0 with a
+          #   warning; musl's headers define NULL as `nullptr` in C++11, which cannot
+          #   initialise an integer ("cannot convert 'std::nullptr_t' to 'Py_ssize_t'").
+          #   Rewrite that one slot to 0 in the unpacked sdist before installing it.
+          # The python-sat wheel itself builds unchanged on musllinux; only this
+          # test dependency needs the workaround. Alpine is detected in-container.
           CIBW_BEFORE_TEST: >-
-            ${{ matrix.libc == 'musllinux' && 'CPPFLAGS="-include sys/types.h"' || '' }}
+            if [ -f /etc/alpine-release ]; then
+            pip download --no-deps --no-binary :all: pypblib==0.0.4 -d /tmp/pypblib &&
+            tar -xzf /tmp/pypblib/pypblib-0.0.4.tar.gz -C /tmp/pypblib &&
+            sed -i 's|NULL\(, */\* tp_print \*/\)|0\1|' /tmp/pypblib/pypblib-0.0.4/Modules/pblib/*.cpp &&
+            CPPFLAGS="-include sys/types.h" pip install /tmp/pypblib/pypblib-0.0.4;
+            fi &&
             pip install -r {project}/requirements.txt
           CIBW_TEST_REQUIRES: pytest
           CIBW_TEST_SOURCES: tests
