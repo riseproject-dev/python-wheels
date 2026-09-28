@@ -15,11 +15,32 @@ segfault at the end of the build:
 Both fixes were made by inference from log text alone, without access to
 riscv64 hardware to actually run the binary and inspect the crash. This
 adds a TEMPORARY, riscv64-only diagnostic around that exact invocation:
-`ulimit -c unlimited`, run it under `strace -f` (printing the tail of the
-trace on failure), and if a core file turns up, run `gdb -batch -ex bt`
-(plus registers and the faulting instructions) against it. `gdb`/`strace`
-are installed on demand since neither is guaranteed present in
+run it under `strace -f` (dumping the full trace to the job log on
+failure), and if a core file turns up, also run `gdb -batch -ex bt` (plus
+registers and the faulting instructions) against it. `gdb`/`strace` are
+installed on demand since neither is guaranteed present in
 manylinux_2_39_riscv64.
+
+The first attempt at this diagnostic never got that far: it called
+`ulimit -c unlimited` unconditionally, and under this script's
+`set -euxo pipefail`, the runner's core-dump hard limit being locked to 0
+by the outer container runtime made that call itself fail and abort the
+whole script before the crashing command, the core-file search, or the
+gdb backtrace ever ran:
+
+    ./ci/build/build-haproxy-dist.sh: line 327: ulimit: core file size: cannot modify limit: Operation not permitted
+
+This revision makes the `ulimit -c unlimited` call non-fatal (it now runs
+as an `if` condition, which `set -e` does not treat as abort-worthy) and
+logs the hard limit and outcome instead of relying on it. Since core
+dumps may simply be unavailable in this runner/container setup — not just
+this one run — `strace -f`'s own output (last syscalls, mapped files, and
+the signal delivery itself) is now the primary diagnostic signal: the
+full trace is written to a file and dumped to the job log whenever the
+invocation exits nonzero, independent of ulimit or core files. The
+core-file search and gdb backtrace remain as a bonus path if a core does
+happen to appear (e.g. via `/proc/sys/kernel/core_pattern`), but nothing
+here depends on it.
 
 This patch exists to get a real crash signal from an actual CI run on the
 riscv64 runner; it is not a fix and is meant to be removed (or replaced by
@@ -32,7 +53,7 @@ Signed-off-by: Ludovic Henry <git@ludovic.dev>
 diff --git a/ci/build/build-haproxy-dist.sh b/ci/build/build-haproxy-dist.sh
 --- a/ci/build/build-haproxy-dist.sh
 +++ b/ci/build/build-haproxy-dist.sh
-@@ -318,7 +318,43 @@ else
+@@ -318,7 +318,56 @@ else
      echo "    Stack canary: NO — consider -fstack-protector-strong"
  fi
 
@@ -43,7 +64,15 @@ diff --git a/ci/build/build-haproxy-dist.sh b/ci/build/build-haproxy-dist.sh
 +    # with zero output and no prior local riscv64 hardware access has been
 +    # available to reproduce it directly.
 +    dnf install -y gdb strace 2>/dev/null || true
-+    ulimit -c unlimited
++    echo "  core-dump hard limit: $(ulimit -Hc 2>/dev/null || echo unknown)"
++    # The container runtime may lock the core-dump hard limit to 0, in which
++    # case raising the soft limit fails with "Operation not permitted". Do
++    # not let that abort the script under `set -e` (it is inside an `if`
++    # condition, so a nonzero status here does not trigger errexit): strace
++    # below is the primary diagnostic signal and does not need core dumps.
++    if ! ulimit -c unlimited 2>&1; then
++        echo "  ulimit -c unlimited failed: core dumps are unavailable in this container; strace is the primary signal below"
++    fi
 +    echo "  core_pattern: $(cat /proc/sys/kernel/core_pattern 2>/dev/null || echo unknown)"
 +    set +e
 +    strace -f -o /tmp/haproxy-v-strace.log \
@@ -52,9 +81,14 @@ diff --git a/ci/build/build-haproxy-dist.sh b/ci/build/build-haproxy-dist.sh
 +    set -e
 +    echo "  haproxy -v exit status: $STATUS"
 +    if [ "$STATUS" -ne 0 ]; then
-+        echo "==> DIAGNOSTIC: haproxy -v failed (status $STATUS); last strace lines:"
-+        tail -n 80 /tmp/haproxy-v-strace.log 2>/dev/null || echo "  (no strace log)"
-+        echo "==> DIAGNOSTIC: searching for a core dump"
++        echo "==> DIAGNOSTIC: haproxy -v failed (status $STATUS); full strace log:"
++        if [ -s /tmp/haproxy-v-strace.log ]; then
++            wc -l /tmp/haproxy-v-strace.log
++            cat /tmp/haproxy-v-strace.log
++        else
++            echo "  (no strace log, or empty — strace itself may have failed to run)"
++        fi
++        echo "==> DIAGNOSTIC: searching for a core dump (bonus signal only; not required)"
 +        CORE=""
 +        for d in . /workspace /tmp "$STAGE_DIR"; do
 +            for f in "$d"/core "$d"/core.*; do
@@ -67,7 +101,7 @@ diff --git a/ci/build/build-haproxy-dist.sh b/ci/build/build-haproxy-dist.sh
 +                -ex 'x/20i $pc-40' -ex 'info sharedlibrary' \
 +                "$STAGE_DIR/haproxy" "$CORE" 2>&1
 +        else
-+            echo "  no core dump found"
++            echo "  no core dump found (expected if core dumps are unavailable here)"
 +        fi
 +        exit "$STATUS"
 +    fi
