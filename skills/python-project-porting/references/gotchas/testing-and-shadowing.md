@@ -410,6 +410,15 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
       neutralizes `-m`'s cwd-insertion by changing *what* cwd is rather than avoiding
       `-m`; both are valid fixes; the cheaper one here is simply not switching to `-m`
       in the first place when upstream never did.
+    - **Hits maturin/PyO3 builds too, with no cibuildwheel or upstream test-command in
+      the picture at all (the dataframely case; see `build-dataframely.yml`).** Its
+      pure-Python wrapper sits at the checkout root like pymongo's, `tests/` has no
+      `__init__.py`, and the workflow's own hand-written "Test wheel" step runs plain
+      `python -c 'import dataframely; ...'` and `python -m pytest tests ...` right
+      after `uv pip install`'ing the wheel — gotcha 111's fix applies verbatim even
+      though there is no cibuildwheel: `cd /tmp` first (gotcha 612's idiom), then pass
+      `tests`, and any `-c`/`--ignore` path, as `${GITHUB_WORKSPACE}`-absolute so
+      pytest can still find them from the new cwd.
 
 229. **A test suite that calls GitPython's `Repo(..., search_parent_directories=True)`
     needs `.git` staged as a `test-sources` entry, and a project with its own
