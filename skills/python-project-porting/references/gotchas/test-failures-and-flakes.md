@@ -431,6 +431,21 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       loops whose iterations differ in cost. Tag it `Inappropriate` with the issue link and
       say to revert it when the toolchain is fixed — it is our infrastructure's defect, not
       upstream's.
+    - **Confirmed again on a second, unrelated code path in the same PR — this is a per-loop
+      risk across a whole vendored tree, not one function.** healpy's PR
+      riseproject-dev/python-wheels#2430 hit the identical libgomp fault twice, in two
+      different vendored subtrees. First in libsharp's four `schedule(dynamic,*)` loops —
+      `map2phase`, `phase2map`, the alm/coefficient loop in `sharp_execute_job` (all in
+      `sharp.c`), and `sharp_legendre_roots.c`'s root finder (`patches/healpy/1.20.0/0002-*`).
+      Then, independently, in `cextern/healpix`'s own `Healpix_cxx` code: `mask_tools.cc`'s
+      `dist2holes()` (`schedule(dynamic,10000)` and `schedule(dynamic)`) and
+      `healpix_map.h`'s `Healpix_Map::swap_scheme()` (`schedule(dynamic,1)`)
+      (`patches/healpy/1.20.0/0003-*`). Same signature both times — a segfault inside
+      libgomp, specific to the riscv64 runners, gone once the loop is `schedule(static)` —
+      but a different function each time. So when a fresh segfault in a package that vendors
+      OpenMP-using C/C++ code matches this signature, don't assume the fix is confined to
+      whichever function crashed first: `grep -rn 'schedule(dynamic\|schedule(guided'` across
+      the *whole* vendored tree and convert every hit, not just the one in the backtrace.
 
 167. **A riscv64-only intermittent SIGSEGV: climb the control ladder before you debug
     anything.** Gotcha 60 says to reproduce a fault on your own host before blaming the
