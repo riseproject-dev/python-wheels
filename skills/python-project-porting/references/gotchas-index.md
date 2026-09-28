@@ -424,6 +424,10 @@ The porting gotchas (550 of them) live in [`references/gotchas/`](gotchas/), spl
   engine reached through Cargo path dependencies into a private monorepo that is never checked
   out — zero sdist ever, no `.github/` in the repo, and the wheel's own bundled CycloneDX SBOM
   names every engine crate `LicenseRef-<vendor>-Proprietary` (the daily-python case).
+- **601** — The package named after the "wrapper" can be the closed compiled core itself: no
+  `unicon`/`unicon.core` repo exists in the upstream org at all, the open-source sibling repo
+  just pip-installs it as a plain version range, zero sdist across 113 releases, and the wheel
+  is ~60 Cython `.so` files with no matching source (the unicon case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

@@ -278,6 +278,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   engine reached through Cargo path dependencies into a private monorepo that is never checked
   out — zero sdist ever, no `.github/` in the repo, and the wheel's own bundled CycloneDX SBOM
   names every engine crate `LicenseRef-<vendor>-Proprietary` (the daily-python case).
+- **601** — The package named after the "wrapper" can be the closed compiled core itself: no
+  `unicon`/`unicon.core` repo exists in the upstream org at all, the open-source sibling repo
+  just pip-installs it as a plain version range, zero sdist across 113 releases, and the wheel
+  is ~60 Cython `.so` files with no matching source (the unicon case).
 
 ---
 
@@ -4900,3 +4904,43 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       --filter-platform riscv64gc-unknown-linux-gnu` against in the first place. Read the
       dependency graph shape before assuming an architecture-support investigation is the next
       step.
+
+601. **The package named after the "wrapper" can be the closed compiled core itself, while the
+    open-source sibling repo is the thin layer on top (the unicon case, inverted from gotcha
+    600).** The queue entry for `unicon` only had a DevNet marketing homepage
+    (`developer.cisco.com/pyats/`), no repo URL. The obvious guess — a `unicon.core` repo
+    holding Cython sources behind a pure-Python `unicon` wrapper — is backwards: searching
+    `CiscoTestAutomation` (the real pyATS org, confirmed via its one public hit,
+    `unicon.plugins`) turns up no `unicon` or `unicon.core` repo at all, public or archived.
+    `unicon.plugins`' own `setup.py` just declares `install_requires = ['unicon >=X.Y.0, <X.Z.0',
+    ...]` — a plain PyPI version constraint, no path/git dependency, no submodule — and its
+    README only tells you to `git clone` *itself*, never mentions where core `unicon` lives.
+    Downloading a wheel (`unicon-26.7-cp312-cp312-manylinux2014_x86_64.whl`) shows the answer:
+    84 files, of which ~60 are `unicon/**/*.cpython-312-x86_64-linux-gnu.so` (`logs`,
+    `patterns`, `sshutils`, `bases/connection`, `eal/backend/spawn`, `statemachine/*`, …) with
+    no matching `.py`/`.pyx` shipped anywhere — the package the wrapper depends on *is* the
+    compiled Cython core, not a pure-Python shim.
+    - **Zero sdist across the entire release history, not just the current version, is the
+      decisive check here** (sharper than gotcha 431's "never shipped one" — this confirms it
+      was never even attempted). `curl -s https://pypi.org/pypi/unicon/json` lists 113 releases
+      back to `3.4.0`; every single one is `bdist_wheel`-only (macOS universal2 +
+      `manylinux2014_x86_64`/`aarch64`, cp39 through cp314 across releases) — `pip download
+      unicon==26.7 --no-binary :all: --no-deps` fails outright with "no matching distribution,"
+      not merely "no sdist for this version." A project that publishes 113 releases over years
+      and has *never once* shipped a source distribution is not an oversight; it is a binary
+      product.
+    - **A same-org sibling being open-source doesn't make the dependency open-source — check
+      what it actually imports, not what its name implies.** `unicon.plugins` is real, active,
+      MIT/Apache-headered, on GitHub with CI — easy to mistake for "the project is open, I must
+      be looking at the wrong repo name." It is a genuine plugin layer, but it treats `unicon`
+      itself exactly like an external closed dependency: installed from PyPI, never vendored,
+      never referenced by path. Grep the dependent's `setup.py`/`pyproject.toml`
+      `install_requires` for a plain version-range string (not a git/path/local spec) before
+      concluding a sibling repo proves anything about the package actually being ported.
+    - **No installer script, no vendored blob, no SBOM to read here — the absence of all three
+      is itself the evidence**, unlike gotchas 157/431/600 which each have some artifact
+      (installer, binary blob, CycloneDX file) naming the closed vendor. `strings -a` across the
+      whole wheel turns up no GitHub/GitLab/Bitbucket URL, no build-host path leaking a private
+      CI workspace — Cisco's internal build simply never touches anything that reaches the
+      published artifact. Conclude closed-source from the negative space (no org repo + zero
+      sdist ever + all-`.so` payload) rather than waiting for a smoking gun that won't appear.
