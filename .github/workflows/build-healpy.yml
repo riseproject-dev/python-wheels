@@ -1,0 +1,188 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/healpy/healpy/blob/1.20.0/.github/workflows/cibuildwheel.yml
+name: Build healpy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/healpy.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-healpy.yml'
+      - 'docs/packages/healpy.yaml'
+      - 'patches/healpy/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-healpy.yml'
+      - 'docs/packages/healpy.yaml'
+      - 'patches/healpy/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: healpy
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build healpy ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Per-interpreter (not abi3): the Cython/C++ extensions link the
+        # version-specific ABI. No cp314t: upstream builds none either (no
+        # free-threaded entry in its own CIBW_BUILD), and astropy -- a hard
+        # runtime dependency -- has no riscv64 wheel for it anywhere.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+
+    env:
+      HEALPY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout healpy ${{ env.HEALPY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: healpy/healpy
+          ref: ${{ env.HEALPY_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch healpy source
+        run: git apply python-wheels/patches/healpy/${{ env.HEALPY_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy/astropy are hard runtime deps and scipy/matplotlib are test
+          # extras; only our registry has riscv64 wheels for any of them, and
+          # only-binary keeps a newer PyPI release from winning the resolution
+          # and building from sdist instead.
+          # SETUPTOOLS_SCM_PRETEND_VERSION_FOR_HEALPY: the `git apply` above
+          # dirties the tree, which setuptools_scm otherwise reports as a
+          # `.devN+g<sha>` version (gotcha 31).
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,astropy,scipy,matplotlib
+            MPLLOCALFREETYPE=1
+            MPLCONFIGDIR=/tmp
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_HEALPY=${{ env.HEALPY_VERSION }}
+          CIBW_TEST_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,astropy,scipy,matplotlib
+            MPLLOCALFREETYPE=1
+            MPLCONFIGDIR=/tmp
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          path = sys.argv[1]
+          assert "-${{ matrix.python }}-" in path, path
+          names = zipfile.ZipFile(path).namelist()
+          exts = {n.rsplit("/", 1)[1].split(".", 1)[0] for n in names if n.endswith(".so") and ".libs/" not in n}
+          assert exts == {
+              "_healpy_pixel_lib", "_healpy_sph_transform_lib", "_hotspots",
+              "_line_integral_convolution", "_masktools", "_pixelfunc",
+              "_query_disc", "_sphtools",
+          }, exts
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                      if ".dist-info/licenses/" in n} - {""}
+          assert licences == {
+              "COPYING", "LICENSE.cfitsio", "LICENSE.healpix_cxx",
+              "LICENSE.libsharp", "LICENSE.pocketfft",
+          }, licences
+          EOF
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: healpy-${{ env.HEALPY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      HEALPY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # libsharp and HEALPix C++ (both cextern/ submodules) link OpenMP when
+      # available, so auditwheel vendors the image's libgomp into healpy.libs/.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: healpy-${{ env.HEALPY_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish healpy ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: healpy-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: healpy-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc

@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 28 Sep 2026 00:00:00 +0000
+Subject: [PATCH] use schedule(static) for libsharp's dynamic OpenMP loops
+
+Upstream-Status: Inappropriate [works around a libgomp defect on the riscv64 runners, riseproject-dev/python-wheels#617]
+
+CI's cp314 leg segfaulted inside libgomp during map2alm (PR #2430,
+run 36393265628, job 108833715006): "Fatal Python error: Segmentation
+fault" with the C stack landing in
+healpy.libs/libgomp-*.so.1.0.0 -> healpy.libs/libsharp-*.so.2.0.2 ->
+libgomp again, from test_sphtfunc.py::test_map2alm_pol. cp313 built
+and tested clean on the same commit, matching gotcha 166's signature
+for the runners' libgomp exactly: a fault inside the OpenMP runtime,
+intermittent across otherwise-identical jobs, and specific to the
+dynamic/guided work-share schedules.
+
+cextern/healpix vendors libsharp (src/common_libraries/libsharp), and
+it schedules its four spherical-harmonic-transform loops --
+map2phase, phase2map and the alm/coefficient loop in
+sharp_execute_job (sharp.c), plus the root-finder in
+sharp_legendre_roots.c -- with schedule(dynamic,*). Every one of them
+runs on every map2alm/alm2map call, which is why the crash isn't
+confined to one test. sharp_mpi.c's own schedule(dynamic,1) is left
+alone: it lives entirely behind #ifdef USE_MPI, which this build never
+defines, so it never compiles into the wheel.
+
+Moving these four loops to schedule(static) costs load balancing on
+transforms whose per-ring cost varies (each ring's associated Legendre
+function evaluation scales with its colatitude-dependent mmax), not
+correctness. Tag it Inappropriate and revert once the runners'
+toolchain is fixed, per gotcha 166.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ cextern/healpix/src/common_libraries/libsharp/libsharp/sharp.c                | 6 +++---
+ cextern/healpix/src/common_libraries/libsharp/libsharp/sharp_legendre_roots.c | 2 +-
+ 2 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/cextern/healpix/src/common_libraries/libsharp/libsharp/sharp.c b/cextern/healpix/src/common_libraries/libsharp/libsharp/sharp.c
+index 59e4638..6ed28c9 100644
+--- a/cextern/healpix/src/common_libraries/libsharp/libsharp/sharp.c
++++ b/cextern/healpix/src/common_libraries/libsharp/libsharp/sharp.c
+@@ -767,7 +767,7 @@ NOINLINE static void map2phase (sharp_job *job, int mmax, int llim, int ulim)
+     ringhelper_init(&helper);
+     int rstride=job->ginfo->nphmax+2;
+     double *ringtmp=RALLOC(double,job->nmaps*rstride);
+-#pragma omp for schedule(dynamic,1)
++#pragma omp for schedule(static)
+     for (int ith=llim; ith<ulim; ++ith)
+       {
+       int dim2 = job->s_th*(ith-llim);
+@@ -812,7 +812,7 @@ NOINLINE static void phase2map (sharp_job *job, int mmax, int llim, int ulim)
+     ringhelper_init(&helper);
+     int rstride=job->ginfo->nphmax+2;
+     double *ringtmp=RALLOC(double,job->nmaps*rstride);
+-#pragma omp for schedule(dynamic,1)
++#pragma omp for schedule(static)
+     for (int ith=llim; ith<ulim; ++ith)
+       {
+       int dim2 = job->s_th*(ith-llim);
+@@ -880,7 +880,7 @@ NOINLINE static void sharp_execute_job (sharp_job *job)
+     sharp_Ylmgen_init (&generator,lmax,mmax,ljob.spin);
+     alloc_almtmp(&ljob,lmax);
+ 
+-#pragma omp for schedule(dynamic,1)
++#pragma omp for schedule(static)
+     for (int mi=0; mi<job->ainfo->nm; ++mi)
+       {
+ /* alm->alm_tmp where necessary */
+diff --git a/cextern/healpix/src/common_libraries/libsharp/libsharp/sharp_legendre_roots.c b/cextern/healpix/src/common_libraries/libsharp/libsharp/sharp_legendre_roots.c
+index ec81ecb..7a9a3c4 100644
+--- a/cextern/healpix/src/common_libraries/libsharp/libsharp/sharp_legendre_roots.c
++++ b/cextern/healpix/src/common_libraries/libsharp/libsharp/sharp_legendre_roots.c
+@@ -25,7 +25,7 @@ void sharp_legendre_roots(int n, double *x, double *w)
+ #pragma omp parallel
+ {
+   int i;
+-#pragma omp for schedule(dynamic,100)
++#pragma omp for schedule(static)
+   for (i=1; i<=m; ++i)
+     {
+     double x0 = cos(pi * ((i<<2)-1) * t1) * t0;
+-- 
+2.43.0
