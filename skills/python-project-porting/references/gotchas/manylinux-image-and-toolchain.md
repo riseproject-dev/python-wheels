@@ -113,6 +113,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
   until you install it.
 - **586** — An inherited `curl … .tar.lz | tar x --lzip` fails on riscv64: `lzip` is in no Rocky 10
   repo and there is no EPEL; fetch the same GNU release's `.tar.xz` instead.
+- **599** — `PROTOC_INCLUDE` (gotcha 100) is not free: it replaces protoc's implicit `-I.`, so a
+  `build.rs` that passes a bare `compile_protos("x.proto")` then fails "does not reside within any
+  --proto_path"; CRB protoc finds `/usr/include` on its own, so leave it unset there.
 ---
 
 26. **The riscv64 runners ship GCC 13; some packages need GCC 14 or later.** The compiler
@@ -1792,3 +1795,24 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
      - **Leave upstream's other `yum install` names alone once checked**: `boost-devel` is in
        AppStream on riscv64; only `epel-release` and `lzip` had to go.
 
+599. **`PROTOC_INCLUDE=/usr/include` (gotcha 100) can itself break a prost/tonic build: it
+     turns off protoc's implicit `-I.`, which a crate that compiles a bare file name relies
+     on (the databricks-zerobus-ingest-sdk case; see `build-databricks-zerobus-ingest-sdk.yml`).**
+     `tonic_prost_build::compile_protos("zerobus_service.proto")` derives its include dir
+     as the file's `parent()`, which is the empty path. prost-build (0.14.4 `config.rs`) drops
+     any include that fails `.exists()`, and `""` fails it, so no `-I` is passed for the
+     crate's own directory, while `$PROTOC_INCLUDE` is still appended as a `-I`. protoc only
+     falls back to `-I.` when **no** `--proto_path` was given (`command_line_interface.cc`,
+     v3.19.6), so the one `-I /usr/include` makes the input unresolvable:
+     `zerobus_service.proto: File does not reside within any path specified using --proto_path`.
+     The vendored protoc works on x86/aarch64 only because nothing sets `PROTOC_INCLUDE` there.
+     - **CRB's protoc does not need `PROTOC_INCLUDE` to find the well-known types.**
+       `AddDefaultProtoPaths` adds `<protoc dir>/../include` when it contains
+       `google/protobuf/descriptor.proto`, so `/usr/bin/protoc` with `protobuf-devel`
+       installed resolves `import "google/protobuf/duration.proto"` by itself. The zerobus
+       build proved it: unset, the proto imported `duration.proto` and compiled first time.
+     - **Choose by the crate's `build.rs`, not by habit.** If it passes explicit, existing
+       include dirs (nemo-relay's `&["proto"]`), `PROTOC_INCLUDE` is harmless. If it passes a
+       bare file name, or `compile_protos(path)` with a parentless path, leave it unset.
+       Setting it cost one ~35-minute riscv64 cycle, spent compiling ~300 crates before
+       `build.rs` ran.

@@ -934,6 +934,10 @@ The porting gotchas (550 of them) live in [`references/gotchas/`](gotchas/), spl
   riscv64 because `lzip` is in no Rocky 10 repo and there is no EPEL; fetch the same release's
   `.tar.xz` on the host, checksum it, and `tar xJf` it in `before-all`. GMP's `--enable-fat` is
   a no-op off x86 and needs no edit (the chiavdf case).
+- **599** — `PROTOC_INCLUDE` (gotcha 100) replaces protoc's implicit `-I.`, so a `build.rs` doing
+  a bare `compile_protos("x.proto")` fails "does not reside within any --proto_path"; CRB's protoc
+  finds `/usr/include` itself via `<bindir>/../include`, so leave it unset (the
+  databricks-zerobus-ingest-sdk case).
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
