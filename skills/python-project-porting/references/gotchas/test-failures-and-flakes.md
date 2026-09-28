@@ -114,6 +114,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **589** — A library with its own runtime CPU dispatch and an override knob reproduces a
   riscv64-only test failure on x86_64 in minutes: force its non-SIMD path with upstream's own
   wheel (kiwipiepy's `KIWI_ARCH_TYPE=none`).
+- **602** — A tool that introspects a *target* process's native call stack (pystack) can find
+  every CPython version's eval-loop/GC frame on riscv64 except 3.13+, where the exact same 28
+  tests fail identically on 3.13, 3.14 *and* 3.14t while 3.12 is fully green — deselect per
+  interpreter, don't skip the whole suite.
 
 ---
 
@@ -1690,3 +1694,30 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       to find from the artifact than from CI. If the frame turns out to be a test-side
       free-threading race, gotcha 571's advice applies: patch the test, don't drop the
       interpreter.
+
+602. **A test matrix over *target* interpreter versions (not the interpreter running the
+    tests) shows the same gotcha-33/169 shape, one level removed: pystack's own test suite
+    launches a separate Python (`astral-sh/setup-uv`, i.e. a python-build-standalone build)
+    and inspects *its* process, and every native-frame-dependent assertion fails identically
+    on riscv64 for that target being 3.13, 3.14 or 3.14t, while 3.12 passes clean (pystack
+    1.7.1, `build-pystack.yml`).** 28 of the same tests fail, byte-for-byte identical FAILED
+    list, on all three newer targets: `test_core_analyzer.py::test_single_thread_stack` /
+    `test_multiple_thread_stack_native` (every `method=` variant), `test_gather_stacks.py`'s
+    native variants, both `test_gc.py::test_gc_status_is_reported_when_garbage_collecting_*`,
+    `test_subinterpreters.py`'s `*_with_native` tests, and the relocated-core/shim-frame
+    tests — every one of them asserts it can classify a *native* frame from the target's own
+    unwind as the CPython eval loop or the GC collector, via `pystack.types.frame_type()` /
+    `is_eval_frame()` matching the literal substring `_PyEval_EvalFrameDefault` (or, on 3.14+
+    tail-call builds, `_TAIL_CALL_*.llvm.*`). On the riscv64 target build for 3.13+, that
+    native unwind never turns up a frame `is_eval_frame()` recognizes, so `eval_frames` comes
+    back `[]`/`0` instead of the upstream-asserted `1` — a real, upstream-documented class of
+    gap in per-arch native/signal-frame unwinding support (pystack itself had to ship an
+    `elfutils-aarch64-signal-frame.patch` for AArch64 alone as of 1.7.2, bloomberg/pystack
+    #341/#348 — riscv64 has no equivalent patch), not a defect in the wheel under test: the
+    wheel that's running the analysis is the *same* cp312/cp314t abi3 build across the whole
+    matrix, only the target interpreter varies. Confirm the shape before touching anything —
+    `grep -oE 'FAILED [^ ]+' <log> | sort` on each failing job and diff them; identical sets
+    across 3.13/3.14/3.14t plus a clean 3.12 is the tell, not a scattered mix. Fix it the
+    gotcha-33 way: deselect exactly those tests, generated once in the `run:` step from
+    `matrix.python_version` (`if [ "$v" != "3.12" ]; then deselect+=(--deselect ...); fi`) so
+    3.12 keeps exercising all of them and the list isn't tripled across the matrix.
