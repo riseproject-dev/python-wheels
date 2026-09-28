@@ -1,0 +1,53 @@
+From a8546cb3bd1952d17723b11ae6af75de1081c5ca Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 24 Sep 2026 12:00:00 +0000
+Subject: [PATCH 5/5] tests: let the environment raise the tile-OOB subprocess
+ timeout
+
+Upstream-Status: To upstream [no riscv64 runner upstream to regression-test it on]
+
+_run_in_subprocess() gives the child process a hard-coded 60s to import warp,
+JIT-compile the debug-mode tile-bounds kernel with Clang, and abort -- and all
+four CPU cases in TestTileOOB hit that ceiling on the riscv64 runner
+(subprocess.TimeoutExpired at exactly 60s each), the same shape as
+unittest_parallel's own hard-coded wall-clock cap that patch 0004 already
+makes overridable: warp compiles every kernel on the machine running the
+tests, so how long that takes is a property of the machine, not of this tiny
+module's five one-line kernels.
+
+Read the limit from WARP_TEST_TILE_OOB_TIMEOUT, keeping 60 as the default so
+nothing changes for anyone who does not set it.
+---
+ warp/tests/tile/test_tile_oob.py | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/warp/tests/tile/test_tile_oob.py b/warp/tests/tile/test_tile_oob.py
+index 508971a..9e4b79e 100644
+--- a/warp/tests/tile/test_tile_oob.py
++++ b/warp/tests/tile/test_tile_oob.py
+@@ -1,6 +1,7 @@
+ # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ # SPDX-License-Identifier: Apache-2.0
+ 
++import os
+ import signal
+ import subprocess
+ import sys
+@@ -13,8 +14,13 @@ from warp.tests.unittest_utils import add_function_test, get_cuda_test_devices
+ # in debug. Subprocesses then amortize compilation through the normal kernel cache.
+ wp.set_module_options({"mode": "debug"})
+ 
++# Overridable because the 60s the subprocess gets to import warp and JIT-compile the debug
++# kernel is a property of the machine running it, not of the kernel: on a slower CPU the
++# Clang invocation alone can cost more than that with nothing wrong.
++_SUBPROCESS_TIMEOUT = int(os.environ.get("WARP_TEST_TILE_OOB_TIMEOUT", 60))
+ 
+-def _run_in_subprocess(func_name: str, device, timeout: int = 60):
++
++def _run_in_subprocess(func_name: str, device, timeout: int = _SUBPROCESS_TIMEOUT):
+     result = subprocess.run(
+         [
+             sys.executable,
+-- 
+2.43.0
+
