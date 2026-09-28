@@ -1,0 +1,128 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build_wheels` job of
+# https://github.com/mitsuba-renderer/drjit/blob/v1.5.0/.github/workflows/wheels.yml
+name: Build drjit wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/drjit.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-drjit.yml'
+      - 'docs/packages/drjit.yaml'
+      - 'patches/drjit/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-drjit.yml'
+      - 'docs/packages/drjit.yaml'
+      - 'patches/drjit/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: drjit
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build drjit ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp39", "cp310", "cp311", "cp312", "cp313", "cp314"]
+
+    env:
+      DRJIT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout drjit v${{ env.DRJIT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: mitsuba-renderer/drjit
+          ref: v${{ env.DRJIT_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # DRJIT_ENABLE_LLVM/DRJIT_ENABLE_CUDA both resolve their backend by
+      # dlopen()-ing libLLVM.so/libcuda.so at runtime (DRJIT_DYNAMIC_LLVM,
+      # DRJIT_DYNAMIC_CUDA), so the build itself needs neither an LLVM install
+      # nor the CUDA toolkit; ext/drjit-core/include/drjit-core/intrin.h and
+      # src/lock.h just assume every non-aarch64 target is x86.
+      - name: Patch drjit source
+        run: git apply python-wheels/patches/drjit/${{ env.DRJIT_VERSION }}/00*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # nanothread/drjit-core/drjit each set their own *_NATIVE_FLAGS cache
+          # var to -march=haswell for a scikit-build/non-aarch64 build; riscv64
+          # GCC rejects it outright ("ISA string must begin with rv32 or rv64").
+          CIBW_ENVIRONMENT: >-
+            SKBUILD_CMAKE_ARGS='-DDRJIT_NATIVE_FLAGS=;-DDRJIT_CORE_NATIVE_FLAGS=;-DNANOTHREAD_NATIVE_FLAGS='
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          path = sys.argv[1]
+          names = zipfile.ZipFile(path).namelist()
+          exts = [n for n in names if n.endswith(".so")]
+          assert exts and any("_drjit_ext" in n for n in exts), exts
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          assert licences == {"LICENSE"}, licences
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: drjit-${{ env.DRJIT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish drjit ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: drjit-${{ matrix.version }}-*-manylinux_riscv64
