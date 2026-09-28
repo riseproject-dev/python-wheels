@@ -1,0 +1,139 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/earth-mover/icechunk/blob/v2.2.0/.github/workflows/python-ci.yaml
+name: Build icechunk wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/icechunk.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-icechunk.yml'
+      - 'docs/packages/icechunk.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-icechunk.yml'
+      - 'docs/packages/icechunk.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  # icechunk/Cargo.toml's release profile sets `codegen-units = 1`; serial
+  # codegen over this workspace (aws-sdk-s3, opentelemetry-otlp, rustls) is
+  # more than the 4-core riscv64 runners can carry in reasonable time.
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+  CARGO_BUILD_JOBS: '2'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: icechunk
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build icechunk ${{ matrix.version }} cp312-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+
+    env:
+      ICECHUNK_VERSION: ${{ matrix.version }}
+
+    steps:
+      # Checked out at the workspace root: icechunk-python is a member of the
+      # icechunk Cargo workspace and builds against its sibling crates.
+      - name: Checkout icechunk v${{ env.ICECHUNK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: earth-mover/icechunk
+          ref: v${{ env.ICECHUNK_VERSION }}
+          persist-credentials: false
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 16
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          working-directory: icechunk-python
+          args: --release --locked -i python3.12 --out dist
+          manylinux: '2_39'
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      # The S3-backed slice of upstream's own suite needs RustFS (or MinIO),
+      # for which no riscv64 image exists; this runs the storage-agnostic
+      # remainder (local-filesystem/in-memory `Repository`, format, stateful
+      # property, and error-handling tests) against the built wheel instead.
+      - name: Test wheel
+        working-directory: icechunk-python
+        run: |
+          uv pip install dist/*.whl
+          python -c "import icechunk._icechunk_python as m; assert m.__file__.endswith('.so'), m.__file__"
+          uv pip install 'pytest==9.0.3' pytest-asyncio pytest-xdist hypothesis boto3 'boto3-stubs[s3]'
+          python -m pytest -n 4 --dist worksteal -m "not hypothesis" \
+            tests/test_array_chunk_iterator.py tests/test_commit_properties.py \
+            tests/test_conflicts.py tests/test_debuginfo.py tests/test_error.py \
+            tests/test_exception_tree.py tests/test_feature_flags.py \
+            tests/test_inspect.py tests/test_logs.py \
+            tests/test_migration.py tests/test_move.py \
+            tests/test_reindex.py tests/test_shift.py tests/test_spec_versions.py \
+            tests/test_stateful_compat.py tests/test_stateful_parallel_sessions.py \
+            tests/test_stateful_repo_ops.py tests/test_stats.py tests/test_store.py \
+            tests/test_store_properties.py tests/test_timetravel.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: icechunk-${{ env.ICECHUNK_VERSION }}-cp312-abi3-manylinux_riscv64
+          path: icechunk-python/dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish icechunk ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: icechunk-${{ matrix.version }}-*-manylinux_riscv64
