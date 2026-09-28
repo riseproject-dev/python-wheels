@@ -1,0 +1,128 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-linux` job of
+# https://github.com/databricks/zerobus-sdk/blob/python/v1.7.0/.github/workflows/release-python.yml
+# and the `test`/`abi3-compat` jobs of
+# https://github.com/databricks/zerobus-sdk/blob/python/v1.7.0/.github/workflows/ci-python.yml
+name: Build databricks-zerobus-ingest-sdk wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/databricks-zerobus-ingest-sdk.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-databricks-zerobus-ingest-sdk.yml'
+      - 'docs/packages/databricks-zerobus-ingest-sdk.yaml'
+      - 'patches/databricks-zerobus-ingest-sdk/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-databricks-zerobus-ingest-sdk.yml'
+      - 'docs/packages/databricks-zerobus-ingest-sdk.yaml'
+      - 'patches/databricks-zerobus-ingest-sdk/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: databricks-zerobus-ingest-sdk
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build databricks-zerobus-ingest-sdk ${{ matrix.version }} cp39-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    env:
+      ZEROBUS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout zerobus-sdk python/v${{ env.ZEROBUS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: databricks/zerobus-sdk
+          ref: python/v${{ env.ZEROBUS_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: |
+          git apply python-wheels/patches/databricks-zerobus-ingest-sdk/${{ env.ZEROBUS_VERSION }}/00*.patch
+
+      - name: Copy root LICENSE for maturin
+        run: cp LICENSE python/LICENSE
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python
+          output-dir: wheelhouse/
+        env:
+          # pyo3's abi3-py39 feature makes this one wheel, built on cp312 and
+          # re-tested on cp313/cp314 like upstream's abi3-compat job.
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          # protoc-bin-vendored has no riscv64 binary (see the patch); CRB's
+          # protoc resolves google/protobuf/*.proto from protobuf-devel on disk.
+          CIBW_BEFORE_BUILD: yum install -y protobuf-compiler protobuf-devel
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PROTOC_INCLUDE=/usr/include
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest pytest-asyncio>=0.21,<1.0 pyarrow
+          CIBW_TEST_SOURCES: python/tests
+          CIBW_TEST_COMMAND: >-
+            python -c "import zerobus._zerobus_core as m; assert m.__file__.endswith('.so'), m.__file__" &&
+            python -m pytest -v python/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: databricks-zerobus-ingest-sdk-${{ env.ZEROBUS_VERSION }}-cp39-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish databricks-zerobus-ingest-sdk ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: databricks-zerobus-ingest-sdk-${{ matrix.version }}-*-manylinux_riscv64
