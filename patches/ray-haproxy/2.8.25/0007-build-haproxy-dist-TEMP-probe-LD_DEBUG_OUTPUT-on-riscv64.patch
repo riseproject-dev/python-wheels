@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Tue, 29 Sep 2026 00:00:00 +0000
+Subject: [PATCH] ci/build: TEMP probe LD_DEBUG_OUTPUT on riscv64 haproxy -v
+ crash
+
+The previous diagnostic round finally captured a clean, correctly-guarded
+LD_DEBUG=all re-run, and it came back completely empty:
+
+    ==> DIAGNOSTIC: LD_DEBUG=all trace (...)
+      LD_DEBUG re-run exit status: 139 (informational only)
+      (empty LD_DEBUG log)
+
+Two things about this are worth separating out before reading anything
+else into it:
+
+- glibc's dynamic linker writes the LD_DEBUG trace with direct, unbuffered
+  write(2) calls to the target fd, not through C stdio -- so redirecting
+  the whole process's stdout/stderr to a regular file (`> file 2>&1`, as
+  the existing re-run does) is not expected to introduce the kind of
+  userspace buffering that would swallow this specific trace even if the
+  process crashes moments later.
+- The two prior fixes to this same diagnostic (exit-127-from-missing-
+  strace, then the unguarded LD_DEBUG re-run aborting the script under
+  `set -e` before its own log could be printed) both turned out to be bugs
+  in the diagnostic harness itself, not in HAProxy -- so it is worth
+  double-checking this empty log isn't a third instance of the same
+  pattern before treating it as real signal about the crash.
+
+Add a second, independent re-run using LD_DEBUG_OUTPUT, which glibc opens
+and writes to directly by path rather than inheriting fd 1/2 from the
+shell at all. If that log also comes back empty, the two independent
+sinks agreeing rules out this specific harness's redirection as the
+explanation, and points instead at the crash happening before ld.so's own
+code starts running (e.g. in the kernel's ELF-loading/entry trampoline,
+ahead of the interpreter's first debug-print call).
+
+Separately: the `readelf -d`-based NEEDED check earlier in this script
+(riscv64's replacement for ldd's self-exec check, which reports "not a
+dynamic executable" against this exact binary on manylinux_2_39_riscv64
+per the commit that added it) has been confirmed passing again on this
+build, and the same platform ldd has, in this round, additionally been
+seen emitting a symbol-version warning about an unrelated system library
+(`libcurl.so.4` wanting a newer OPENSSL_3.2.0 than our vendored 3.0.x
+libssl provides) while walking dependencies it wasn't asked to vendor --
+further evidence this image's riscv64 ldd is doing something unreliable
+of its own accord, not that the haproxy binary it's being pointed at is
+malformed.
+
+No compiler flag in this script, in HAProxy's own Makefile defaults for
+TARGET=linux-glibc, or in the riscv64 branches added by earlier patches
+here selects a CPU/ISA baseline (no CPU= or ARCH= is passed to HAProxy's
+`make`, and HAProxy's default CPU_CFLAGS/ARCH_FLAGS for an unset CPU/ARCH
+add no -march/-mcpu at all). A leaked `-march=native` would also fail to
+compile outright on this toolchain rather than produce a binary that
+merely segfaults at runtime, per gcc's behaviour on this same
+manylinux_2_39_riscv64 image (see build-pyscipopt.yml, which strips
+`-march=native` from a vendored dependency's build for exactly this
+reason). Still no evidence of an ISA mismatch from the build flags; not
+changing anything CPU/ISA-related in this round.
+
+Still a TEMPORARY riscv64-only diagnostic, not a fix.
+
+Upstream-Status: Inappropriate [temporary riscv64 CI diagnostic, not meant to be carried or upstreamed]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/ci/build/build-haproxy-dist.sh b/ci/build/build-haproxy-dist.sh
+--- a/ci/build/build-haproxy-dist.sh
++++ b/ci/build/build-haproxy-dist.sh
+@@ -359,7 +359,31 @@ if [ "$ARCH_LABEL" = "riscv64" ]; then
+             echo "  never reached a clean exit):"
+             tail -n 500 /tmp/haproxy-v-lddebug.log
+         else
+-            echo "  (empty LD_DEBUG log)"
++            echo "  (empty LD_DEBUG log; re-running with LD_DEBUG_OUTPUT below, which"
++            echo "  glibc writes through a different path than the shell's own"
++            echo "  redirect of the whole process's stdout/stderr)"
++        fi
++
++        echo "==> DIAGNOSTIC: LD_DEBUG=all + LD_DEBUG_OUTPUT trace (glibc opens this"
++        echo "    file itself and writes to it directly, independently of whatever"
++        echo "    the shell did to fd 1/2 above -- an empty log here too would mean"
++        echo "    the crash happens before ld.so's own code starts running at all,"
++        echo "    e.g. in the kernel's ELF-loading/entry trampoline):"
++        rm -f /tmp/haproxy-v-lddebug-output.*
++        set +e
++        LD_LIBRARY_PATH="$STAGE_DIR/lib" LD_DEBUG=all \
++            LD_DEBUG_OUTPUT=/tmp/haproxy-v-lddebug-output \
++            "$STAGE_DIR/haproxy" -v > /dev/null 2>&1
++        LDDEBUG_OUTPUT_STATUS=$?
++        set -e
++        echo "  LD_DEBUG_OUTPUT re-run exit status: $LDDEBUG_OUTPUT_STATUS (informational only)"
++        LDDEBUG_OUTPUT_FILE="$(ls /tmp/haproxy-v-lddebug-output.* 2>/dev/null | head -n1)"
++        if [ -n "$LDDEBUG_OUTPUT_FILE" ] && [ -s "$LDDEBUG_OUTPUT_FILE" ]; then
++            echo "  $LDDEBUG_OUTPUT_FILE:"
++            wc -l "$LDDEBUG_OUTPUT_FILE"
++            tail -n 500 "$LDDEBUG_OUTPUT_FILE"
++        else
++            echo "  (empty or missing LD_DEBUG_OUTPUT file too)"
+         fi
+
+         echo "==> DIAGNOSTIC: ldd (informational only; may report \"not a dynamic"
