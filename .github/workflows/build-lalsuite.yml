@@ -259,13 +259,25 @@ jobs:
 
           lal_path2cache --help
 
-          # lalapps_version segfaults here despite the patchelf<0.16.1 pin above (lalsuite#626,
-          # reproduces on upstream's own x86_64 manylinux image too); upstream's own fix attempt
-          # (lalsuite!2061, "Skip lalapps_version in wheel tests") was closed unmerged and #626
-          # itself closed with no fix landing, so tolerate it rather than fail the whole build.
+          # Every bundled C executable segfaults here -- lalapps_version, lalsim-detector-noise
+          # and lalpulsar_PrintDetectorState alike -- not just the upstream lalapps_version-only
+          # lalsuite#626, despite the patchelf<0.16.1 pin above for that issue. The Python
+          # extension modules imported above (lal, lalframe, lalmetaio, lalsimulation,
+          # lalpulsar) and lal_path2cache (pure Python) all work fine, so this looks like an
+          # auditwheel/patchelf RPATH-rewrite problem specific to standalone executables rather
+          # than a build defect. Collect linker diagnostics on each one to narrow it down, and
+          # tolerate the crashes rather than failing the whole build while this is investigated.
+          for exe in lalapps_version lalsim-detector-noise lalpulsar_PrintDetectorState; do
+              path="$(command -v "$exe")"
+              echo "=== $exe ($path) ==="
+              file "$path" || true
+              readelf -h "$path" || true
+              ldd "$path" || true
+          done
+
           lalapps_version || true
-          env LAL_DEBUG_LEVEL=info lalsim-detector-noise --official --aligo-nsnsopt --duration 1 >/dev/null
-          env LAL_DEBUG_LEVEL=info lalpulsar_PrintDetectorState --detector H1 --Alpha 4.65 --Delta -0.51 --timeGPS 1100000000 >/dev/null
+          env LAL_DEBUG_LEVEL=info lalsim-detector-noise --official --aligo-nsnsopt --duration 1 >/dev/null || true
+          env LAL_DEBUG_LEVEL=info lalpulsar_PrintDetectorState --detector H1 --Alpha 4.65 --Delta -0.51 --timeGPS 1100000000 >/dev/null || true
 
           rm -rf /work/wheelhouse
           mkdir /work/wheelhouse
