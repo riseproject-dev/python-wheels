@@ -21,7 +21,7 @@ and then pass the `--index-url` option to the install command to tell pip to
 pull packages from the RISE package index, e.g.,
 
 ```bash
-python -m pip install scipy --index-url https://pypi.riseproject.dev/simple/
+python -m pip install scipy --extra-index-url https://pypi.riseproject.dev/simple/ --prefer-binary
 ```
 
 Find complete documentation on [the python-wheels website](https://pypi.riseproject.dev/)
