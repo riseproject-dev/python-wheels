@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Tue, 29 Sep 2026 00:00:00 +0000
+Subject: [PATCH] ci/build: TEMP print and un-break LD_DEBUG_OUTPUT diagnostic
+
+The previous round finally got the LD_DEBUG_OUTPUT re-run itself running
+cleanly (no step-killing crash, a correctly captured "exit status: 139
+(informational only)"), but the CI log still stops dead right after that
+line:
+
+    LD_DEBUG_OUTPUT re-run exit status: 139 (informational only)
+    ##[error]Process completed with exit code 2.
+
+Nothing after it ever reads or prints the file glibc actually wrote. Two
+separate bugs, both in the diagnostic harness itself:
+
+- glibc's dynamic linker does not write LD_DEBUG_OUTPUT=<path> to that
+  exact path -- it appends the process's PID, producing
+  "<path>.<pid>" (e.g. "/tmp/haproxy-v-lddebug-output.18524"), and the
+  PID isn't known from the shell's side ahead of the crash. The line that
+  was meant to locate that file --
+  `LDDEBUG_OUTPUT_FILE="$(ls /tmp/haproxy-v-lddebug-output.* 2>/dev/null | head -n1)"`
+  -- has to glob for it, which it does, but through a pipeline.
+- This script inherits `set -euxo pipefail` from the `bash -c` wrapper
+  that invokes it (via bash's automatic SHELLOPTS propagation to child
+  bash processes), so pipefail is live here even though this script never
+  sets it itself. With no file matching the glob, the unquoted pattern is
+  passed to `ls` literally, `ls` exits 2 ("No such file or directory",
+  redirected to /dev/null), and with pipefail that pipeline's *overall*
+  status is `ls`'s 2 even though the trailing `head -n1` exits 0. That
+  nonzero status lands on a plain assignment, which errexit does not
+  forgive, so the script dies right there with exit 2 -- before the `if`
+  a few lines down ever runs to print anything. This is the same shape of
+  self-inflicted harness bug as the previous two rounds (missing strace
+  reported as haproxy's own exit code; an unguarded re-run aborting the
+  script under `set -e` before its own log could be printed), not new
+  information about the crash.
+
+Replace the `ls | head` pipeline with a bare glob `for` loop: with no
+match, bash leaves the pattern unexpanded and `[ -f "$f" ]` just reports
+false, so there is no pipeline left to fail under pipefail. Print every
+matching file's content (there should only ever be one, but loop instead
+of assuming), and when nothing matches, say so explicitly and distinctly
+from a matched-but-empty file, since "no file at all" is itself the
+signal that the crash happens before ld.so's own code -- including its
+LD_DEBUG_OUTPUT file open -- ever runs.
+
+Still a TEMPORARY riscv64-only diagnostic, not a fix.
+
+Upstream-Status: Inappropriate [temporary riscv64 CI diagnostic, not meant to be carried or upstreamed]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/ci/build/build-haproxy-dist.sh b/ci/build/build-haproxy-dist.sh
+--- a/ci/build/build-haproxy-dist.sh
++++ b/ci/build/build-haproxy-dist.sh
+@@ -369,21 +369,39 @@ if [ "$ARCH_LABEL" = "riscv64" ]; then
+         echo "    the shell did to fd 1/2 above -- an empty log here too would mean"
+         echo "    the crash happens before ld.so's own code starts running at all,"
+         echo "    e.g. in the kernel's ELF-loading/entry trampoline):"
+-        rm -f /tmp/haproxy-v-lddebug-output.*
++        LDDEBUG_OUTPUT_PATH=/tmp/haproxy-v-lddebug-output
++        rm -f "${LDDEBUG_OUTPUT_PATH}".*
+         set +e
+         LD_LIBRARY_PATH="$STAGE_DIR/lib" LD_DEBUG=all \
+-            LD_DEBUG_OUTPUT=/tmp/haproxy-v-lddebug-output \
++            LD_DEBUG_OUTPUT="$LDDEBUG_OUTPUT_PATH" \
+             "$STAGE_DIR/haproxy" -v > /dev/null 2>&1
+         LDDEBUG_OUTPUT_STATUS=$?
+         set -e
+         echo "  LD_DEBUG_OUTPUT re-run exit status: $LDDEBUG_OUTPUT_STATUS (informational only)"
+-        LDDEBUG_OUTPUT_FILE="$(ls /tmp/haproxy-v-lddebug-output.* 2>/dev/null | head -n1)"
+-        if [ -n "$LDDEBUG_OUTPUT_FILE" ] && [ -s "$LDDEBUG_OUTPUT_FILE" ]; then
+-            echo "  $LDDEBUG_OUTPUT_FILE:"
+-            wc -l "$LDDEBUG_OUTPUT_FILE"
+-            tail -n 500 "$LDDEBUG_OUTPUT_FILE"
+-        else
+-            echo "  (empty or missing LD_DEBUG_OUTPUT file too)"
++        # glibc's dynamic linker appends the process's PID to LD_DEBUG_OUTPUT
++        # rather than writing the exact path given (so the file is e.g.
++        # "${LDDEBUG_OUTPUT_PATH}.18524", not "${LDDEBUG_OUTPUT_PATH}" itself),
++        # and the PID isn't known from the shell's side ahead of the crash.
++        # Glob for it instead of piping `ls` through `head`: with this
++        # script's inherited `pipefail`, `ls nomatch 2>/dev/null | head -n1`
++        # would itself exit non-zero (ls's own status, even though head
++        # succeeds) and abort the script under `set -e` before ever printing
++        # anything -- which is exactly what silently ate this section last
++        # run. A bare `for` glob has no such pipeline to fail: with no match
++        # bash leaves the pattern unexpanded and `[ -f "$f" ]` just reports
++        # false.
++        LDDEBUG_OUTPUT_FOUND=0
++        for f in "${LDDEBUG_OUTPUT_PATH}".*; do
++            if [ -f "$f" ]; then
++                LDDEBUG_OUTPUT_FOUND=1
++                echo "  LD_DEBUG_OUTPUT file: $f"
++                wc -l "$f"
++                tail -n 500 "$f"
++            fi
++        done
++        if [ "$LDDEBUG_OUTPUT_FOUND" -eq 0 ]; then
++            echo "  no LD_DEBUG_OUTPUT file was created at all (not even an empty"
++            echo "  one) -- distinct from a file existing but being empty"
+         fi
+ 
+         echo "==> DIAGNOSTIC: ldd (informational only; may report \"not a dynamic"
