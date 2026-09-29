@@ -9,7 +9,20 @@ repository for projects where upstream are not yet ready or able to perform buil
 
 [RISE](https://riseproject.dev) is a collaborative, industry-led initiative under the Linux Foundation that accelerates open-source software development for the RISC-V architecture.
 
-## Documentation
+## Usage
+
+Installing Python wheels from the RISE registry is as easy as:
+
+```bash
+python -m pip install --upgrade pip
+```
+
+and then pass the `--index-url` option to the install command to tell pip to
+pull packages from the RISE package index, e.g.,
+
+```bash
+python -m pip install scipy --index-url https://pypi.riseproject.dev/simple/
+```
 
 Find complete documentation on [the python-wheels website](https://pypi.riseproject.dev/)
 
