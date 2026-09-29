@@ -113,6 +113,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
   until you install it.
 - **586** — An inherited `curl … .tar.lz | tar x --lzip` fails on riscv64: `lzip` is in no Rocky 10
   repo and there is no EPEL; fetch the same GNU release's `.tar.xz` instead.
+- **617** — An upstream Dockerfile's static `.a` built without `-fPIC` links into a `.so` only on
+  default-PIE Debian/Ubuntu gcc; on the manylinux image it fails with `R_RISCV_HI20`.
 - **599** — `PROTOC_INCLUDE` (gotcha 100) is not free: it replaces protoc's implicit `-I.`, so a
   `build.rs` that passes a bare `compile_protos("x.proto")` then fails "does not reside within any
   --proto_path"; CRB protoc finds `/usr/include` on its own, so leave it unset there.
@@ -1862,3 +1864,27 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
        which failure you have from the CMake **configure** log path before reaching for either
        fix: `Utilities/cmcurl/CMakeLists.txt` (this gotcha) vs a vendored third-party
        `CMakeLists.txt` three levels down (207).
+
+617. **An upstream Dockerfile that hand-builds a static dependency for a `.so` can omit
+    `-fPIC` and still link on x86_64/aarch64 only because Debian/Ubuntu's gcc defaults to PIE;
+    the manylinux image's gcc does not, so the same recipe fails at the final `.so` link on
+    riscv64 (the runai-model-streamer-s3 case).** Run:ai's `.devcontainer/Dockerfile` builds
+    OpenSSL, curl, zlib and the AWS SDK as `.a` archives that `libstreamers3.so` links
+    statically. curl gets `CFLAGS="-fPIC"`, the AWS SDK `-DCMAKE_POSITION_INDEPENDENT_CODE=ON`
+    and OpenSSL compiles PIC itself, but zlib's `./configure --static --shared` passes nothing,
+    so `libz.a`'s objects come out in whatever the compiler's default code model is. On
+    Ubuntu (default-PIE gcc, cross compilers included) that is PC-relative and links into a
+    shared object. Transcribed as-is into the manylinux_riscv64 image, the link of the final
+    `.so` fails with `relocation R_RISCV_HI20 against '_length_code' can not be used when
+    making a shared object; recompile with -fPIC` for every `libz.a` member, and `ld` then
+    segfaults. That is 45 minutes of dependency build plus the Bazel compile before the
+    error appears.
+    - **Audit every `.a` in the recipe before the first run, not just the ones gotcha 294's
+      CMake allowlist would miss.** Any static dependency built with plain `./configure`/`make`
+      and no `-fPIC` has the problem. The fix is the same one-liner upstream already uses for
+      its sibling libraries: `CFLAGS="-fPIC" ./configure ...`.
+    - **Key a cached dependency prefix on the recipe, not just the versions.** If the cache
+      key is only `<dep>-<version>` pairs, the broken non-PIC `libz.a` is restored on the next
+      run and the fix never reaches the link. Keying on
+      `hashFiles('<checkout>/.github/workflows/build-<pkg>.yml')` rebuilds the prefix whenever
+      the recipe changes.

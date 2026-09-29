@@ -967,6 +967,11 @@ The porting gotchas (551 of them) live in [`references/gotchas/`](gotchas/), spl
   riscv64 because `lzip` is in no Rocky 10 repo and there is no EPEL; fetch the same release's
   `.tar.xz` on the host, checksum it, and `tar xJf` it in `before-all`. GMP's `--enable-fat` is
   a no-op off x86 and needs no edit (the chiavdf case).
+- **617** — An upstream Dockerfile that hand-builds a static dependency (zlib's plain
+  `./configure --static`) without `-fPIC` links into a `.so` on x86_64/aarch64 only because
+  Debian/Ubuntu gcc defaults to PIE; the manylinux image's gcc does not, so the final link fails
+  with `R_RISCV_HI20 ... recompile with -fPIC`. Also key a cached dependency prefix on the recipe
+  (the runai-model-streamer-s3 case).
 - **599** — `PROTOC_INCLUDE` (gotcha 100) replaces protoc's implicit `-I.`, so a `build.rs` doing
   a bare `compile_protos("x.proto")` fails "does not reside within any --proto_path"; CRB's protoc
   finds `/usr/include` itself via `<bindir>/../include`, so leave it unset (the
@@ -1376,6 +1381,12 @@ The porting gotchas (551 of them) live in [`references/gotchas/`](gotchas/), spl
 - **596** — `cannot open shared object file: No such file or directory` for a file that exists is
   glibc rejecting a foreign-machine ELF: ladybug's `getArch()` falls back to `amd64`, so riscv64
   `INSTALL` fetched x86-64 extensions. Patch the fallback; deselect tests needing upstream plugins.
+- **616** — A test matrix over *target* interpreter versions (not the one running the tests)
+  shows gotcha 33/169's shape one level removed: pystack's native-frame classification of a
+  separate target process finds the CPython eval-loop/GC frame on riscv64 for every target
+  except 3.13+, where 28 identical tests fail on 3.13/3.14/3.14t and 3.12 is fully green —
+  a documented per-arch native-unwind gap (pystack's `elfutils-aarch64-signal-frame.patch`
+  exists only for AArch64), so deselect per interpreter rather than skip the whole suite.
 - **598** — A single long build-then-test job's test step inherits the rest of the job's
   `timeout-minutes`, so a hang (openvino's cp314t pytest) holds the runner ~11h and ends `cancelled`;
   cap the test step with its own `timeout-minutes`, upload wheels first, reproduce from the artifact.
