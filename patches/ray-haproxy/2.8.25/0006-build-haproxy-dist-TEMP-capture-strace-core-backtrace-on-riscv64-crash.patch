@@ -45,6 +45,25 @@ being diagnosed:
     `ldd`, and `strace` only when `command -v strace` actually finds it
     on PATH after the install attempt.
 
+That revision ran on riscv64 CI for the first time and got the real
+crash: `haproxy -v` genuinely segfaults, plain and under `LD_DEBUG=all`
+alike. But the `LD_DEBUG=all` re-run was never wrapped in the same
+`set +e` / capture-status / `set -e` pattern the plain invocation above
+it uses -- it was a bare command under `set -e`, so its own segfault
+(exit 139) aborted the script right there, before the following
+`echo`/`cat` could run:
+
+    ==> DIAGNOSTIC: LD_DEBUG=all trace (...)
+    ##[error]Process completed with exit code 139.
+
+The trace glibc's dynamic linker had already written to
+`/tmp/haproxy-v-lddebug.log` (unbuffered, as it goes, not just on clean
+exit) never made it into the job log. Guard that re-run the same way the
+plain invocation is guarded, and print the log's tail unconditionally
+afterwards regardless of the re-run's own exit status -- capped to the
+last 500 lines since a full `LD_DEBUG=all` trace can be large and the
+crash-adjacent lines at the end are what matter.
+
 Still a TEMPORARY riscv64-only diagnostic, not a fix.
 
 Upstream-Status: Inappropriate [temporary riscv64 CI diagnostic, not meant to be carried or upstreamed]
@@ -54,7 +73,7 @@ Signed-off-by: Ludovic Henry <git@ludovic.dev>
 diff --git a/ci/build/build-haproxy-dist.sh b/ci/build/build-haproxy-dist.sh
 --- a/ci/build/build-haproxy-dist.sh
 +++ b/ci/build/build-haproxy-dist.sh
-@@ -318,7 +318,89 @@ else
+@@ -318,7 +318,95 @@ else
      echo "    Stack canary: NO — consider -fstack-protector-strong"
  fi
 
@@ -87,12 +106,18 @@ diff --git a/ci/build/build-haproxy-dist.sh b/ci/build/build-haproxy-dist.sh
 +
 +        echo "==> DIAGNOSTIC: LD_DEBUG=all trace (glibc's own dynamic-linker trace;"
 +        echo "    built into every glibc, unlike strace, so it needs no package install):"
++        set +e
 +        LD_LIBRARY_PATH="$STAGE_DIR/lib" LD_DEBUG=all "$STAGE_DIR/haproxy" -v \
 +            > /tmp/haproxy-v-lddebug.log 2>&1
-+        echo "  (LD_DEBUG re-run exit status: $?, informational only)"
++        LDDEBUG_STATUS=$?
++        set -e
++        echo "  LD_DEBUG re-run exit status: $LDDEBUG_STATUS (informational only)"
 +        if [ -s /tmp/haproxy-v-lddebug.log ]; then
 +            wc -l /tmp/haproxy-v-lddebug.log
-+            cat /tmp/haproxy-v-lddebug.log
++            echo "  last 500 lines (ld.so writes this trace to fd 2 unbuffered as it"
++            echo "  runs, so the crash-adjacent lines survive even though the process"
++            echo "  never reached a clean exit):"
++            tail -n 500 /tmp/haproxy-v-lddebug.log
 +        else
 +            echo "  (empty LD_DEBUG log)"
 +        fi
