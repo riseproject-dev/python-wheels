@@ -686,3 +686,54 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
       reason. Run the metadata check *after* that `cd`, not before it: writing the check
       first (chronologically, before the later `import <pkg>` smoke test was added) is why
       it alone stayed exposed.
+
+618. **`--import-mode=importlib` does not immunize a package-nested test suite against
+    gotcha 148's shadowing — it reaches the same in-place build by a wholly different route
+    (fixing gotcha 612 on the same script does not fix this; the pyscf case).** Gotchas
+    25/148/218 are all `sys.path`-based: `-m`/prepend-mode insertion puts the checkout
+    *root* on `sys.path[0]`, and switching to `--import-mode=importlib` (pyscf's own
+    `pytest.ini` `addopts`) is the documented way to stop that. It does not stop this,
+    because importlib mode's own package resolution never consults `sys.path` for a test
+    file that lives inside a real package: pytest's `_import_module_using_spec` (in
+    `_pytest/pathlib.py`) walks up `__init__.py` files from the test file's *own path on
+    disk* to find the top-level package, then imports every ancestor — including that
+    top-level package — via `importlib.util.spec_from_file_location` pointed straight at
+    that filesystem location, before the test file's own body (and its `sys.path`-based
+    imports) ever runs. Collecting `pytest /work/<pkg>/<pkg>` therefore imports `<pkg>`
+    itself from `/work/<pkg>/<pkg>/__init__.py` — the checkout, built in place by an
+    earlier `--no-clean` build step in a *different* container that had build-only system
+    libraries installed — never the `auditwheel`-repaired, properly-`pip install`ed wheel,
+    regardless of cwd or `PYTHONPATH`. `cd /tmp` (gotcha 612's fix, applied on this same
+    script one step earlier) does nothing here: that fix closes the cwd-insertion route,
+    but this route never used cwd at all.
+    - **The tell is a `.so` load failure whose message names a checkout path, cascading
+      into unrelated `AttributeError: module '<pkg>.<sub>' has no attribute '<name>'`s
+      across hundreds of otherwise-unconnected test files.** pyscf's `ctypes.cdll[...]`
+      failed with `OSError: libopenblas.so.0: cannot open shared object file` — true only
+      for the checkout's raw, unrepaired `libnp_helper.so` (built where `openblas-devel`
+      was installed; the *test* container never installs an OpenBLAS runtime, relying on
+      auditwheel's vendored copy — the one on the wheel it never actually tested). That one
+      early exception aborts `<pkg>/lib/__init__.py` partway through, so every submodule
+      import statement after the one that failed (`from pyscf.lib import diis`,
+      `load_library`, `einsum`, …) never ran, and every other file that touches those names
+      for the rest of the *same* pytest process reports them missing — 336 collection
+      errors from what is structurally one root cause. Read the *first* traceback's file
+      paths, not the error text of the hundredth: `/work/<pkg>/<pkg>/...` in an `import`
+      frame (not just the test file's own collection-target path) is the actual signal.
+    - **Fix the same way gotcha 148 already does, for the same underlying reason (the
+      suite lives inside the package) — `mv` the checkout's package dir to a name that
+      isn't `<pkg>` right before the pytest invocation, and repoint the collection target
+      and any `--ignore=` globs at the new name.** The rename doesn't touch file *contents*:
+      `<pkg>/__init__.py`'s own top-level `from <pkg> import lib` is an absolute import
+      Python evaluates fresh against `sys.path` when it runs — under the new directory
+      name, pytest's on-disk resolution no longer matches `<pkg>`, so that statement (and
+      every other absolute `from <pkg> import ...` in the suite) falls through to a normal
+      import and finds the properly installed wheel. No `CIBW_TEST_SOURCES`-style staging
+      is needed, since importlib mode's failure mode isn't `sys.path` order — just the one
+      `mv`.
+    - **Verify by checking which package a passing run actually imported, not just that it
+      passed.** A green run after the `mv` whose collection still shows any
+      `/work/<pkg>/<pkg>/...` (the *old* name) import frame would mean the rename didn't
+      take effect for that file — e.g. a leftover `--ignore=` still pointed at the old path,
+      skipping rather than fixing it. The fix must make every collected file resolve
+      `<pkg>` to site-packages, not just quiet the ones an `--ignore=` glob already hid.

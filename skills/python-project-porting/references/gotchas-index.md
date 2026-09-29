@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (551 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -1192,6 +1192,14 @@ The porting gotchas (551 of them) live in [`references/gotchas/`](gotchas/), spl
   set with no exception, because `python -c` puts the checkout root's stale egg-info ahead
   of site-packages on `sys.path` — not because `auditwheel repair` dropped anything (the
   pyscf case).
+- **618** — `--import-mode=importlib` stops gotcha 25/148/218's `sys.path`-insertion
+  shadowing but not gotcha 148's underlying problem itself: for a test nested inside the
+  package, pytest's own package resolution walks `__init__.py` files up from the test
+  file's disk path and imports the top-level package straight off that location, so
+  `<pkg>` still loads from the in-place checkout build, never the installed wheel — fix
+  with the same `mv <pkg> <pkg>-src` gotcha 148 already uses, not more `cd`s (the pyscf
+  case; one early `.so` load failure there then cascades into 336 unrelated-looking
+  `AttributeError`s within the same pytest process).
 
 ### Testing: pytest config, servers & test selection — [`gotchas/pytest-config-servers-and-selection.md`](gotchas/pytest-config-servers-and-selection.md)
 
