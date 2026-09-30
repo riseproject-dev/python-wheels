@@ -458,6 +458,11 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
   the upstream wheel with HTTP Range requests, use its unstripped `.symtab` to rule the jaxlib
   `embed_bitcode` wall in or out, and scale the sibling's measured per-leg CI time by compiled
   `.text` before writing any YAML (the litert-converter case).
+- **622** — An LLVM-JIT package can be arch-blocked even though its pinned LLVM has a RISCV
+  backend: taichi's Linux CPU JIT uses RuntimeDyld, whose `RuntimeDyldELF.cpp` has no RISC-V
+  relocations before LLVM 20, while its codegen calls `getPointerElementType()` (removed in
+  LLVM 17); its CMake also `FATAL_ERROR`s on any processor but x86_64/aarch64/x86 and its `Arch`
+  enum has no riscv64 (the taichi case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

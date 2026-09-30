@@ -297,6 +297,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   swap" on paper: cost the extra closure from the upstream wheel's unstripped `.symtab` (Range
   reads, no download) and scale the sibling's measured CI time by `.text` (the
   litert-converter case).
+- **622** — For an LLVM JIT, a RISCV codegen target is not enough: intersect the LLVM API
+  window the source compiles against with the first LLVM whose JIT linker (RuntimeDyld vs
+  JITLink) handles RISC-V, and check the project's own CPU `Arch` enum (the taichi case).
 
 ---
 
@@ -5199,3 +5202,42 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     say in the note how cheaply it reopens. If the riscv64 pool gains a Bazel remote cache or
     much faster runners, the workflow is `build-ai-edge-litert.yml` with the target and
     `--config` swapped.
+
+622. **For an LLVM JIT, "LLVM has a RISC-V backend" is the wrong question: intersect the LLVM
+    API window the project compiles against with the first LLVM whose *JIT linker* handles
+    RISC-V, and check the project's own CPU-arch enum (the taichi case).** taichi 1.7.4 is
+    upstream LLVM 15.0.5 (not a fork; `dev_install.md` builds it with
+    `-DLLVM_TARGETS_TO_BUILD="X86;NVPTX"`), and LLVM 15 does have a RISCV codegen target, so
+    "just rebuild LLVM with `RISCV`" looks like the whole port. It is not, for three reasons
+    that each read in minutes over raw.githubusercontent.com, no checkout needed:
+    - **Which JIT linker does the CPU backend use on Linux?** `taichi/runtime/cpu/jit_cpu.cpp`
+      picks `orc::ObjectLinkingLayer` (JITLink) only under `__APPLE__ && __aarch64__`; every
+      Linux build gets `orc::RTDyldObjectLinkingLayer` (RuntimeDyld). Grep
+      `llvm/lib/ExecutionEngine/RuntimeDyld/RuntimeDyldELF.cpp` per release tag for `riscv`:
+      **0 hits in 15.0.7, 16.0.6, 17.0.6, 18.1.8 and 19.1.7; 37 in 20.1.8.** RuntimeDyld
+      cannot apply a single RISC-V relocation before LLVM 20, so a riscv64 build on the
+      project's own LLVM compiles and links fine and then fails at the first kernel launch.
+    - **What is the newest LLVM the project's source still compiles against?** taichi calls
+      `Type::getPointerElementType()` (`taichi/codegen/llvm/codegen_llvm.cpp`), which
+      `llvm/include/llvm/IR/Type.h` still has in 16.0.6 and has dropped in 17.0.6. Window
+      <=16 vs RuntimeDyld-RISC-V >=20: empty. The only ways through are a source patch that
+      swaps the Linux riscv64 JIT onto JITLink `ELF_riscv` as it stood in LLVM 15/16 (602
+      lines in 15.0.5 vs ~1000 in 20.1.8, so it is the immature one), or porting the codegen
+      to opaque pointers and LLVM 20+. Both are compiler work for upstream, not packaging.
+    - **Does the project know about any CPU arch but x86_64/aarch64?** taichi's
+      `cmake/TaichiCXXFlags.cmake` ends its processor switch with
+      `message(FATAL_ERROR "Unknown processor type ${CMAKE_SYSTEM_PROCESSOR}")`,
+      `taichi/inc/archs.inc.h` lists only `x64` and `arm64` as CPU arches, and
+      `taichi/rhi/arch.cpp`'s `host_arch()` and `default_simd_width()` fall through to
+      `RHI_NOT_IMPLEMENTED` for anything else. A new `Arch` enum value is a user-visible API
+      change (`ti.cpu` resolves through `host_arch()`), not a build fix.
+    Two cost multipliers push it further: the runtime is a `runtime_<arch>.bc` compiled at build
+    time by `CLANG_EXECUTABLE` and loaded by the project's own LLVM, so the manylinux_riscv64
+    image's clang 21.1.8 (whose bitcode LLVM 15 cannot read) is unusable and clang 15 has to be
+    built from source too, which is libclang's ~10 h full LLVM/Clang compile
+    (`build-libclang.yml`, `timeout-minutes: 1440`). And the upstream Linux pipeline is
+    x86_64-only: `ti_build/llvm.py` downloads one `taichi-llvm-15-linux.zip` on Linux with no
+    `machine` check, and PyPI has no sdist and no Linux aarch64 wheel for any 1.7.x release,
+    so there is no non-x86 Linux build to mirror (goal 2). Park it as *upstream-arch-blocked*,
+    not dependency-blocked, and say what reopens it: an upstream riscv64 `Arch` plus either a
+    JITLink path on Linux or a move to LLVM 20 or newer.
