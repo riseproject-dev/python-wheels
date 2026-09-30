@@ -1,0 +1,279 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `firmware_update`, `build_python_sdist` and `build_python_wheels` jobs of
+# https://github.com/jetperch/joulescope_driver/blob/v2.4.1/.github/workflows/packaging.yml
+name: Build pyjoulescope-driver wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyjoulescope-driver.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyjoulescope-driver.yml'
+      - 'docs/packages/pyjoulescope-driver.yaml'
+      - 'patches/pyjoulescope-driver/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyjoulescope-driver.yml'
+      - 'docs/packages/pyjoulescope-driver.yaml'
+      - 'patches/pyjoulescope-driver/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyjoulescope-driver
+      version: ${{ inputs.version }}
+
+  build_sdist:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyjoulescope-driver ${{ matrix.version }} sdist
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      PYJOULESCOPE_DRIVER_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout joulescope_driver v${{ env.PYJOULESCOPE_DRIVER_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: jetperch/joulescope_driver
+          ref: v${{ env.PYJOULESCOPE_DRIVER_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch joulescope_driver source
+        run: git apply python-wheels/patches/pyjoulescope-driver/${{ env.PYJOULESCOPE_DRIVER_VERSION }}/*.patch
+
+      - name: Set up Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.14'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Embed JS320 firmware
+        run: python tools/embed_js320_firmware.py
+
+      - name: Build sdist
+        run: |
+          uv pip install build
+          python -m build --sdist
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyjoulescope-driver-${{ env.PYJOULESCOPE_DRIVER_VERSION }}-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_sdist]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyjoulescope-driver ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Matches upstream's own cp312/cp313/cp314 matrix (no cp314t upstream).
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      PYJOULESCOPE_DRIVER_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: pyjoulescope-driver-${{ env.PYJOULESCOPE_DRIVER_VERSION }}-sdist
+          path: dist/
+
+      - name: Extract the sdist and stage the licence-collection script
+        run: |
+          mkdir sdist
+          tar xzf dist/*.tar.gz --strip-components=1 -C sdist
+          cat > collect-licenses.sh <<'COLLECT_EOF'
+          #!/bin/bash
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # Stage, at the project root, the licence of every shared library
+          # auditwheel vendors out of the build image alongside libudev.
+          # The patched setup.cfg's LICENSE.* glob copies them into the wheel.
+          set -euo pipefail
+
+          project="${1:?usage: collect-licenses.sh <project-dir>}"
+
+          # ldd is transitive, so the linked lib alone covers its whole closure;
+          # ldd does not list the root itself, so resolve that too.
+          mapfile -t libs < <(
+              {
+                  ldd /usr/lib64/libudev.so | tr ' ' '\n' | grep '^/'
+                  readlink -f /usr/lib64/libudev.so
+              } | sort -u
+          )
+
+          # `rpm -qf` reports unowned files on stdout, so keep only bare package names.
+          # glibc and the gcc runtime are on auditwheel's manylinux allowlist and
+          # are never vendored into the wheel.
+          mapfile -t pkgs < <(
+              rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null |
+                  grep -E '^[A-Za-z0-9._+-]+$' | sort -u |
+                  grep -vE '^(glibc|libgcc|libstdc\+\+|gcc)$'
+          )
+
+          for pkg in "${pkgs[@]}"; do
+              mapfile -t files < <(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
+
+              # Some subpackages leave the licence to a sibling of the same source RPM.
+              if [ -z "${files[0]:-}" ]; then
+                  srpm=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg")
+                  mapfile -t files < <(
+                      rpm -qa --qf '%{SOURCERPM} %{NAME}\n' |
+                          awk -v s="$srpm" '$1 == s { print $2 }' |
+                          xargs -r rpm -q --licensefiles 2>/dev/null | sort -u
+                  )
+              fi
+
+              # Others mark it %doc rather than %license, and the image installs no docs.
+              if [ -z "${files[0]:-}" ]; then
+                  dnf -y --disablerepo=extras reinstall --setopt=tsflags= "$pkg" >/dev/null
+                  mapfile -t files < <(rpm -qd "$pkg" | grep -iE '/(LICEN[CS]E|COPYING|NOTICE)')
+              fi
+
+              for f in "${files[@]}"; do
+                  [ -f "$f" ] || continue
+                  cp "$f" "$project/LICENSE.${pkg}.$(basename "$f")"
+              done
+              compgen -G "$project/LICENSE.$pkg.*" >/dev/null ||
+                  { echo "no licence file found for $pkg" >&2; exit 1; }
+          done
+
+          ls -1 "$project"/LICENSE.* | sed "s|$project/||"
+          COLLECT_EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: sdist
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # libudev-devel doesn't exist on Rocky 10; systemd-devel provides libudev.so/libudev.h instead (gotcha 252)
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf install -y systemd-devel &&
+            bash {project}/collect-licenses.sh {package}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=numpy
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: pytest --pyargs pyjoulescope_driver
+
+      - name: Verify the wheel ships the compiled extension and licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = sorted(n for n in names if n.endswith(".so"))
+          print("\n".join(sos))
+          assert any(n.startswith("pyjoulescope_driver/binding.") for n in sos), sos
+
+          lic = sorted(n.split(".dist-info/licenses/", 1)[1] for n in names
+                       if ".dist-info/licenses/" in n and not n.endswith("/"))
+          print("\n".join(lic))
+          expected_files = {
+              "LICENSE.txt",
+              "third-party/libusb/COPYING",
+              "third-party/miniz/LICENSE",
+              "third-party/tinyprintf/tinyprintf_LICENSE.BSD-new",
+          }
+          assert expected_files <= set(lic), expected_files - set(lic)
+          expected_pkgs = {"libcap", "systemd-libs"}
+          have_pkgs = {f.split(".", 2)[1] for f in lic if f.startswith("LICENSE.") and f != "LICENSE.txt"}
+          assert expected_pkgs <= have_pkgs, expected_pkgs - have_pkgs
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyjoulescope-driver-${{ env.PYJOULESCOPE_DRIVER_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources for pyjoulescope-driver ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      PYJOULESCOPE_DRIVER_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # libcap/systemd-libs are the copyleft (GPL/LGPL) libraries auditwheel vendors
+      # out of the build image alongside libudev.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc libcap systemd-libs
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyjoulescope-driver-${{ env.PYJOULESCOPE_DRIVER_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyjoulescope-driver ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyjoulescope-driver-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: pyjoulescope-driver-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc and the copyleft libraries bundled in the wheel
