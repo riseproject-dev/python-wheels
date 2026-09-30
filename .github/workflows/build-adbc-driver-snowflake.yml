@@ -1,0 +1,182 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build at this tag (the python-manylinux job of
+# .github/workflows/packaging.yml, ci/scripts/python_util.sh's build_drivers and
+# ci/scripts/python_wheel_unix_{build,relocate}.sh):
+#   https://github.com/apache/arrow-adbc/blob/apache-arrow-adbc-23/.github/workflows/packaging.yml
+# Same shape as build-adbc-driver-flightsql.yml: the driver's shared library
+# (c/driver/snowflake -> go/adbc/pkg/snowflake, via CMake's add_go_lib) is a cgo
+# `go build -buildmode=c-shared`, so the manylinux image gets the Go toolchain
+# pinned in upstream's own .env. Upstream's Python tests (native-unix.yml's "Test
+# Python Driver Snowflake") need a live Snowflake account via ADBC_SNOWFLAKE_URI
+# and self-skip without it, so the test step also drives the loaded Go driver
+# offline: DatabaseInit parses the DSN with gosnowflake without connecting.
+name: Build adbc-driver-snowflake wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/adbc-driver-snowflake.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-adbc-driver-snowflake.yml'
+      - 'docs/packages/adbc-driver-snowflake.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-adbc-driver-snowflake.yml'
+      - 'docs/packages/adbc-driver-snowflake.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: adbc-driver-snowflake
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build adbc-driver-snowflake ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    # gosnowflake pulls in the AWS/Azure/GCP SDK module graph, fetched fresh every run.
+    timeout-minutes: 120
+
+    env:
+      ADBC_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout apache/arrow-adbc v${{ env.ADBC_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: apache/arrow-adbc
+          ref: go/adbc/v${{ env.ADBC_VERSION }}
+          persist-credentials: false
+
+      - name: Get required Go version
+        run: |
+          (. .env && echo "GO_VERSION=${GO}") >> "$GITHUB_ENV"
+
+      - name: Write the build script
+        run: |
+          cat > build.sh <<'BUILD_SCRIPT'
+          set -euo pipefail
+
+          curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-riscv64.tar.gz" -o /tmp/go.tar.gz
+          tar -C /usr/local -xzf /tmp/go.tar.gz
+          export PATH="/usr/local/go/bin:${PATH}"
+          export GOCACHE=/workspace/.gocache
+          export GOPATH=/workspace/.gopath
+          go version
+
+          git config --global --add safe.directory "*"
+
+          cmake -S c -B build \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            -DCMAKE_INSTALL_PREFIX=/workspace/build/install \
+            -DADBC_BUILD_SHARED=ON \
+            -DADBC_BUILD_STATIC=OFF \
+            -DADBC_DRIVER_SNOWFLAKE=ON
+          cmake --build build --target install -j"$(nproc)"
+
+          PY=/opt/python/cp312-cp312/bin
+          "$PY"/pip install -q --upgrade pip wheel auditwheel
+
+          cd python/adbc_driver_snowflake
+          ADBC_SNOWFLAKE_LIBRARY=/workspace/build/install/lib/libadbc_driver_snowflake.so \
+            "$PY"/pip wheel . --no-deps -w dist
+
+          # Upstream's ci/scripts/python_wheel_fix_tag.py retag: setup.py declares
+          # no ext_modules, so setuptools tags the .so-carrying wheel py3-none-any.
+          plat=$("$PY"/python -c 'import sysconfig; print(sysconfig.get_platform().replace("-", "_").replace(".", "_"))')
+          cd dist
+          "$PY"/python -m wheel unpack ./*.whl -d unpacked
+          meta=$(find unpacked -name WHEEL)
+          sed -i \
+            -e 's/^Root-Is-Purelib: true$/Root-Is-Purelib: false/' \
+            -e "s/^Tag: py3-none-any\$/Tag: py3-none-${plat}/" \
+            "$meta"
+          rm ./*.whl
+          "$PY"/python -m wheel pack unpacked/* --dest-dir .
+          rm -rf unpacked
+
+          "$PY"/python -m auditwheel repair ./*.whl -w /workspace/wheelhouse --plat manylinux_2_39_riscv64
+          BUILD_SCRIPT
+
+      - name: Build the driver and package the wheel
+        run: |
+          docker run --rm \
+            -v "$(pwd)":/workspace \
+            --workdir /workspace \
+            -e GO_VERSION="${{ env.GO_VERSION }}" \
+            "${{ env.MANYLINUX_RISCV64_IMAGE }}" \
+            bash build.sh
+
+      - name: Install the wheel and run the test suite
+        run: |
+          set -euo pipefail
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install -q --upgrade pip
+          PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ pip install -q \
+            wheelhouse/*.whl adbc-driver-manager pandas "pyarrow>=14.0.1" pytest
+
+          python - <<'PY'
+          import adbc_driver_snowflake
+          import adbc_driver_snowflake.dbapi
+          from adbc_driver_snowflake import DatabaseOptions
+
+          db = adbc_driver_snowflake.connect("user:pass@myaccount/mydb/myschema?warehouse=mywh")
+          try:
+              assert db.get_option(DatabaseOptions.ACCOUNT.value) == "myaccount"
+              assert db.get_option(DatabaseOptions.DATABASE.value) == "mydb"
+              assert db.get_option(DatabaseOptions.SCHEMA.value) == "myschema"
+              assert db.get_option(DatabaseOptions.WAREHOUSE.value) == "mywh"
+          finally:
+              db.close()
+          print("driver:", adbc_driver_snowflake._driver_path())
+          PY
+          python -m pytest -vv --import-mode append python/adbc_driver_snowflake/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: adbc-driver-snowflake-${{ env.ADBC_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish adbc-driver-snowflake ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: adbc-driver-snowflake-${{ matrix.version }}-*-manylinux_riscv64
