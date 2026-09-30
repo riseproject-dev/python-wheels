@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Upstream tests Linux in
+# https://github.com/asottile/dockerfile/blob/v3.4.0/.github/workflows/main.yml
+# (tox, `pytest tests`) and builds its Linux wheel by hand with setuptools-golang's
+# manylinux helper. We reproduce that shape with cibuildwheel: setuptools-golang
+# runs `go build -buildmode=c-shared` on pylib/main.go inside the container.
+name: Build dockerfile wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/dockerfile.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-dockerfile.yml'
+      - 'docs/packages/dockerfile.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-dockerfile.yml'
+      - 'docs/packages/dockerfile.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  GO_VERSION: '1.26.8'
+  GO_SHA256: 75d368eef1dc44ff9de0c8cac4b37c519e541e6d46c4291c1ff959644a71af32
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: dockerfile
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build dockerfile ${{ matrix.version }} cp312-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      DOCKERFILE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout dockerfile v${{ env.DOCKERFILE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: asottile/dockerfile
+          ref: v${{ env.DOCKERFILE_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          # setup.py tags the wheel abi3 at the building interpreter's version and does
+          # not skip that under Py_GIL_DISABLED, so no cp314t; cibuildwheel reuses and
+          # tests the cp312-abi3 wheel on cp313/cp314.
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl -sSfL -o /tmp/go.tar.gz https://go.dev/dl/go${{ env.GO_VERSION }}.linux-riscv64.tar.gz &&
+            echo "${{ env.GO_SHA256 }}  /tmp/go.tar.gz" | sha256sum -c &&
+            tar -zxf /tmp/go.tar.gz -C /usr/local/ &&
+            rm /tmp/go.tar.gz
+          CIBW_ENVIRONMENT_LINUX: PATH="/usr/local/go/bin:$PATH"
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests testfiles
+          CIBW_TEST_COMMAND: >-
+            python -c "import dockerfile; assert dockerfile.__file__.endswith('.abi3.so'), dockerfile.__file__" &&
+            python -m pytest tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dockerfile-${{ env.DOCKERFILE_VERSION }}-cp312-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish dockerfile ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: dockerfile-${{ matrix.version }}-*-manylinux_riscv64
