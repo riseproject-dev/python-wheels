@@ -445,6 +445,10 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
   per-package repo in the `CiscoTestAutomation` org, and wheels that are 100% Cython `.so`
   even for the most pure-Python-sounding one (`pyats.datastructures`) — confirm per package
   with two curl calls rather than re-deriving from scratch (the pyats family case).
+- **619** — A closed uniffi `.so` with no public wrapper source still names its public vendor
+  `-sys` crate in its `.cargo/registry` paths; that crate's crates.io tarball ships the
+  vendor's prebuilt-platform table as `checksum.txt`, readable with no GitHub API access —
+  re-check at the crate's `max_version` (the livekit-plugins-ai-coustics case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

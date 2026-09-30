@@ -286,6 +286,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   dependency (`mpy-cross`) with zero sdist across its whole release history and no riscv64
   wheel anywhere blocks `pip install openbricks` outright, even though openbricks' own C
   extension is an ordinary portable build (the openbricks case).
+- **619** — A closed uniffi `.so` with no public wrapper source still names its public vendor
+  `-sys` crate in Cargo registry paths; that crate's crates.io tarball ships the vendor's
+  prebuilt-platform table as `checksum.txt`, readable with no GitHub API access (the
+  livekit-plugins-ai-coustics case).
 
 ---
 
@@ -5068,3 +5072,30 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       "vendor-named generator"), here leading nowhere public. Cite the README quote in the
       park note; still pull one wheel per package (e.g. `pyats.results` 26.7 is three `.so`
       plus a re-export `__init__.py`) to confirm it is not one of the open-source parts.
+
+619. **A closed uniffi/pyo3 `.so` whose wrapper source is nowhere public still names its
+    public vendor `-sys` crate — pivot to that crate's crates.io tarball, whose shipped
+    checksum list *is* the vendor's platform table (the livekit-plugins-ai-coustics case).**
+    `livekit-plugins-ai-coustics` 0.3.2's sdist is 19 KB of uniffi-generated `_ffi.py` plus a
+    `setup.py` forcing `has_ext_modules()`; the 80 MB `libplugins_ai_coustics_uniffi.so` is
+    injected by an unpublished CI step (`package-data` globs `*.so`, `MANIFEST.in` has
+    `global-include *.so`), the licence is LiveKit's ToS, and the plugin is absent from
+    `livekit/agents`. Gotcha 600's SBOM trick has nothing to read here, but the `.so` still
+    carries Cargo's panic-location paths:
+    `strings lib.so | grep -oE '\.cargo/registry/src/[^/]+/[^/]+' | sort -u` printed
+    `aic-sdk-0.21.4` and `uniffi_core-0.31.1` — the closed wrapper sits on a *public*
+    Apache-2.0 crate. That crate's `-sys` dependency settles the port in two `curl` calls,
+    with no GitHub API access needed:
+    - `curl -sSL -A x https://crates.io/api/v1/crates/aic-sdk-sys/<ver>/download | tar xz`
+      and read `checksum.txt`: `build-utils/downloader.rs` refuses any `TARGET` not listed
+      there ("Target platform not available in aic-sdk"), and it lists exactly the
+      `aic-sdk-<triple>-<ver>.tar.gz` release assets the build fetches — for Linux only
+      `x86_64`/`aarch64-unknown-linux-gnu`. Repeat for the crate's `max_version` (0.25.0
+      here, same two) so a stale pin isn't mistaken for the vendor's current reach.
+    - Pull one listed asset from the vendor's GitHub Releases to confirm closedness: headers,
+      `lib/libaic.{so,a}` and examples only, and its README says the C interface is
+      Apache-2.0 while "the core SDK library is distributed under the proprietary AIC-SDK
+      license" (runtime licence key required). An Apache-2.0 `-sys` crate over a proprietary
+      blob is gotcha 582's shape one language over.
+    Check the Python `Requires-Dist` too: here `livekit` is independently blocked (gotcha
+    340), so the park has two walls.
