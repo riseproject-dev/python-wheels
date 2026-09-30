@@ -463,6 +463,10 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
   relocations before LLVM 20, while its codegen calls `getPointerElementType()` (removed in
   LLVM 17); its CMake also `FATAL_ERROR`s on any processor but x86_64/aarch64/x86 and its `Arch`
   enum has no riscv64 (the taichi case).
+- **623** — A libFuzzer-linking package is not blocked by an upstream LLVM pin older than 17:
+  compiler-rt's `ALL_FUZZER_SUPPORTED_ARCH` gained RISCV64 in LLVM 17, and Rocky 10's riscv64
+  `compiler-rt` RPM already ships `libclang_rt.fuzzer_no_main.a` and the asan/ubsan archives,
+  so `dnf install compiler-rt` plus `LIBFUZZER_LIB` replaces the LLVM build (the atheris case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

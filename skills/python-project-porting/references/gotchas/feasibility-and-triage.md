@@ -300,6 +300,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **622** — For an LLVM JIT, a RISCV codegen target is not enough: intersect the LLVM API
   window the source compiles against with the first LLVM whose JIT linker (RuntimeDyld vs
   JITLink) handles RISC-V, and check the project's own CPU `Arch` enum (the taichi case).
+- **623** — A libFuzzer/sanitizer package whose upstream pins a pre-riscv64 LLVM is not blocked:
+  check the fuzzer arch list per LLVM tag, then the distro's `compiler-rt` file list (the atheris
+  case).
 
 ---
 
@@ -5241,3 +5244,42 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     so there is no non-x86 Linux build to mirror (goal 2). Park it as *upstream-arch-blocked*,
     not dependency-blocked, and say what reopens it: an upstream riscv64 `Arch` plus either a
     JITLink path on Linux or a move to LLVM 20 or newer.
+
+623. **A libFuzzer/sanitizer package whose upstream pins a pre-riscv64 LLVM is not blocked:
+    check compiler-rt's per-tool arch list for each LLVM tag, then check whether the image's
+    distro `compiler-rt` already ships the archive (the atheris case).** Gotcha 622 parks an
+    LLVM *JIT*. A package that only *links* a compiler-rt runtime has to be triaged
+    differently, and the answer often goes the other way. atheris's `deployment/Dockerfile`
+    builds `make compiler-rt` from a pinned llvm-project commit (`0982db18…`, which is
+    16.0.0-dev) and hands the resulting `libclang_rt.fuzzer_no_main.a` to `setup.py` through
+    `LIBFUZZER_LIB`. Each of the checks below takes minutes over raw.githubusercontent.com,
+    with no checkout needed:
+    - **Which LLVM added riscv64 for the specific runtime?** Read
+      `compiler-rt/cmake/Modules/AllSupportedArchDefs.cmake` at the pinned commit and at a few
+      release tags. `ALL_ASAN_SUPPORTED_ARCH`, `ALL_UBSAN_SUPPORTED_ARCH` and
+      `ALL_SANITIZER_COMMON_SUPPORTED_ARCH` already list `${RISCV64}` in 14.0.6, but
+      `ALL_FUZZER_SUPPORTED_ARCH` gains it only in **17.0.6** (it is absent in 16.0.6 and at
+      atheris's pin). So upstream's exact recipe *cannot* produce a riscv64 libFuzzer, but any
+      LLVM from 17 on can. "Sanitizers support RISC-V" is not a valid shortcut, because
+      libFuzzer lagged ASan by several releases.
+    - **Does the project need that exact LLVM?** atheris does not. Its only gate is
+      `setup_utils/check_libfuzzer_version.sh`, which requires `LLVMFuzzerRunDriver` to be
+      present in the archive (any recent libFuzzer has it). Its own C++ (`src/native/*.cc`)
+      has no arch conditionals. `find_libfuzzer.sh` knows only x86_64/i386/aarch64 and the
+      old `lib/linux/…-<arch>.a` layout, but setting `LIBFUZZER_LIB` bypasses it entirely.
+    - **Does the image already have it?** List the RPM's files without downloading the whole
+      package: range-fetch its first ~2 MB and parse the header's BASENAMES/DIRNAMES tags
+      (1117/1118/1116). Rocky 10's
+      `AppStream/riscv64/os/Packages/c/compiler-rt-21.1.8-1.el10.riscv64.rpm` ships
+      `libclang_rt.{fuzzer_no_main,asan,ubsan_standalone,ubsan_standalone_cxx}.a` under
+      `/usr/lib/clang/21/lib/riscv64-redhat-linux-gnu/`. These are exactly the four archives
+      atheris's `setup.py` links or merges. It derives the sanitizer names by string-replacing
+      `.fuzzer_no_main`, so they must sit next to each other, and they do. So
+      `CIBW_BEFORE_ALL: dnf install -y compiler-rt` plus a `LIBFUZZER_LIB` path replaces
+      upstream's hours-long LLVM build. Hardcode the `clang/<major>` path: `CIBW_ENVIRONMENT`
+      is evaluated *before* `before-all` as well, so a `$(ls …)` or `$(clang
+      -print-resource-dir)` there fails before the package that makes it resolvable is
+      installed.
+    Record the upstream pin's version in the workflow comment. It is the reason this port
+    deviates from upstream's recipe, and it is what to re-check if upstream ever bumps its
+    LLVM to 17 or later.
