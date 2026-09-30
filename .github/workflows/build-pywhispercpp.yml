@@ -1,0 +1,165 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the Linux legs of
+# https://github.com/absadiki/pywhispercpp/blob/v1.5.1/.github/workflows/wheels.yml
+name: Build pywhispercpp wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pywhispercpp.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pywhispercpp.yml'
+      - 'docs/packages/pywhispercpp.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pywhispercpp.yml'
+      - 'docs/packages/pywhispercpp.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pywhispercpp
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pywhispercpp ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      PYWHISPERCPP_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pywhispercpp v${{ env.PYWHISPERCPP_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: absadiki/pywhispercpp
+          ref: v${{ env.PYWHISPERCPP_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      # The wheel ships whisper.cpp/ggml and pybind11 code; upstream ships only its own licence.
+      - name: Stage the bundled libraries' licences
+        run: |
+          cp whisper.cpp/LICENSE LICENSE.whisper.cpp
+          cp pybind11/LICENSE LICENSE.pybind11
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # ggml defaults RVV/Zfh/Zvfh/Zicbop/Zihintpause on for riscv64 with no runtime
+          # dispatch; turning them off keeps the wheel at the rv64gc baseline.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PYWHISPERCPP=${{ env.PYWHISPERCPP_VERSION }}
+            CMAKE_ARGS="-DGGML_NATIVE=OFF -DGGML_RVV=OFF -DGGML_RV_ZFH=OFF -DGGML_RV_ZVFH=OFF -DGGML_RV_ZICBOP=OFF -DGGML_RV_ZIHINTPAUSE=OFF"
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_ENVIRONMENT: >-
+            PIP_ONLY_BINARY=numpy
+            PYTHON_GIL=1
+          CIBW_TEST_SOURCES: pyproject.toml tests whisper.cpp/models whisper.cpp/samples
+          CIBW_TEST_COMMAND: python -m pytest tests
+
+      - name: Check the wheel's extension, licences and ISA baseline
+        run: |
+          mkdir -p whl && cd whl
+          python3 -m zipfile -e ../wheelhouse/*.whl .
+          python3 - <<'EOF'
+          import glob
+          assert glob.glob("_pywhispercpp.cpython-*-riscv64-linux-gnu.so")
+          licences = {p.rsplit("/", 1)[1] for p in glob.glob("*.dist-info/licenses/*")}
+          assert licences == {"LICENSE", "LICENSE.whisper.cpp", "LICENSE.pybind11"}, licences
+          EOF
+          for so in _pywhispercpp.*.so pywhispercpp.libs/lib{whisper,ggml}*.so*; do
+            arch=$(readelf -A "$so" | sed -n 's/.*Tag_RISCV_arch: "\(.*\)"/\1/p')
+            echo "$so: $arch"
+            test -n "$arch"
+            if echo "$arch" | grep -qE '_(v|zv[a-z0-9]*|zfh[a-z]*)[0-9]'; then exit 1; fi
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pywhispercpp-${{ env.PYWHISPERCPP_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      PYWHISPERCPP_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # ggml builds with OpenMP, so auditwheel vendors the image's libgomp.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pywhispercpp-${{ env.PYWHISPERCPP_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish pywhispercpp ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pywhispercpp-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: pywhispercpp-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
