@@ -1,0 +1,200 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux-arm` job of
+# https://github.com/AcademySoftwareFoundation/OpenImageIO/blob/v3.1.17.0/.github/workflows/wheel.yml
+name: Build openimageio wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/openimageio.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-openimageio.yml'
+      - 'docs/packages/openimageio.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-openimageio.yml'
+      - 'docs/packages/openimageio.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: openimageio
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build openimageio ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream skips free-threaded builds ("cp3??t-*" in pyproject.toml).
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      OPENIMAGEIO_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout OpenImageIO v${{ env.OPENIMAGEIO_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: AcademySoftwareFoundation/OpenImageIO
+          ref: v${{ env.OPENIMAGEIO_VERSION }}
+          persist-credentials: false
+
+      # OpenImageIO_BUILD_MISSING_DEPS=all git-clones and statically links these at
+      # configure time, but upstream's wheel only ships LICENSE.md and THIRD-PARTY.md.
+      - name: Stage the statically linked dependencies' licences
+        run: |
+          set -euo pipefail
+          get() { curl -fsSL --retry 5 "$2" -o "LICENSE.$1"; }
+          gh=https://raw.githubusercontent.com
+          get expat "$gh/libexpat/libexpat/R_2_6_3/expat/COPYING"
+          get fmt "$gh/fmtlib/fmt/12.1.0/LICENSE"
+          get freetype "$gh/freetype/freetype/VER-2-14-1/LICENSE.TXT"
+          get freetype-ftl "$gh/freetype/freetype/VER-2-14-1/docs/FTL.TXT"
+          get giflib "https://sourceforge.net/p/giflib/code/ci/5.2.1/tree/COPYING?format=raw"
+          get imath "$gh/AcademySoftwareFoundation/Imath/v3.1.10/LICENSE.md"
+          get libdeflate "$gh/ebiggers/libdeflate/v1.23/COPYING"
+          get libjpeg-turbo "$gh/libjpeg-turbo/libjpeg-turbo/3.1.2/LICENSE.md"
+          get libjpeg-turbo-ijg "$gh/libjpeg-turbo/libjpeg-turbo/3.1.2/README.ijg"
+          get libpng "$gh/pnggroup/libpng/v1.6.50/LICENSE"
+          get libtiff "https://gitlab.com/libtiff/libtiff/-/raw/v4.7.1/LICENSE.md"
+          get libuhdr "$gh/google/libultrahdr/v1.4.0/LICENSE"
+          get libwebp "$gh/webmproject/libwebp/v1.5.0/COPYING"
+          get libwebp-patents "$gh/webmproject/libwebp/v1.5.0/PATENTS"
+          get minizip-ng "$gh/zlib-ng/minizip-ng/4.0.10/LICENSE"
+          get opencolorio "$gh/AcademySoftwareFoundation/OpenColorIO/v2.5.1/LICENSE"
+          get opencolorio-third-party "$gh/AcademySoftwareFoundation/OpenColorIO/v2.5.1/THIRD-PARTY.md"
+          get openexr "$gh/AcademySoftwareFoundation/OpenEXR/v3.3.5/LICENSE.md"
+          get openjpeg "$gh/uclouvain/openjpeg/v2.5.4/LICENSE"
+          get pybind11 "$gh/pybind/pybind11/v3.0.1/LICENSE"
+          get pystring "$gh/imageworks/pystring/v1.2.0/LICENSE"
+          get robin-map "$gh/Tessil/robin-map/v1.4.0/LICENSE"
+          get yaml-cpp "$gh/jbeder/yaml-cpp/0.8.0/LICENSE"
+
+      - name: Write the smoke test
+        run: |
+          cat > oiio_smoke_test.py <<'EOF'
+          import os
+          import subprocess
+          import tempfile
+
+          import OpenImageIO as oiio
+          from OpenImageIO import ImageBuf, ImageBufAlgo, ImageSpec
+
+          src = ImageBuf(ImageSpec(64, 48, 3, oiio.UINT8))
+          assert ImageBufAlgo.fill(src, (0.1, 0.2, 0.3), (0.9, 0.7, 0.5)), oiio.geterror()
+          pixels = src.get_pixels(oiio.FLOAT)
+          assert pixels.shape == (48, 64, 3), pixels.shape
+
+          tmp = tempfile.mkdtemp()
+          tolerance = {"exr": 0.001, "tif": 0.0, "png": 0.0, "bmp": 0.0, "tga": 0.0,
+                       "dpx": 0.0, "hdr": 0.02, "jp2": 0.1, "jpg": 0.1, "webp": 0.1}
+          for ext, tol in tolerance.items():
+              path = os.path.join(tmp, "img." + ext)
+              assert src.write(path), (ext, src.geterror())
+              back = ImageBuf(path)
+              assert back.read(), (ext, back.geterror())
+              result = ImageBufAlgo.compare(src, back, tol + 1e-6, tol + 1e-6)
+              assert result.nfail == 0, (ext, result.maxerror)
+
+          tx = os.path.join(tmp, "img.tx")
+          subprocess.run(["maketx", os.path.join(tmp, "img.tif"), "-o", tx], check=True)
+          assert ImageBuf(tx).spec().tile_width > 0
+
+          linear = ImageBufAlgo.colorconvert(src, "sRGB", "linear")
+          assert not linear.has_error, linear.geterror()
+          assert ImageBufAlgo.compare(src, linear, 0.01, 0.01).nfail > 0
+          print("smoke test ok")
+          EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT_PASS_LINUX: GITHUB_ACTIONS
+          CIBW_ENVIRONMENT: >
+              PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+              CMAKE_BUILD_PARALLEL_LEVEL=4
+              SKBUILD_CMAKE_ARGS="-DLINKSTATIC=1"
+              SKBUILD_CMAKE_BUILD_TYPE="MinSizeRel"
+              SKBUILD_BUILD_DIR=/project/build
+              SKBUILD_WHEEL_LICENSE_FILES="LICENSE*;THIRD-PARTY.md"
+              CXXFLAGS="-Wno-error=stringop-overflow -Wno-pragmas"
+              WebP_BUILD_VERSION="1.5.0"
+              WebP_GIT_COMMIT=a4d7a715337ded4451fec90ff8ce79728e04126c
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy
+          CIBW_TEST_COMMAND: oiiotool --buildinfo && python {project}/oiio_smoke_test.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: openimageio-${{ env.OPENIMAGEIO_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import re, sys, zipfile
+          z = zipfile.ZipFile(sys.argv[1])
+          names = z.namelist()
+          assert not any(".libs/" in n for n in names), [n for n in names if ".libs/" in n]
+          lib = next(n for n in names if re.fullmatch(r"OpenImageIO/lib/libOpenImageIO\.so\.[0-9.]+", n))
+          deps = re.search(rb"BZip2 [^;\x00]*;[^\x00]*", z.read(lib)).group().decode()
+          built = {name for name, _, ver in (d.partition(" ") for d in deps.split(";")) if ver and ver != "NONE"}
+          expected = {"expat", "fmt", "Freetype", "GIF", "Imath", "JPEG", "libdeflate", "libjpeg-turbo",
+                      "libuhdr", "minizip-ng", "OpenColorIO", "OpenEXR", "OpenJPEG", "PNG", "pybind11",
+                      "Python3", "Robinmap", "TIFF", "WebP", "yaml-cpp", "ZLIB"}
+          assert built == expected, (deps, sorted(built ^ expected))
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          staged = {"expat", "fmt", "freetype", "freetype-ftl", "giflib", "imath", "libdeflate",
+                    "libjpeg-turbo", "libjpeg-turbo-ijg", "libpng", "libtiff", "libuhdr", "libwebp",
+                    "libwebp-patents", "minizip-ng", "opencolorio", "opencolorio-third-party",
+                    "openexr", "openjpeg", "pybind11", "pystring", "robin-map", "yaml-cpp"}
+          assert licences == {"LICENSE.md", "THIRD-PARTY.md"} | {"LICENSE." + s for s in staged}, licences
+          print(sys.argv[1], "ok")
+          EOF
+
+  publish:
+    name: Publish openimageio ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: openimageio-${{ matrix.version }}-*-manylinux_riscv64
