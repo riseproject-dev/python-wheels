@@ -1,0 +1,146 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow mirrors the `build_wheels` job of upstream's own
+# .github/workflows/publish.yml, narrowed to Linux, and runs the tests of its
+# .github/workflows/test_linux.yml against the built wheel.
+name: Build polyscope wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/polyscope.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-polyscope.yml'
+      - 'docs/packages/polyscope.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-polyscope.yml'
+      - 'docs/packages/polyscope.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: polyscope
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build polyscope ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        libc: [manylinux, musllinux]
+
+    env:
+      POLYSCOPE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout polyscope-py v${{ env.POLYSCOPE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: nmwsharp/polyscope-py
+          ref: v${{ env.POLYSCOPE_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      # The extension statically links every library below; upstream's wheel ships
+      # only its own LICENSE.
+      - name: Stage the vendored dependencies' licences
+        run: |
+          set -euo pipefail
+          cp deps/polyscope/LICENSE LICENSE.polyscope
+          cp deps/nanobind/LICENSE LICENSE.nanobind
+          cp deps/nanobind/ext/robin_map/LICENSE LICENSE.robin-map
+          cp deps/eigen/COPYING.MPL2 LICENSE.eigen
+          cp deps/polyscope/deps/glfw/LICENSE.md LICENSE.glfw
+          cp deps/polyscope/deps/glad/LICENSE LICENSE.glad
+          cp deps/polyscope/deps/glm/copying.txt LICENSE.glm
+          cp deps/polyscope/deps/happly/LICENSE LICENSE.happly
+          cp deps/polyscope/deps/imgui/imgui/LICENSE.txt LICENSE.imgui
+          cp deps/polyscope/deps/imgui/implot/LICENSE LICENSE.implot
+          cp deps/polyscope/deps/imgui/ImGuizmo/LICENSE LICENSE.imguizmo
+          cp deps/polyscope/deps/json/LICENSE.MIT LICENSE.nlohmann-json
+          cp deps/polyscope/deps/IconFontCppHeaders/licence.txt LICENSE.iconfontcppheaders
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          config-file: .github/workflows/cibuildwheel_config.toml
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # Replaces the config file's environment table, whose CMAKE_ARGS lacks the leading '-'.
+          CIBW_ENVIRONMENT: >-
+            CMAKE_ARGS=-DPOLYSCOPE_BACKEND_OPENGL3_EGL=ON
+            SKBUILD_WHEEL_LICENSE_FILES="LICENSE*"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+          CIBW_TEST_SOURCES: test
+          CIBW_TEST_COMMAND: >-
+            python test/polyscope_test.py -v --backend=openGL_mock &&
+            python test/polyscope_test.py -v --backend=openGL3_egl
+          # numpy has no riscv64 musllinux wheel in our registry.
+          CIBW_TEST_SKIP: "*-musllinux*"
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          exts = [n for n in names if n.startswith("polyscope_bindings.") and n.endswith(".so")]
+          assert len(exts) == 1 and "-riscv64-linux-" in exts[0], exts
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          expected = {"LICENSE"} | {f"LICENSE.{d}" for d in (
+              "polyscope", "nanobind", "robin-map", "eigen", "glfw", "glad", "glm", "happly",
+              "imgui", "implot", "imguizmo", "nlohmann-json", "iconfontcppheaders")}
+          assert licences == expected, licences
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: polyscope-${{ env.POLYSCOPE_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish polyscope ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: polyscope-${{ matrix.version }}-*riscv64
