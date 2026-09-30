@@ -290,6 +290,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   `-sys` crate in Cargo registry paths; that crate's crates.io tarball ships the vendor's
   prebuilt-platform table as `checksum.txt`, readable with no GitHub API access (the
   livekit-plugins-ai-coustics case).
+- **620** — A closed vendor wheel can be *mostly* `.py` by file count and still have zero buildable
+  source: test each compiled module for a `.py` twin, not the `.py`/`.so` ratio, and a repo named
+  exactly after the package can still be docs-only (the genie case).
 
 ---
 
@@ -5099,3 +5102,42 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       blob is gotcha 582's shape one language over.
     Check the Python `Requires-Dist` too: here `livekit` is independently blocked (gotcha
     340), so the park has two walls.
+
+620. **Gotcha 605's "pull one wheel, confirm it is `.so`-only" shortcut gives the wrong
+    signal on a *mixed* closed wheel — ask whether each compiled module has a `.py` twin, not
+    what the `.py`/`.so` ratio is (the genie case).** `genie` 26.7 is the pyATS suite's
+    network-abstraction layer, and unlike every `pyats.*` sibling its
+    `cp312-manylinux2014_x86_64` wheel is *majority* Python by file count: 261 entries, 180
+    `.py` against 75 `.so`. Read naively that looks like a mostly-pure package with a few
+    speedups — the shape where gotcha 24/41 say "just build the pure part". It is not. Of
+    the 75 compiled modules **not one** has a `.py` or `__init__.py` twin in the wheel, and
+    they are the whole engine: `genie/conf/base/{device,testbed,interface,link,attributes,api,
+    utils}`, `genie/metaparser/util/{schemaengine,traceabledict}`, `genie/parsergen/core`,
+    `genie/harness/{main,discovery,_commons_internal}`, `genie/ops/base/maker`,
+    `genie/abstract/{package,token,decorator}`, `genie/utils/{dq,diff}`. The 180 `.py` are
+    149 files under `genie/tests/`, one 273 KB data file (`ops/ops_schema.py`), ~22
+    `__init__.py` re-export stubs, and a handful of helpers of at most 31 KB each
+    (`conf/base/base.py`, `abstract/magic.py`, `utils/cisco_collections/__init__.py`, …) —
+    one of which (`genie/utils/__init__.py`) states `__copyright__ = 'Cisco Systems, Inc.
+    Cisco Confidential'`. No `.pyx`/`.c`/`.pxd` ships, no LICENSE file ships, and `WHEEL`
+    carries the same `setuptools (79.0.1+cisco.1)` generator as gotcha 605. PyPI has 42
+    releases / 569 files, every one a `bdist_wheel` and zero sdist; the only `none-any` is a
+    `genie-1.0.0-py3-none-any.whl` placeholder that predates the current package.
+    - **A repo named exactly after the package is not proof of source.** Unlike `pyats.*`
+      (no per-package repo, gotcha 605), `CiscoTestAutomation/genie` *does* exist — no
+      description, no language, created the same day as the equally empty `dyntopo`. A
+      depth-1 clone is `docs/` only (325 `.rst`, five Sphinx-helper `.py`, no
+      `setup.py`/`pyproject.toml`/`src/`). The Sphinx tree itself settles it:
+      `docs/cookbooks/genie.rst` lists "Below Genie packages are Open source libraries" as
+      `genie.libs.{conf,ops,sdk,robot,parser,filetransferutils}` and `genie.telemetry` —
+      the core `genie` is not on it — and `genielibs` holds only `pkgs/*-pkg/src/genie/libs/…`.
+      A GitHub code search for class names that live only in the compiled core
+      (`org:CiscoTestAutomation "class Dq"`) returns nothing.
+    - **The check.** For each compiled module path `M` (strip the
+      `.cpython-3XX-<arch>-linux-gnu.so` suffix), look for `M.py` or `M/__init__.py`
+      in the same wheel; any engine-sized module with no twin is closed. Then subtract
+      `tests/`, data files and `__init__.py` re-exports before judging what is "pure". A
+      wheel where the compiled set is the load-bearing code is parked like gotcha 601/605,
+      however many `.py` files sit around it. Also read the open packages it
+      `Requires-Dist`s (`genie.libs.*` here) as separate queue entries with their own
+      verdicts — they are open, but useless on riscv64 without the closed core.

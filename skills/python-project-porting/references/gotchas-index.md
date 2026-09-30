@@ -449,6 +449,10 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
   `-sys` crate in its `.cargo/registry` paths; that crate's crates.io tarball ships the
   vendor's prebuilt-platform table as `checksum.txt`, readable with no GitHub API access —
   re-check at the crate's `max_version` (the livekit-plugins-ai-coustics case).
+- **620** — A closed vendor wheel can be *mostly* `.py` by file count (180 `.py` vs 75 `.so`)
+  and still have zero buildable source: check each compiled module for a `.py` twin rather than
+  the ratio, discount `tests/` and re-export stubs, and don't treat a repo named exactly after
+  the package as source — `CiscoTestAutomation/genie` is docs-only (the genie case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
