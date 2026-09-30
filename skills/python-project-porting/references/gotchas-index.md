@@ -453,6 +453,11 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
   and still have zero buildable source: check each compiled module for a `.py` twin rather than
   the ratio, discount `tests/` and re-export stubs, and don't treat a repo named exactly after
   the package as source — `CiscoTestAutomation/genie` is docs-only (the genie case).
+- **621** — A `build_<feature>` flag sibling of a package this repo already builds (the
+  converter behind LiteRT's `build_converter`) shares the scaffolding but not the size: read
+  the upstream wheel with HTTP Range requests, use its unstripped `.symtab` to rule the jaxlib
+  `embed_bitcode` wall in or out, and scale the sibling's measured per-leg CI time by compiled
+  `.text` before writing any YAML (the litert-converter case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

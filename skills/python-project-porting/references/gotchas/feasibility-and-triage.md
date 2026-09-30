@@ -293,6 +293,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **620** — A closed vendor wheel can be *mostly* `.py` by file count and still have zero buildable
   source: test each compiled module for a `.py` twin, not the `.py`/`.so` ratio, and a repo named
   exactly after the package can still be docs-only (the genie case).
+- **621** — A `build_<feature>` flag sibling of a package already built here is "one target
+  swap" on paper: cost the extra closure from the upstream wheel's unstripped `.symtab` (Range
+  reads, no download) and scale the sibling's measured CI time by `.text` (the
+  litert-converter case).
 
 ---
 
@@ -5141,3 +5145,57 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       however many `.py` files sit around it. Also read the open packages it
       `Requires-Dist`s (`genie.libs.*` here) as separate queue entries with their own
       verdicts — they are open, but useless on riscv64 without the closed core.
+
+621. **A `build_<feature>` flag sibling of a package this repo already builds looks like "swap
+    one Bazel target". Cost it by the *extra closure*, measured from the upstream wheel's
+    unstripped `.symtab` and scaled against the sibling's real CI time, not by the shared
+    scaffolding (the litert-converter case).** `litert-converter` 0.4.0 comes from the very
+    tag `build-ai-edge-litert.yml` already builds: `google-ai-edge/LiteRT` v2.2.0, whose
+    `litert/version.bzl` carries `LITERT_CONVERTER_VERSION = "0.4.0"` next to
+    `LITERT_EXPERIMENTAL_VERSION = "2.2.0"`. Upstream's `ci/build_converter_with_bazel.sh`
+    differs from `build_pip_package_with_bazel.sh` only by `--config=litert_converter` and the
+    target `//ci/tools/python/wheel:litert_converter_wheel`, so every riscv64 fix the
+    ai-edge-litert port found (bazel 7.5.0 bootstrap, the `platforms.bzl` patch, the
+    `HERMETIC_REQUIREMENTS_LOCK` numpy rewrite, the XNNPACK fp16 define) would carry over
+    unchanged. What does not carry over is the size, and that is the whole triage:
+    - **Read the upstream wheel's native payload without downloading it.** Wrap a
+      `RawIOBase` whose `readinto` issues `Range: bytes=a-b` requests in
+      `io.BufferedReader` and hand it to `zipfile.ZipFile`. That lists members and sizes in a
+      handful of requests, and `z.read(member)` inflates one member into memory with nothing
+      written to disk. It works on a host with <100 MB free, where `pip download` of the
+      70 MB wheel dies with `ENOSPC`.
+    - **An unstripped `.symtab` turns "is the jaxlib wall in this graph?" into a grep.** The
+      pinned TF (`bcdab1a6`) vendors an XLA whose `xla/codegen/intrinsic/cpp:embed_bitcode`
+      has no RISC-V branch (gotcha 426's 2.22+ shape). The converter's
+      `tensorflow/transforms:tensorflow_passes` does reach tf2xla
+      (`xla_legalize_tf_with_tf2xla`, `xla_call_module_loader`), so reading BUILD files
+      cannot rule the wall out without a `bazel query` over a full TF checkout. The x86_64
+      `libLiteRTCompilerMLIR.so` (288 MB) keeps a 13.9 MB `.symtab` alongside `.dynsym`. It
+      has 72,755 `_ZN4mlir2TF`, 31,047 `_ZN3xla` and 85,252 `_ZN4llvm` hits but **zero**
+      `LLVMInitialize*Target`, `CpuCompiler`, `OrcJIT`/`LLJIT` or `eigen_unary`, and its only
+      `xla::cpu` names are `*ThunkProto` protobuf classes. The XLA CPU compiler is not
+      linked, so the converter is very probably *not* Bazel-blocked like jaxlib (PR #526).
+      Absence evidence only counts when `.symtab` is present; a stripped `.so` shows exports
+      only.
+    - **Then scale the proven sibling's measured build time by compiled size.** The
+      converter target is a strict superset of the sibling's: it links
+      `pywrap_litert_with_converter_binaries` in place of `pywrap_litert_binaries`, plus the
+      MLIR library, and that `.so` alone has 120 MB of `.text`. ai-edge-litert 2.2.0's
+      publish run 35573236381 spent 3h40m-4h40m in the Bazel step per interpreter, for about
+      23 MB of compiled payload. 5-8x that is roughly 20-30 h per leg. That is over the
+      sibling's 720-min `timeout-minutes`, over the repo's 1440-min ceiling
+      (`build-torch.yml`), and past libclang's ~10 h record. It is also per-interpreter: the
+      shared library itself depends on `@nanobind` and `MLIRBindingsPythonCAPIObjects`, which
+      compile against the hermetic Python headers, so nothing collapses across the
+      cp311-cp314 legs into one build.
+    - **Check which arches upstream ships the *flagged* variant on, since it can be narrower
+      than the base.** ai-edge-litert 2.2.0 ships `manylinux_2_27_aarch64`. litert-converter
+      has shipped only `manylinux_2_27_x86_64` and `macosx_12_0_arm64` across all 188
+      releases (1,635 files). The public `linux_nightly_wheel.yml` runs on
+      `linux-x86-n2-16` only and never calls `build_converter_with_bazel.sh`, so the
+      converter's release pipeline is internal and there is no non-x86 Linux build to mirror
+      (goal 2).
+    Park it with tensorflow's verdict (gotcha 426), "disproportionate, not hard-blocked", and
+    say in the note how cheaply it reopens. If the riscv64 pool gains a Bazel remote cache or
+    much faster runners, the workflow is `build-ai-edge-litert.yml` with the target and
+    `--config` swapped.
