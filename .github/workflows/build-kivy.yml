@@ -1,0 +1,264 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on
+# https://github.com/kivy/kivy/blob/2.3.1/.github/workflows/manylinux_wheels.yml
+name: Build kivy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/kivy.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-kivy.yml'
+      - 'docs/packages/kivy.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-kivy.yml'
+      - 'docs/packages/kivy.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: kivy
+      version: ${{ inputs.version }}
+
+  kivy_examples_create:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build kivy-examples ${{ matrix.version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      KIVY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout kivy ${{ env.KIVY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: kivy/kivy
+          ref: ${{ env.KIVY_VERSION }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install CI/CD Python requirements
+        run: |
+          uv pip install -r .ci/cicd-requirements.txt
+
+      - name: Create wheel
+        run: |
+          KIVY_BUILD_EXAMPLES=1 python3 -m build --wheel .
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: kivy-${{ env.KIVY_VERSION }}-examples
+          path: dist/*.whl
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build kivy ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # 2.3.1 predates 3.14: upstream builds up to cp313 and caps Cython at 3.0.11.
+        python: ["cp312", "cp313"]
+
+    env:
+      KIVY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout kivy ${{ env.KIVY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: kivy/kivy
+          ref: ${{ env.KIVY_VERSION }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Generate version metadata
+        run: |
+          source .ci/ubuntu_ci.sh
+          update_version_metadata
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_ENVIRONMENT_LINUX: >-
+            KIVY_SPLIT_EXAMPLES=1 USE_X11=1 USE_SDL2=1 USE_PANGOFT2=0 USE_GSTREAMER=0
+            KIVY_DEPS_ROOT=$(pwd)/kivy-dependencies
+            LD_LIBRARY_PATH=$(pwd)/kivy-dependencies/dist/lib:$(pwd)/kivy-dependencies/dist/lib64
+            CMAKE_POLICY_VERSION_MINIMUM=3.5
+          # Upstream's install_manylinux_build_deps minus EPEL and three optional packages Rocky 10
+          # lacks, then its SDL2 stack build (a separate manylinux2014 docker run upstream).
+          CIBW_BEFORE_ALL_LINUX: |
+            set -e
+            dnf install -y autoconf automake cmake gcc gcc-c++ git make pkgconfig \
+              ninja-build alsa-lib-devel pulseaudio-libs-devel \
+              libX11-devel libXext-devel libXrandr-devel libXcursor-devel libXfixes-devel \
+              libXi-devel dbus-devel ibus-devel \
+              systemd-devel mesa-libGL-devel libxkbcommon-devel \
+              mesa-libEGL-devel wayland-devel wayland-protocols-devel \
+              libdrm-devel mesa-libgbm-devel libsamplerate-devel \
+              python-unversioned-command zlib-ng-compat-devel
+            ./tools/build_linux_dependencies.sh
+            d=kivy-dependencies/build
+            cp $d/SDL2-*/LICENSE.txt LICENSE.SDL2
+            cp $d/SDL2_image-*/LICENSE.txt LICENSE.SDL2_image
+            cp $d/SDL2_image-*/external/libtiff/COPYRIGHT LICENSE.libtiff
+            cp $d/SDL2_image-*/external/libwebp/COPYING LICENSE.libwebp
+            cp $d/SDL2_mixer-*/LICENSE.txt LICENSE.SDL2_mixer
+            cp $d/SDL2_mixer-*/external/libxmp/docs/COPYING LICENSE.libxmp
+            cp $d/SDL2_ttf-*/LICENSE.txt LICENSE.SDL2_ttf
+            cp $d/SDL2_ttf-*/external/freetype/docs/FTL.TXT LICENSE.freetype
+            cp $d/SDL2_ttf-*/external/harfbuzz/COPYING LICENSE.harfbuzz
+            cp $d/libpng-*/LICENSE LICENSE.libpng
+
+      - name: Check the vendored libraries and their licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          licences = {"LICENSE", "LICENSE.SDL2", "LICENSE.SDL2_image", "LICENSE.libtiff",
+                      "LICENSE.libwebp", "LICENSE.SDL2_mixer", "LICENSE.libxmp",
+                      "LICENSE.SDL2_ttf", "LICENSE.freetype", "LICENSE.harfbuzz",
+                      "LICENSE.libpng"}
+          libs = {"libSDL2", "libSDL2_image", "libSDL2_mixer", "libSDL2_ttf", "libpng16"}
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              found = {n.rsplit("/", 1)[1] for n in names if ".dist-info/" in n}
+              assert licences <= found, f"{whl}: missing {licences - found}"
+              vendored = {n.rsplit("/", 1)[1].split("-")[0] for n in names
+                          if n.lower().startswith("kivy.libs/") and not n.endswith("/")}
+              assert vendored == libs, f"{whl}: vendors {sorted(vendored)}"
+              assert any(n.startswith("kivy/core/window/_window_sdl2.") for n in names), whl
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: kivy-${{ env.KIVY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  test_wheels:
+    needs: [setup, kivy_examples_create, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    name: Test kivy ${{ matrix.version }} on Python ${{ matrix.python }}
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ['3.12', '3.13']
+
+    env:
+      KIVY_VERSION: ${{ matrix.version }}
+      DISPLAY: ':99.0'
+      PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+
+    steps:
+      - name: Checkout kivy ${{ env.KIVY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: kivy/kivy
+          ref: ${{ env.KIVY_VERSION }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python }}
+          activate-environment: true
+          enable-cache: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: kivy-${{ env.KIVY_VERSION }}-*-manylinux_riscv64
+          merge-multiple: true
+          path: dist
+
+      # Upstream's ubuntu-latest image already has Xvfb and Mesa; uv's venv has no pip.
+      - name: Setup env
+        run: |
+          sudo apt-get update
+          sudo apt-get install -qy xvfb libgl1-mesa-dri
+          uv pip install pip
+          source .ci/ubuntu_ci.sh
+          prepare_env_for_unittest
+
+      - name: Install Kivy
+        run: |
+          source .ci/ubuntu_ci.sh
+          install_kivy_wheel dev
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: kivy-${{ env.KIVY_VERSION }}-examples
+          path: dist
+
+      - name: Install kivy-examples wheel
+        run: |
+          source .ci/ubuntu_ci.sh
+          install_kivy_examples_wheel dev
+
+      - name: Test Kivy
+        run: |
+          source .ci/ubuntu_ci.sh
+          test_kivy_install
+
+      - name: Test Kivy benchmarks
+        run: |
+          source .ci/ubuntu_ci.sh
+          test_kivy_benchmark
+
+  publish:
+    name: Publish kivy ${{ matrix.version }}
+    needs: [setup, build_wheels, test_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: kivy-${{ matrix.version }}-*-manylinux_riscv64
