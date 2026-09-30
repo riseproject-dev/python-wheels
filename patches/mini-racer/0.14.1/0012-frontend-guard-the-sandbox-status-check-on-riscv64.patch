@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Wed, 24 Sep 2026 00:00:00 +0200
+Subject: [PATCH] frontend: guard the sandbox status check on riscv64
+
+The riscv64 build_dll job got past every prior GCC-compat and gn-arg
+fix and ~99% into the ninja build (2155/2176), then failed compiling
+mini_racer's own exports.cc:
+
+  ../../custom_deps/mini_racer/exports.cc: In function
+  'bool mr_v8_is_using_sandbox()':
+  ../../custom_deps/mini_racer/exports.cc:180:18: error:
+  'IsSandboxConfiguredSecurely' is not a member of 'v8::V8'
+    180 |   return v8::V8::IsSandboxConfiguredSecurely();
+
+v8::V8::IsSandboxConfiguredSecurely() (include/v8-initialization.h) is
+declared only `#if defined(V8_ENABLE_SANDBOX)`. V8_ENABLE_SANDBOX
+itself is off unless V8's sandbox is compiled in, and the sandbox
+(BUILD.gn) defaults on only when pointer-compression-backed-by-a-
+shared-cage is available, which in turn (gni/v8.gni) defaults true
+only for v8_current_cpu == "arm64", "x64" or "loong64" -- riscv64 is
+not in that list, and this port sets no gn arg to force it on. So on
+riscv64 the sandbox is off by default and the API this function calls
+unconditionally does not exist, whereas every architecture upstream
+actually ships wheels for (x64/arm64, per .github/workflows/build.yml)
+gets pointer compression, and hence the sandbox, on by default and
+never hits this.
+
+Guard the call the same way v8-initialization.h guards the API: when
+V8_ENABLE_SANDBOX isn't defined there is no sandbox to speak of, so
+report it as not securely configured (mirrors what a fallback,
+insecure sandbox already reports via the same function).
+
+Upstream-Status: To upstream [not yet submitted to bpcreech/PyMiniRacer]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ src/v8_py_frontend/exports.cc | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/v8_py_frontend/exports.cc b/src/v8_py_frontend/exports.cc
+index 0000000..0000000 100644
+--- a/src/v8_py_frontend/exports.cc
++++ b/src/v8_py_frontend/exports.cc
+@@ -177,7 +177,11 @@ LIB_EXPORT auto mr_v8_version() -> char const* {
+ }
+
+ LIB_EXPORT auto mr_v8_is_using_sandbox() -> bool {
++#if defined(V8_ENABLE_SANDBOX)
+   return v8::V8::IsSandboxConfiguredSecurely();
++#else
++  return false;
++#endif
+ }
+
+ LIB_EXPORT auto mr_get_identity_hash(uint64_t context_id,
