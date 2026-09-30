@@ -1,0 +1,170 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/Nixtla/hierarchicalforecast/blob/v1.5.1/.github/workflows/python-publish.yml
+# and https://github.com/Nixtla/hierarchicalforecast/blob/v1.5.1/.github/workflows/pytest.yml
+name: Build hierarchicalforecast wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/hierarchicalforecast.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-hierarchicalforecast.yml'
+      - 'docs/packages/hierarchicalforecast.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-hierarchicalforecast.yml'
+      - 'docs/packages/hierarchicalforecast.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: hierarchicalforecast
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build hierarchicalforecast ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        include:
+          - python: "cp312"
+            test_requires: statsforecast
+          - python: "cp313"
+            test_requires: statsforecast
+          # statsforecast needs statsmodels, which has no cp314 riscv64 wheel on
+          # pypi.riseproject.dev yet; these two modules import it at the top.
+          - python: "cp314"
+            pytest_args: --ignore=tests/test_evaluation.py --ignore=tests/test_utils.py
+          # utilsforecast (a hard runtime dep) requires pandas<3, which has no
+          # cp314t riscv64 wheel on pypi.riseproject.dev.
+          - python: "cp314t"
+            test_skip: "*"
+
+    env:
+      HIERARCHICALFORECAST_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout hierarchicalforecast v${{ env.HIERARCHICALFORECAST_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Nixtla/hierarchicalforecast
+          ref: v${{ env.HIERARCHICALFORECAST_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      # external_libs/eigen is compiled into the wheel but upstream's wheel
+      # ships only its own LICENSE; stage eigen's for the default COPYING* glob.
+      - name: Stage the vendored dependency's licence
+        run: cp external_libs/eigen/COPYING.MPL2 COPYING.eigen
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_ENVIRONMENT: >-
+            PIP_ONLY_BINARY=numpy,pandas,scipy,scikit-learn,matplotlib,polars-runtime-32,statsmodels,statsforecast,coreforecast,pyarrow
+          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
+          # polars is pinned to a version pypi.riseproject.dev has built for
+          # riscv64; upstream's polars<=1.32.0 predates the polars-runtime split.
+          CIBW_TEST_REQUIRES: pytest pytest-benchmark scipy polars==1.44.2 ${{ matrix.test_requires }}
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: python -m pytest tests --import-mode=importlib ${{ matrix.pytest_args }}
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for path in sys.argv[1:]:
+              names = zipfile.ZipFile(path).namelist()
+              assert any(n.endswith(".so") for n in names), (path, names)
+              licences = {n.rsplit("/", 1)[-1] for n in names
+                          if ".dist-info/licenses/" in n} - {""}
+              assert licences == {"LICENSE", "COPYING.eigen"}, (path, licences)
+              print(path, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: hierarchicalforecast-${{ env.HIERARCHICALFORECAST_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      HIERARCHICALFORECAST_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # setup.py links -fopenmp on Linux, so auditwheel vendors the image's
+      # libgomp into hierarchicalforecast.libs/.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: hierarchicalforecast-${{ env.HIERARCHICALFORECAST_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish hierarchicalforecast ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: hierarchicalforecast-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: hierarchicalforecast-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
