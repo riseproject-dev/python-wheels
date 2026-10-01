@@ -1,67 +1,54 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Ludovic Henry <git@ludovic.dev>
-Date: Mon, 28 Sep 2026 00:00:00 +0000
+Date: Thu, 1 Oct 2026 00:00:00 +0000
 Subject: [PATCH] ci/build: vendor our own OpenSSL on riscv64
 
-Once the ldd self-exec check (0004) was worked around, the build got one
-step further and then died with no output at all right where the staged
-binary is first executed:
+collect_deps resolves the binary's NEEDED entries with a plain ldd, run
+before patchelf gives it an RPATH. On manylinux_2_39_riscv64 that finds
+Rocky 10's own OpenSSL (3.5.5) on the default loader path and vendors it:
 
     Vendoring: libssl.so.3 (/lib64/lp64d/libssl.so.3)
     Vendoring: libcrypto.so.3 (/lib64/lp64d/libcrypto.so.3)
-    ...
-    All NEEDED entries are allowlisted or vendored
-    ./ci/build/build-haproxy-dist.sh: line 310: 18549 Segmentation fault  LD_LIBRARY_PATH="$STAGE_DIR/lib" "$STAGE_DIR/haproxy" -v
 
-`/lib64/lp64d/libssl.so.3` is not a build path -- it is Rocky 10's own
-system OpenSSL (`rpm -q openssl-libs` on the manylinux_2_39_riscv64 base
-reports 3.5.5), not the OpenSSL 3.0.15 this same script builds from source
-a few lines above and points HAProxy's SSL_INC/SSL_LIB at. `collect_deps`
-resolves each NEEDED entry with a plain `ldd`, which at that point in the
-script has no LD_LIBRARY_PATH pointing at the just-built OpenSSL and no
-RPATH on the binary yet (patchelf runs later), so it falls through to the
-dynamic linker's default search path -- and manylinux_2_39_riscv64 (Rocky
-10) already has a libssl.so.3/libcrypto.so.3 there. manylinux2014 (CentOS
-7, x86_64/aarch64) never hits this: it has no libssl.so.3 at all, ldd
-correctly reports "not found", and the "vendor OpenSSL .so files we built
-from source" fallback a few lines down fills in the right copy. On
-riscv64 that fallback never fires, because collect_deps has already
-placed a file under the same soname (Rocky 10's, not ours) and the
-fallback's `[ -f "$STAGE_DIR/lib/$soname" ] && continue` guard skips it.
+manylinux2014 has no libssl.so.3, so on x86_64/aarch64 ldd reports it
+"not found" and the "vendor the OpenSSL .so files we built from source"
+fallback that follows ships the 3.0.15 HAProxy was compiled and linked
+against. On riscv64 that fallback skips both sonames because Rocky 10's
+copies are already in lib/.
 
-The wheel ends up shipping a HAProxy linked against OpenSSL 3.0.15 headers
-but running against Rocky 10's unrelated 3.5.5 build -- five minor
-releases apart, with its own (RHEL10-target) hwcap-gated codepaths -- and
-it now segfaults before HAProxy's own code ever prints anything, which
-points at process-startup library-constructor code in that mismatched
-libcrypto rather than anything in HAProxy's own `-v` handling.
+Point that ldd walk at the OpenSSL built here, on riscv64 only. Keep it
+scoped to the collect_deps call: exported for the rest of the script,
+it also reaches binutils, whose readelf links libcurl through
+libdebuginfod, and Rocky 10's libcurl needs a newer OpenSSL than 3.0.15
+exports, so every later readelf fails to start:
 
-Point ldd at the OpenSSL we just built before collect_deps runs, on
-riscv64 only, so it vendors that copy instead of falling through to
-Rocky 10's.
+    readelf: .../lib/libssl.so.3: version `OPENSSL_3.2.0' not found (required by /lib64/lp64d/libcurl.so.4)
 
-Upstream-Status: Inappropriate [only manylinux_2_39_riscv64 (Rocky 10) already ships a colliding libssl.so.3/libcrypto.so.3 on the default loader path; manylinux2014 (x86_64/aarch64) doesn't carry that soname so upstream's existing targets never hit this]
+which silently turned the script's hardening checks into "NO".
+
+Upstream-Status: Inappropriate [manylinux2014 (x86_64/aarch64) has no libssl.so.3 on the default loader path, so upstream's targets already vendor the OpenSSL they build]
 
 Signed-off-by: Ludovic Henry <git@ludovic.dev>
 ---
 diff --git a/ci/build/build-haproxy-dist.sh b/ci/build/build-haproxy-dist.sh
 --- a/ci/build/build-haproxy-dist.sh
 +++ b/ci/build/build-haproxy-dist.sh
-@@ -235,6 +235,17 @@ collect_deps() {
+@@ -244,7 +244,17 @@ collect_deps() {
      done
  }
-
+ 
+-collect_deps "$STAGE_DIR/haproxy"
 +if [ "$ARCH_LABEL" = "riscv64" ]; then
-+    # manylinux_2_39_riscv64 (Rocky 10) already ships libssl.so.3/libcrypto.so.3
-+    # on the default loader search path; manylinux2014 (CentOS 7) doesn't carry
-+    # that soname at all. Without this, ldd's default resolution below (run
-+    # with no LD_LIBRARY_PATH yet, since patchelf hasn't set one on the binary)
-+    # finds Rocky 10's own OpenSSL build instead of the one just built from
-+    # source above, and collect_deps vendors *that* -- a different OpenSSL
-+    # build than the one HAProxy was actually configured, compiled and linked
-+    # against a few lines up.
-+    export LD_LIBRARY_PATH="$OPENSSL_LIB_DIR"
++    # manylinux_2_39_riscv64 (Rocky 10) ships its own libssl.so.3/libcrypto.so.3
++    # on the default loader path, which manylinux2014 doesn't, so a plain ldd
++    # would vendor Rocky's OpenSSL instead of the one built above. Scope this to
++    # the ldd walk: exported script-wide it also reaches binutils, whose
++    # readelf links libcurl (via libdebuginfod) and then fails to start against
++    # this older OpenSSL.
++    LD_LIBRARY_PATH="$OPENSSL_LIB_DIR" collect_deps "$STAGE_DIR/haproxy"
++else
++    collect_deps "$STAGE_DIR/haproxy"
 +fi
- collect_deps "$STAGE_DIR/haproxy"
-
+ 
  # Also vendor the OpenSSL .so files we built from source — ldd sees them by
+ # their build path, but make sure their sonames are in lib/.
