@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/kratsg/pylibmagic/blob/v0.5.0/.cirrus.yml
+name: Build pylibmagic wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pylibmagic.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pylibmagic.yml'
+      - 'docs/packages/pylibmagic.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pylibmagic.yml'
+      - 'docs/packages/pylibmagic.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pylibmagic
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pylibmagic ${{ matrix.version }} cp312-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        libc: [manylinux, musllinux]
+
+    env:
+      PYLIBMAGIC_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pylibmagic v${{ env.PYLIBMAGIC_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: kratsg/pylibmagic
+          ref: v${{ env.PYLIBMAGIC_VERSION }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # CMakeLists.txt fetches and bundles libmagic (file) at build time but the wheel ships
+      # only pylibmagic's LICENSE; scikit-build-core's default glob picks this up (gotcha 53).
+      - name: Stage libmagic licence
+        run: |
+          tag=$(sed -n 's/^ *GIT_TAG *//p' CMakeLists.txt)
+          curl -fsSL --retry 5 -o LICENSE.libmagic "https://raw.githubusercontent.com/file/file/${tag}/COPYING"
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: cp312-${{ matrix.libc }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_SOURCES: tests pyproject.toml
+          CIBW_TEST_COMMAND: >-
+            pytest tests &&
+            python -c "import importlib.metadata as md;
+            licenses = {str(f) for f in md.files('pylibmagic') if '.dist-info/licenses/' in str(f)};
+            assert any(l.endswith('/LICENSE') for l in licenses), licenses;
+            assert any(l.endswith('/LICENSE.libmagic') for l in licenses), licenses"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pylibmagic-${{ matrix.version }}-cp312-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pylibmagic ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pylibmagic-${{ matrix.version }}-*riscv64
