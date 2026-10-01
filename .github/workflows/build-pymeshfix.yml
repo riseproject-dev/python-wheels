@@ -1,0 +1,111 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` and `test_abi3` jobs of
+# https://github.com/pyvista/pymeshfix/blob/v0.18.1/.github/workflows/build-and-deploy.yml
+name: Build pymeshfix wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pymeshfix.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pymeshfix.yml'
+      - 'docs/packages/pymeshfix.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pymeshfix.yml'
+      - 'docs/packages/pymeshfix.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pymeshfix
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pymeshfix ${{ matrix.version }} cp312-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    env:
+      PYMESHFIX_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pymeshfix v${{ env.PYMESHFIX_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pyvista/pymeshfix
+          ref: v${{ env.PYMESHFIX_VERSION }}
+          persist-credentials: false
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # wheel.py-api = "cp312": built once on cp312, reused and tested on
+          # cp313/cp314 like upstream's test_abi3 job. Upstream ships no cp314t.
+          CIBW_BUILD: "cp312-* cp313-* cp314-*"
+          CIBW_ARCHS: riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,vtk,matplotlib,pillow,contourpy,kiwisolver,fonttools
+
+      - name: Check the extension and license made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          assert len(sys.argv) == 2, sys.argv[1:]
+          whl = sys.argv[1]
+          assert "-cp312-abi3-" in whl, whl
+          names = zipfile.ZipFile(whl).namelist()
+          assert "pymeshfix/_meshfix.abi3.so" in names, names
+          assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
+          print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pymeshfix-${{ env.PYMESHFIX_VERSION }}-cp312-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pymeshfix ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pymeshfix-${{ matrix.version }}-*-manylinux_riscv64

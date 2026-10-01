@@ -1,0 +1,132 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on upstream's own cibuildwheel-driven
+# https://github.com/pydicom/pylibjpeg-openjpeg/blob/v2.5.0/.github/workflows/release-wheels.yml,
+# narrowed to Linux riscv64, with the tests of its pytest-builds.yml.
+name: Build pylibjpeg-openjpeg wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pylibjpeg-openjpeg.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pylibjpeg-openjpeg.yml'
+      - 'docs/packages/pylibjpeg-openjpeg.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pylibjpeg-openjpeg.yml'
+      - 'docs/packages/pylibjpeg-openjpeg.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pylibjpeg-openjpeg
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pylibjpeg-openjpeg ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream ships no free-threaded wheel and the Cython extension
+        # declares no Py_mod_gil slot, so cp314t is left out (gotcha 33/127).
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      PYLIBJPEG_OPENJPEG_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pylibjpeg-openjpeg v${{ env.PYLIBJPEG_OPENJPEG_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pydicom/pylibjpeg-openjpeg
+          ref: v${{ env.PYLIBJPEG_OPENJPEG_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # The extension compiles in the vendored Little CMS but the wheel ships
+      # no licence for it.
+      - name: Patch pylibjpeg-openjpeg source
+        run: |
+          git apply python-wheels/patches/pylibjpeg-openjpeg/${{ env.PYLIBJPEG_OPENJPEG_VERSION }}/00*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+          CIBW_TEST_REQUIRES: >-
+            pytest
+            pydicom
+            pylibjpeg
+            git+https://github.com/pydicom/pylibjpeg-data
+          CIBW_TEST_COMMAND: pytest --pyargs openjpeg.tests
+
+      - name: Check the wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("_openjpeg") and n.endswith(".so") for n in names), whl
+              for lic in ("LICENSE", "LICENSE.lcms2"):
+                  assert any(n.endswith(".dist-info/" + lic) for n in names), (whl, lic)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pylibjpeg-openjpeg-${{ env.PYLIBJPEG_OPENJPEG_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pylibjpeg-openjpeg ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pylibjpeg-openjpeg-${{ matrix.version }}-*-manylinux_riscv64

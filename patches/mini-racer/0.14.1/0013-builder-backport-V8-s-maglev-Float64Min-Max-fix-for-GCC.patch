@@ -1,0 +1,98 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 27 Sep 2026 00:00:00 +0200
+Subject: [PATCH] builder: backport V8's maglev Float64Min/Max fix for GCC
+
+With the sandbox guard in place, the riscv64 build compiled every
+object (2170/2176) and then failed linking mksnapshot:
+
+  maglev-ir-riscv.cc: in function
+  'v8::internal::maglev::Float64Min::GenerateCode(...)':
+  undefined reference to 'void v8::internal::MacroAssembler::
+  FloatMinMaxHelper<double>(FPURegister, FPURegister, FPURegister,
+  MaxMinKind)'
+
+(and the same from Float64Max::GenerateCode). FloatMinMaxHelper is a
+member template declared in src/codegen/riscv/macro-assembler-riscv.h
+but defined only in macro-assembler-riscv.cc, which never explicitly
+instantiates it. Its only in-file users are the Float32/Float64
+Min/Max wrappers. GCC inlines all four and emits no out-of-line
+instantiation, so the two calls from src/maglev/riscv/maglev-ir-riscv.cc
+have nothing to link against. No other object had an undefined
+reference, so this is the only one.
+
+V8's main branch has since changed maglev to call the public
+MacroAssembler::Float64Min/Float64Max wrappers, which generate the same
+code (each calls FloatMinMaxHelper<double> with kMin/kMax) and are
+ordinary out-of-line members. Backport that change into the riscv64
+GCC compat patch. The 14.4 through 15.4 lkgr branches still have the
+template call.
+
+https://github.com/riseproject-dev/python-wheels/actions/runs/35995947527/job/107620840172
+
+Upstream-Status: To upstream [not yet submitted to bpcreech/PyMiniRacer; the V8 hunk backports V8 main's switch to Float64Min/Float64Max]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ builder/0001-riscv64-gcc-compat.patch | 20 ++++++++++++++++++++
+ builder/v8_build.py                   | 12 ++++++++++--
+ 2 files changed, 30 insertions(+), 2 deletions(-)
+
+diff --git a/builder/0001-riscv64-gcc-compat.patch b/builder/0001-riscv64-gcc-compat.patch
+index ee00c0f..b9b9ee3 100644
+--- a/builder/0001-riscv64-gcc-compat.patch
++++ b/builder/0001-riscv64-gcc-compat.patch
+@@ -34,3 +34,23 @@
+      defined(HWY_NO_LIBCXX)
+  #define HWY_BROKEN_EMU128 1
+  #else
++--- src/maglev/riscv/maglev-ir-riscv.cc	2026-09-27 00:00:00
+++++ src/maglev/riscv/maglev-ir-riscv.cc	2026-09-27 00:00:00
++@@ -881,7 +881,7 @@
++   DoubleRegister right = ToDoubleRegister(RightInput());
++   DoubleRegister out = ToDoubleRegister(result());
++ 
++-  __ FloatMinMaxHelper<double>(out, left, right, MaxMinKind::kMin);
+++  __ Float64Min(out, left, right);
++ }
++ 
++ void Float64Max::SetValueLocationConstraints() {
++@@ -896,7 +896,7 @@
++   DoubleRegister right = ToDoubleRegister(RightInput());
++   DoubleRegister out = ToDoubleRegister(result());
++ 
++-  __ FloatMinMaxHelper<double>(out, left, right, MaxMinKind::kMax);
+++  __ Float64Max(out, left, right);
++ }
++ 
++ int Float64Ieee754Unary::MaxCallStackArgs() const { return 0; }
+diff --git a/builder/v8_build.py b/builder/v8_build.py
+index b7a5c0d..498516c 100644
+--- a/builder/v8_build.py
++++ b/builder/v8_build.py
+@@ -408,8 +408,8 @@ def build_v8(args: Args) -> None:
+         return
+ 
+     if machine().lower() == "riscv64":
+-        # Two things GCC (used instead of clang on riscv64, see is_clang=false
+-        # above) genuinely cannot compile, as opposed to merely warns about
++        # Three things GCC (used instead of clang on riscv64, see is_clang=false
++        # above) genuinely cannot build, as opposed to merely warns about
+         # (those are handled by treat_warnings_as_errors=false):
+         #
+         # * unibrow::Utf8::WriteLeadingAscii's explicit specializations are
+@@ -423,6 +423,14 @@ def build_v8(args: Args) -> None:
+         #   src/json/json-stringifier.cc's AppendStringSIMD asks it for a
+         #   hw::FixedTag<SrcChar, 16>, which the scalar target cannot provide
+         #   ("static assertion failed: Too many lanes").
++        #
++        # * src/maglev/riscv/maglev-ir-riscv.cc calls
++        #   MacroAssembler::FloatMinMaxHelper<double>, a member template
++        #   defined only in macro-assembler-riscv.cc and never explicitly
++        #   instantiated there. GCC inlines every use in that file and emits
++        #   no out-of-line copy, so linking mksnapshot fails with an undefined
++        #   reference. Call the Float64Min/Float64Max wrappers instead, as
++        #   V8's main branch now does.
+         apply_patch("0001-riscv64-gcc-compat.patch")
+ 
+     build_dir = get_v8_path() / "out.gn" / "build"

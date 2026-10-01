@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/obspy/obspy/blob/1.5.1/.github/workflows/build_wheels.yml
+name: Build obspy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/obspy.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-obspy.yml'
+      - 'docs/packages/obspy.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-obspy.yml'
+      - 'docs/packages/obspy.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: obspy
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build obspy ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream ships no free-threaded wheel.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+
+    env:
+      OBSPY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout obspy ${{ env.OBSPY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: obspy/obspy
+          ref: ${{ env.OBSPY_VERSION }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build and test wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Only our registry has riscv64 wheels for these; keep a newer PyPI sdist from winning.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy,matplotlib,contourpy,kiwisolver,pillow,lxml,sqlalchemy,pyproj,shapely,cartopy,rpds-py
+          # --no-report: do not upload results to upstream's tests.obspy.org report server.
+          # Network tests stay deselected (obspy-runtests' default).
+          CIBW_TEST_COMMAND: obspy-runtests --no-report
+          CIBW_TEST_EXTRAS: tests
+          # Optional deps outside the tests extra; without them 25 tests skip.
+          CIBW_TEST_REQUIRES: cartopy geographiclib pyshp jsonschema
+
+      - name: Check the wheel ships the licences and the compiled libraries
+        run: |
+          python3 - <<'EOF'
+          import glob, zipfile
+
+          names = zipfile.ZipFile(glob.glob("wheelhouse/*.whl")[0]).namelist()
+          assert "obspy/io/mseed/src/libmseed/LICENSE.txt" in names, names
+          assert any(n.endswith("dist-info/licenses/LICENSE.txt") for n in names), names
+          libs = sorted(n for n in names if n.startswith("obspy/lib/") and n.endswith(".so"))
+          assert len(libs) == 7, libs
+          # Nothing grafted by auditwheel (e.g. GCC runtime), so no gpl_sources job is needed.
+          assert not any(".libs/" in n for n in names), [n for n in names if ".libs/" in n]
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: obspy-${{ env.OBSPY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish obspy ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: obspy-${{ matrix.version }}-*-manylinux_riscv64

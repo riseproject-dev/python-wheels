@@ -445,6 +445,28 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
   per-package repo in the `CiscoTestAutomation` org, and wheels that are 100% Cython `.so`
   even for the most pure-Python-sounding one (`pyats.datastructures`) — confirm per package
   with two curl calls rather than re-deriving from scratch (the pyats family case).
+- **619** — A closed uniffi `.so` with no public wrapper source still names its public vendor
+  `-sys` crate in its `.cargo/registry` paths; that crate's crates.io tarball ships the
+  vendor's prebuilt-platform table as `checksum.txt`, readable with no GitHub API access —
+  re-check at the crate's `max_version` (the livekit-plugins-ai-coustics case).
+- **620** — A closed vendor wheel can be *mostly* `.py` by file count (180 `.py` vs 75 `.so`)
+  and still have zero buildable source: check each compiled module for a `.py` twin rather than
+  the ratio, discount `tests/` and re-export stubs, and don't treat a repo named exactly after
+  the package as source — `CiscoTestAutomation/genie` is docs-only (the genie case).
+- **621** — A `build_<feature>` flag sibling of a package this repo already builds (the
+  converter behind LiteRT's `build_converter`) shares the scaffolding but not the size: read
+  the upstream wheel with HTTP Range requests, use its unstripped `.symtab` to rule the jaxlib
+  `embed_bitcode` wall in or out, and scale the sibling's measured per-leg CI time by compiled
+  `.text` before writing any YAML (the litert-converter case).
+- **622** — An LLVM-JIT package can be arch-blocked even though its pinned LLVM has a RISCV
+  backend: taichi's Linux CPU JIT uses RuntimeDyld, whose `RuntimeDyldELF.cpp` has no RISC-V
+  relocations before LLVM 20, while its codegen calls `getPointerElementType()` (removed in
+  LLVM 17); its CMake also `FATAL_ERROR`s on any processor but x86_64/aarch64/x86 and its `Arch`
+  enum has no riscv64 (the taichi case).
+- **623** — A libFuzzer-linking package is not blocked by an upstream LLVM pin older than 17:
+  compiler-rt's `ALL_FUZZER_SUPPORTED_ARCH` gained RISCV64 in LLVM 17, and Rocky 10's riscv64
+  `compiler-rt` RPM already ships `libclang_rt.fuzzer_no_main.a` and the asan/ubsan archives,
+  so `dnf install compiler-rt` plus `LIBFUZZER_LIB` replaces the LLVM build (the atheris case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

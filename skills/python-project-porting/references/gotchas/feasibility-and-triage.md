@@ -286,6 +286,23 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   dependency (`mpy-cross`) with zero sdist across its whole release history and no riscv64
   wheel anywhere blocks `pip install openbricks` outright, even though openbricks' own C
   extension is an ordinary portable build (the openbricks case).
+- **619** — A closed uniffi `.so` with no public wrapper source still names its public vendor
+  `-sys` crate in Cargo registry paths; that crate's crates.io tarball ships the vendor's
+  prebuilt-platform table as `checksum.txt`, readable with no GitHub API access (the
+  livekit-plugins-ai-coustics case).
+- **620** — A closed vendor wheel can be *mostly* `.py` by file count and still have zero buildable
+  source: test each compiled module for a `.py` twin, not the `.py`/`.so` ratio, and a repo named
+  exactly after the package can still be docs-only (the genie case).
+- **621** — A `build_<feature>` flag sibling of a package already built here is "one target
+  swap" on paper: cost the extra closure from the upstream wheel's unstripped `.symtab` (Range
+  reads, no download) and scale the sibling's measured CI time by `.text` (the
+  litert-converter case).
+- **622** — For an LLVM JIT, a RISCV codegen target is not enough: intersect the LLVM API
+  window the source compiles against with the first LLVM whose JIT linker (RuntimeDyld vs
+  JITLink) handles RISC-V, and check the project's own CPU `Arch` enum (the taichi case).
+- **623** — A libFuzzer/sanitizer package whose upstream pins a pre-riscv64 LLVM is not blocked:
+  check the fuzzer arch list per LLVM tag, then the distro's `compiler-rt` file list (the atheris
+  case).
 
 ---
 
@@ -5068,3 +5085,201 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       "vendor-named generator"), here leading nowhere public. Cite the README quote in the
       park note; still pull one wheel per package (e.g. `pyats.results` 26.7 is three `.so`
       plus a re-export `__init__.py`) to confirm it is not one of the open-source parts.
+
+619. **A closed uniffi/pyo3 `.so` whose wrapper source is nowhere public still names its
+    public vendor `-sys` crate — pivot to that crate's crates.io tarball, whose shipped
+    checksum list *is* the vendor's platform table (the livekit-plugins-ai-coustics case).**
+    `livekit-plugins-ai-coustics` 0.3.2's sdist is 19 KB of uniffi-generated `_ffi.py` plus a
+    `setup.py` forcing `has_ext_modules()`; the 80 MB `libplugins_ai_coustics_uniffi.so` is
+    injected by an unpublished CI step (`package-data` globs `*.so`, `MANIFEST.in` has
+    `global-include *.so`), the licence is LiveKit's ToS, and the plugin is absent from
+    `livekit/agents`. Gotcha 600's SBOM trick has nothing to read here, but the `.so` still
+    carries Cargo's panic-location paths:
+    `strings lib.so | grep -oE '\.cargo/registry/src/[^/]+/[^/]+' | sort -u` printed
+    `aic-sdk-0.21.4` and `uniffi_core-0.31.1` — the closed wrapper sits on a *public*
+    Apache-2.0 crate. That crate's `-sys` dependency settles the port in two `curl` calls,
+    with no GitHub API access needed:
+    - `curl -sSL -A x https://crates.io/api/v1/crates/aic-sdk-sys/<ver>/download | tar xz`
+      and read `checksum.txt`: `build-utils/downloader.rs` refuses any `TARGET` not listed
+      there ("Target platform not available in aic-sdk"), and it lists exactly the
+      `aic-sdk-<triple>-<ver>.tar.gz` release assets the build fetches — for Linux only
+      `x86_64`/`aarch64-unknown-linux-gnu`. Repeat for the crate's `max_version` (0.25.0
+      here, same two) so a stale pin isn't mistaken for the vendor's current reach.
+    - Pull one listed asset from the vendor's GitHub Releases to confirm closedness: headers,
+      `lib/libaic.{so,a}` and examples only, and its README says the C interface is
+      Apache-2.0 while "the core SDK library is distributed under the proprietary AIC-SDK
+      license" (runtime licence key required). An Apache-2.0 `-sys` crate over a proprietary
+      blob is gotcha 582's shape one language over.
+    Check the Python `Requires-Dist` too: here `livekit` is independently blocked (gotcha
+    340), so the park has two walls.
+
+620. **Gotcha 605's "pull one wheel, confirm it is `.so`-only" shortcut gives the wrong
+    signal on a *mixed* closed wheel — ask whether each compiled module has a `.py` twin, not
+    what the `.py`/`.so` ratio is (the genie case).** `genie` 26.7 is the pyATS suite's
+    network-abstraction layer, and unlike every `pyats.*` sibling its
+    `cp312-manylinux2014_x86_64` wheel is *majority* Python by file count: 261 entries, 180
+    `.py` against 75 `.so`. Read naively that looks like a mostly-pure package with a few
+    speedups — the shape where gotcha 24/41 say "just build the pure part". It is not. Of
+    the 75 compiled modules **not one** has a `.py` or `__init__.py` twin in the wheel, and
+    they are the whole engine: `genie/conf/base/{device,testbed,interface,link,attributes,api,
+    utils}`, `genie/metaparser/util/{schemaengine,traceabledict}`, `genie/parsergen/core`,
+    `genie/harness/{main,discovery,_commons_internal}`, `genie/ops/base/maker`,
+    `genie/abstract/{package,token,decorator}`, `genie/utils/{dq,diff}`. The 180 `.py` are
+    149 files under `genie/tests/`, one 273 KB data file (`ops/ops_schema.py`), ~22
+    `__init__.py` re-export stubs, and a handful of helpers of at most 31 KB each
+    (`conf/base/base.py`, `abstract/magic.py`, `utils/cisco_collections/__init__.py`, …) —
+    one of which (`genie/utils/__init__.py`) states `__copyright__ = 'Cisco Systems, Inc.
+    Cisco Confidential'`. No `.pyx`/`.c`/`.pxd` ships, no LICENSE file ships, and `WHEEL`
+    carries the same `setuptools (79.0.1+cisco.1)` generator as gotcha 605. PyPI has 42
+    releases / 569 files, every one a `bdist_wheel` and zero sdist; the only `none-any` is a
+    `genie-1.0.0-py3-none-any.whl` placeholder that predates the current package.
+    - **A repo named exactly after the package is not proof of source.** Unlike `pyats.*`
+      (no per-package repo, gotcha 605), `CiscoTestAutomation/genie` *does* exist — no
+      description, no language, created the same day as the equally empty `dyntopo`. A
+      depth-1 clone is `docs/` only (325 `.rst`, five Sphinx-helper `.py`, no
+      `setup.py`/`pyproject.toml`/`src/`). The Sphinx tree itself settles it:
+      `docs/cookbooks/genie.rst` lists "Below Genie packages are Open source libraries" as
+      `genie.libs.{conf,ops,sdk,robot,parser,filetransferutils}` and `genie.telemetry` —
+      the core `genie` is not on it — and `genielibs` holds only `pkgs/*-pkg/src/genie/libs/…`.
+      A GitHub code search for class names that live only in the compiled core
+      (`org:CiscoTestAutomation "class Dq"`) returns nothing.
+    - **The check.** For each compiled module path `M` (strip the
+      `.cpython-3XX-<arch>-linux-gnu.so` suffix), look for `M.py` or `M/__init__.py`
+      in the same wheel; any engine-sized module with no twin is closed. Then subtract
+      `tests/`, data files and `__init__.py` re-exports before judging what is "pure". A
+      wheel where the compiled set is the load-bearing code is parked like gotcha 601/605,
+      however many `.py` files sit around it. Also read the open packages it
+      `Requires-Dist`s (`genie.libs.*` here) as separate queue entries with their own
+      verdicts — they are open, but useless on riscv64 without the closed core.
+
+621. **A `build_<feature>` flag sibling of a package this repo already builds looks like "swap
+    one Bazel target". Cost it by the *extra closure*, measured from the upstream wheel's
+    unstripped `.symtab` and scaled against the sibling's real CI time, not by the shared
+    scaffolding (the litert-converter case).** `litert-converter` 0.4.0 comes from the very
+    tag `build-ai-edge-litert.yml` already builds: `google-ai-edge/LiteRT` v2.2.0, whose
+    `litert/version.bzl` carries `LITERT_CONVERTER_VERSION = "0.4.0"` next to
+    `LITERT_EXPERIMENTAL_VERSION = "2.2.0"`. Upstream's `ci/build_converter_with_bazel.sh`
+    differs from `build_pip_package_with_bazel.sh` only by `--config=litert_converter` and the
+    target `//ci/tools/python/wheel:litert_converter_wheel`, so every riscv64 fix the
+    ai-edge-litert port found (bazel 7.5.0 bootstrap, the `platforms.bzl` patch, the
+    `HERMETIC_REQUIREMENTS_LOCK` numpy rewrite, the XNNPACK fp16 define) would carry over
+    unchanged. What does not carry over is the size, and that is the whole triage:
+    - **Read the upstream wheel's native payload without downloading it.** Wrap a
+      `RawIOBase` whose `readinto` issues `Range: bytes=a-b` requests in
+      `io.BufferedReader` and hand it to `zipfile.ZipFile`. That lists members and sizes in a
+      handful of requests, and `z.read(member)` inflates one member into memory with nothing
+      written to disk. It works on a host with <100 MB free, where `pip download` of the
+      70 MB wheel dies with `ENOSPC`.
+    - **An unstripped `.symtab` turns "is the jaxlib wall in this graph?" into a grep.** The
+      pinned TF (`bcdab1a6`) vendors an XLA whose `xla/codegen/intrinsic/cpp:embed_bitcode`
+      has no RISC-V branch (gotcha 426's 2.22+ shape). The converter's
+      `tensorflow/transforms:tensorflow_passes` does reach tf2xla
+      (`xla_legalize_tf_with_tf2xla`, `xla_call_module_loader`), so reading BUILD files
+      cannot rule the wall out without a `bazel query` over a full TF checkout. The x86_64
+      `libLiteRTCompilerMLIR.so` (288 MB) keeps a 13.9 MB `.symtab` alongside `.dynsym`. It
+      has 72,755 `_ZN4mlir2TF`, 31,047 `_ZN3xla` and 85,252 `_ZN4llvm` hits but **zero**
+      `LLVMInitialize*Target`, `CpuCompiler`, `OrcJIT`/`LLJIT` or `eigen_unary`, and its only
+      `xla::cpu` names are `*ThunkProto` protobuf classes. The XLA CPU compiler is not
+      linked, so the converter is very probably *not* Bazel-blocked like jaxlib (PR #526).
+      Absence evidence only counts when `.symtab` is present; a stripped `.so` shows exports
+      only.
+    - **Then scale the proven sibling's measured build time by compiled size.** The
+      converter target is a strict superset of the sibling's: it links
+      `pywrap_litert_with_converter_binaries` in place of `pywrap_litert_binaries`, plus the
+      MLIR library, and that `.so` alone has 120 MB of `.text`. ai-edge-litert 2.2.0's
+      publish run 35573236381 spent 3h40m-4h40m in the Bazel step per interpreter, for about
+      23 MB of compiled payload. 5-8x that is roughly 20-30 h per leg. That is over the
+      sibling's 720-min `timeout-minutes`, over the repo's 1440-min ceiling
+      (`build-torch.yml`), and past libclang's ~10 h record. It is also per-interpreter: the
+      shared library itself depends on `@nanobind` and `MLIRBindingsPythonCAPIObjects`, which
+      compile against the hermetic Python headers, so nothing collapses across the
+      cp311-cp314 legs into one build.
+    - **Check which arches upstream ships the *flagged* variant on, since it can be narrower
+      than the base.** ai-edge-litert 2.2.0 ships `manylinux_2_27_aarch64`. litert-converter
+      has shipped only `manylinux_2_27_x86_64` and `macosx_12_0_arm64` across all 188
+      releases (1,635 files). The public `linux_nightly_wheel.yml` runs on
+      `linux-x86-n2-16` only and never calls `build_converter_with_bazel.sh`, so the
+      converter's release pipeline is internal and there is no non-x86 Linux build to mirror
+      (goal 2).
+    Park it with tensorflow's verdict (gotcha 426), "disproportionate, not hard-blocked", and
+    say in the note how cheaply it reopens. If the riscv64 pool gains a Bazel remote cache or
+    much faster runners, the workflow is `build-ai-edge-litert.yml` with the target and
+    `--config` swapped.
+
+622. **For an LLVM JIT, "LLVM has a RISC-V backend" is the wrong question: intersect the LLVM
+    API window the project compiles against with the first LLVM whose *JIT linker* handles
+    RISC-V, and check the project's own CPU-arch enum (the taichi case).** taichi 1.7.4 is
+    upstream LLVM 15.0.5 (not a fork; `dev_install.md` builds it with
+    `-DLLVM_TARGETS_TO_BUILD="X86;NVPTX"`), and LLVM 15 does have a RISCV codegen target, so
+    "just rebuild LLVM with `RISCV`" looks like the whole port. It is not, for three reasons
+    that each read in minutes over raw.githubusercontent.com, no checkout needed:
+    - **Which JIT linker does the CPU backend use on Linux?** `taichi/runtime/cpu/jit_cpu.cpp`
+      picks `orc::ObjectLinkingLayer` (JITLink) only under `__APPLE__ && __aarch64__`; every
+      Linux build gets `orc::RTDyldObjectLinkingLayer` (RuntimeDyld). Grep
+      `llvm/lib/ExecutionEngine/RuntimeDyld/RuntimeDyldELF.cpp` per release tag for `riscv`:
+      **0 hits in 15.0.7, 16.0.6, 17.0.6, 18.1.8 and 19.1.7; 37 in 20.1.8.** RuntimeDyld
+      cannot apply a single RISC-V relocation before LLVM 20, so a riscv64 build on the
+      project's own LLVM compiles and links fine and then fails at the first kernel launch.
+    - **What is the newest LLVM the project's source still compiles against?** taichi calls
+      `Type::getPointerElementType()` (`taichi/codegen/llvm/codegen_llvm.cpp`), which
+      `llvm/include/llvm/IR/Type.h` still has in 16.0.6 and has dropped in 17.0.6. Window
+      <=16 vs RuntimeDyld-RISC-V >=20: empty. The only ways through are a source patch that
+      swaps the Linux riscv64 JIT onto JITLink `ELF_riscv` as it stood in LLVM 15/16 (602
+      lines in 15.0.5 vs ~1000 in 20.1.8, so it is the immature one), or porting the codegen
+      to opaque pointers and LLVM 20+. Both are compiler work for upstream, not packaging.
+    - **Does the project know about any CPU arch but x86_64/aarch64?** taichi's
+      `cmake/TaichiCXXFlags.cmake` ends its processor switch with
+      `message(FATAL_ERROR "Unknown processor type ${CMAKE_SYSTEM_PROCESSOR}")`,
+      `taichi/inc/archs.inc.h` lists only `x64` and `arm64` as CPU arches, and
+      `taichi/rhi/arch.cpp`'s `host_arch()` and `default_simd_width()` fall through to
+      `RHI_NOT_IMPLEMENTED` for anything else. A new `Arch` enum value is a user-visible API
+      change (`ti.cpu` resolves through `host_arch()`), not a build fix.
+    Two cost multipliers push it further: the runtime is a `runtime_<arch>.bc` compiled at build
+    time by `CLANG_EXECUTABLE` and loaded by the project's own LLVM, so the manylinux_riscv64
+    image's clang 21.1.8 (whose bitcode LLVM 15 cannot read) is unusable and clang 15 has to be
+    built from source too, which is libclang's ~10 h full LLVM/Clang compile
+    (`build-libclang.yml`, `timeout-minutes: 1440`). And the upstream Linux pipeline is
+    x86_64-only: `ti_build/llvm.py` downloads one `taichi-llvm-15-linux.zip` on Linux with no
+    `machine` check, and PyPI has no sdist and no Linux aarch64 wheel for any 1.7.x release,
+    so there is no non-x86 Linux build to mirror (goal 2). Park it as *upstream-arch-blocked*,
+    not dependency-blocked, and say what reopens it: an upstream riscv64 `Arch` plus either a
+    JITLink path on Linux or a move to LLVM 20 or newer.
+
+623. **A libFuzzer/sanitizer package whose upstream pins a pre-riscv64 LLVM is not blocked:
+    check compiler-rt's per-tool arch list for each LLVM tag, then check whether the image's
+    distro `compiler-rt` already ships the archive (the atheris case).** Gotcha 622 parks an
+    LLVM *JIT*. A package that only *links* a compiler-rt runtime has to be triaged
+    differently, and the answer often goes the other way. atheris's `deployment/Dockerfile`
+    builds `make compiler-rt` from a pinned llvm-project commit (`0982db18…`, which is
+    16.0.0-dev) and hands the resulting `libclang_rt.fuzzer_no_main.a` to `setup.py` through
+    `LIBFUZZER_LIB`. Each of the checks below takes minutes over raw.githubusercontent.com,
+    with no checkout needed:
+    - **Which LLVM added riscv64 for the specific runtime?** Read
+      `compiler-rt/cmake/Modules/AllSupportedArchDefs.cmake` at the pinned commit and at a few
+      release tags. `ALL_ASAN_SUPPORTED_ARCH`, `ALL_UBSAN_SUPPORTED_ARCH` and
+      `ALL_SANITIZER_COMMON_SUPPORTED_ARCH` already list `${RISCV64}` in 14.0.6, but
+      `ALL_FUZZER_SUPPORTED_ARCH` gains it only in **17.0.6** (it is absent in 16.0.6 and at
+      atheris's pin). So upstream's exact recipe *cannot* produce a riscv64 libFuzzer, but any
+      LLVM from 17 on can. "Sanitizers support RISC-V" is not a valid shortcut, because
+      libFuzzer lagged ASan by several releases.
+    - **Does the project need that exact LLVM?** atheris does not. Its only gate is
+      `setup_utils/check_libfuzzer_version.sh`, which requires `LLVMFuzzerRunDriver` to be
+      present in the archive (any recent libFuzzer has it). Its own C++ (`src/native/*.cc`)
+      has no arch conditionals. `find_libfuzzer.sh` knows only x86_64/i386/aarch64 and the
+      old `lib/linux/…-<arch>.a` layout, but setting `LIBFUZZER_LIB` bypasses it entirely.
+    - **Does the image already have it?** List the RPM's files without downloading the whole
+      package: range-fetch its first ~2 MB and parse the header's BASENAMES/DIRNAMES tags
+      (1117/1118/1116). Rocky 10's
+      `AppStream/riscv64/os/Packages/c/compiler-rt-21.1.8-1.el10.riscv64.rpm` ships
+      `libclang_rt.{fuzzer_no_main,asan,ubsan_standalone,ubsan_standalone_cxx}.a` under
+      `/usr/lib/clang/21/lib/riscv64-redhat-linux-gnu/`. These are exactly the four archives
+      atheris's `setup.py` links or merges. It derives the sanitizer names by string-replacing
+      `.fuzzer_no_main`, so they must sit next to each other, and they do. So
+      `CIBW_BEFORE_ALL: dnf install -y compiler-rt` plus a `LIBFUZZER_LIB` path replaces
+      upstream's hours-long LLVM build. Hardcode the `clang/<major>` path: `CIBW_ENVIRONMENT`
+      is evaluated *before* `before-all` as well, so a `$(ls …)` or `$(clang
+      -print-resource-dir)` there fails before the package that makes it resolvable is
+      installed.
+    Record the upstream pin's version in the workflow comment. It is the reason this port
+    deviates from upstream's recipe, and it is what to re-check if upstream ever bumps its
+    LLVM to 17 or later.

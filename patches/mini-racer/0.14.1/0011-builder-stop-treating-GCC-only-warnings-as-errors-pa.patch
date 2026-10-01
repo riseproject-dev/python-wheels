@@ -1,0 +1,181 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sat, 19 Sep 2026 10:00:00 +0200
+Subject: [PATCH] builder: stop treating GCC-only warnings as errors; patch
+ highway's EMU128 opt-out
+
+The -k 1000 build did its job: one 24h run collected every remaining
+failure instead of one per cycle. There were six, and they split into
+two kinds.
+
+Five are pure -Werror diagnostics GCC emits and clang does not:
+-Wuninitialized (53 of them in wasm/baseline/liftoff-compiler.cc),
+-Wdangling-reference (compiler/js-call-reducer.cc,
+compiler/js-typed-lowering.cc -- both false positives: the reference
+is to data owned by the node's operator, not by the temporary node
+wrapper), -Wsign-compare (maglev/maglev-graph-builder.cc) and
+-Wparentheses (heap/collection-barrier.cc). Chasing these one cast at
+a time is unbounded work at a day per discovery, and V8 never promised
+to be warning-clean under GCC: config("chromium_code") in
+build/config/compiler/BUILD.gn adds -Werror unconditionally, while
+config("no_chromium_code") pointedly restricts it to clang because
+"GCC may emit unsuppressible warnings" (crbug.com/589724). Set the
+declared treat_warnings_as_errors=false gn arg, whose own comment says
+it exists to be overridden "for Chromium builds on Linux that could
+use a different version of the compiler", and drop the mul-karatsuba
+cast that only existed to silence one of these.
+
+The sixth is a real compile error, and not in V8's own code:
+src/json/json-stringifier.cc's AppendStringSIMD asks
+third_party/highway for a hw::FixedTag<SrcChar, 16>, but highway
+resolved to HWY_SCALAR, whose tags hold one lane ("static assertion
+failed: Too many lanes"). The cause is highway's EMU128 opt-out, which
+at the revision V8 pins (84379d1c) disables EMU128 for every GCC older
+than 16.0 -- ours is 14.3.1 -- leaving HWY_SCALAR as the fallback.
+That is wrong on RISC-V specifically: with no V extension in the
+baseline, EMU128 is the only fallback that can provide fixed-width
+tags at all. Highway has since fixed this upstream, carving RISC-V out
+with a GCC 14 floor and naming V8's JSON stringifier as the breakage;
+backport that carve-out.
+
+Also drop ninja -k 1000, which has now served its purpose: with the
+warning class gone, keeping the build going past a genuine error only
+converts a fast failure into a 24h timeout.
+
+https://github.com/riseproject-dev/python-wheels/actions/runs/34755707688/job/103719604859
+
+Upstream-Status: To upstream [not yet submitted to bpcreech/PyMiniRacer]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ builder/0001-riscv64-gcc-compat.patch | 34 ++++++++++++++---------
+ builder/v8_build.py                   | 51 ++++++++++++++++++++---------------
+ 2 files changed, 51 insertions(+), 34 deletions(-)
+
+diff --git a/builder/0001-riscv64-gcc-compat.patch b/builder/0001-riscv64-gcc-compat.patch
+index ee8eb3a..ee00c0f 100644
+--- a/builder/0001-riscv64-gcc-compat.patch
++++ b/builder/0001-riscv64-gcc-compat.patch
+@@ -1,16 +1,5 @@
+---- src/bigint/mul-karatsuba.cc	2026-09-13 13:52:35
+-+++ src/bigint/mul-karatsuba.cc	2026-09-13 13:52:35
+-@@ -48,7 +48,7 @@
+-   // Round up, unless we're only just above the threshold. This smoothes
+-   // the steps by which time goes up as input size increases.
+-   uint32_t additive = ((1 << shift) - 1);
+--  if (shift >= 2 && (len & additive) < (1 << (shift - 2))) {
+-+  if (shift >= 2 && (len & additive) < static_cast<uint32_t>(1 << (shift - 2))) {
+-     return len;
+-   }
+-   return ((len + additive) >> shift) << shift;
+---- src/strings/unicode.h	2026-09-13 13:52:35
+-+++ src/strings/unicode.h	2026-09-13 13:52:35
++--- src/strings/unicode.h	2026-09-19 00:00:00
+++++ src/strings/unicode.h	2026-09-19 00:00:00
+ @@ -215,14 +215,6 @@
+    template <typename Char>
+    static size_t WriteLeadingAscii(const Char* src, char* dest, size_t size);
+@@ -26,3 +15,22 @@
+    // Encode the given characters as Utf8 into the provided output buffer.
+    struct EncodingResult {
+      size_t bytes_written;
++--- third_party/highway/src/hwy/detect_targets.h	2026-09-19 00:00:00
+++++ third_party/highway/src/hwy/detect_targets.h	2026-09-19 00:00:00
++@@ -393,8 +393,15 @@
++ // remains with 13.2, see #1683. This is separate from HWY_BROKEN_TARGETS
++ // because it affects the fallback target, which must always be enabled. If 1,
++ // we instead choose HWY_SCALAR even without HWY_COMPILE_ONLY_SCALAR being set.
+++// RISC-V has no native SIMD baseline unless the V extension is enabled, so
+++// there EMU128 is the only fallback able to provide fixed-width tags:
+++// substituting HWY_SCALAR does not merely lose speed, it makes
+++// FixedTag<T, N> with N > 1 fail to compile, which breaks downstream users
+++// such as V8's JSON stringifier. Keep the blanket GCC opt-out, but do not
+++// extend it past GCC 14 on RISC-V, where the bug has not been observed.
++ #if !defined(HWY_BROKEN_EMU128)  // allow overriding
++-#if (HWY_COMPILER_GCC_ACTUAL && HWY_COMPILER_GCC_ACTUAL < 1600) || \
+++#if (HWY_COMPILER_GCC_ACTUAL &&                                   \
+++     HWY_COMPILER_GCC_ACTUAL < (HWY_ARCH_RISCV ? 1400 : 1600)) || \
++     defined(HWY_NO_LIBCXX)
++ #define HWY_BROKEN_EMU128 1
++ #else
+diff --git a/builder/v8_build.py b/builder/v8_build.py
+index a5457e7..b7a5c0d 100644
+--- a/builder/v8_build.py
++++ b/builder/v8_build.py
+@@ -339,6 +339,20 @@ def run_build(build_dir: Path, args: Args) -> None:
+         opts["v8_enable_temporal_support"] = "false"
+         opts["enable_rust"] = "false"
+ 
++        # V8 is only warning-clean under clang, which is what it gates its
++        # -Werror on everywhere but here: config("chromium_code") in
++        # build/config/compiler/BUILD.gn adds -Werror for any compiler, while
++        # config("no_chromium_code") deliberately restricts it to clang
++        # ("GCC may emit unsuppressible warnings", crbug.com/589724). GCC
++        # flags a long tail of diagnostics clang does not (-Wuninitialized,
++        # -Wdangling-reference, -Wsign-compare, -Wparentheses in five
++        # different translation units so far, all of them benign or outright
++        # false positives), and each one costs a day of CI to discover. The
++        # declared gn arg exists for exactly this case -- "allow overriding
++        # this e.g. for Chromium builds on Linux that could use a different
++        # version of the compiler" (build/config/compiler/compiler.gni):
++        opts["treat_warnings_as_errors"] = "false"
++
+     if is_linux() and target_cpu != get_local_v8_target_cpu():
+         run(
+             executable,
+@@ -361,23 +375,12 @@ def run_build(build_dir: Path, args: Args) -> None:
+     )
+ 
+     # Finally, actually do the build:
+-    ninja_args = [
++    run(
+         executable,
+         str(get_depot_tools_path() / "ninja.py"),
+         # "-vv",  # too much spam for GitHub Actions
+         "-C",
+         str(build_dir),
+-    ]
+-    if target_cpu == "riscv64":
+-        # This is the first time this codebase has been compiled with GCC
+-        # for this target in anger, so there is a long tail of small
+-        # GCC-vs-clang source incompatibilities to find (see apply_patch()
+-        # calls above). Keep going past failures so one build surfaces as
+-        # many of them as possible, instead of one per multi-hour CI cycle:
+-        ninja_args += ["-k", "1000"]
+-
+-    run(
+-        *ninja_args,
+         str(Path("custom_deps") / "mini_racer"),
+         cwd=get_v8_path(),
+     )
+@@ -405,15 +408,21 @@ def build_v8(args: Args) -> None:
+         return
+ 
+     if machine().lower() == "riscv64":
+-        # GCC (used instead of clang on riscv64, see is_clang=false above)
+-        # is stricter than clang about a few things in v8's C++, e.g. an
+-        # explicit specialization declared inside a class body
+-        # (unibrow::Utf8::WriteLeadingAscii in unicode.h -- the out-of-line
+-        # definitions in unicode.cc are already namespace-scope and
+-        # standard-conformant on their own) and a signed/unsigned
+-        # comparison under -Werror=sign-compare (bigint/mul-karatsuba.cc).
+-        # Both are narrow, mechanical fixes; accumulate any more of this
+-        # kind we hit in the same patch:
++        # Two things GCC (used instead of clang on riscv64, see is_clang=false
++        # above) genuinely cannot compile, as opposed to merely warns about
++        # (those are handled by treat_warnings_as_errors=false):
++        #
++        # * unibrow::Utf8::WriteLeadingAscii's explicit specializations are
++        #   declared a second time inside the class body in src/strings/
++        #   unicode.h; clang takes that as an extension, GCC rejects it
++        #   ("explicit specialization in non-namespace scope"). The
++        #   out-of-line definitions in unicode.cc are already namespace-scope
++        #   and standard-conformant on their own.
++        #
++        # * third_party/highway resolves to HWY_SCALAR here, and
++        #   src/json/json-stringifier.cc's AppendStringSIMD asks it for a
++        #   hw::FixedTag<SrcChar, 16>, which the scalar target cannot provide
++        #   ("static assertion failed: Too many lanes").
+         apply_patch("0001-riscv64-gcc-compat.patch")
+ 
+     build_dir = get_v8_path() / "out.gn" / "build"

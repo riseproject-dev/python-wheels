@@ -1,0 +1,169 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build:
+#   https://github.com/doronz88/sslpsk-pmd3/blob/v1.0.3/.github/workflows/python-publish-macos-and-linux.yml
+name: Build sslpsk-pmd3 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/sslpsk-pmd3.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sslpsk-pmd3.yml'
+      - 'docs/packages/sslpsk-pmd3.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sslpsk-pmd3.yml'
+      - 'docs/packages/sslpsk-pmd3.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: sslpsk-pmd3
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build sslpsk-pmd3 ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # No cp314t: single-phase init re-enables the GIL, and upstream ships no free-threaded wheel.
+        python: ["cp312", "cp313", "cp314"]
+        libc: [manylinux, musllinux]
+
+    env:
+      SSLPSK_PMD3_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout sslpsk-pmd3 v${{ env.SSLPSK_PMD3_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: doronz88/sslpsk-pmd3
+          ref: v${{ env.SSLPSK_PMD3_VERSION }}
+          persist-credentials: false
+
+      # Upstream's suite calls ssl.wrap_socket, gone since Python 3.12; this is its client/server echo test via SSLPSKContext.
+      - name: Stage smoke test
+        run: |
+          mkdir -p tests
+          cat > tests/test_psk.py <<'EOF'
+          import socket
+          import ssl
+          import threading
+
+          import sslpsk_pmd3
+
+          PSK = bytes.fromhex('c033f52671c61c8128f7f8a40be88038bcf2b07a6eb3095c36e3759f0cf40837')
+          IDENTITY = b'client1'
+          HINT = b'server-hint'
+
+
+          def context(protocol):
+              ctx = sslpsk_pmd3.SSLPSKContext(protocol)
+              ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+              ctx.set_ciphers('PSK')
+              return ctx
+
+
+          server_ctx = context(ssl.PROTOCOL_TLS_SERVER)
+          server_ctx.hint = HINT
+          server_ctx.psk = lambda identity: PSK if identity == IDENTITY else b''
+
+          seen_hints = []
+          client_ctx = context(ssl.PROTOCOL_TLS_CLIENT)
+          client_ctx.check_hostname = False
+          client_ctx.verify_mode = ssl.CERT_NONE
+          client_ctx.psk = lambda hint: seen_hints.append(hint) or (PSK, IDENTITY)
+
+          server_raw, client_raw = socket.socketpair()
+          server_errors = []
+
+
+          def serve():
+              try:
+                  with server_ctx.wrap_socket(server_raw, server_side=True) as conn:
+                      conn.sendall(conn.recv(64).upper())
+              except Exception as exc:
+                  server_errors.append(exc)
+
+
+          thread = threading.Thread(target=serve)
+          thread.start()
+          with client_ctx.wrap_socket(client_raw) as conn:
+              cipher, version, _ = conn.cipher()
+              conn.sendall(b'abcdefghi')
+              reply = conn.recv(64)
+          thread.join()
+
+          assert not server_errors, server_errors
+          assert reply == b'ABCDEFGHI', reply
+          assert version == 'TLSv1.2' and 'PSK' in cipher, (cipher, version)
+          assert seen_hints == [HINT], seen_hints
+          print(ssl.OPENSSL_VERSION, sslpsk_pmd3.sslpsk._sslpsk.__name__, cipher, version, 'ok')
+          EOF
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # openssl-dev, not upstream's libressl-dev: the extension must link the OpenSSL that Python's _ssl uses.
+          CIBW_BEFORE_ALL_LINUX: yum install -y openssl-devel || apk add --upgrade openssl-dev
+          CIBW_ENVIRONMENT: SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SSLPSK_PMD3=${{ env.SSLPSK_PMD3_VERSION }}
+          # The extension sets callbacks on the SSL* owned by Python's _ssl, so a private libssl copy of another version silently breaks PSK.
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: auditwheel repair --exclude libssl.so.3 --exclude libcrypto.so.3 -w {dest_dir} {wheel}
+          CIBW_TEST_COMMAND: python {project}/tests/test_psk.py
+
+      - name: Test against the runner's own Python and OpenSSL
+        if: matrix.python == 'cp312' && matrix.libc == 'manylinux'
+        run: |
+          python3 -m zipfile -e wheelhouse/*.whl "$RUNNER_TEMP/site"
+          PYTHONPATH="$RUNNER_TEMP/site" python3 tests/test_psk.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sslpsk-pmd3-${{ env.SSLPSK_PMD3_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish sslpsk-pmd3 ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: sslpsk-pmd3-${{ matrix.version }}-*riscv64

@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version glob to (re)build; empty builds every version of docs/packages/polars-runtime-{32,64}.yaml not released yet'
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/polars-runtime-{32,64,compat}.yaml not released yet'
         required: false
         default: ''
   pull_request:
@@ -18,6 +18,7 @@ on:
       - '.github/workflows/build-polars-runtime.yml'
       - 'docs/packages/polars-runtime-32.yaml'
       - 'docs/packages/polars-runtime-64.yaml'
+      - 'docs/packages/polars-runtime-compat.yaml'
       - '.github/workflows/test-polars-runtime.yml'
   push:
     branches: [main]
@@ -25,6 +26,7 @@ on:
       - '.github/workflows/build-polars-runtime.yml'
       - 'docs/packages/polars-runtime-32.yaml'
       - 'docs/packages/polars-runtime-64.yaml'
+      - 'docs/packages/polars-runtime-compat.yaml'
       - '.github/workflows/test-polars-runtime.yml'
 
 concurrency:
@@ -55,7 +57,7 @@ defaults:
     shell: bash
 
 jobs:
-  # Both runtimes come out of one checkout, but each is its own package with
+  # All runtimes come out of one checkout, but each is its own package with
   # its own docs/packages/<package>.yaml, and the nightly declares a new
   # version in one at a time -- so resolve, build and publish them separately.
   setup:
@@ -70,8 +72,14 @@ jobs:
       package: polars-runtime-64
       version: ${{ inputs.version }}
 
+  setup-compat:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: polars-runtime-compat
+      version: ${{ inputs.version }}
+
   plan:
-    needs: [setup, setup-64]
+    needs: [setup, setup-64, setup-compat]
     runs-on: ubuntu-latest
     outputs:
       # [{"package": ..., "version": ...}, ...], one entry per wheel to build.
@@ -83,13 +91,15 @@ jobs:
         env:
           VERSIONS_32: ${{ needs.setup.outputs.versions || '[]' }}
           VERSIONS_64: ${{ needs.setup-64.outputs.versions || '[]' }}
+          VERSIONS_COMPAT: ${{ needs.setup-compat.outputs.versions || '[]' }}
         run: |
           set -euo pipefail
-          builds=$(jq -cn --argjson v32 "$VERSIONS_32" --argjson v64 "$VERSIONS_64" \
+          builds=$(jq -cn --argjson v32 "$VERSIONS_32" --argjson v64 "$VERSIONS_64" --argjson vcompat "$VERSIONS_COMPAT" \
             '[$v32[] | {package: "polars-runtime-32", version: .}]
-             + [$v64[] | {package: "polars-runtime-64", version: .}]')
-          versions=$(jq -cn --argjson v32 "$VERSIONS_32" --argjson v64 "$VERSIONS_64" \
-            '$v32 + $v64 | unique')
+             + [$v64[] | {package: "polars-runtime-64", version: .}]
+             + [$vcompat[] | {package: "polars-runtime-compat", version: .}]')
+          versions=$(jq -cn --argjson v32 "$VERSIONS_32" --argjson v64 "$VERSIONS_64" --argjson vcompat "$VERSIONS_COMPAT" \
+            '$v32 + $v64 + $vcompat | unique')
           echo "builds=$builds" >> "$GITHUB_OUTPUT"
           echo "versions=$versions" >> "$GITHUB_OUTPUT"
           echo "Wheels to build: $builds"
@@ -133,14 +143,18 @@ jobs:
           VERSION=$(tomlq '.project.version' "$POLARS_PYPROJECT_TOML" | tr -d '"')
           CARGO_32_VERSION=$(tomlq '.package.version' py-polars/runtime/polars-runtime-32/Cargo.toml | tr -d '"')
           CARGO_64_VERSION=$(tomlq '.package.version' py-polars/runtime/polars-runtime-64/Cargo.toml | tr -d '"')
+          CARGO_COMPAT_VERSION=$(tomlq '.package.version' py-polars/runtime/polars-runtime-compat/Cargo.toml | tr -d '"')
 
           RT32_VERSION=($(tomlq '.project.dependencies[0]' "$POLARS_PYPROJECT_TOML" | tr -d '"'))
           RT64_VERSION=($(tomlq '.project."optional-dependencies".rt64[0]' "$POLARS_PYPROJECT_TOML" | tr -d '"'))
+          COMPAT_VERSION=($(tomlq '.project."optional-dependencies".rtcompat[0]' "$POLARS_PYPROJECT_TOML" | tr -d '"'))
 
           [[ "$VERSION" == "$(echo $CARGO_32_VERSION | sed 's/-beta\./b/')" ]] || (echo "Incorrect cargo 32 version" && exit 1)
           [[ "$VERSION" == "$(echo $CARGO_64_VERSION | sed 's/-beta\./b/')" ]] || (echo "Incorrect cargo 64 version" && exit 1)
+          [[ "$VERSION" == "$(echo $CARGO_COMPAT_VERSION | sed 's/-beta\./b/')" ]] || (echo "Incorrect cargo compat version" && exit 1)
           [[ "$VERSION" == "${RT32_VERSION[2]}" ]] || (echo "Incorrect rt32 version" && exit 1)
           [[ "$VERSION" == "${RT64_VERSION[2]}" ]] || (echo "Incorrect rt64 version" && exit 1)
+          [[ "$VERSION" == "${COMPAT_VERSION[2]}" ]] || (echo "Incorrect rtcompat version" && exit 1)
 
       - name: Build sdist and wheel
         run: uv build py-polars --out-dir dist

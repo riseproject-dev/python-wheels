@@ -61,32 +61,44 @@ jobs:
           ref: v${{ env.TOMBI_VERSION }}
           persist-credentials: false
 
-      # pyproject.toml/Cargo.toml both pin the placeholder "0.0.0-dev" upstream's
-      # own `cargo xtask set-version` replaces from GITHUB_REF at release time
-      # (xtask/src/command/set_version.rs); reproduce just the two patches this
-      # build needs instead of running xtask itself.
+      # The repo root pyproject.toml is just a uv workspace file (dev/stub
+      # dependency groups); it has no [build-system]. The real buildable
+      # package -- [build-system], [tool.maturin] with manifest-path pointing
+      # at rust/tombi-cli/Cargo.toml, module-name, python-source -- lives at
+      # python/tombi/pyproject.toml. pyproject.toml/Cargo.toml both pin the
+      # placeholder "0.0.0-dev" upstream's own `cargo xtask set-version`
+      # replaces from GITHUB_REF at release time (xtask/src/command/set_version.rs);
+      # reproduce just the two patches this build needs instead of running
+      # xtask itself. Cargo.toml is the workspace root ([workspace.package]
+      # version), so that one stays at the checkout root.
       - name: Set version
         run: |
-          sed -i "s/^version = \"0.0.0-dev\".*/version = \"${TOMBI_VERSION}\"/" pyproject.toml Cargo.toml
+          sed -i "s/^version = \"0.0.0-dev\".*/version = \"${TOMBI_VERSION}\"/" python/tombi/pyproject.toml Cargo.toml
 
       # `[tool.maturin] bindings = "bin"`: the wheel is one compiled executable
       # with no ABI tag, so a single native build covers every interpreter.
-      # No `--locked` (unlike build-taplo.yml/build-git-cliff.yml, and matching
-      # upstream's own release_pypi.yml): the version patch above leaves
-      # Cargo.lock's workspace-local entries stale, so cargo needs to update it.
+      # `working-directory: python/tombi` mirrors build-git-cliff.yml's own
+      # pattern for a pyproject.toml that isn't at the checkout root: maturin
+      # runs with that directory as cwd, finds its pyproject.toml there, and
+      # that file's own manifest-path ("../../rust/tombi-cli/Cargo.toml")
+      # resolves relative to it, back to the checkout root.
+      # No `--locked` (like build-taplo.yml/build-git-cliff.yml): the version
+      # patch above leaves Cargo.lock's workspace-local entries stale, so cargo
+      # needs to update it.
       - name: Build wheel
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
         with:
           command: build
           target: riscv64gc-unknown-linux-gnu
           args: --release --out dist
+          working-directory: python/tombi
           manylinux: '2_39'
           before-script-linux: git config --global --add safe.directory "*"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: tombi-${{ env.TOMBI_VERSION }}-manylinux_riscv64
-          path: dist/*.whl
+          path: python/tombi/dist/*.whl
           if-no-files-found: error
 
   test_wheel:
