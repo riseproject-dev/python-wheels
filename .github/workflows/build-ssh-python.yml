@@ -1,0 +1,220 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `manylinux-*`/`python_test` jobs of
+# https://github.com/ParallelSSH/ssh-python/blob/1.2.0.post1/.circleci/config.yml
+name: Build ssh-python wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ssh-python.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ssh-python.yml'
+      - 'docs/packages/ssh-python.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ssh-python.yml'
+      - 'docs/packages/ssh-python.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: ssh-python
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build ssh-python ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      SSH_PYTHON_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout ssh-python ${{ env.SSH_PYTHON_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ParallelSSH/ssh-python
+          ref: ${{ env.SSH_PYTHON_VERSION }}
+          persist-credentials: false
+
+      - name: Stage the licence-collection script
+        run: |
+          cat > collect-licenses.sh <<'COLLECT_EOF'
+          #!/bin/bash
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # Stage, at the project root, the licence of libssh (built from the
+          # vendored libssh/ tree) and of every shared library auditwheel vendors
+          # out of the build image alongside it (OpenSSL and the krb5 GSSAPI stack).
+          # setuptools' default LICEN[CS]E* glob copies them into the wheel.
+          set -euo pipefail
+
+          project="${1:?usage: collect-licenses.sh <project-dir>}"
+
+          cp "$project/libssh/COPYING" "$project/LICENSE.libssh"
+          cp "$project/libssh/BSD" "$project/LICENSE.libssh.BSD"
+
+          mapfile -t libs < <(
+              for root in /usr/lib64/libgssapi_krb5.so /usr/lib64/libcrypto.so; do
+                  ldd "$root" | tr ' ' '\n' | grep '^/'
+                  readlink -f "$root"
+              done | sort -u
+          )
+
+          # glibc, the gcc runtime and zlib are on auditwheel's manylinux allowlist.
+          mapfile -t pkgs < <(
+              rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null |
+                  grep -E '^[A-Za-z0-9._+-]+$' | sort -u |
+                  grep -vE '^(glibc|libgcc|libstdc\+\+|gcc|zlib-ng-compat)$'
+          )
+
+          for pkg in "${pkgs[@]}"; do
+              rpm -q --qf '%{NAME}: %{LICENSE}\n' "$pkg"
+              mapfile -t files < <(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
+
+              if [ -z "${files[0]:-}" ]; then
+                  srpm=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg")
+                  mapfile -t files < <(
+                      rpm -qa --qf '%{SOURCERPM} %{NAME}\n' |
+                          awk -v s="$srpm" '$1 == s { print $2 }' |
+                          xargs -r rpm -q --licensefiles 2>/dev/null | sort -u
+                  )
+              fi
+
+              if [ -z "${files[0]:-}" ]; then
+                  dnf -y --disablerepo=extras reinstall --setopt=tsflags= "$pkg" >/dev/null
+                  mapfile -t files < <(rpm -qd "$pkg" | grep -iE '/(LICEN[CS]E|COPYING|NOTICE)')
+              fi
+
+              for f in "${files[@]}"; do
+                  [ -f "$f" ] || continue
+                  cp "$f" "$project/LICENSE.${pkg}.$(basename "$f")"
+              done
+              compgen -G "$project/LICENSE.$pkg.*" >/dev/null ||
+                  { echo "no licence file found for $pkg" >&2; exit 1; }
+          done
+
+          ls -1 "$project"/LICENSE.* | sed "s|$project/||"
+          COLLECT_EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Replaces upstream's custom image, which builds OpenSSL 3.4.0 and krb5
+          # 1.21.3 from source (gotcha 46) and preinstalls libssh (SYSTEM_LIBSSH=1):
+          # Rocky 10's own openssl-devel/krb5-devel are current, and setup.py's
+          # default embedded build compiles the same vendored libssh/ tree with the
+          # same WITH_GSSAPI=ON cmake flags.
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf -y install openssl-devel krb5-devel zlib-devel &&
+            bash {project}/collect-licenses.sh {project}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest pytest-rerunfailures
+          # tests/ is a package whose sibling ssh/ source dir would shadow the
+          # installed wheel (gotcha 25); setup.cfg carries upstream's pytest addopts.
+          CIBW_TEST_SOURCES: tests setup.cfg
+          CIBW_TEST_COMMAND: >-
+            python -c 'from ssh.session import Session; Session()' &&
+            python -m pytest tests
+
+      - name: Check the wheel ships the extensions, libssh and the licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("ssh/session") and n.endswith(".so") for n in names), names
+              assert any("libssh" in n and ".so" in n for n in names), names
+              lic = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+              print(whl, sorted(lic))
+              assert {"LICENSE", "COPYING", "LICENSE.libssh", "LICENSE.libssh.BSD"} <= lic, lic
+              pkgs = {f.split(".", 2)[1] for f in lic if f.startswith("LICENSE.") and f.count(".") >= 2}
+              assert {"openssl-libs", "krb5-libs", "libcom_err", "keyutils-libs"} <= pkgs, pkgs
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ssh-python-${{ env.SSH_PYTHON_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources for ssh-python ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      SSH_PYTHON_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc keyutils-libs
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ssh-python-${{ env.SSH_PYTHON_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish ssh-python ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: ssh-python-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: ssh-python-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc and the copyleft libraries bundled in the wheel
