@@ -1,0 +1,175 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-wheels` and `test-wheels` jobs of
+# https://github.com/Farama-Foundation/Arcade-Learning-Environment/blob/v0.12.1/.github/workflows/build-python.yml
+name: Build ale-py wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ale-py.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ale-py.yml'
+      - 'docs/packages/ale-py.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ale-py.yml'
+      - 'docs/packages/ale-py.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: ale-py
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build ale-py ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream's [tool.cibuildwheel] skip list excludes cp314t.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      ALE_PY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout ale-py ${{ env.ALE_PY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Farama-Foundation/Arcade-Learning-Environment
+          ref: v${{ env.ALE_PY_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch ale-py source
+        run: git apply python-wheels/patches/ale-py/${{ env.ALE_PY_VERSION }}/00*.patch
+
+      - name: Download and unpack ROMs
+        run: ./scripts/download_unpack_roms.sh
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream's manylinux-<arch>-vcpkg image has no riscv64 build; this builds the
+          # same vcpkg.json dependencies (SDL2 2.30.11 shared, OpenCV 4.10.0 static) from
+          # their release tarballs, with zlib from the image.
+          CIBW_BEFORE_ALL: |
+            set -e
+            dnf install -y -q ninja-build zlib-devel \
+              libX11-devel libXext-devel libXcursor-devel libXi-devel libXrandr-devel \
+              libXinerama-devel libXxf86vm-devel libxkbcommon-devel \
+              wayland-devel wayland-protocols-devel alsa-lib-devel
+            mkdir -p /tmp/ale-deps && cd /tmp/ale-deps
+
+            curl -fsSL --retry 5 -o SDL2.tar.gz https://github.com/libsdl-org/SDL/releases/download/release-2.30.11/SDL2-2.30.11.tar.gz
+            tar xzf SDL2.tar.gz
+            cmake -S SDL2-2.30.11 -B sdl2-build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR=lib \
+              -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST=OFF \
+              -DSDL_DBUS=OFF -DSDL_IBUS=OFF -DSDL_LIBSAMPLERATE=OFF -DSDL_VULKAN=OFF
+            cmake --build sdl2-build && cmake --install sdl2-build
+            cp SDL2-2.30.11/LICENSE.txt {project}/LICENSE.SDL2.txt
+
+            curl -fsSL --retry 5 -o opencv.tar.gz https://github.com/opencv/opencv/archive/refs/tags/4.10.0.tar.gz
+            tar xzf opencv.tar.gz
+            cmake -S opencv-4.10.0 -B opencv-build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR=lib \
+              -DBUILD_SHARED_LIBS=OFF -DBUILD_LIST=core,imgproc \
+              -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF \
+              -DBUILD_JAVA=OFF -DBUILD_opencv_python3=OFF \
+              -DWITH_ITT=OFF -DWITH_IPP=OFF -DWITH_OPENCL=OFF -DWITH_LAPACK=OFF -DWITH_EIGEN=OFF \
+              -DWITH_TIFF=OFF -DWITH_JPEG=OFF -DWITH_PNG=OFF -DWITH_WEBP=OFF \
+              -DWITH_OPENJPEG=OFF -DWITH_JASPER=OFF -DWITH_OPENEXR=OFF -DWITH_GTK=OFF -DWITH_FFMPEG=OFF \
+              -DWITH_PROTOBUF=OFF -DWITH_QUIRC=OFF -DWITH_ADE=OFF -DWITH_GDCM=OFF \
+              -DWITH_GSTREAMER=OFF -DWITH_V4L=OFF -DWITH_1394=OFF -DWITH_GPHOTO2=OFF \
+              -DWITH_OPENVX=OFF -DWITH_VA=OFF -DWITH_VA_INTEL=OFF -DWITH_GDAL=OFF \
+              -DWITH_OPENGL=OFF -DWITH_QT=OFF -DWITH_TBB=OFF -DWITH_VTK=OFF -DWITH_IMGCODEC_HDR=OFF \
+              -DWITH_IMGCODEC_SUNRASTER=OFF -DWITH_IMGCODEC_PXM=OFF -DWITH_IMGCODEC_PFM=OFF
+            cmake --build opencv-build && cmake --install opencv-build
+            cp opencv-4.10.0/LICENSE {project}/LICENSE.opencv.txt
+          # jax is a build requirement only for the XLA vector interface, which needs
+          # jaxlib's FFI headers; jaxlib has no riscv64 build, so that interface is off
+          # and pip's no-isolation mode skips resolving jax (gotcha 76).
+          # nanobind is capped at the 2.x series ale-py 0.12.1 was released with.
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          CIBW_BEFORE_BUILD: |
+            python -m pip install "scikit-build-core>=0.10" "nanobind>=2.5.0,<3"
+            python -c "import importlib.metadata as m, shutil; shutil.copy(next(f.locate() for f in m.files('nanobind') if f.name == 'LICENSE'), '{project}/LICENSE.nanobind')"
+          CIBW_ENVIRONMENT: >-
+            SKBUILD_CMAKE_ARGS="-DSDL_SUPPORT=ON;-DSDL_DYNLOAD=ON;-DBUILD_CPP_LIB=OFF;-DBUILD_PYTHON_LIB=ON;-DBUILD_VECTOR_LIB=ON;-DBUILD_VECTOR_XLA_LIB=OFF"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,opencv-python
+          # Upstream's `test` extra minus jax and chex (jaxlib again); the XLA test
+          # module importorskips them.
+          CIBW_TEST_REQUIRES: pytest>=7.0 gymnasium>=1.1.0 opencv-python>=3.0
+          CIBW_TEST_SOURCES: tests pyproject.toml
+          CIBW_TEST_COMMAND: python -m pytest
+
+      - name: Check the bundled licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          expected = {"LICENSE.md", "LICENSE.SDL2.txt", "LICENSE.opencv.txt", "LICENSE.nanobind"}
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              found = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n}
+              assert expected <= found, f"{whl}: missing {expected - found}"
+              assert not any(n.startswith("ale_py.libs/") for n in names), f"{whl}: auditwheel grafted libraries"
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ale-py-${{ env.ALE_PY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish ale-py ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: ale-py-${{ matrix.version }}-*-manylinux_riscv64
