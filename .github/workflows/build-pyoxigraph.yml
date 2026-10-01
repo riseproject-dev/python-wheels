@@ -1,0 +1,169 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `python_sdist` and `wheel_linux` jobs of
+# https://github.com/oxigraph/oxigraph/blob/v0.5.11/.github/workflows/artifacts.yml
+# and the `python` job of
+# https://github.com/oxigraph/oxigraph/blob/v0.5.11/.github/workflows/tests.yml
+name: Build pyoxigraph wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyoxigraph.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyoxigraph.yml'
+      - 'docs/packages/pyoxigraph.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyoxigraph.yml'
+      - 'docs/packages/pyoxigraph.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyoxigraph
+      version: ${{ inputs.version }}
+
+  stubs:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Generate pyoxigraph ${{ matrix.version }} stubs
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      PYOXIGRAPH_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout oxigraph v${{ env.PYOXIGRAPH_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: oxigraph/oxigraph
+          ref: v${{ env.PYOXIGRAPH_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.13'
+          enable-cache: false
+
+      - run: uv run --locked python generate_stubs.py pyoxigraph pyoxigraph.pyi --ruff
+        working-directory: ./python
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyoxigraph-${{ env.PYOXIGRAPH_VERSION }}-stubs
+          path: python/pyoxigraph.pyi
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, stubs]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyoxigraph ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      PYOXIGRAPH_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout oxigraph v${{ env.PYOXIGRAPH_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: oxigraph/oxigraph
+          ref: v${{ env.PYOXIGRAPH_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: pyoxigraph-${{ env.PYOXIGRAPH_VERSION }}-stubs
+          path: python
+
+      # maturin only globs licence files next to python/pyproject.toml, so
+      # upstream's wheels ship none, not even for the bundled RocksDB and lz4.
+      - name: Copy licence files next to python/pyproject.toml
+        run: |
+          cp LICENSE-APACHE LICENSE-MIT python/
+          cp oxrocksdb-sys/rocksdb/LICENSE.Apache python/LICENSE.rocksdb
+          cp oxrocksdb-sys/rocksdb/LICENSE.leveldb python/LICENSE.leveldb
+          cp oxrocksdb-sys/lz4/lib/LICENSE python/LICENSE.lz4
+
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 10
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf install -y clang &&
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+            sh -s -- -y --profile minimal
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            CARGO_BUILD_JOBS=2
+          CIBW_TEST_SOURCES: python/tests
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m, pyoxigraph.pyoxigraph as n;
+            assert n.__file__.endswith('.so'), n.__file__;
+            f = {p.name for p in m.files('pyoxigraph')};
+            assert {'__init__.pyi', 'LICENSE-APACHE', 'LICENSE-MIT', 'LICENSE.rocksdb', 'LICENSE.leveldb', 'LICENSE.lz4'} <= f, f" &&
+            python -m unittest discover -v -s python/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyoxigraph-${{ env.PYOXIGRAPH_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyoxigraph ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyoxigraph-${{ matrix.version }}-*-manylinux_riscv64
