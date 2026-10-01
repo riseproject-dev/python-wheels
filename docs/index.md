@@ -27,3 +27,4 @@ website](https://riseproject.dev/).
 {% if p.url == page.url %}{% continue %}{% endif -%}
 - [{{ p.title }}]({{ p.url | relative_url }})
 {% endfor %}
+- [Dashboard]({{ '/dashboard/' | relative_url }})

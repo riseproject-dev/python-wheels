@@ -8,10 +8,12 @@ on:
     branches: [main]
     paths:
       - "docs/**"
+      - "ci_scripts/dashboard/**"
   pull_request:
     types: [opened, synchronize, reopened, closed]
     paths:
       - "docs/**"
+      - "ci_scripts/dashboard/**"
   workflow_dispatch:
 
 concurrency:
@@ -27,20 +29,21 @@ jobs:
       - run: true
 
   preview:
+    if: github.event_name == 'pull_request'
     needs: [setup]
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         if: github.event.action != 'closed'
         with:
           python-version: '3'
 
-      - name: Install package doc generator dependencies
+      - name: Install site generator dependencies
         if: github.event.action != 'closed'
         run: pip install -r ci_scripts/requirements.txt
 
@@ -54,7 +57,7 @@ jobs:
         run: |
           echo "value=/pr-preview/pr-${{ github.event.number }}" >> "$GITHUB_OUTPUT"
 
-      - uses: ruby/setup-ruby@v1
+      - uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8  # v1.327.0
         if: github.event.action != 'closed'
         with:
           ruby-version: '3.3'
@@ -86,7 +89,7 @@ jobs:
       # occasionally not live for a few seconds is a smaller problem than a
       # misleading red X on an otherwise-working PR.
       - name: Deploy or remove PR preview
-        uses: rossjrw/pr-preview-action@v1
+        uses: rossjrw/pr-preview-action@ffa7509e91a3ec8dfc2e5536c4d5c1acdf7a6de9  # v1.8.1
         with:
           source-dir: ./_site
 
@@ -97,26 +100,43 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: '3'
 
-      - name: Install package doc generator dependencies
+      - name: Install site generator dependencies
         run: pip install -r ci_scripts/requirements.txt
 
       - name: Generate package pages from YAML
         run: python ci_scripts/generate_packages_doc.py
 
+      - name: Restore the dashboard's pypi.org response cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ runner.temp }}/dashboard/requests-cache.sqlite
+          key: requests-cache-${{ github.ref }}
+          restore-keys: requests-cache-main
+
+      # build.py stages nothing unless the result is complete, and keep_files
+      # leaves the previous dashboard serving, so an upstream data outage must
+      # not block a docs deploy.
+      - name: Generate the dashboard
+        continue-on-error: true
+        run: |
+          python ci_scripts/dashboard/build.py \
+            --build-dir "${{ runner.temp }}/dashboard" \
+            --output-dir docs/dashboard
+
       - name: Build with Jekyll
-        uses: actions/jekyll-build-pages@v1
+        uses: actions/jekyll-build-pages@44a6e6beabd48582f863aeeb6cb2151cc1716697  # v1.0.13
         with:
           source: ./docs
           destination: ./_site
 
       - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4
+        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453  # v4.1.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./_site
