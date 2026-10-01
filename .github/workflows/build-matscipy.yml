@@ -69,28 +69,21 @@ jobs:
           only: ${{ matrix.python }}-manylinux_riscv64
         env:
           CIBW_BUILD_FRONTEND: build
-          # ase 3.28.0 removed the whole ase.constraints module (UnitCellFilter and
-          # friends) that this v1.2.0 tag's own tests/ still imports from; matscipy's
-          # pyproject.toml floor (ase>=3.26.0) doesn't cap the other end, so an
-          # unconstrained resolve picks today's ase and breaks 29 tests / errors on 12
-          # modules. A version spec embedded directly in CIBW_TEST_REQUIRES silently
-          # does nothing (the quoted token is a literal string, not a parsed
-          # requirement), so this pins it via a PIP_CONSTRAINT file instead.
-          # CIBW_TEST_COMMAND runs matscipy's whole build+test lifecycle inside the
-          # manylinux Docker container, and neither github.workspace nor runner.temp
-          # -- both host paths -- is visible there (two prior attempts confirmed
-          # each one the hard way). before-build/build/repair/test share one container
-          # instance per identifier, so write the file here, from inside that
-          # container, instead of from a host-side step.
-          CIBW_BEFORE_BUILD: |
-            pip install meson meson-python ninja
-            echo 'ase<3.28' > /tmp/ase-constraint.txt
+          CIBW_BEFORE_BUILD: pip install meson meson-python ninja
           CIBW_ENVIRONMENT: >-
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             PIP_ONLY_BINARY=numpy,scipy,matplotlib,contourpy,kiwisolver,pillow
           # Upstream's wheel job only imports the extension; run its tests.yml suite instead.
-          CIBW_TEST_REQUIRES: pytest pytest-subtests pytest-timeout pytest-xdist sympy
-          CIBW_TEST_ENVIRONMENT: PIP_CONSTRAINT=/tmp/ase-constraint.txt
+          # ase 3.28.0 removed the whole ase.constraints module (UnitCellFilter and
+          # friends) that this v1.2.0 tag's own tests/ still imports from; matscipy's
+          # pyproject.toml floor (ase>=3.26.0) doesn't cap the other end, so an
+          # unconstrained resolve picks today's ase and breaks 29 tests / errors on 12
+          # modules. ase<3.28 is its own space-separated token here (no quote
+          # characters anywhere in this YAML scalar), resolved together with
+          # matscipy's own floor by the same `pip install` that installs the wheel.
+          # A PIP_CONSTRAINT file written from CIBW_BEFORE_BUILD into /tmp was tried
+          # first and didn't error, but also didn't actually cap the resolve.
+          CIBW_TEST_REQUIRES: pytest pytest-subtests pytest-timeout pytest-xdist sympy ase<3.28
           CIBW_TEST_COMMAND: cd {project}/tests && pytest -v --durations=20 --timeout=600 -n auto
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
