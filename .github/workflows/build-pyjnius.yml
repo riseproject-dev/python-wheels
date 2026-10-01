@@ -1,0 +1,170 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the Linux jobs of
+# https://github.com/kivy/pyjnius/blob/1.7.0/.github/workflows/create.yml
+name: Build pyjnius wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyjnius.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyjnius.yml'
+      - 'docs/packages/pyjnius.yaml'
+      - 'patches/pyjnius/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyjnius.yml'
+      - 'docs/packages/pyjnius.yaml'
+      - 'patches/pyjnius/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyjnius
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyjnius ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      PYJNIUS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyjnius ${{ env.PYJNIUS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: kivy/pyjnius
+          ref: ${{ env.PYJNIUS_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream builds against JDK 11; Rocky 10 only packages JDK 21.
+          CIBW_BEFORE_ALL_LINUX: dnf -y install java-21-openjdk-devel
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyjnius-${{ env.PYJNIUS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  test_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    name: Test pyjnius ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    env:
+      PYJNIUS_VERSION: ${{ matrix.version }}
+      UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+      UV_INDEX_STRATEGY: unsafe-best-match
+
+    steps:
+      - name: Checkout pyjnius ${{ env.PYJNIUS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: kivy/pyjnius
+          ref: ${{ env.PYJNIUS_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pyjnius test suite
+        run: git apply python-wheels/patches/pyjnius/${{ env.PYJNIUS_VERSION }}/*.patch
+
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: pyjnius-${{ env.PYJNIUS_VERSION }}-*-manylinux_riscv64
+          path: dist
+          merge-multiple: true
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      # Temurin publishes no riscv64 JDK 17, upstream's test JDK.
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961  # v5.7.0
+        with:
+          java-version: '21'
+          distribution: temurin
+          architecture: riscv64
+
+      - name: Setup ant
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ant
+
+      - name: Build test-classes via ant
+        run: ant all
+
+      - name: Install pyjnius wheel + test prerequisites
+        run: uv pip install --only-binary pyjnius --find-links dist "pyjnius[dev,ci]==${PYJNIUS_VERSION}"
+
+      - name: Test wheel
+        run: |
+          cd tests
+          CLASSPATH=../build/test-classes:../build/classes python -m pytest -v
+
+  publish:
+    name: Publish pyjnius ${{ matrix.version }}
+    needs: [setup, build_wheels, test_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyjnius-${{ matrix.version }}-*-manylinux_riscv64
