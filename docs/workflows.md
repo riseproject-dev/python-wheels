@@ -112,10 +112,14 @@ following workflows beyond those used for specific package builds:
 
 ## The RISC-V Wheels Dashboard
 
-RISE makes use of the [RISC-V
-Wheels](https://stanfromireland.github.io/riscv-wheels/) dashboard, which tracks
-the status of riscv64 compatibility for 360 binary Python wheels. This provides
-a detailed look at ecosystem-wide support, including wheels which are available
-in the RISE package index but not yet upstream. It should be the first reference when
-determining which packages to contribute support for and at what level (i.e.
-upstream versus `python-wheels`).
+RISE maintains the [RISC-V Wheels]({{ '/dashboard/' | relative_url }}) dashboard,
+which tracks the status of riscv64 compatibility across the most-downloaded
+binary Python wheels. This provides a detailed look at ecosystem-wide support,
+including wheels which are available in the RISE package index but not yet
+upstream. It should be the first reference when determining which packages to
+contribute support for and at what level (i.e. upstream versus `python-wheels`).
+
+The dashboard is regenerated with each publish of this site. Its generator is
+vendored in `ci_scripts/dashboard/` from
+[riseproject-dev/python-wheels-dashboard](https://github.com/riseproject-dev/python-wheels-dashboard),
+which remains its upstream source of truth.

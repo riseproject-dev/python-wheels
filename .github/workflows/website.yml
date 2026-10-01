@@ -8,10 +8,12 @@ on:
     branches: [main]
     paths:
       - "docs/**"
+      - "ci_scripts/dashboard/**"
   pull_request:
     types: [opened, synchronize, reopened, closed]
     paths:
       - "docs/**"
+      - "ci_scripts/dashboard/**"
   workflow_dispatch:
 
 concurrency:
@@ -40,7 +42,7 @@ jobs:
         with:
           python-version: '3'
 
-      - name: Install package doc generator dependencies
+      - name: Install site generator dependencies
         if: github.event.action != 'closed'
         run: pip install -r ci_scripts/requirements.txt
 
@@ -103,11 +105,28 @@ jobs:
         with:
           python-version: '3'
 
-      - name: Install package doc generator dependencies
+      - name: Install site generator dependencies
         run: pip install -r ci_scripts/requirements.txt
 
       - name: Generate package pages from YAML
         run: python ci_scripts/generate_packages_doc.py
+
+      - name: Restore the dashboard's pypi.org response cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ runner.temp }}/dashboard/requests-cache.sqlite
+          key: requests-cache-${{ github.ref }}
+          restore-keys: requests-cache-main
+
+      # build.py stages nothing unless the result is complete, and keep_files
+      # leaves the previous dashboard serving, so an upstream data outage must
+      # not block a docs deploy.
+      - name: Generate the dashboard
+        continue-on-error: true
+        run: |
+          python ci_scripts/dashboard/build.py \
+            --build-dir "${{ runner.temp }}/dashboard" \
+            --output-dir docs/dashboard
 
       - name: Build with Jekyll
         uses: actions/jekyll-build-pages@v1
