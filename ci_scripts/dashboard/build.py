@@ -3,9 +3,9 @@
 
 """Build the RISC-V Wheels dashboard into the Jekyll source tree.
 
-Wraps the vendored generator (see README.md) with the sanity checks the website
-build needs: the upstream package list has served HTTP 200 with zero rows, and
-publishing that would replace a working dashboard with a blank one.
+Runs the vendored generator's steps (see README.md) with the sanity checks the
+website build needs: the upstream package list has served HTTP 200 with zero rows,
+and publishing that would replace a working dashboard with a blank one.
 
 Nothing is written to --output-dir unless a complete result was produced, so a
 failed run leaves the previously published dashboard serving untouched.
@@ -15,21 +15,25 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import shutil
-import subprocess
 import sys
 import urllib.request
 
-VENDOR_DIR = Path(__file__).resolve().parent
+import requests_cache
+import yaml
 
-UPSTREAM_LIST_URL = "https://hugovk.dev/top-pypi-packages/top-pypi-packages.min.json"
-# The upstream endpoint is a live query and has returned HTTP 200 carrying an
-# empty `rows` plus a ClickHouse row-limit `exception`. This pinned copy of the
-# same file is committed upstream and regenerated monthly, so falling back to it
-# costs at most one month of ranking drift.
-FALLBACK_LIST_URL = (
-    "https://raw.githubusercontent.com/hugovk/top-pypi-packages/"
-    "6becf8c3b/top-pypi-packages.min.json"
+VENDOR_DIR = Path(__file__).resolve().parent
+REPO_ROOT = VENDOR_DIR.parents[1]
+
+sys.path.insert(0, str(VENDOR_DIR))
+
+from svg_wheel import generate_svg_wheel  # noqa: E402
+import utils  # noqa: E402
+from utils import (  # noqa: E402
+    annotate_wheels,
+    get_top_packages,
+    save_to_file,
 )
 
 # Loose floors: enough to catch an empty or truncated upstream response without
@@ -41,7 +45,7 @@ MIN_WHEEL_SVG_BYTES = 10 * 1024
 
 # Copied from the vendored directory as-is.
 STATIC_FILES = ("index.html", "wheel.css", "favicon.ico")
-# Produced by generate.py in the build directory.
+# Produced by generate.py.
 GENERATED_FILES = ("results.json", "wheel.svg")
 
 
@@ -83,93 +87,55 @@ def validate_package_list(payload):
     return rows, None
 
 
-def get_package_list(candidates):
+def get_package_list():
     """Fetch the package list from the first usable candidate. Exits on failure."""
     failures = []
-    for label, url in candidates:
-        print(f"Fetching the {label} package list: {url}")
-        payload = fetch(url)
-        if payload is not None:
-            rows, reason = validate_package_list(payload)
-            if rows is not None:
-                print(f"  accepted: {len(rows)} rows")
-                if label == "pinned":
-                    print(
-                        "::warning::The upstream package list was unusable; "
-                        "using the pinned copy, so the download rankings may be "
-                        "up to a month old."
-                    )
-                return payload
-            print(f"  rejected: {reason}")
-            failures.append(f"{label}: {reason}")
-        else:
-            failures.append(f"{label}: could not be fetched")
-
-    sys.exit(
-        "Could not obtain a usable package list, refusing to publish:\n  "
-        + "\n  ".join(failures)
-    )
+    url = "https://hugovk.dev/top-pypi-packages/top-pypi-packages.min.json"
+    print(f"Fetching the package list: {url}")
+    payload = fetch(url)
+    if payload is not None:
+        rows, reason = validate_package_list(payload)
+        if rows is not None:
+            print(f"  accepted: {len(rows)} rows")
+            return payload
+        sys.exit(f"Could not obtain a usable package list, refusing to publish: {reason}")
+    else:
+        sys.exit(f"Could not obtain a usable package list, refusing to publish: could not be fetched")
 
 
-def validate_output(build_dir):
-    """Exit unless the generator produced a complete, sane result."""
-    results = build_dir / "results.json"
-    try:
-        with open(results, encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
-        sys.exit(f"{results} is unusable: {e}")
+def collect_registry_packages(packages_dir):
+    """Return the normalised names of every package the RISE registry serves.
 
-    packages = data.get("data")
-    if not isinstance(packages, list):
-        sys.exit(f"{results} has no `data` list")
-    if len(packages) < MIN_OUTPUT_PACKAGES:
-        sys.exit(
-            f"{results} has only {len(packages)} packages, expected at least "
-            f"{MIN_OUTPUT_PACKAGES}"
-        )
-    if not isinstance(data.get("last_update"), str) or not data["last_update"]:
-        sys.exit(f"{results} has no `last_update`")
-
-    wheel = build_dir / "wheel.svg"
-    if not wheel.is_file():
-        sys.exit(f"{wheel} was not generated")
-    size = wheel.stat().st_size
-    if size < MIN_WHEEL_SVG_BYTES:
-        # One <path> per package, so a near-empty wheel is a few hundred bytes.
-        sys.exit(f"{wheel} is only {size} bytes, expected at least "
-                 f"{MIN_WHEEL_SVG_BYTES}")
-
-    return len(packages)
-
-
-def check_no_front_matter():
-    """Exit if index.html gained YAML front matter.
-
-    The page's AngularJS bindings (``{{ package.name }}``) are also valid Liquid.
-    Jekyll only leaves them alone because a file without front matter is a static
-    file, copied byte-for-byte. Add front matter and the package list renders
-    empty in production with no build error.
+    These are read from this repo's own docs/packages/*.yaml rather than probed
+    over HTTP against pypi.riseproject.dev: the YAML is what the registry is
+    generated from, so it is both authoritative and free.
     """
-    index = VENDOR_DIR / "index.html"
-    with open(index, encoding="utf-8") as f:
-        if f.read(3) == "---":
-            sys.exit(
-                f"{index} starts with YAML front matter. Jekyll would then run "
-                "Liquid over it and eat the AngularJS bindings, silently "
-                "emptying the package list. Remove the front matter."
-            )
+    names = set()
+    unreleased = 0
+    for path in sorted(packages_dir.glob("*.yaml")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+        except (OSError, yaml.YAMLError) as e:
+            sys.exit(f"{path} is unusable: {e}")
+
+        name = (data or {}).get("package-name")
+        if not name:
+            sys.exit(f"{path} has no `package-name`")
+        if not (data.get("versions") or []):
+            # Nothing published yet, so the registry serves no wheels for it.
+            unreleased += 1
+            continue
+        # Same normalisation as utils.normalize().
+        names.add(re.sub(r"[-_.]+", "-", name).lower())
+
+    print(f"Read {len(names)} registry packages from {packages_dir}", end="")
+    print(f" ({unreleased} with no release yet)" if unreleased else "")
+    return frozenset(names)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--build-dir",
-        required=True,
-        type=Path,
-        help="scratch directory for the generator; must be outside docs/, as it "
-        "collects a multi-GB requests-cache.sqlite",
-    )
     parser.add_argument(
         "--output-dir",
         required=True,
@@ -177,44 +143,37 @@ def main():
         help="where to stage the dashboard, e.g. docs/dashboard",
     )
     parser.add_argument(
-        "--list-url",
-        help="override the upstream package list URL (for testing the input gate)",
+        "--packages-dir",
+        default=REPO_ROOT / "docs" / "packages",
+        type=Path,
+        help="directory of per-package YAML describing the RISE registry (default: docs/packages)",
     )
     args = parser.parse_args()
 
-    if args.list_url:
-        candidates = [("override", args.list_url)]
-    else:
-        candidates = [("upstream", UPSTREAM_LIST_URL), ("pinned", FALLBACK_LIST_URL)]
+    output_dir = args.output_dir.resolve()
+    packages_dir = args.packages_dir.resolve()
 
-    check_no_front_matter()
+    payload = get_package_list()
+    registry = collect_registry_packages(packages_dir)
 
-    build_dir = args.build_dir.resolve()
-    build_dir.mkdir(parents=True, exist_ok=True)
-
-    payload = get_package_list(candidates)
-    (build_dir / "top-pypi-packages.json").write_bytes(payload)
-
-    # A subprocess, not an import: utils.py builds its CachedSession at module
-    # import time, so the sqlite path binds to the cwd of whoever imports it
-    # first. Running with cwd=build_dir keeps every cwd-relative read and write
-    # out of the Jekyll source tree.
-    print("Running the vendored generator...")
-    subprocess.run(
-        [sys.executable, str(VENDOR_DIR / "generate.py")],
-        cwd=build_dir,
-        check=True,
+    utils.SESSION = requests_cache.CachedSession(
+        "requests-cache", expire_after=utils.SESSION.settings.expire_after
     )
 
-    count = validate_output(build_dir)
+    Path("top-pypi-packages.json").write_bytes(payload)
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    packages = get_top_packages()
+    packages = annotate_wheels(packages, registry)
+    save_to_file(packages, "results.json")
+    generate_svg_wheel(packages)
+
+    os.makedirs(output_dir, exist_ok=True)
     for name in STATIC_FILES:
-        shutil.copy2(VENDOR_DIR / name, args.output_dir / name)
+        shutil.copy2(VENDOR_DIR / name, output_dir / name)
     for name in GENERATED_FILES:
-        shutil.copy2(build_dir / name, args.output_dir / name)
+        shutil.copy2(name, output_dir / name)
 
-    print(f"Staged the dashboard for {count} packages in {args.output_dir}")
+    print(f"Staged the dashboard for {len(packages)} packages in {output_dir}")
 
 
 if __name__ == "__main__":

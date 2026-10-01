@@ -13,7 +13,6 @@ from concurrent.futures import ThreadPoolExecutor
 
 
 BASE_URL = "https://pypi.org/pypi"
-RISE_REGISTRY_URL = "https://pypi.riseproject.dev/simple"
 
 DEPRECATED_PACKAGES = {
     "BeautifulSoup",
@@ -225,19 +224,9 @@ def normalize(package_name: str) -> str:
     return re.sub(r"[-_.]+", "-", package_name).lower()
 
 
-def in_rise_registry(package_name: str) -> bool:
-    """Whether the RISE riscv64 registry has wheels for this package."""
-    url = f"{RISE_REGISTRY_URL}/{normalize(package_name)}/"
-    try:
-        response = SESSION.get(url, allow_redirects=False)
-    except Exception as e:
-        print(f" ! Could not check the RISE registry for {package_name}: {e}")
-        return False
-
-    return response.status_code == 200
-
-
-def annotate_wheels(packages) -> list[dict]:
+def annotate_wheels(packages, registry) -> list[dict]:
+    """Classify each package. ``registry`` holds the normalised names of the
+    packages the RISE riscv64 registry serves."""
     print("Getting wheel data...")
     keep = []
 
@@ -272,7 +261,7 @@ def annotate_wheels(packages) -> list[dict]:
             package["css_class"] = "success"
             package["icon"] = "\u2713"  # Check mark
         elif has_other_binary_wheel:
-            in_registry = in_rise_registry(package["name"])
+            in_registry = normalize(package["name"]) in registry
             if in_registry:
                 package["css_class"] = "rise"
                 package["icon"] = "📦"
