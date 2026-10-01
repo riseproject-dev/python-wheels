@@ -24,41 +24,72 @@ rest of this repo.
 | File | Origin |
 |---|---|
 | `LICENSE` | verbatim from upstream |
-| `generate.py`, `utils.py`, `svg_wheel.py` | upstream, SPDX header prepended |
+| `svg_wheel.py` | upstream, SPDX header prepended |
+| `utils.py` | upstream, SPDX header prepended, plus the registry change below |
 | `wheel.css`, `favicon.ico` | verbatim from upstream |
 | `index.html` | upstream, with the text edits listed below |
 | `build.py` | **new**, RISE-authored — not upstream |
+
+Upstream's `generate.py` is **not** vendored: it is a four-line `main()`, and
+`build.py` calls those same four functions itself.
 
 The generator's own dependencies (`requests`, `requests-cache`) live in
 `ci_scripts/requirements.txt` alongside the rest of this repo's CI Python deps;
 upstream's `pre-commit` pin is dropped, as there are no local hooks here.
 
-`build.py` holds all python-wheels-specific logic so that the upstream files stay
-a clean copy. It fetches and sanity-checks the package list, runs `generate.py` in
-a scratch directory, validates the result, and only then stages five files into
-the Jekyll source tree.
+`build.py` holds all python-wheels-specific logic. It fetches and sanity-checks the
+package list, collects the registry contents from `docs/packages/*.yaml`, imports
+`utils` and `svg_wheel` to produce `results.json` and `wheel.svg` in a scratch
+directory, validates the result, and only then stages five files into the Jekyll
+source tree.
+
+Because it imports the vendored modules rather than spawning them, two cwd-bound
+details matter. `utils` builds its `CachedSession` from a relative path **at import
+time**, and `get_top_packages()`/`generate_svg_wheel()` read and write relative to
+the cwd. So `build.py` resolves its path arguments to absolute, `chdir`s into the
+build dir, and rebinds `utils.SESSION` there — otherwise a multi-GB
+`requests-cache.sqlite` lands wherever the script was invoked from.
+
+## The registry lookup
+
+Upstream's `utils.in_rise_registry()` asks
+`https://pypi.riseproject.dev/simple/<name>/` whether the registry has a package,
+one HTTP request per candidate. In this repo the answer is already on disk:
+`docs/packages/*.yaml` is what the registry index is generated from, and
+`generate_packages_doc.py` publishes that index in the same job that builds this
+dashboard — so the HTTP answer is a deploy behind, and `requests-cache` can pin a
+404 for a newly added package for up to 30 days.
+
+So `in_rise_registry()` is gone, along with `RISE_REGISTRY_URL`, and
+`annotate_wheels(packages, registry)` takes the set of normalised names that
+`build.py` collected and tests membership directly.
 
 ## Resyncing from upstream
 
 ```bash
 cd ci_scripts/dashboard
 UP=/path/to/python-wheels-dashboard
-cp "$UP"/{LICENSE,generate.py,utils.py,svg_wheel.py,index.html,wheel.css,favicon.ico} .
+cp "$UP"/{LICENSE,utils.py,svg_wheel.py,index.html,wheel.css,favicon.ico} .
 ```
 
 Then re-apply the local deltas:
 
-1. Prepend the BSD-2-Clause SPDX header to `generate.py`, `utils.py` and
-   `svg_wheel.py` (copy it from a sibling file).
-2. Re-apply the `index.html` edits:
+1. Prepend the BSD-2-Clause SPDX header to `utils.py` and `svg_wheel.py` (copy it
+   from a sibling file).
+2. Re-apply the registry change described above: drop `RISE_REGISTRY_URL` and
+   `in_rise_registry()`, give `annotate_wheels()` a `registry` parameter, and use
+   `normalize(package["name"]) in registry` where the HTTP probe was.
+3. Re-apply the `index.html` edits:
    - drop the stale "top 360" figure from the "What is this list?" paragraph and
      the "Thanks" paragraph — the generator applies no slice, so the real count
      moves every run;
    - change the footer cadence from "Updated daily." to the real cadence;
    - keep the absolute link back to <https://pypi.riseproject.dev/> near the `<h1>`.
-3. If upstream changed its `requests`/`requests-cache` pins, update them in
+4. If upstream changed its `requests`/`requests-cache` pins, update them in
    `ci_scripts/requirements.txt`.
-4. Update the vendored commit SHA above.
+5. If upstream's `generate.py` grew a step beyond its four calls, mirror it in
+   `build.py`'s `main()`.
+6. Update the vendored commit SHA above.
 
 Leave `build.py` alone — it is not upstream.
 
