@@ -1,0 +1,172 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-wheels` job of
+# https://github.com/adamtheturtle/strict-kwargs/blob/2026.8.28-post.2/.github/workflows/release.yml
+name: Build strict-kwargs wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/strict-kwargs.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-strict-kwargs.yml'
+      - 'docs/packages/strict-kwargs.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-strict-kwargs.yml'
+      - 'docs/packages/strict-kwargs.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: strict-kwargs
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build strict-kwargs ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    env:
+      STRICT_KWARGS_VERSION: ${{ matrix.version }}
+
+    steps:
+      # Upstream tags same-day re-releases as `<date>-post.<N>` (wheel version `<date>.post<N>`).
+      - name: Resolve git tag
+        id: tag
+        run: echo "ref=${STRICT_KWARGS_VERSION/.post/-post.}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout strict-kwargs ${{ steps.tag.outputs.ref }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: adamtheturtle/strict-kwargs
+          ref: ${{ steps.tag.outputs.ref }}
+          persist-credentials: false
+
+      # No musl target: rustup.rs ships no riscv64 musl toolchain.
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --locked --out dist
+          manylinux: '2_39'
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: strict-kwargs-${{ env.STRICT_KWARGS_VERSION }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test strict-kwargs ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    env:
+      STRICT_KWARGS_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: strict-kwargs-${{ env.STRICT_KWARGS_VERSION }}-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --find-links . "strict-kwargs==${STRICT_KWARGS_VERSION}"
+
+      # Upstream's tests are a Rust integration suite (`cargo test`) that is never packaged;
+      # drive the installed binary, which requires the `ty` it depends on, instead.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          strict-kwargs --version
+          ty version
+
+          work=$(mktemp -d)
+          cd "$work"
+          cat > example.py <<'PY'
+          def add(a: int, b: int) -> int:
+              return a + b
+
+
+          add(a=1, b=2)
+          add(1, 2)
+          add(1, b=2)
+          PY
+
+          set +e
+          strict-kwargs check example.py
+          rc=$?
+          set -e
+          [ "$rc" -eq 1 ]
+
+          set +e
+          strict-kwargs check --output-format json example.py > report.json
+          rc=$?
+          set -e
+          [ "$rc" -eq 1 ]
+          python -m json.tool report.json
+
+          set +e
+          strict-kwargs check --fix example.py
+          rc=$?
+          set -e
+          [ "$rc" -ne 2 ]
+          cat example.py
+          [ "$(grep -c 'add(a=1, b=2)' example.py)" -eq 3 ]
+
+          strict-kwargs check example.py
+
+  publish:
+    name: Publish strict-kwargs ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: strict-kwargs-${{ matrix.version }}-manylinux_riscv64
