@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 28 Sep 2026 00:00:00 +0000
+Subject: [PATCH] ci/build: add riscv64 and build against PCRE2 there
+
+build-haproxy-dist.sh's arch normalisation only knows x86_64/aarch64/arm64,
+so it exits with "Unsupported architecture: riscv64" before doing anything:
+
+    Unsupported architecture: riscv64
+
+Add a riscv64 case. Its dependency install and HAProxy `make` flags also
+assume PCRE1 (`pcre-devel`, `USE_PCRE=1`), which manylinux2014 (CentOS 7)
+carries; manylinux_2_39_riscv64 (Rocky 10) dropped the legacy PCRE1 package
+and only ships `pcre2-devel`. Branch on the riscv64 arch label to install
+`pcre2-devel` and build with `USE_PCRE2=1 USE_PCRE2_JIT=1` instead, leaving
+the x86_64/aarch64 codepath untouched.
+
+Rocky 10 also splits `FindBin.pm` out of its base Perl into `perl-FindBin`,
+which OpenSSL's `Configure` needs and manylinux2014's Perl carries without
+a separate package:
+
+    Can't locate FindBin.pm in @INC (you may need to install the FindBin module) ... at .../openssl-3.0.15/Configure line 15.
+
+Rocky 10 splits the `lib` pragma out the same way, into `perl-lib`, and
+`Configure` needs that too (it's `use`d two lines later than `FindBin`, so
+this only surfaced once the FindBin install let Configure get further):
+
+    Can't locate lib.pm in @INC (you may need to install the lib module) ... at .../openssl-3.0.15/Configure line 16.
+
+Install both alongside `perl-IPC-Cmd` on riscv64.
+
+Upstream-Status: Inappropriate [manylinux2014 (x86_64/aarch64) still has pcre-devel; this is a difference between manylinux images, not something upstream's existing targets need]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/ci/build/build-haproxy-dist.sh b/ci/build/build-haproxy-dist.sh
+--- a/ci/build/build-haproxy-dist.sh
++++ b/ci/build/build-haproxy-dist.sh
+@@ -62,6 +62,7 @@
+     x86_64)  ARCH_LABEL="x86_64" ;;
+     aarch64) ARCH_LABEL="arm64" ;;
+     arm64)   ARCH_LABEL="arm64" ;;  # macOS (future)
++    riscv64) ARCH_LABEL="riscv64" ;;
+     *)       echo "Unsupported architecture: $ARCH"; exit 1 ;;
+ esac
+
+@@ -91,7 +92,14 @@
+ #   lua-devel     — for HAProxy USE_LUA=1 (Lua 5.1 on CentOS 7)
+ # ---------------------------------------------------------------------------
+ echo "==> Installing build dependencies"
+-yum install -y perl-IPC-Cmd pcre-devel zlib-devel readline-devel 2>/dev/null
++if [ "$ARCH_LABEL" = "riscv64" ]; then
++    # manylinux_2_39_riscv64 (Rocky 10) dropped the legacy PCRE1 package;
++    # only pcre2-devel is available there. HAProxy's USE_PCRE2 build option
++    # is the equivalent for that library.
++    yum install -y perl-IPC-Cmd perl-FindBin perl-lib pcre2-devel zlib-devel readline-devel 2>/dev/null
++else
++    yum install -y perl-IPC-Cmd pcre-devel zlib-devel readline-devel 2>/dev/null
++fi
+
+ # ---------------------------------------------------------------------------
+ # 1. Build OpenSSL from source
+@@ -159,13 +167,19 @@
+ tar -xzf "$BUILD_DIR/haproxy.tar.gz" -C "$BUILD_DIR" --strip-components=1
+
+ echo "==> Compiling HAProxy"
++# manylinux_2_39_riscv64 only has pcre2-devel (see the riscv64 branch above),
++# so build against PCRE2 there instead of PCRE1.
++PCRE_MAKE_VARS=(USE_PCRE=1)
++if [ "$ARCH_LABEL" = "riscv64" ]; then
++    PCRE_MAKE_VARS=(USE_PCRE2=1 USE_PCRE2_JIT=1)
++fi
+ make -C "$BUILD_DIR" \
+     TARGET=linux-glibc \
+     USE_OPENSSL=1 \
+     SSL_INC="$DEPS_DIR/include" \
+     SSL_LIB="$OPENSSL_LIB_DIR" \
+     USE_ZLIB=1 \
+-    USE_PCRE=1 \
++    "${PCRE_MAKE_VARS[@]}" \
+     USE_LUA=1 \
+     LUA_INC="$DEPS_DIR/include" \
+     LUA_LIB="$DEPS_DIR/lib" \
