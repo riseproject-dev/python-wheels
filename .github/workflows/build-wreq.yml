@@ -96,17 +96,15 @@ jobs:
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             MATURIN_PEP517_ARGS="--features jemalloc"
             CARGO_BUILD_JOBS=2
-          # Upstream's tests job serves httpbin on localhost:8080 as a service container.
-          CIBW_TEST_REQUIRES: pytest pytest-asyncio pytest-rerunfailures httpbin
-          # multipart_test.py, request_test.py and response_test.py open README.md,
-          # Cargo.toml and LICENSE by a path relative to the repo root (e.g.
-          # Path("./README.md"), open("README.md")) to build request bodies; without
-          # them staged in test_cwd every such test fails with a FileNotFoundError,
-          # surfaced as a DecodingError once that exception inside the async
-          # body-stream leaves httpbin nothing to respond with.
+          # Upstream's tests job serves httpbin on localhost:8080 from the kennethreitz/httpbin
+          # container, i.e. under gunicorn: httpbin answers every chunked (streamed-body)
+          # request with a 501 unless SERVER_SOFTWARE is gunicorn, so the Werkzeug dev
+          # server behind `python -m httpbin.core` fails the body-stream tests.
+          CIBW_TEST_REQUIRES: pytest pytest-asyncio pytest-rerunfailures httpbin gunicorn
+          # The body-stream and multipart tests open these by a repo-root-relative path.
           CIBW_TEST_SOURCES: tests README.md Cargo.toml LICENSE
           CIBW_TEST_COMMAND: >-
-            python -m httpbin.core --port 8080 > httpbin.log 2>&1 & HTTPBIN_PID=$!;
+            python -m gunicorn -b 127.0.0.1:8080 -k gthread --threads 8 httpbin:app > httpbin.log 2>&1 & HTTPBIN_PID=$!;
             python -c "import wreq.wreq as m; assert m.__file__.endswith('.so'), m.__file__" &&
             for i in $(seq 60); do
             python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/get', timeout=2)" 2>/dev/null && break;
