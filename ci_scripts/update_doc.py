@@ -12,8 +12,8 @@ adds a bare `- version:` line, which is what the build workflow builds); this
 script only fills in `tag`/`files`, or replaces them on a rebuild.
 
 generate_packages_doc.py renders this YAML into the published
-Markdown pages, so this script only needs to maintain the YAML source of
-truth; it never touches docs/packages/*.md or index.md directly.
+Markdown pages under docs/project/<name>/, so this script only needs to
+maintain the YAML source of truth; it never touches a generated page directly.
 """
 
 import difflib
