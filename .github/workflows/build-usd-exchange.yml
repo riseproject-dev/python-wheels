@@ -1,0 +1,311 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Mirrors upstream's repo_man build (tools/repoman/cmake_build.py, install_usdex.py,
+# py_package.py) and its whl test suite (tools/pyproject/pytest.sh), narrowed to riscv64.
+# Upstream links prebuilt packman OpenUSD/MaterialX/oneTBB packages with no riscv64
+# flavor, so the same stock OpenUSD release is built here with build_usd.py instead.
+name: Build usd-exchange wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/usd-exchange.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-usd-exchange.yml'
+      - 'docs/packages/usd-exchange.yaml'
+      - 'patches/usd-exchange/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-usd-exchange.yml'
+      - 'docs/packages/usd-exchange.yaml'
+      - 'patches/usd-exchange/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: usd-exchange
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build usd-exchange ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream's usd_flavors.json and requires-python stop at 3.13.
+        python: ["cp310", "cp311", "cp312", "cp313"]
+
+    env:
+      USD_EXCHANGE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout usd-exchange v${{ env.USD_EXCHANGE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: NVIDIA-Omniverse/usd-exchange
+          ref: v${{ env.USD_EXCHANGE_VERSION }}
+          persist-credentials: false
+
+      - name: Resolve the OpenUSD release of the default flavor
+        id: usd
+        run: |
+          set -euo pipefail
+          usd_ver="$(sed -n 's/^default_flavor = "usd_\([0-9.]*\)_py_.*"$/\1/p' repo.toml)"
+          test -n "${usd_ver}"
+          printf 'ver=%s\ntag=v%s\n' "${usd_ver}" "${usd_ver}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout OpenUSD ${{ steps.usd.outputs.tag }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: PixarAnimationStudios/OpenUSD
+          ref: ${{ steps.usd.outputs.tag }}
+          path: OpenUSD
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Patch OpenUSD
+        run: git -C OpenUSD apply "${GITHUB_WORKSPACE}"/python-wheels/patches/usd-exchange/${{ env.USD_EXCHANGE_VERSION }}/00*.patch
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
+
+      - name: Build OpenUSD, usd-exchange and the wheel
+        run: |
+          mkdir -p dist
+          docker run -i --rm \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            -e USD_EXCHANGE_VERSION \
+            -e USD_VER="${{ steps.usd.outputs.ver }}" \
+            "${MANYLINUX_RISCV64_IMAGE}" bash -s <<'USDEX_BUILD_EOF'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+
+          PY_ROOT="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}"
+          PY="${PY_ROOT}/bin/python"
+          PY_VER="$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+          "$PY" -m pip install build toml wheel "pybind11==2.11.1"
+
+          # The manylinux image ships no libpython (PEP 513); FindPython's Development
+          # component needs the file to exist, and nothing ends up linking against it.
+          "$PY" -c "import pathlib,sysconfig; pathlib.Path(sysconfig.get_config_var('LIBDIR'), sysconfig.get_config_var('LDLIBRARY')).touch()"
+
+          USD=/work/_build/usd
+          # usdex only ships MaterialXCore/Format; the render modules want X11, absent from the image.
+          "$PY" OpenUSD/build_scripts/build_usd.py --onetbb \
+            --build-args USD,"-DPXR_PY_UNDEFINED_DYNAMIC_LOOKUP=ON -DPXR_BUILD_EXEC=OFF" \
+              MaterialX,"-DMATERIALX_BUILD_RENDER=OFF" \
+            --no-imaging --no-tools --no-examples --no-tutorials \
+            --build /work/_build/usd-build --src /work/_build/usd-src "${USD}" -v
+
+          cmake -S /work -B /work/_build/cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            -DUSDEX_INSTALL_PYTHONDIR=python \
+            -DUSDEX_USD_ROOT="${USD}" \
+            -DUSDEX_TBB_ROOT="${USD}" \
+            -DUSDEX_MATERIALX_ROOT="${USD}" \
+            -DUSDEX_VERSION_STRING="${USD_EXCHANGE_VERSION}" \
+            -DUSDEX_PYBIND11_INCLUDE_DIR="$("$PY" -c 'import pybind11; print(pybind11.get_include())')" \
+            -DUSDEX_PYTHON_VERSION="${PY_VER}" \
+            -DUSDEX_PYTHON_ROOT="${PY_ROOT}"
+          cmake --build /work/_build/cmake --config Release -j "$(nproc)"
+          cmake --install /work/_build/cmake --config Release --prefix /work/_build/install
+
+          "$PY" - <<'STAGE_EOF'
+          import glob, importlib.metadata, os, shutil, sys, toml
+
+          usd ="/work/_build/usd"
+          usdex = "/work/_build/install"
+          staging = "/work/_build/pyproject"
+          libs = f"{staging}/usd_exchange.libs"
+          usd_ver = os.environ["USD_VER"]
+          major, minor = (int(x) for x in usd_ver.split("."))
+
+          def copy(src, dst):
+              os.makedirs(os.path.dirname(dst), exist_ok=True)
+              (shutil.copytree if os.path.isdir(src) else shutil.copyfile)(src, dst)
+
+          for sub in ("core", "rtx", "test"):
+              shutil.copytree(f"{usdex}/python/usdex/{sub}", f"{staging}/usdex/{sub}")
+
+          plugins = ["ar", "sdf", "sdr", "usd", "usdGeom", "usdLux", "usdMtlx", "usdPhysics", "usdShade", "usdShaders", "usdUI"]
+          schemas = ["usdMedia", "usdProc", "usdRender", "usdSemantics", "usdSkel", "usdVol"]
+          validators = ["usdValidation", "usdGeomValidators", "usdPhysicsValidators", "usdShadeValidators", "usdSkelValidators", "usdUtilsValidators"]
+          modules = ["Ar", "Gf", "Kind", "Pcp", "Plug", "Sdf", "Sdr", "Tf", "Trace", "Ts", "Usd", "UsdGeom", "UsdLux", "UsdPhysics", "UsdShade", "UsdUI", "UsdUtils", "Vt", "Work",
+                     "UsdMedia", "UsdMtlx", "UsdProc", "UsdRender", "UsdSemantics", "UsdSkel", "UsdVol", "UsdValidation"]
+          if (major, minor) < (25, 8):
+              plugins.append("ndr")
+              modules.append("Ndr")
+          if (major, minor) >= (26, 8):
+              schemas += ["usdLod", "usdProfiles"]
+              validators.append("usdLuxValidators")
+              modules += ["UsdLod", "UsdProfiles"]
+
+          copy(f"{usd}/lib/usd/plugInfo.json", f"{libs}/usd/plugInfo.json")
+          for plugin in plugins + schemas + validators:
+              for root in (f"{usd}/lib/usd", f"{usd}/plugin/usd"):
+                  if os.path.exists(f"{root}/{plugin}"):
+                      copy(f"{root}/{plugin}", f"{libs}/usd/{plugin}")
+                      break
+              else:
+                  sys.exit(f"plugin {plugin} not found")
+          copy(f"{usd}/plugin/usd/usdShaders.so", f"{libs}/usd/usdShaders.so")
+          for name in validators:
+              if name.endswith("Validators"):
+                  copy(f"{usd}/lib/libusd_{name}.so", f"{libs}/libusd_{name}.so")
+
+          mtlx = f"{libs}/usd/usdMtlx/resources/libraries"
+          for src in glob.glob(f"{usd}/libraries/bxdf/*open_pbr_surface.mtlx"):
+              copy(src, f"{mtlx}/bxdf/{os.path.basename(src)}")
+          for name in ("stdlib_defs.mtlx", "stdlib_ng.mtlx"):
+              copy(f"{usd}/libraries/stdlib/{name}", f"{mtlx}/stdlib/{name}")
+
+          for module in modules:
+              src = f"{usd}/lib/python/pxr/{module}"
+              lib = "_" + module[0].lower() + module[1:]
+              for path in glob.glob(f"{src}/*.py") + glob.glob(f"{src}/*.pyi") + glob.glob(f"{src}/{lib}*.so"):
+                  copy(path, f"{staging}/pxr/{module}/{os.path.basename(path)}")
+              if not glob.glob(f"{staging}/pxr/{module}/{lib}*.so"):
+                  sys.exit(f"pxr.{module} has no {lib} binding")
+
+          notices = {
+              "materialx-LICENSE.txt": glob.glob("/work/_build/usd-src/MaterialX-*/LICENSE")[0],
+              "onetbb-LICENSE.txt": glob.glob("/work/_build/usd-src/oneTBB-*/LICENSE.txt")[0],
+              "openusd-LICENSE.txt": "/work/OpenUSD/LICENSE.txt",
+              "pybind11-LICENSE.txt": [f for f in importlib.metadata.files("pybind11") if f.name == "LICENSE"][0].locate(),
+              "pyboost11-LICENSE.txt": "/work/tools/internal-licenses/pyboost11-LICENSE.txt",
+              "usd-exchange-LICENSE.md": "/work/LICENSE.md",
+          }
+          for name, src in notices.items():
+              copy(src, f"{staging}/{name}")
+
+          validator_version = toml.load("/work/tools/repoman/repo_tools.toml")["repo_install_usdex"]["usd_validation_version"]
+          data = toml.load("/work/tools/pyproject/pyproject.toml")
+          data["project"]["version"] = os.environ["USD_EXCHANGE_VERSION"]
+          data["project"]["optional-dependencies"].update({
+              "usd" + usd_ver.replace(".", ""): [],
+              "test": [f"usd-validation-nvidia>={validator_version},<{int(validator_version.split('.')[0]) + 1}"],
+          })
+          with open(f"{staging}/pyproject.toml", "w") as f:
+              toml.dump(data, f)
+          with open("/work/README.md") as f:
+              readme = f.readlines()[4:7]
+          with open("/work/tools/pyproject/pypi-notice.md") as f:
+              notice = f.read()
+          with open(f"{staging}/README.md", "w") as f:
+              f.writelines(readme)
+              f.write(f"\n{notice}")
+          shutil.copyfile("/work/tools/pyproject/hatch_build.py", f"{staging}/hatch_build.py")
+          STAGE_EOF
+
+          # Upstream strips before auditwheel's patchelf, never after it.
+          find /work/_build/pyproject /work/_build/usd/lib /work/_build/install/lib -name '*.so*' -type f \
+            -exec sh -c 'head -c4 "$1" | grep -q ELF && strip "$1"' _ {} \;
+
+          "$PY" -m build --wheel --outdir /work/_build/pyproject/dist /work/_build/pyproject
+          LD_LIBRARY_PATH="/work/_build/install/lib:/work/_build/usd/lib:${LD_LIBRARY_PATH:-}" \
+            auditwheel repair -w /work/_build/wheelhouse /work/_build/pyproject/dist/*.whl
+
+          "$PY" - <<'PLUGINFO_EOF'
+          import glob, json, os, re, subprocess, sys, tempfile
+
+          wheel = glob.glob("/work/_build/wheelhouse/*.whl")[0]
+          with tempfile.TemporaryDirectory() as tmp:
+              subprocess.run([sys.executable, "-m", "wheel", "unpack", wheel, "--dest", tmp], check=True)
+              unpacked = glob.glob(f"{tmp}/*/")[0].rstrip("/")
+              libs_root = f"{unpacked}/usd_exchange.libs"
+              hashed = {}
+              for lib in glob.glob(f"{libs_root}/*.so*"):
+                  match = re.match(r"^(lib.+?)-[0-9a-f]{6,}\.so", os.path.basename(lib))
+                  if match:
+                      hashed[match.group(1)] = os.path.basename(lib)
+              for plug_info in glob.glob(f"{libs_root}/usd/*/resources/plugInfo.json"):
+                  with open(plug_info) as f:
+                      data = json.loads("".join(line for line in f if not line.lstrip().startswith("#")))
+                  modified = False
+                  for plug in data.get("Plugins", []):
+                      lib = hashed.get(f"libusd_{plug.get('Name')}")
+                      if lib and "LibraryPath" in plug:
+                          plug["LibraryPath"] = f"../../{lib}"
+                          modified = True
+                  if modified:
+                      with open(plug_info, "w") as f:
+                          json.dump(data, f, indent=4)
+              subprocess.run([sys.executable, "-m", "wheel", "pack", unpacked, "--dest-dir", "/work/dist"], check=True)
+          PLUGINFO_EOF
+          ls -la /work/dist
+          USDEX_BUILD_EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: usd-exchange-${{ env.USD_EXCHANGE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+      - name: Test usd-exchange wheel
+        run: |
+          docker run -i --rm \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            "${MANYLINUX_RISCV64_IMAGE}" bash -s <<'USDEX_TEST_EOF'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+
+          VENV=/tmp/venv
+          "/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin/python" -m venv "${VENV}"
+          wheel="$(echo /work/dist/*.whl)"
+          "${VENV}/bin/python" -m pip install "${wheel}[test]"
+
+          unset PYTHONPATH
+          "${VENV}/bin/python" tools/pyproject/check_wheel_imports.py
+          "${VENV}/bin/python" -m unittest discover -v -s source/core/tests/unittest
+          "${VENV}/bin/python" -m unittest discover -v -s source/rtx/tests/unittest
+          USDEX_TEST_EOF
+
+  publish:
+    name: Publish usd-exchange ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: usd-exchange-${{ matrix.version }}-*-manylinux_riscv64
