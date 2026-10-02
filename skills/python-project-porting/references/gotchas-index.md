@@ -467,6 +467,11 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
   compiler-rt's `ALL_FUZZER_SUPPORTED_ARCH` gained RISCV64 in LLVM 17, and Rocky 10's riscv64
   `compiler-rt` RPM already ships `libclang_rt.fuzzer_no_main.a` and the asan/ubsan archives,
   so `dnf install compiler-rt` plus `LIBFUZZER_LIB` replaces the LLVM build (the atheris case).
+- **627** — A binding to a Chromium-embedding Qt module inherits the arch list of that Qt
+  line's frozen Chromium fork: Qt5 WebEngine is `qtwebengine-chromium` `87-based` (Chromium 87,
+  no `ARCH_CPU_RISCV64`, `#error` in `build_config.h`), Debian/Arch RISC-V/openSUSE ship only Qt6
+  WebEngine on riscv64, and QTBUG-132451 is open. Park and point users at the Qt6 binding (the
+  pyqtwebengine case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
