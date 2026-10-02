@@ -88,13 +88,28 @@ jobs:
           # Upstream's wheel job only smoke-tests; also run its CI suite against the wheel,
           # with its conda test env minus openmm (no riscv64 build; those tests skip).
           CIBW_TEST_EXTRAS: all
-          CIBW_TEST_REQUIRES: gsd>=2.8
+          # pyparsing 3.3.3 rewrote infix_notation as a shunting-yard parser that takes the
+          # first operator in op_list order without backtracking. mdtraj sorts its operators
+          # alphabetically, so '>' wins over '>=' and test_binary_selection_operator fails on
+          # 'name >= 1' on every arch (x86_64 too, with upstream's PyPI wheel); 3.3.2 passes
+          # (gotchas 355, 583). Upstream leaves pyparsing unpinned.
+          CIBW_TEST_REQUIRES: 'gsd>=2.8 pyparsing<3.3.3'
           CIBW_TEST_SOURCES: tests pyproject.toml
+          # Deselected for riscv64 rounding at a histogram bin edge (gotcha 304), not a wrong
+          # result: test_compare_rdf_t_master compares to a reference file that matches the
+          # x86 SSE distance kernel bit for bit. riscv64 builds the scalar vectorize_generic.h
+          # kernel, and GCC contracts its float32 multiply-adds to fmadd.s, so a few pair
+          # distances land across a 0.005 nm bin edge: 18/20000 elements off, as 9 adjacent-bin
+          # pairs (e.g. [20,32]/[20,33]). On x86_64,
+          # building with -D__NO_INTRINSICS -mfma -ffp-contract=fast gives the same 18
+          # elements with the same values; without -mfma it passes; and mdtraj's own numpy
+          # path (opt=False) misses this reference file at 10 elements.
           CIBW_TEST_COMMAND: >-
             python -c "import mdtraj; print(mdtraj.__version__)" &&
             mdconvert -h &&
             mdinspect -h &&
             pytest -n logical --durations=10 tests/ -r fE --color=yes
+            --deselect tests/test_rdf.py::test_compare_rdf_t_master
 
       - name: Check the wheel ships the licences and the compiled extensions
         run: |
