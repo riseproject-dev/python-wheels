@@ -1,0 +1,151 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `tests` job of
+# https://github.com/openslide/openslide-python/blob/v1.4.6/.github/workflows/python.yml
+name: Build openslide-python wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/openslide-python.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-openslide-python.yml'
+      - 'docs/packages/openslide-python.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-openslide-python.yml'
+      - 'docs/packages/openslide-python.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYTHONUNBUFFERED: 1
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: openslide-python
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build openslide-python ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # setup.py tags GIL builds cp311-abi3 (built on that floor) and
+        # free-threaded builds per interpreter.
+        python: ["cp311", "cp314t"]
+
+    env:
+      OPENSLIDE_PYTHON_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout openslide-python v${{ env.OPENSLIDE_PYTHON_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: openslide/openslide-python
+          ref: v${{ env.OPENSLIDE_PYTHON_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: openslide-python-${{ env.OPENSLIDE_PYTHON_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  # The suite needs libopenslide, which the manylinux image cannot install
+  # (it is EPEL-only), so test on the runner against Ubuntu's, as upstream does.
+  test_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    name: Test openslide-python ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ["3.11", "3.12", "3.13", "3.14", "3.14t"]
+
+    env:
+      OPENSLIDE_PYTHON_VERSION: ${{ matrix.version }}
+      UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_ONLY_BINARY: pillow
+
+    steps:
+      - name: Checkout openslide-python v${{ env.OPENSLIDE_PYTHON_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: openslide/openslide-python
+          ref: v${{ env.OPENSLIDE_PYTHON_VERSION }}
+          persist-credentials: false
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: openslide-python-${{ env.OPENSLIDE_PYTHON_VERSION }}-${{ matrix.python-version == '3.14t' && 'cp314t' || 'cp311' }}-manylinux_riscv64
+          path: wheelhouse
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install OpenSlide (system)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libopenslide0
+
+      - name: Install
+        run: uv pip install jinja2 pytest wheelhouse/*.whl
+
+      - name: Run tests
+        run: pytest -v
+
+      - name: Tile slide
+        run: python examples/deepzoom/deepzoom_tile.py --viewer -o tiled tests/fixtures/small.svs
+
+  publish:
+    name: Publish openslide-python ${{ matrix.version }}
+    needs: [setup, build_wheels, test_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: openslide-python-${{ matrix.version }}-*-manylinux_riscv64
