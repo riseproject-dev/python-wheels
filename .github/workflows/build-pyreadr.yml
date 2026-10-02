@@ -1,0 +1,145 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `test` job of
+# https://github.com/ofajardo/pyreadr/blob/v0.5.6/.github/workflows/ci.yml
+name: Build pyreadr wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyreadr.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyreadr.yml'
+      - 'docs/packages/pyreadr.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyreadr.yml'
+      - 'docs/packages/pyreadr.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyreadr
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyreadr ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Matches upstream's own PyPI wheel matrix (cp310-cp314, no free-threaded build).
+        python: ["cp310", "cp311", "cp312", "cp313", "cp314"]
+
+    env:
+      PYREADR_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyreadr v${{ env.PYREADR_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ofajardo/pyreadr
+          ref: v${{ env.PYREADR_VERSION }}
+          persist-credentials: false
+
+      - name: Stage the vendored-library licence collector
+        # auditwheel vendors libbz2 and liblzma (zlib is on the manylinux allowlist);
+        # stage their licences at the root for setuptools' default LICEN[CS]E* glob (gotcha 137).
+        run: |
+          cat > collect-licenses.sh <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          project="${1:?usage: collect-licenses.sh <project-dir>}"
+          for pkg in bzip2-libs xz-libs; do
+            mapfile -t files < <(rpm -q --licensefiles "$pkg" | grep '^/' | while read -r f; do [ -f "$f" ] && echo "$f"; done || true)
+            if [ -z "${files[0]:-}" ]; then
+              dnf -y reinstall --setopt=tsflags= "$pkg"
+              mapfile -t files < <(rpm -qd "$pkg" | grep -iE '/(LICEN[CS]E|COPYING)[^/]*$')
+            fi
+            for f in "${files[@]}"; do
+              cp "$f" "$project/LICENSE.${pkg%-libs}.$(basename "$f")"
+            done
+          done
+          ls "$project"/LICENSE*
+          EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf -y install bzip2-devel xz-devel zlib-devel &&
+            bash {project}/collect-licenses.sh {project}
+          CIBW_ENVIRONMENT_LINUX: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Our registry carries numpy/pandas for cp310/cp311 only at older releases (gotcha 354).
+          CIBW_TEST_ENVIRONMENT: PIP_PREFER_BINARY=1
+          CIBW_TEST_SOURCES: tests test_data
+          CIBW_TEST_REQUIRES: pandas xarray
+          CIBW_TEST_COMMAND: >-
+            python tests/test_basic.py &&
+            python tests/test_http_integration.py
+
+      - name: Check the extension and the licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          grafted_licence = {"libbz2": "LICENSE.bzip2.", "liblzma": "LICENSE.xz."}
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("pyreadr/librdata.") and n.endswith(".so") for n in names), whl
+              licences = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+              assert {"LICENSE", "LICENSE_librdata", "LICENSE_jamovi_readstat"} <= licences, (whl, licences)
+              grafted = {n.rsplit("/", 1)[1].split("-")[0] for n in names if n.startswith("pyreadr.libs/")} - {""}
+              assert grafted <= grafted_licence.keys(), (whl, grafted)
+              for lib in grafted:
+                  assert any(lic.startswith(grafted_licence[lib]) for lic in licences), (whl, lib, licences)
+              print(whl, sorted(grafted), sorted(licences))
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyreadr-${{ env.PYREADR_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyreadr ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyreadr-${{ matrix.version }}-*-manylinux_riscv64
