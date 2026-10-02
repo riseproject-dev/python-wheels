@@ -1,0 +1,151 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+
+# This workflow follows upstream's own fiftyone-db release process:
+# https://github.com/voxel51/fiftyone/blob/main/.github/workflows/build-db.yml
+# which releases from db-v<version> tags and builds one wheel per platform
+# directly with `python -m build`, no interpreter matrix (the wheel is
+# tagged py3-none-<platform> and carries no compiled extension of its own).
+# Upstream's own workflow has no Linux leg at all - every Linux install
+# today builds the sdist locally, since the unpatched CustomBdistWheel
+# produces an invalid "linux-<arch>" tag for any arch it doesn't special-case.
+name: Build fiftyone-db wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/fiftyone-db.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fiftyone-db.yml'
+      - 'docs/packages/fiftyone-db.yaml'
+      - 'patches/fiftyone-db/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fiftyone-db.yml'
+      - 'docs/packages/fiftyone-db.yaml'
+      - 'patches/fiftyone-db/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: fiftyone-db
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build fiftyone-db ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    env:
+      FIFTYONE_DB_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout fiftyone db-v${{ env.FIFTYONE_DB_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: voxel51/fiftyone
+          ref: db-v${{ env.FIFTYONE_DB_VERSION }}
+          path: fiftyone
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        # git -C changes git's own cwd, but the shell still expands this
+        # glob relative to $GITHUB_WORKSPACE (where fiftyone/ and
+        # python-wheels/ are siblings) before git ever sees it, so the
+        # patch path is relative to there, not to -C's target.
+        run: git -C fiftyone apply $PWD/python-wheels/patches/fiftyone-db/${{ env.FIFTYONE_DB_VERSION }}/*.patch
+
+      - name: Build wheel, check its tag/contents, and smoke-test install
+        # All three steps run inside the manylinux image, not the bare
+        # runner: the runner's own python/pip is a different glibc baseline
+        # than manylinux_2_39, and pip's platform-tag compatibility check
+        # rejects the wheel as "not a supported wheel on this platform"
+        # outside the image it was tagged for.
+        env:
+          RELEASE_VERSION: ${{ env.FIFTYONE_DB_VERSION }}
+        run: |
+          set -eux
+          mkdir -p wheelhouse
+          docker run --rm -i \
+            -v "${GITHUB_WORKSPACE}:/work" -w /work/fiftyone/package/db \
+            -e RELEASE_VERSION \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+          PYTHON_BIN=/opt/python/cp312-cp312/bin/python
+          "${PYTHON_BIN}" -m pip install -q -U pip build
+          "${PYTHON_BIN}" -Im build --wheel
+          cp dist/*.whl /work/wheelhouse/
+
+          wheel=$(ls /work/wheelhouse/*.whl)
+          case "$wheel" in
+            *-py3-none-manylinux_2_39_riscv64.whl) ;;
+            *) echo "unexpected wheel tag: $wheel"; exit 1 ;;
+          esac
+          "${PYTHON_BIN}" -m zipfile -l "$wheel"
+          # MongoDB ships no riscv64 binary (gotcha: see patches/fiftyone-db's
+          # Upstream-Status), so the wheel must NOT contain mongod - only the
+          # empty bin/ dir fiftyone.db expects to find at runtime.
+          if "${PYTHON_BIN}" -m zipfile -l "$wheel" | grep -q 'fiftyone/db/bin/mongod'; then
+            echo "wheel unexpectedly bundles a mongod binary"
+            exit 1
+          fi
+
+          "${PYTHON_BIN}" -m venv /tmp/venv
+          /tmp/venv/bin/pip install -q "$wheel"
+          /tmp/venv/bin/python -c "
+          import fiftyone.db
+          print('fiftyone.db imports ok; bin dir:', fiftyone.db.FIFTYONE_DB_BIN_DIR)
+          "
+          SCRIPT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fiftyone-db-${{ env.FIFTYONE_DB_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish fiftyone-db ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: fiftyone-db-${{ matrix.version }}-py3-none-manylinux_riscv64
