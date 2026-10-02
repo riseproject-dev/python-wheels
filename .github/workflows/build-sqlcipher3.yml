@@ -1,0 +1,165 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `wheels` job of
+# https://github.com/coleifer/sqlcipher3/blob/0.6.2/.github/workflows/wheels.yaml
+name: Build sqlcipher3 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/sqlcipher3.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sqlcipher3.yml'
+      - 'docs/packages/sqlcipher3.yaml'
+      - 'patches/sqlcipher3/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sqlcipher3.yml'
+      - 'docs/packages/sqlcipher3.yaml'
+      - 'patches/sqlcipher3/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: sqlcipher3
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build sqlcipher3 ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        libc: [manylinux, musllinux]
+
+    env:
+      SQLCIPHER3_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout sqlcipher3 ${{ env.SQLCIPHER3_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: coleifer/sqlcipher3
+          ref: ${{ env.SQLCIPHER3_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch sqlcipher3 source
+        run: git apply python-wheels/patches/sqlcipher3/${{ env.SQLCIPHER3_VERSION }}/*.patch
+
+      # Upstream's suite never sets a key, so check the statically linked OpenSSL and the
+      # licences of what the wheel bundles.
+      - name: Write encryption smoke test
+        run: |
+          cat > smoke_test.py <<'EOF'
+          import importlib.metadata
+          import os
+          import tempfile
+
+          from sqlcipher3 import dbapi2 as sqlite
+
+          licenses = sorted(
+              p.name for p in importlib.metadata.files("sqlcipher3") if ".dist-info/licenses/" in str(p)
+          )
+          assert licenses == ["LICENSE", "LICENSE.openssl", "LICENSE.sqlcipher"], licenses
+
+          with tempfile.TemporaryDirectory() as tmp:
+              path = os.path.join(tmp, "enc.db")
+              conn = sqlite.connect(path)
+              conn.execute("PRAGMA key = 'riscv64'")
+              provider = conn.execute("PRAGMA cipher_provider_version").fetchone()[0]
+              assert provider.startswith("OpenSSL 3."), provider
+              conn.execute("CREATE TABLE t (v TEXT)")
+              conn.execute("INSERT INTO t VALUES ('plaintext-marker')")
+              conn.commit()
+              conn.close()
+              with open(path, "rb") as fh:
+                  assert b"plaintext-marker" not in fh.read()
+
+              conn = sqlite.connect(path)
+              conn.execute("PRAGMA key = 'riscv64'")
+              assert conn.execute("PRAGMA cipher_integrity_check").fetchall() == []
+              assert conn.execute("SELECT v FROM t").fetchall() == [("plaintext-marker",)]
+              conn.close()
+
+              conn = sqlite.connect(path)
+              conn.execute("PRAGMA key = 'wrong'")
+              try:
+                  conn.execute("SELECT v FROM t").fetchall()
+              except sqlite.DatabaseError:
+                  pass
+              else:
+                  raise AssertionError("wrong key decrypted the database")
+              print(provider, "ok")
+          EOF
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_BUILD_FRONTEND: build
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # Conan's openssl recipe has no riscv64 entry and falls back to linux-generic32.
+          CIBW_ENVIRONMENT: >-
+            SQLCIPHER3_COMPILE_TARGET=riscv64
+            CONAN_OPENSSL_CONFIGURATION=linux64-riscv64
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_BEFORE_ALL_LINUX: command -v yum >/dev/null && yum -y install perl-core || command -v apk >/dev/null && apk add perl || true
+          CIBW_TEST_COMMAND: >
+            mv {project}/sqlcipher3 {project}/sqlcipher3_ &&
+            python {project}/tests/ &&
+            python {project}/smoke_test.py &&
+            mv {project}/sqlcipher3_ {project}/sqlcipher3
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sqlcipher3-${{ env.SQLCIPHER3_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish sqlcipher3 ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: sqlcipher3-${{ matrix.version }}-*riscv64
