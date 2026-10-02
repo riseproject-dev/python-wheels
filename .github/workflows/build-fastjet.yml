@@ -1,0 +1,140 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/scikit-hep/fastjet/blob/v3.5.1.4/.github/workflows/wheels.yml
+name: Build fastjet wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/fastjet.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fastjet.yml'
+      - 'docs/packages/fastjet.yaml'
+      - 'patches/fastjet/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fastjet.yml'
+      - 'docs/packages/fastjet.yaml'
+      - 'patches/fastjet/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: fastjet
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build fastjet ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+    env:
+      FASTJET_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout fastjet ${{ env.FASTJET_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: scikit-hep/fastjet
+          ref: v${{ env.FASTJET_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch fastjet source
+        run: git apply python-wheels/patches/fastjet/${{ env.FASTJET_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_CONFIG_SETTINGS: >
+            "cmake.define.FASTJET_ENABLE_CGAL"="ON"
+          # Licence notices of the CGAL and Boost headers compiled in by upstream's before-all.
+          CIBW_BEFORE_BUILD: >-
+            cp {project}/boost_1_88_0/LICENSE_1_0.txt {project}/LICENSE.boost &&
+            cp /usr/local/share/doc/CGAL/LICENSE {project}/LICENSE.CGAL &&
+            cp /usr/local/share/doc/CGAL/LICENSE.GPL {project}/LICENSE.CGAL.GPL &&
+            cp /usr/local/share/doc/CGAL/LICENSE.LGPL {project}/LICENSE.CGAL.LGPL
+          # Our registry carries awkward-cpp 56, not PyPI's newest 57: stay on awkward 2.13.0.
+          CIBW_ENVIRONMENT: >-
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_FASTJET=${{ env.FASTJET_VERSION }}
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,awkward-cpp,pyarrow,pandas,boost-histogram
+          # pandas (via dask-awkward[test]) has no free-threaded riscv64 wheel.
+          CIBW_TEST_EXTRAS: ${{ matrix.python == 'cp314t' && 'dask,dev' || 'test' }}
+          CIBW_TEST_REQUIRES: ${{ matrix.python == 'cp314t' && 'uproot>=5 distributed>=2023.4.0' || '' }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fastjet-${{ env.FASTJET_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+      - name: Check the wheel ships the extensions and the bundled licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          for mod in ("fastjet/_ext.", "fastjet/_swig/_fastjet_swig."):
+              assert any(n.startswith(mod) and n.endswith(".so") for n in names), mod
+          for lib in ("fastjet", "fastjettools", "fastjetplugins", "siscone", "fastjetcontribfragile"):
+              assert f"fastjet/lib64/lib{lib}.so" in names, lib
+          assert not any(n.startswith("fastjet.libs/") for n in names), names
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+          for want in ("LICENSE", "LICENSE.boost", "LICENSE.CGAL", "LICENSE.CGAL.GPL", "LICENSE.CGAL.LGPL",
+                       "extern/fastjet-core/COPYING", "extern/fastjet-core/plugins/SISCone/siscone/COPYING",
+                       "extern/fastjet-contrib/COPYING", "extern/fastjet-contrib/Nsubjettiness/COPYING"):
+              assert want in licences, (want, sorted(licences))
+          print(sys.argv[1], len(licences), "licence files ok")
+          EOF
+
+  publish:
+    name: Publish fastjet ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: fastjet-${{ matrix.version }}-*-manylinux_riscv64
