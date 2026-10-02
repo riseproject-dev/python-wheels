@@ -1,0 +1,170 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/mdtraj/mdtraj/blob/1.11.1.post2/.github/workflows/build.yaml
+# and the test job of: https://github.com/mdtraj/mdtraj/blob/1.11.1.post2/.github/workflows/main.yaml
+name: Build mdtraj wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/mdtraj.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mdtraj.yml'
+      - 'docs/packages/mdtraj.yaml'
+      - 'patches/mdtraj/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mdtraj.yml'
+      - 'docs/packages/mdtraj.yaml'
+      - 'patches/mdtraj/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: mdtraj
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build mdtraj ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      MDTRAJ_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout mdtraj ${{ env.MDTRAJ_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: mdtraj/mdtraj
+          ref: ${{ env.MDTRAJ_VERSION }}
+          fetch-depth: 0  # versioneer derives the version from `git describe`
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply python-wheels/patches/mdtraj/${{ env.MDTRAJ_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy,pandas,tables,blosc2,numexpr,ndindex,msgpack,pydantic-core,netcdf4,cftime
+          # Upstream's wheel job only smoke-tests; also run its CI suite against the wheel,
+          # with its conda test env minus openmm (no riscv64 build; those tests skip).
+          CIBW_TEST_EXTRAS: all
+          CIBW_TEST_REQUIRES: gsd>=2.8
+          CIBW_TEST_SOURCES: tests pyproject.toml
+          CIBW_TEST_COMMAND: >-
+            python -c "import mdtraj; print(mdtraj.__version__)" &&
+            mdconvert -h &&
+            mdinspect -h &&
+            pytest -n logical --durations=10 tests/ -r fE --color=yes
+
+      - name: Check the wheel ships the licences and the compiled extensions
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          exts = {n.split("/")[-1].split(".")[0] for n in names if n.endswith(".so") and ".libs/" not in n}
+          assert exts == {"xtc", "trr", "dcd", "dtr", "_rmsd", "_lprmsd", "_geometry", "drid", "neighbors", "neighborlist"}, exts
+          assert "mdtraj/core/lib/libtheobald.a" in names, names
+          licences = {n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n} - {""}
+          expected = {"LICENSE", "LICENSE.dtrplugin", "LICENSE.munkres", "LICENSE.openmm", "LICENSE.vmd-plugins", "LICENSE.xdrfile"}
+          assert licences == expected, licences
+          # -fopenmp makes auditwheel vendor the image's libgomp, hence the gpl_sources job.
+          assert any(n.startswith("mdtraj.libs/libgomp") for n in names), [n for n in names if ".libs/" in n]
+          EOF
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mdtraj-${{ env.MDTRAJ_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      MDTRAJ_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mdtraj-${{ env.MDTRAJ_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish mdtraj ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: mdtraj-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: mdtraj-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
