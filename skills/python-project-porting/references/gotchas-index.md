@@ -1446,6 +1446,10 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
   upstream's own CI matrix is a single `['3.12']` entry marked `# Currently unused` — drop
   `cp314` from the port's matrix instead of chasing the C++ (gotcha 322's pattern, settled by
   upstream signals per gotcha 149/468/542, not by debugging the crash).
+- **626** — Since numpy 2.5, `np.linalg.eig` returns complex eigenvectors on *every*
+  architecture (even for a diagonal matrix), so gotcha 170's dtype trap now fails an older
+  release on x86_64 too — check `eig(...)[1].dtype` under numpy 2.5 vs 2.4 on any host, then
+  backport upstream's `eigh` fix rather than pinning numpy (the mdanalysis case).
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 

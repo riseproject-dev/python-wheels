@@ -128,6 +128,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
   pickling tensors through `_share_fd_cpu_()` is `/dev/shm` exhaustion from Docker's 64MB
   default, not disk space or a riscv64 bug — raise it with `CIBW_CONTAINER_ENGINE`'s
   `create_args` (same knob as gotcha 552) rather than deselecting an addressable failure.
+- **626** — Since numpy 2.5, `np.linalg.eig` returns complex eigenvectors on *every* arch, even
+  for a diagonal matrix: gotcha 170's dtype trap is no longer riscv64-only, so a released
+  package calling `eig` on a symmetric matrix fails everywhere — look for upstream's `eigh` fix.
 
 ---
 
@@ -1834,3 +1837,26 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
     gotcha-33 way: deselect exactly those tests, generated once in the `run:` step from
     `matrix.python_version` (`if [ "$v" != "3.12" ]; then deselect+=(--deselect ...); fi`) so
     3.12 keeps exercising all of them and the list isn't tripled across the matrix.
+
+626. **Since numpy 2.5, `np.linalg.eig` returns `complex128` eigenvectors on every
+    architecture, even for a real diagonal matrix — gotcha 170's dtype trap is no longer a
+    riscv64-OpenBLAS quirk, and an older release that calls `eig` on a symmetric matrix now
+    fails on x86_64 too (the mdanalysis case).** MDAnalysis 2.10.0's
+    `Masses.principal_axes()` calls `np.linalg.eig(moment_of_inertia)`; against the registry's
+    numpy 2.5.3 the complex vectors reach `np.degrees(mdamath.angle(...))` in
+    `align_principal_axis()` and raise `TypeError: ufunc 'degrees' not supported for the
+    input types` on all three legs. On x86_64, `eig(np.diag([3., 2., 1.]))[1].dtype` is
+    `complex128` with numpy 2.5.3 and `float64` with 2.4.6 — one line in a throwaway
+    `uv run --with numpy==2.5.3` settles which gotcha you are in before any riscv64
+    debugging.
+    - **The fix is upstream's, not a deselect or a numpy pin**: switching to `np.linalg.eigh`
+      (real by construction for symmetric input) is what both statsmodels-shaped code and
+      MDAnalysis need; MDAnalysis landed it as "Fix compatibility with numpy 2.5" (#5404) and
+      it backports cleanly onto the release. Pinning `numpy<2.5` in the test env would hide a
+      runtime break every user of the wheel hits.
+    - **Expect a second, unrelated drift failure in the same first run.** A release that
+      predates both numpy 2.5 and pytest 9.1 also tripped pytest 9.1 reading
+      `parametrize("btype,", [...])`'s trailing comma as a one-element tuple of names
+      ("the number of names (1) must be equal to the number of values (4)"), a collection
+      error that fails the whole run; upstream's one-character fix (8783f8d) backports too.
+      Read the full FAILED/ERROR list before assuming one cause.
