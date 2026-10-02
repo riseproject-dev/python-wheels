@@ -52,9 +52,7 @@ jobs:
         # cp310/cp311 are dropped: torch and pytorch-tokenizers (both hard runtime
         # deps) have no riscv64 wheel for either on pypi.riseproject.dev. cp314t
         # is dropped too: upstream itself ships no free-threaded wheel.
-        # TEMP: restricted to cp312 only while diagnosing the cpuinfo abort
-        # under gdb (gotcha 115) - restore ["cp312", "cp313", "cp314"] once done.
-        python: ["cp312"]
+        python: ["cp312", "cp313", "cp314"]
     name: Build executorch ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 720
@@ -185,17 +183,9 @@ jobs:
             pip install "cmake>=3.24,<4.0.0" "packaging>=24.2" pyyaml
             "setuptools>=77.0.3" wheel zstd certifi &&
             pip install --only-binary=:all: "torch==2.13.0"
-          # TEMP diagnostic (gotcha 115): keep debug symbols so gdb's backtrace
-          # resolves symbols instead of bare addresses. setup.py's get_build_type()
-          # only offers Debug/Release via $DEBUG, but appends $CMAKE_ARGS after its
-          # own -DCMAKE_BUILD_TYPE flag, so CMAKE_ARGS wins (RelWithDebInfo matches
-          # this repo's own precedent in build-tesserocr.yml, and keeps optimizations
-          # on so the crash still reproduces the same way as the real release build).
           CIBW_ENVIRONMENT: >-
             CMAKE_BUILD_PARALLEL_LEVEL=8
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-            CFLAGS=-g CXXFLAGS=-g
-            CMAKE_ARGS=-DCMAKE_BUILD_TYPE=RelWithDebInfo
           # The torch wheel already carries these and loads them RTLD_GLOBAL (gotcha 17).
           CIBW_REPAIR_WHEEL_COMMAND: >-
             auditwheel repair -w {dest_dir} {wheel}
@@ -212,25 +202,7 @@ jobs:
           # a newer torch than the extension was actually compiled against.
           CIBW_TEST_REQUIRES: torch==2.13.0
           CIBW_TEST_SOURCES: riscv64_smoke_test.py
-          # TEMP diagnostic (gotcha 115): gdb works on the real riscv64 runner
-          # (not under QEMU). The abort is 100% deterministic across all 3
-          # python legs already observed, so a single gdb run is enough - no
-          # retry loop needed. Fail the step either way so the log is easy to
-          # spot: once with the backtrace if the abort reproduces, once with a
-          # clear "did not reproduce" message otherwise.
-          CIBW_BEFORE_TEST_LINUX: dnf -y install gdb
-          CIBW_TEST_COMMAND: >-
-            gdb -batch -ex run -ex "thread apply all bt 25" --args python riscv64_smoke_test.py
-            > /tmp/gdb-backtrace.log 2>&1;
-            gdb_status=$?;
-            cat /tmp/gdb-backtrace.log;
-            echo "gdb exit status: $gdb_status";
-            if grep -qE "SIGABRT|Aborted" /tmp/gdb-backtrace.log;
-            then echo "=== crash reproduced under gdb (backtrace above) ===";
-            exit 1;
-            else echo "=== SIGABRT/Aborted NOT found - crash did not reproduce under gdb ===";
-            exit 1;
-            fi
+          CIBW_TEST_COMMAND: python -X faulthandler riscv64_smoke_test.py
 
       - name: Check the extensions and the vendored licences made it into the wheel
         run: |
