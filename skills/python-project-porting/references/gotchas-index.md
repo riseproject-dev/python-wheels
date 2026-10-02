@@ -1064,6 +1064,9 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
   the segment auditwheel's patchelf prepends for the RPATH lands below it and the binary is
   killed at exec, silently behind a `subprocess.run` wrapper — `readelf -lW` the artifact, then
   link with `-Wl,-Ttext-segment=0x200000` or PIE (pygraphviz / python-gdcm / perf-analyzer).
+- **625** — Conan's `openssl` recipe maps riscv64 to `linux-generic32`; override with
+  `CONAN_OPENSSL_CONFIGURATION=linux-generic64`, not `linux64-riscv64`, whose AES asm `jal`
+  overflows `R_RISCV_JAL` when `libcrypto.a` is linked into a large `.so` (sqlcipher3).
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 
