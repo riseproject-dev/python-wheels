@@ -48,6 +48,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
 - **611** — absltest's `app.run()` normally parses `FLAGS` before tests run; plain `pytest`
   `tests/__init__.py` regardless of whether the run uses it; needs `coverage` in
   `CIBW_TEST_REQUIRES`, named (not `:all:`) in `PIP_ONLY_BINARY`.
+- **624** — A doctest that touches a lazily-downloaded dataset fails only on a *fresh* test
+  venv, because the library prints its download progress into the doctest's stdout;
+  mirror upstream's pre-download step (`make download-datasets`) before pytest.
 
 ---
 
@@ -885,3 +888,28 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
     - **Drop `pytest` from `CIBW_TEST_REQUIRES`** once nothing in the test command calls
       it — leaner, and it mirrors upstream, which never runs pytest either (goal 2: a
       workflow that diverges from upstream for no reason is a defect).
+
+624. **A doctest that iterates a lazily-downloaded dataset fails on every fresh test venv,
+     because the library prints its download progress into the doctest's captured stdout
+     (the river case; see `build-river.yml`).** river's `Dataset.__iter__` calls
+     `self.download(verbose=True)` the first time a remote dataset is read, which prints
+     `Downloading …` and `Uncompressing into …`; the doctest
+     `tests/anomaly/test_hst.py::test_missing_features` iterates `datasets.CreditCard()`
+     (151 MB) and expects no output, so it fails with an output mismatch. Every
+     cibuildwheel test venv starts with an empty `~/river_data`, so it failed identically
+     on cp312, cp313 and cp314 after ~44 minutes of an otherwise green suite.
+    - **It looks like a flake locally, which is the trap.** The first local x86_64 run
+      downloaded the data and failed; every later run reused the cache and passed, so the
+      failure "did not reproduce" in isolation. If a doctest that names a dataset fails
+      once and then passes, suspect the cache, not the test: `rm -rf` the library's data
+      dir and rerun to reproduce it on demand.
+    - **Upstream already has the fix — look for it in the test job, not the tests.**
+      river's `code-quality.yml` runs `make download-datasets` before `pytest`; its
+      Makefile target is one `python -c "…download()…"` line. Copy that command into
+      `CIBW_TEST_COMMAND` ahead of pytest (it needs the installed wheel, so
+      `CIBW_BEFORE_TEST`, which runs before the wheel is installed, is the wrong hook). It
+      is upstream's own step, so it needs no deselect and no comment.
+    - **Grep before the first CI cycle**: `grep -n 'print\|verbose' <pkg>/datasets/base.py`
+      plus a scan of upstream's test job for any `download`/`fetch` step that runs before
+      pytest. Upstream's step is load-bearing whenever it exists, even when it reads like
+      a cache warm-up.

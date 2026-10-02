@@ -1278,6 +1278,10 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
   `unittest`-based file's own relative test-data path can fail separately from a cwd
   mismatch (`cd {project}/tests` vs `{project}`), surfacing as an unrelated-looking read
   error, not a flags error.
+- **624** — A doctest that iterates a lazily-downloaded dataset fails on every fresh test
+  venv because the download prints progress into its stdout, yet "passes on rerun"
+  locally once the data is cached; run upstream's own pre-download step
+  (`make download-datasets`) in `CIBW_TEST_COMMAND` ahead of pytest (the river case).
 
 ### Test failures, flakes & arch-specific bugs — [`gotchas/test-failures-and-flakes.md`](gotchas/test-failures-and-flakes.md)
 
