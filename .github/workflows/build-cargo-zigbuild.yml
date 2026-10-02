@@ -1,0 +1,168 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/rust-cross/cargo-zigbuild/blob/v0.23.4/.github/workflows/pypi.yml
+# and the Linux steps of the `test` job of
+# https://github.com/rust-cross/cargo-zigbuild/blob/v0.23.4/.github/workflows/CI.yml
+name: Build cargo-zigbuild wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cargo-zigbuild.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cargo-zigbuild.yml'
+      - 'docs/packages/cargo-zigbuild.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cargo-zigbuild.yml'
+      - 'docs/packages/cargo-zigbuild.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cargo-zigbuild
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build cargo-zigbuild ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    env:
+      CARGO_ZIGBUILD_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout cargo-zigbuild v${{ env.CARGO_ZIGBUILD_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: rust-cross/cargo-zigbuild
+          ref: v${{ env.CARGO_ZIGBUILD_VERSION }}
+          persist-credentials: false
+
+      # Upstream builds static *-unknown-linux-musl binaries in rust-musl-cross
+      # images; rustup ships no riscv64 musl host toolchain, so build glibc.
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          args: --release -o dist --strip
+          manylinux: '2_39'
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cargo-zigbuild-${{ env.CARGO_ZIGBUILD_VERSION }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test cargo-zigbuild ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    env:
+      CARGO_ZIGBUILD_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+      RUST_BACKTRACE: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Checkout cargo-zigbuild v${{ env.CARGO_ZIGBUILD_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: rust-cross/cargo-zigbuild
+          ref: v${{ env.CARGO_ZIGBUILD_VERSION }}
+          persist-credentials: false
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: cargo-zigbuild-${{ env.CARGO_ZIGBUILD_VERSION }}-manylinux_riscv64
+          path: wheelhouse
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # master
+        with:
+          toolchain: stable
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install wheel
+        run: uv pip install --reinstall --find-links wheelhouse "cargo-zigbuild==${CARGO_ZIGBUILD_VERSION}"
+
+      # The wheel holds only the cargo-zigbuild executable; zig itself comes
+      # from the ziglang wheel it depends on, found through `python -m ziglang`.
+      - name: Test wheel
+        run: |
+          set -euxo pipefail
+          cargo-zigbuild --version
+          cargo zigbuild --help >/dev/null
+          python -m ziglang version
+
+          cargo zigbuild --target riscv64gc-unknown-linux-gnu --manifest-path tests/hello-rustls/Cargo.toml
+          readelf -h tests/hello-rustls/target/riscv64gc-unknown-linux-gnu/debug/hello-rustls | grep 'Machine:.*RISC-V'
+
+          cargo zigbuild --target riscv64gc-unknown-linux-gnu.2.31 --manifest-path tests/hello-rustls/Cargo.toml --target-dir "$RUNNER_TEMP/glibc-2.31"
+          bin="$RUNNER_TEMP/glibc-2.31/riscv64gc-unknown-linux-gnu/debug/hello-rustls"
+          readelf -V "$bin" > "$RUNNER_TEMP/versions.txt"
+          if grep -E 'GLIBC_2\.(3[2-9]|[4-9][0-9])' "$RUNNER_TEMP/versions.txt"; then exit 1; fi
+          "$bin"
+
+          cargo-zigbuild run --target riscv64gc-unknown-linux-gnu --manifest-path tests/hello-rustls/Cargo.toml
+          cargo-zigbuild test --target riscv64gc-unknown-linux-gnu --manifest-path tests/hello-rustls/Cargo.toml
+
+          cargo zigbuild --target aarch64-unknown-linux-gnu --manifest-path tests/hello-rustls/Cargo.toml
+          readelf -h tests/hello-rustls/target/aarch64-unknown-linux-gnu/debug/hello-rustls | grep 'Machine:.*AArch64'
+
+          cargo zigbuild --target aarch64-unknown-linux-gnu --manifest-path tests/libhello/Cargo.toml
+          readelf -h tests/libhello/target/aarch64-unknown-linux-gnu/debug/libhello.so | grep 'Type:.*DYN'
+
+  publish:
+    name: Publish cargo-zigbuild ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: cargo-zigbuild-${{ matrix.version }}-manylinux_riscv64
