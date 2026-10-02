@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 1 Oct 2026 00:00:00 +0000
+Subject: [PATCH] ci/build: link haproxy above mmap_min_addr on riscv64
+
+The staged binary is killed with SIGSEGV the first time the script runs
+it, with no output from HAProxy or from the dynamic linker:
+
+    Segmentation fault      LD_LIBRARY_PATH="$STAGE_DIR/lib" "$STAGE_DIR/haproxy" -v
+
+HAProxy's Makefile links a non-PIE executable, and GNU ld's riscv64
+default linker script places its first PT_LOAD at 0x10000 (x86_64 and
+aarch64 use 0x400000). `patchelf --set-rpath '$ORIGIN/lib'` has to grow
+the program headers of an ET_EXEC it cannot relocate, so it maps them in
+a new segment just below the old base, under 0x10000 -- which is the
+kernel's vm.mmap_min_addr on the riscv64 runners. execve then fails past
+its point of no return and the process dies before ld.so's first
+instruction: LD_DEBUG=all writes nothing and LD_DEBUG_OUTPUT is never
+even created, and ldd (which asks ld.so to load the binary) reports "not
+a dynamic executable" for the patchelf'd file. The vendored libraries
+play no part in it: the crash is identical whether Rocky 10's OpenSSL
+3.5.5 or the OpenSSL 3.0.15 built here is vendored.
+
+Pass `-Wl,-Ttext-segment=0x200000` through HAProxy's ADDLIB link hook on
+riscv64, so patchelf's extra segment still lands above mmap_min_addr, as
+it already does on x86_64/aarch64 with their higher default base.
+
+Upstream-Status: Inappropriate [riscv64-only: x86_64/aarch64 link at 0x400000, so patchelf's prepended segment never drops below mmap_min_addr there]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/ci/build/build-haproxy-dist.sh b/ci/build/build-haproxy-dist.sh
+--- a/ci/build/build-haproxy-dist.sh
++++ b/ci/build/build-haproxy-dist.sh
+@@ -173,6 +173,14 @@ PCRE_MAKE_VARS=(USE_PCRE=1)
+ if [ "$ARCH_LABEL" = "riscv64" ]; then
+     PCRE_MAKE_VARS=(USE_PCRE2=1 USE_PCRE2_JIT=1)
+ fi
++# riscv64's default non-PIE link base is 0x10000, which is also the kernel's
++# vm.mmap_min_addr: the program header segment `patchelf --set-rpath` prepends
++# below it further down can't be mapped, and execve kills the binary with
++# SIGSEGV before ld.so runs. Link it higher, like x86_64/aarch64 already are.
++LINK_MAKE_VARS=()
++if [ "$ARCH_LABEL" = "riscv64" ]; then
++    LINK_MAKE_VARS=(ADDLIB=-Wl,-Ttext-segment=0x200000)
++fi
+ make -C "$BUILD_DIR" \
+     TARGET=linux-glibc \
+     USE_OPENSSL=1 \
+@@ -184,6 +192,7 @@ make -C "$BUILD_DIR" \
+     LUA_INC="$DEPS_DIR/include" \
+     LUA_LIB="$DEPS_DIR/lib" \
+     USE_PROMEX=1 \
++    "${LINK_MAKE_VARS[@]}" \
+     -j"$(nproc)"
+ 
+ # ---------------------------------------------------------------------------

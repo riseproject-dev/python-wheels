@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `manylinux` and `tests` jobs of
+# https://github.com/0x676e67/wreq-python/blob/v0.12.1/.github/workflows/ci.yml
+name: Build wreq wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/wreq.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-wreq.yml'
+      - 'docs/packages/wreq.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-wreq.yml'
+      - 'docs/packages/wreq.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # wreq-python gitignores Cargo.lock and requires `wreq = "6.0.0-rc"`, so a fresh
+  # resolve floats to the newest rc; pin the one the 0.12.1 release sdist locks.
+  WREQ_CRATE_VERSION: '6.0.0-rc.29'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: wreq
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build wreq ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # `tag` has to be a real axis: two `include` entries that only add new
+        # keys would both extend the one `version` combination, and the second
+        # would overwrite the first instead of creating a second leg.
+        tag: [cp311-abi3, cp314t]
+        include:
+          - tag: cp311-abi3
+            build: >-
+              cp312-manylinux_riscv64 cp313-manylinux_riscv64
+              cp314-manylinux_riscv64
+          - tag: cp314t
+            build: cp314t-manylinux_riscv64
+
+    env:
+      WREQ_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout wreq-python v${{ env.WREQ_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: 0x676e67/wreq-python
+          ref: v${{ env.WREQ_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # btls-sys runs bindgen (libclang) and `git apply`s its BoringSSL patches.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
+            dnf install -y clang-devel git
+          CIBW_BEFORE_BUILD_LINUX: >-
+            cargo generate-lockfile &&
+            cargo update -p wreq --precise ${{ env.WREQ_CRATE_VERSION }}
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            MATURIN_PEP517_ARGS="--features jemalloc"
+            CARGO_BUILD_JOBS=2
+          # Upstream's tests job serves httpbin on localhost:8080 from the kennethreitz/httpbin
+          # container, i.e. under gunicorn: httpbin answers every chunked (streamed-body)
+          # request with a 501 unless SERVER_SOFTWARE is gunicorn, so the Werkzeug dev
+          # server behind `python -m httpbin.core` fails the body-stream tests.
+          CIBW_TEST_REQUIRES: pytest pytest-asyncio pytest-rerunfailures httpbin gunicorn
+          # The body-stream and multipart tests open these by a repo-root-relative path.
+          CIBW_TEST_SOURCES: tests README.md Cargo.toml LICENSE
+          CIBW_TEST_COMMAND: >-
+            python -m gunicorn -b 127.0.0.1:8080 -k gthread --threads 8 httpbin:app > httpbin.log 2>&1 & HTTPBIN_PID=$!;
+            python -c "import wreq.wreq as m; assert m.__file__.endswith('.so'), m.__file__" &&
+            for i in $(seq 60); do
+            python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/get', timeout=2)" 2>/dev/null && break;
+            sleep 1; done &&
+            python -m pytest -v tests; rc=$?;
+            kill $HTTPBIN_PID; [ $rc = 0 ] || tail -n 50 httpbin.log; exit $rc
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: wreq-${{ env.WREQ_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish wreq ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: wreq-${{ matrix.version }}-*-manylinux_riscv64

@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 1 Oct 2026 00:00:00 +0000
+Subject: [PATCH] ci/build: vendor our own OpenSSL on riscv64
+
+collect_deps resolves the binary's NEEDED entries with a plain ldd, run
+before patchelf gives it an RPATH. On manylinux_2_39_riscv64 that finds
+Rocky 10's own OpenSSL (3.5.5) on the default loader path and vendors it:
+
+    Vendoring: libssl.so.3 (/lib64/lp64d/libssl.so.3)
+    Vendoring: libcrypto.so.3 (/lib64/lp64d/libcrypto.so.3)
+
+manylinux2014 has no libssl.so.3, so on x86_64/aarch64 ldd reports it
+"not found" and the "vendor the OpenSSL .so files we built from source"
+fallback that follows ships the 3.0.15 HAProxy was compiled and linked
+against. On riscv64 that fallback skips both sonames because Rocky 10's
+copies are already in lib/.
+
+Point that ldd walk at the OpenSSL built here, on riscv64 only. Keep it
+scoped to the collect_deps call: exported for the rest of the script,
+it also reaches binutils, whose readelf links libcurl through
+libdebuginfod, and Rocky 10's libcurl needs a newer OpenSSL than 3.0.15
+exports, so every later readelf fails to start:
+
+    readelf: .../lib/libssl.so.3: version `OPENSSL_3.2.0' not found (required by /lib64/lp64d/libcurl.so.4)
+
+which silently turned the script's hardening checks into "NO".
+
+Upstream-Status: Inappropriate [manylinux2014 (x86_64/aarch64) has no libssl.so.3 on the default loader path, so upstream's targets already vendor the OpenSSL they build]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/ci/build/build-haproxy-dist.sh b/ci/build/build-haproxy-dist.sh
+--- a/ci/build/build-haproxy-dist.sh
++++ b/ci/build/build-haproxy-dist.sh
+@@ -244,7 +244,17 @@ collect_deps() {
+     done
+ }
+ 
+-collect_deps "$STAGE_DIR/haproxy"
++if [ "$ARCH_LABEL" = "riscv64" ]; then
++    # manylinux_2_39_riscv64 (Rocky 10) ships its own libssl.so.3/libcrypto.so.3
++    # on the default loader path, which manylinux2014 doesn't, so a plain ldd
++    # would vendor Rocky's OpenSSL instead of the one built above. Scope this to
++    # the ldd walk: exported script-wide it also reaches binutils, whose
++    # readelf links libcurl (via libdebuginfod) and then fails to start against
++    # this older OpenSSL.
++    LD_LIBRARY_PATH="$OPENSSL_LIB_DIR" collect_deps "$STAGE_DIR/haproxy"
++else
++    collect_deps "$STAGE_DIR/haproxy"
++fi
+ 
+ # Also vendor the OpenSSL .so files we built from source — ldd sees them by
+ # their build path, but make sure their sonames are in lib/.
