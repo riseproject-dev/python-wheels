@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/BobTheBuidler/faster-eth-utils/blob/v5.3.29/.github/workflows/release.yaml
+name: Build faster-eth-utils wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/faster-eth-utils.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-faster-eth-utils.yml'
+      - 'docs/packages/faster-eth-utils.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-faster-eth-utils.yml'
+      - 'docs/packages/faster-eth-utils.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: faster-eth-utils
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build faster-eth-utils ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      FASTER_ETH_UTILS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout faster-eth-utils ${{ env.FASTER_ETH_UTILS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: BobTheBuidler/faster-eth-utils
+          ref: v${{ env.FASTER_ETH_UTILS_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_EXTRAS: test
+          CIBW_TEST_REQUIRES: eth-hash[pycryptodome]
+          CIBW_TEST_SOURCES: tests fixtures build pyproject.toml
+          # Upstream tests via tox (tox.ini core env), not in cibuildwheel; the import assert catches a pure-Python wheel.
+          CIBW_TEST_COMMAND: >-
+            python -c "import faster_eth_utils.abi as m; assert m.__file__.endswith('.so'), m.__file__"
+            && python -m pytest tests/core
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: faster-eth-utils-${{ env.FASTER_ETH_UTILS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish faster-eth-utils ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: faster-eth-utils-${{ matrix.version }}-*-manylinux_riscv64
