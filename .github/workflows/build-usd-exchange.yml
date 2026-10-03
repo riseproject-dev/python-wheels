@@ -92,7 +92,10 @@ jobs:
           persist-credentials: false
 
       - name: Patch OpenUSD
-        run: git -C OpenUSD apply "${GITHUB_WORKSPACE}"/python-wheels/patches/usd-exchange/${{ env.USD_EXCHANGE_VERSION }}/00*.patch
+        run: git -C OpenUSD apply "${GITHUB_WORKSPACE}"/python-wheels/patches/usd-exchange/${{ env.USD_EXCHANGE_VERSION }}/0001-*.patch
+
+      - name: Patch usd-exchange
+        run: git apply "${GITHUB_WORKSPACE}"/python-wheels/patches/usd-exchange/${{ env.USD_EXCHANGE_VERSION }}/0002-*.patch
 
       - name: Pull manylinux_riscv64 image
         run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
@@ -294,6 +297,13 @@ jobs:
           "/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin/python" -m venv "${VENV}"
           wheel="$(echo /work/dist/*.whl)"
           "${VENV}/bin/python" -m pip install "${wheel}[test]"
+
+          # usdex's own test extra declares usd-validation-nvidia as an open range (py_package.py), so pip installs
+          # whatever is newest; usdex.test's ValidationRules only recognizes the exact release pinned in
+          # repo_tools.toml (a newer one can rename the native-validator adapter it registers, which breaks the
+          # ShaderSdrCompliance issue filter in testMaterialAlgo.py - see CLAUDE.md gotcha 629), so repin exactly.
+          usd_validation_version="$(sed -n 's/^usd_validation_version = "\(.*\)"$/\1/p' tools/repoman/repo_tools.toml)"
+          "${VENV}/bin/python" -m pip install "usd-validation-nvidia==${usd_validation_version}"
 
           unset PYTHONPATH
           "${VENV}/bin/python" tools/pyproject/check_wheel_imports.py
