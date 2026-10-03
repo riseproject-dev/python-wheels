@@ -1,0 +1,297 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `python-wheels` job of
+# https://github.com/kreuzberg-dev/kreuzberg-lts/blob/v4.10.2/.github/workflows/publish.yaml
+# and, for the libpdfium it embeds, the `build` job of
+# https://github.com/bblanchon/pdfium-binaries/blob/chromium/7678/.github/workflows/build.yml
+name: Build kreuzberg wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/kreuzberg.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-kreuzberg.yml'
+      - 'docs/packages/kreuzberg.yaml'
+      - 'patches/kreuzberg/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-kreuzberg.yml'
+      - 'docs/packages/kreuzberg.yaml'
+      - 'patches/kreuzberg/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: kreuzberg
+      version: ${{ inputs.version }}
+
+  # bblanchon/pdfium-binaries publishes no linux-riscv64 asset, so its own recipe is run
+  # for riscv64, cross-compiling from x64 exactly as it does for its linux-arm64 asset.
+  build_pdfium:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pdfium for kreuzberg ${{ matrix.version }} linux-riscv64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+
+    env:
+      KREUZBERG_VERSION: ${{ matrix.version }}
+      PDFium_TARGET_OS: linux
+      PDFium_TARGET_CPU: riscv64
+      PDFium_ENABLE_V8: false
+      PDFium_IS_DEBUG: false
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: pdfium-binaries
+
+    steps:
+      - name: Checkout kreuzberg v${{ env.KREUZBERG_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: kreuzberg-dev/kreuzberg-lts
+          ref: v${{ env.KREUZBERG_VERSION }}
+          path: kreuzberg
+          sparse-checkout: .github/workflows
+          persist-credentials: false
+
+      - name: Read the pdfium release kreuzberg pins
+        working-directory: kreuzberg
+        run: |
+          version=$(sed -nE 's/^  PDFIUM_VERSION: "([0-9]+)"$/\1/p' .github/workflows/publish.yaml)
+          test -n "${version}"
+          echo "PDFium_BRANCH=chromium/${version}" >> "${GITHUB_ENV}"
+
+      - name: Checkout pdfium-binaries ${{ env.PDFium_BRANCH }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: bblanchon/pdfium-binaries
+          ref: ${{ env.PDFium_BRANCH }}
+          path: pdfium-binaries
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Set environment variables
+        run: steps/00-environment.sh
+
+      - name: Install (1/2)
+        run: steps/01-install.sh
+
+      - name: Checkout PDFium
+        run: steps/02-checkout.sh
+        timeout-minutes: 15
+
+      - name: Apply patches
+        run: steps/03-patch.sh
+
+      - name: Apply riscv64 patches
+        working-directory: pdfium-binaries/pdfium
+        run: git apply -v ../../python-wheels/patches/kreuzberg/${{ env.KREUZBERG_VERSION }}/*.patch
+
+      - name: Install Extras
+        run: steps/04-install-extras.sh
+
+      - name: Configure
+        run: |
+          steps/05-configure.sh
+          cat pdfium/out/args.gn
+
+      - name: Build
+        run: steps/06-build.sh
+
+      - name: Stage
+        run: steps/07-stage.sh
+
+      - name: Collect licenses
+        run: steps/08-licenses.sh
+
+      - name: Check the glibc floor fits manylinux_2_39
+        run: |
+          readelf --dyn-syms --wide staging/lib/libpdfium.so | grep -w FPDF_InitLibraryWithConfig
+          glibc=$(readelf --version-info --wide staging/lib/libpdfium.so | grep -o 'GLIBC_2\.[0-9]*' | sort -uV | tail -n 1)
+          echo "libpdfium.so needs ${glibc}"
+          test "$(printf '%s\nGLIBC_2.39\n' "${glibc}" | sort -V | tail -n 1)" = GLIBC_2.39
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: kreuzberg-${{ env.KREUZBERG_VERSION }}-pdfium-linux-riscv64
+          path: pdfium-binaries/staging/
+          if-no-files-found: error
+
+  build_wheel:
+    needs: [setup, build_pdfium]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build kreuzberg ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 480
+
+    env:
+      KREUZBERG_VERSION: ${{ matrix.version }}
+      # Microsoft publishes no linux-riscv64 ONNX Runtime archive; take the library from our riscv64 wheel.
+      ORT_VERSION: "1.30.0"
+
+    steps:
+      - name: Checkout kreuzberg v${{ env.KREUZBERG_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: kreuzberg-dev/kreuzberg-lts
+          ref: v${{ env.KREUZBERG_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: kreuzberg-${{ env.KREUZBERG_VERSION }}-pdfium-linux-riscv64
+          path: pdfium-linux-riscv64
+
+      - name: Prepare wheel staging directory
+        run: mkdir -p target/wheels
+
+      # Upstream's wheel ships no licence text for itself or the pdfium, tesseract,
+      # leptonica and ONNX Runtime it links (versions pinned in the checkout).
+      - name: Stage licences
+        run: |
+          tesseract=$(sed -nE 's/^ *const TESSERACT_VERSION: &str = "(.*)";$/\1/p' crates/kreuzberg-tesseract/build.rs)
+          leptonica=$(sed -nE 's/^ *const LEPTONICA_VERSION: &str = "(.*)";$/\1/p' crates/kreuzberg-tesseract/build.rs)
+          test -n "${tesseract}" && test -n "${leptonica}"
+          cp LICENSE packages/python/LICENSE
+          cp pdfium-linux-riscv64/LICENSE packages/python/LICENSE.pdfium
+          for f in pdfium-linux-riscv64/licenses/*; do
+            cp "${f}" "packages/python/LICENSE.pdfium-$(basename "${f}")"
+          done
+          curl -fsSL -o packages/python/LICENSE.tesseract "https://raw.githubusercontent.com/tesseract-ocr/tesseract/${tesseract}/LICENSE"
+          curl -fsSL -o packages/python/LICENSE.leptonica "https://raw.githubusercontent.com/DanBloomberg/leptonica/${leptonica}/leptonica-license.txt"
+
+      - name: Build Linux wheels
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          args: --release -i python3.10 --out ../../target/wheels
+          target: riscv64gc-unknown-linux-gnu
+          manylinux: '2_39'
+          working-directory: packages/python
+          sccache: false
+          before-script-linux: |
+            set -euo pipefail
+            export CFLAGS="-std=gnu11"
+            export CXXFLAGS="-std=gnu++17"
+            export CMAKE_C_FLAGS="${CFLAGS}"
+            export CMAKE_CXX_FLAGS="${CXXFLAGS}"
+            rustup component add rust-src || true
+            yum install -y openssl openssl-devel pkgconfig
+            export OPENSSL_LIB_DIR=/usr/lib64
+            export OPENSSL_INCLUDE_DIR=/usr/include
+            export KREUZBERG_PDFIUM_PREBUILT="${GITHUB_WORKSPACE}/pdfium-linux-riscv64"
+            ORT_VERSION="${{ env.ORT_VERSION }}"
+            ORT_DIR="/tmp/onnxruntime-linux-riscv64-${ORT_VERSION}"
+            /opt/python/cp312-cp312/bin/python -m pip download --no-deps --only-binary :all: --python-version 3.12 --platform manylinux_2_39_riscv64 \
+              --index-url https://pypi.riseproject.dev/simple/ "onnxruntime==${ORT_VERSION}" -d /tmp/ort-wheel
+            mkdir -p "${ORT_DIR}/lib"
+            /opt/python/cp312-cp312/bin/python - /tmp/ort-wheel/onnxruntime-*.whl "${ORT_DIR}" <<'EOF'
+            import sys, zipfile
+            whl, ort_dir = sys.argv[1:]
+            z = zipfile.ZipFile(whl)
+            for name in z.namelist():
+                if name.startswith("onnxruntime/capi/libonnxruntime.so."):
+                    open(f"{ort_dir}/lib/{name.rsplit('/', 1)[1]}", "wb").write(z.read(name))
+                elif name == "onnxruntime/LICENSE":
+                    open("LICENSE.onnxruntime", "wb").write(z.read(name))
+            EOF
+            ln -sf "libonnxruntime.so.${ORT_VERSION}" "${ORT_DIR}/lib/libonnxruntime.so.1"
+            ln -sf "libonnxruntime.so.${ORT_VERSION}" "${ORT_DIR}/lib/libonnxruntime.so"
+            cp "${ORT_DIR}"/lib/libonnxruntime.so* /usr/lib/
+            export ORT_LIB_LOCATION="${ORT_DIR}/lib"
+            export ORT_PREFER_DYNAMIC_LINK=1
+
+      - name: List built wheels
+        run: ls -lh target/wheels
+
+      - name: Check wheel contents
+        run: |
+          python3 - target/wheels/*.whl <<'EOF'
+          import sys, zipfile
+
+          (whl,) = sys.argv[1:]
+          assert whl.endswith("-cp310-abi3-manylinux_2_39_riscv64.whl"), whl
+          names = zipfile.ZipFile(whl).namelist()
+          assert "kreuzberg/_internal_bindings.abi3.so" in names, names
+          assert any(n.startswith("kreuzberg.libs/libonnxruntime") for n in names), names
+          licences = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+          for licence in ("LICENSE", "LICENSE.pdfium", "LICENSE.pdfium-freetype.txt", "LICENSE.tesseract", "LICENSE.leptonica", "LICENSE.onnxruntime"):
+              assert licence in licences, (licence, sorted(licences))
+          print(whl, sorted(licences))
+          EOF
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      # The checkout's packages/python/kreuzberg would shadow the installed wheel.
+      - name: Remove the source package
+        run: rm -rf packages/python/kreuzberg pdfium-linux-riscv64
+
+      - name: Smoke test wheel
+        run: |
+          uv pip install --no-index --find-links target/wheels kreuzberg
+          python scripts/python/print_kreuzberg_version.py
+
+      - name: Run binding tests
+        working-directory: packages/python
+        run: |
+          uv pip install httpx pytest pytest-asyncio pytest-mock pytest-rerunfailures pytest-timeout
+          python -m pytest tests -v
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: kreuzberg-${{ env.KREUZBERG_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: target/wheels/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish kreuzberg ${{ matrix.version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: kreuzberg-${{ matrix.version }}-*-manylinux_riscv64
