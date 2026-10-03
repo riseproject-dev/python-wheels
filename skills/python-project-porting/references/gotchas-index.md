@@ -1455,6 +1455,9 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
   architecture (even for a diagonal matrix), so gotcha 170's dtype trap now fails an older
   release on x86_64 too — check `eig(...)[1].dtype` under numpy 2.5 vs 2.4 on any host, then
   backport upstream's `eigh` fix rather than pinning numpy (the mdanalysis case).
+- **628** — An upstream aarch64 `test-skip` backed by "N tests fail" is often x86-hardcoded
+  SIMD-alignment / `/proc/cpuinfo` `flags` tests — match the count on riscv64 and deselect
+  exactly that set, class-qualified where names are shared (the pyfftw case).
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
