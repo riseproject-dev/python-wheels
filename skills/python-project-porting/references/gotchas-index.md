@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (554 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -1179,6 +1179,7 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
 - **361** — Gotcha 29's `pkg_resources` removal also bites `CIBW_TEST_REQUIRES`, not just a
 - **367** — A `setup.py`'s own "distributor customization" import hook can go silently
 - **588** — setuptools-scm >= 10.2 breaks every cp39 build whose in-tree backend declares
+- **629** — A *test-only* dependency pinned upstream as an open range drifts out from
 
 ### Testing: test-sources & shadowing — [`gotchas/testing-and-shadowing.md`](gotchas/testing-and-shadowing.md)
 
@@ -1458,6 +1459,10 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
 - **628** — An upstream aarch64 `test-skip` backed by "N tests fail" is often x86-hardcoded
   SIMD-alignment / `/proc/cpuinfo` `flags` tests — match the count on riscv64 and deselect
   exactly that set, class-qualified where names are shared (the pyfftw case).
+- **630** — OpenUSD's own unconditional `ArchWarn: ARCH_CACHE_LINE_SIZE !=
+  Arch_ObtainCacheLineSize()` (no env var gates it) fails the one usd-exchange test
+  asserting a subprocess's stderr is byte-for-byte empty — deselect that one test with a
+  source patch, since `python -m unittest` has no `-k`.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 

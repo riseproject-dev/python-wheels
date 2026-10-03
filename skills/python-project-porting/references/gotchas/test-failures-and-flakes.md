@@ -134,6 +134,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
 - **628** — Tests that hardcode x86 SIMD alignment (16/32 bytes) or read `/proc/cpuinfo`'s
   `flags` fail as a fixed, countable set on every non-x86 arch; an upstream that `test-skip`s
   the whole suite on aarch64 for "N failing tests" is usually this — match N, deselect only those.
+- **630** — OpenUSD's own `ArchWarn: ARCH_CACHE_LINE_SIZE != Arch_ObtainCacheLineSize()`
+  (unconditional, no env var gates it) fails the one usd-exchange test asserting a
+  subprocess's stderr is byte-for-byte empty — deselect that one test via a source patch,
+  `python -m unittest` has no `-k`.
 
 ---
 
@@ -1885,3 +1889,50 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
       stub file of `unittest.TestCase` classes carrying the real names (plain classes not named
       `Test*` are not collected, so the stub collects nothing). Same "don't inherit the
       arch-wide skip" reasoning as gotcha 304, different failure shape.
+
+630. **OpenUSD's own startup diagnostic can fail a test that asserts a subprocess's
+    stderr is byte-for-byte empty — gotcha 484's "cache-line warning is not a failure"
+    is true of the *build*, but a test that checks stderr exactly has no such tolerance
+    (the usd-exchange case).** `testSettings.py::SettingsTest::testEnableTranscodingSetting`
+    spawns `python -c "import usdex.core; ..."` and asserts `result.stderr == ""`. On
+    riscv64 it instead gets `" ArchWarn: ARCH_CACHE_LINE_SIZE != Arch_ObtainCacheLineSize()\n
+    Function: Arch_ValidateAssumptions\n File: .../pxr/base/arch/assumptions.cpp\n Line: 140\n"`
+    — the exact diagnostic gotcha 484 already explains: `pxr/base/arch/align.h` hardcodes
+    `ARCH_CACHE_LINE_SIZE` to 64 for every arch except Apple ARM (128), riscv64 falls into
+    that 64 default, and `Arch_ObtainCacheLineSize()` (`sysconf(_SC_LEVEL1_DCACHE_LINESIZE)`
+    on Linux) disagrees on these runners, so `Arch_ValidateAssumptions()` prints the warning
+    on *every* process that imports `pxr` — unconditionally, with no `PXR_*`/`TF_DEBUG`
+    env var gating it (`ArchWarn` is `fprintf(stderr, ...)` straight out of
+    `arch/error.cpp`, below the `Tf` diagnostics layer the rest of OpenUSD's env settings
+    control). The suite's own `assertEnvSetting` helper already strips every `PXR_*` env
+    var before each subprocess specifically to get a clean stderr baseline (see its
+    comment on `PXR_WORK_THREAD_LIMIT`), which shows upstream is aware stderr noise is
+    possible — just not of this particular, arch-unconditional source.
+    - **Sibling tests in the same file survive because they assert a regex, not equality.**
+      `testDisableTranscodingSetting`/`testInvalidTranscodingSetting` use
+      `assertRegex(result.stderr, pattern)` (a search, not a full match), so the extra
+      `ArchWarn` line is invisible to them; only the one test with
+      `expectedOutputPattern=""` → `assertEqual(result.stderr, "")` is exposed. Diffing
+      which of the three nearly-identical tests fails is the fast way to notice this is a
+      stderr-content gotcha, not a transcoding-logic one.
+    - **There is no clean constant to patch in, unlike a true missing-arch gap.** Unlike
+      gotcha 442's SIMD gates (a scalar fallback exists to select), riscv64 implementations
+      do not share one L1 cache-line size the way x86_64 effectively does — hardcoding
+      *this* runner's `sysconf` value into `align.h` would be wrong on a different riscv64
+      board, and the check exists precisely to catch that mismatch. Patching OpenUSD's
+      arch-assumption diagnostic away is the wrong fix for a one-test problem; gotcha 628's
+      aarch64-SIMD precedent (and gotcha 304's "don't inherit the arch-wide skip") both land
+      on the same answer here: deselect narrowly.
+    - **`python -m unittest discover` has no `-k`/deselect flag (unlike pytest's gotcha
+      14/33), so the deselection has to live in the test source itself.** Add a one-line
+      `@unittest.skipIf(platform.machine() == "riscv64", "...")` above the one affected
+      `def test...` via a `patches/<pkg>/<version>/NNNN-*.patch` against the project's own
+      checkout (not the vendored dependency's — here that means a *second* `git apply`
+      step pointed at the project root, since the existing "Patch OpenUSD" step's glob only
+      ever touched the nested `OpenUSD/` checkout; naming the two patch files `0001-*`
+      against the dependency and `0002-*` against the project and giving each `git apply`
+      step an explicit, non-overlapping glob keeps one step from trying to apply the
+      other's patch to the wrong tree). Tag it `Upstream-Status: Inappropriate` — the
+      `ArchWarn` is upstream's own intentional diagnostic, correctly firing; the gap is
+      that one test's assertion has no tolerance for it, which is a CI-environment fact
+      about riscv64 hardware diversity, not a bug to report upstream.
