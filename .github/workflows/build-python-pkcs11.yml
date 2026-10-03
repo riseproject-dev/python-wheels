@@ -32,6 +32,8 @@ permissions:
 
 env:
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Upstream tests against SoftHSMv2 main for ML-DSA; pinned here for reproducibility.
+  SOFTHSM_REF: 884cb38f3d2012a0447bd5f50dbd29c429987c41
 
 jobs:
   setup:
@@ -45,7 +47,7 @@ jobs:
     if: needs.setup.outputs.versions != '[]'
     name: Build python-pkcs11 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -71,15 +73,24 @@ jobs:
           only: ${{ matrix.python }}-manylinux_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: |
+            set -euo pipefail
+            dnf install -y --setopt=install_weak_deps=False autoconf automake libtool openssl openssl-devel
+            curl -sSfL https://github.com/softhsm/SoftHSMv2/archive/${{ env.SOFTHSM_REF }}.tar.gz | tar xz -C /tmp
+            cd /tmp/SoftHSMv2-${{ env.SOFTHSM_REF }}
+            ./autogen.sh
+            ./configure --prefix=/usr --disable-gost --enable-mldsa
+            make -j"$(nproc)"
+            make install
+            mkdir -p /opt/softhsm_tokens
+            echo "directories.tokendir = /opt/softhsm_tokens" > /opt/softhsm2.conf
           CIBW_ENVIRONMENT: >-
             SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PYTHON_PKCS11=${{ env.PYTHON_PKCS11_VERSION }}
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # Upstream's tests.yml runs the suite against a SoftHSM token; Rocky 10 ships SoftHSM 2.6.1.
-          CIBW_BEFORE_TEST_LINUX: >-
-            dnf install -y --setopt=install_weak_deps=False softhsm openssl &&
-            softhsm2-util --init-token --free --label TEST --pin 1234 --so-pin 5678
+            SOFTHSM2_CONF=/opt/softhsm2.conf
+          CIBW_BEFORE_TEST_LINUX: softhsm2-util --init-token --free --label TEST --pin 1234 --so-pin 5678
           CIBW_TEST_ENVIRONMENT: >-
-            PKCS11_MODULE=/usr/lib64/pkcs11/libsofthsm2.so
+            PKCS11_MODULE=/usr/lib/softhsm/libsofthsm2.so
             PKCS11_TOKEN_LABEL=TEST
             PKCS11_TOKEN_PIN=1234
             PKCS11_TOKEN_SO_PIN=5678
