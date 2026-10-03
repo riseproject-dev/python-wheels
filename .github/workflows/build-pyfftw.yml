@@ -1,0 +1,163 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the build_linux_wheels job of
+# https://github.com/pyFFTW/pyFFTW/blob/v0.15.1/.github/workflows/wheel_tests_and_release.yml
+name: Build pyfftw wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyfftw.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyfftw.yml'
+      - 'docs/packages/pyfftw.yaml'
+      - 'patches/pyfftw/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyfftw.yml'
+      - 'docs/packages/pyfftw.yaml'
+      - 'patches/pyfftw/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyfftw
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyfftw ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      PYFFTW_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyFFTW v${{ env.PYFFTW_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pyFFTW/pyFFTW
+          ref: v${{ env.PYFFTW_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply python-wheels/patches/pyfftw/${{ env.PYFFTW_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream's before-all, plus the notice for the libfftw3* that
+          # auditwheel vendors (upstream's wheels ship none).
+          CIBW_BEFORE_ALL_LINUX: >-
+            yum install -y fftw-devel &&
+            cp /usr/share/licenses/fftw-libs-double/COPYING {project}/LICENSE.fftw
+          CIBW_ENVIRONMENT: >-
+            PIP_PREFER_BINARY=true
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PYFFTW=${{ env.PYFFTW_VERSION }}
+
+      - name: Check the wheel vendors FFTW and ships its licence
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              libs = {n.split("/")[1].split("-")[0] for n in names if n.startswith("pyfftw.libs/")}
+              assert {"libfftw3", "libfftw3f", "libfftw3l", "libfftw3_omp"} <= libs, (whl, libs)
+              licences = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+              assert licences == {"LICENSE.txt", "LICENSE.fftw"}, (whl, licences)
+              print(whl, "ok", sorted(libs))
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyfftw-${{ env.PYFFTW_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      PYFFTW_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # auditwheel vendors libfftw3* (GPL-2.0-or-later) and the -fopenmp libgomp.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc fftw
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyfftw-${{ env.PYFFTW_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyfftw ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyfftw-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: pyfftw-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc, fftw
