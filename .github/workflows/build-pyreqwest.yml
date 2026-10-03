@@ -1,0 +1,172 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build` + `test-builds-arch` jobs of
+# https://github.com/MarkusSintonen/pyreqwest/blob/v0.12.4/.github/workflows/ci.yml
+name: Build pyreqwest wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyreqwest.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyreqwest.yml'
+      - 'docs/packages/pyreqwest.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyreqwest.yml'
+      - 'docs/packages/pyreqwest.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  CI: 1
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyreqwest
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyreqwest ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      PYREQWEST_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyreqwest v${{ env.PYREQWEST_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: MarkusSintonen/pyreqwest
+          ref: v${{ env.PYREQWEST_VERSION }}
+          persist-credentials: false
+
+      # No musl target: rustup.rs ships no riscv64 musl toolchain.
+      - name: Build wheels
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          manylinux: '2_39'
+          args: --release --out dist --features mimalloc --interpreter python3.12 python3.13 python3.14 python3.14t
+          rust-toolchain: stable
+          docker-options: -e CI
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - name: Verify the wheels ship the compiled extension
+        run: |
+          set -euo pipefail
+          ls -lh dist/
+          for whl in dist/*.whl; do
+            python3 - "$whl" <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = [n for n in names if n.startswith("pyreqwest/_pyreqwest.") and n.endswith(".so")]
+          assert sos, names
+          assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
+          print(sys.argv[1], "->", sos)
+          EOF
+          done
+          [ "$(ls dist/*.whl | wc -l)" -eq 4 ]
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyreqwest-${{ env.PYREQWEST_VERSION }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    name: Test pyreqwest ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    env:
+      PYREQWEST_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+      UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_ONLY_BINARY: ':all:'
+
+    steps:
+      - name: Checkout pyreqwest v${{ env.PYREQWEST_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: MarkusSintonen/pyreqwest
+          ref: v${{ env.PYREQWEST_VERSION }}
+          persist-credentials: false
+
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: pyreqwest-${{ env.PYREQWEST_VERSION }}-manylinux_riscv64
+          path: dist
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      # The test-time half of upstream's `dev` group at its uv.lock pins; granian is
+      # unpinned because its locked 2.7.9 has no riscv64 wheel.
+      - name: Install test dependencies
+        run: >-
+          uv pip install
+          pytest==9.1.1 pytest-asyncio==1.4.0 syrupy==5.5.3 dirty-equals==0.11
+          granian asgi-types==0.2.0 starlette==1.3.1 pydantic==2.13.4
+          trustme==1.2.1 cryptography==49.0.0 requests-toolbelt==1.0.0
+          httpx==0.28.1 yarl==1.24.5 multidict==6.7.1 docker==7.2.0 packaging==26.2
+
+      - name: Install wheel
+        run: uv pip install pyreqwest --no-index --no-deps --find-links dist --force-reinstall
+
+      - name: Test wheel
+        run: |
+          python -c "import pyreqwest._pyreqwest as m; assert m.__file__.endswith('.so'), m.__file__"
+          pytest --ignore=tests/test_examples.py
+          pytest tests/pytest_mock/test_plugin_external.py
+
+  publish:
+    name: Publish pyreqwest ${{ matrix.version }}
+    needs: [setup, build_wheels, test_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyreqwest-${{ matrix.version }}-manylinux_riscv64
