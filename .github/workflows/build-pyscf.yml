@@ -1,0 +1,255 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow follows upstream's own release-pypi-aarch64 job:
+# https://github.com/pyscf/pyscf/blob/master/.github/workflows/publish.yml
+name: Build pyscf wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyscf.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyscf.yml'
+      - 'docs/packages/pyscf.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyscf.yml'
+      - 'docs/packages/pyscf.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  LIBCINT_VERSION: v6.1.3
+  LIBXC_VERSION: '7.0.0'
+  XCFUN_REF: a89b783
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyscf
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyscf ${{ matrix.version }} py3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    env:
+      PYSCF_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyscf v${{ env.PYSCF_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pyscf/pyscf
+          ref: v${{ env.PYSCF_VERSION }}
+          path: pyscf
+          persist-credentials: false
+
+      - name: Build wheel
+        run: |
+          mkdir -p wheelhouse
+          set -o pipefail
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" -w /work/pyscf \
+            -e LIBCINT_VERSION -e LIBXC_VERSION -e XCFUN_REF \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT' 2>&1 | tee build.log
+          set -eux
+
+          dnf -y install openblas-devel gcc
+
+          # Upstream's own official Linux wheels ship no licence for any of these;
+          # send this fix upstream too.
+          curl -fsSLo LICENSE.libcint "https://raw.githubusercontent.com/sunqm/libcint/${LIBCINT_VERSION}/LICENSE"
+          curl -fsSLo LICENSE.libxc "https://gitlab.com/libxc/libxc/-/raw/${LIBXC_VERSION}/COPYING"
+          curl -fsSLo LICENSE.xcfun "https://raw.githubusercontent.com/dftlibs/xcfun/${XCFUN_REF}/LICENSE.md"
+          cp /usr/share/licenses/openblas/LICENSE LICENSE.openblas
+
+          PYTHON_BIN=/opt/python/cp312-cp312/bin/python
+          export PATH="/opt/python/cp312-cp312/bin:${PATH}"
+          "${PYTHON_BIN}" -m pip install -q -U pip setuptools wheel auditwheel
+
+          export PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          export PIP_ONLY_BINARY=cmake
+          # WITH_F12/ENABLE_SMD=OFF matches upstream's own macOS build; the Linux
+          # jobs turn ENABLE_SMD on, which also links in pyscf's own GPLv3-licensed
+          # MNSOL solvent code (pyscf/lib/solvent), kept out of scope here.
+          export CMAKE_CONFIGURE_ARGS="-DWITH_F12=OFF -DENABLE_SMD=OFF"
+          export CMAKE_BUILD_PARALLEL_LEVEL=4
+          "${PYTHON_BIN}" -m pip wheel -v --no-deps --no-clean -w /tmp/wheelhouse .
+
+          auditwheel repair /tmp/wheelhouse/pyscf-*.whl --lib-sdir /lib -w /work/wheelhouse
+          SCRIPT
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyscf-${{ env.PYSCF_VERSION }}-build-log
+          path: build.log
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyscf-${{ env.PYSCF_VERSION }}-py3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+      - name: Test wheel
+        run: |
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" -w /work/pyscf \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          PYTHON_BIN=/opt/python/cp312-cp312/bin/python
+          "${PYTHON_BIN}" -m pip install -q --only-binary=:all: /work/wheelhouse/*.whl
+          "${PYTHON_BIN}" -m pip install -q pytest
+
+          # cd out of /work/pyscf first (gotcha 612): the build step's --no-clean
+          # pip wheel leaves pyscf.egg-info there, and `python -c` puts cwd on
+          # sys.path[0], so importlib.metadata resolves that stale egg-info instead
+          # of the installed wheel and the licence check below sees an empty set.
+          cd /tmp
+          licences=$("${PYTHON_BIN}" -c "
+          import importlib.metadata as m
+          print(sorted(p.name for p in m.files('pyscf') if '.dist-info/licenses/' in str(p)))
+          ")
+          echo "$licences"
+          "${PYTHON_BIN}" -c "
+          import importlib.metadata as m
+          names = {p.name for p in m.files('pyscf') if '.dist-info/licenses/' in str(p)}
+          expected = {'LICENSE', 'NOTICE', 'LICENSE.libcint', 'LICENSE.libxc', 'LICENSE.xcfun', 'LICENSE.openblas'}
+          assert expected <= names, names
+          "
+
+          echo 'pbc_tools_pbc_fft_engine = "NUMPY"' > .pyscf_conf.py
+          echo 'scf_hf_SCF_mute_chkfile = True' >> .pyscf_conf.py
+          export PYSCF_CONFIG_FILE=/tmp/.pyscf_conf.py
+          export OMP_NUM_THREADS=1
+          ulimit -s 20000
+          "${PYTHON_BIN}" -c "import pyscf; from pyscf import gto, scf
+          mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g')
+          mf = scf.RHF(mol).run()
+          assert abs(mf.e_tot - (-1.1167)) < 1e-3, mf.e_tot
+          print('HF energy ok:', mf.e_tot)"
+
+          # Rename the checkout's package dir before collection (gotcha 618): even under
+          # pytest.ini's --import-mode=importlib, a test nested inside the package gets its
+          # ancestor packages imported straight off disk by walking up __init__.py files, so
+          # pyscf itself loads from this in-place build, not the installed wheel. Renaming
+          # breaks the name match and pyscf/__init__.py's own `from pyscf import lib` then
+          # falls through to the installed copy via normal sys.path.
+          mv /work/pyscf/pyscf /work/pyscf/pyscf-src
+          # pytest's Package.setup() still imports each package __init__.py it collects
+          # through, and resolves names only up to the non-identifier `pyscf-src`, so
+          # grad/__init__.py runs again as a top-level `grad` whose rhf.py rebinds the
+          # installed scf.hf.RHF.Gradients to a duplicate class (tools/test/test_finite_diff.py
+          # then fails isinstance(..., GradientsBase)). No pyscf test dir has an __init__.py,
+          # so dropping these changes nothing collected and imports nothing from the checkout.
+          find /work/pyscf/pyscf-src -name __init__.py -delete
+          # Run from the checkout root like upstream's CI: pytest anchors pytest.ini's
+          # --ignore-glob patterns (*_slow*.py, *test_bz*, ...) at the cwd, so from /tmp none
+          # matched. The pytest script, unlike `python -m`, keeps the cwd (and gotcha 612's
+          # stale egg-info) off sys.path.
+          cd /work/pyscf
+          # Deselected for riscv64 rounding at the edge of each test's own numerical noise
+          # (gotcha 304), none is a wrong result:
+          # - pbc/grad *_stress test_get_vxc_*: analytic XC stress vs a 1e-5 central difference
+          #   of the XC grid energy. The bound (1e-9; 1e-8 for kuks) is only 28-45 ULP of that
+          #   energy; riscv64 lands at 48-67 ULP (1.06e-9 to 1.48e-9; 2.06e-8). The full-SCF
+          #   test_{lda,gga}_vs_finite_difference stress checks in the same files pass.
+          # - test_davidson_diag_matrix: for a = 2*I the eigenvalue is 2*dot(x, x) of a
+          #   normalised x, and assertAlmostEqual on that size-1 array passes only when it is
+          #   bit-exactly 2.0; a 1-ULP ddot difference raises TypeError (no ndarray.__round__).
+          # - test_weight_orth: norm of (wSw)^-1/2 for a cond-6e7 random Gram matrix, asserted
+          #   to 8 places. riscv64 is 6.5e-9 off; on x86_64 a 1-ULP perturbation of S alone
+          #   moves it by up to 4.6e-9. Its orthonormality assertion passes.
+          /opt/python/cp312-cp312/bin/pytest pyscf-src -c pytest.ini \
+            --ignore=/work/pyscf/pyscf-src/adc \
+            --ignore=/work/pyscf/pyscf-src/pbc/df \
+            --ignore=/work/pyscf/pyscf-src/pbc/cc \
+            --ignore=/work/pyscf/pyscf-src/solvent \
+            --ignore=/work/pyscf/pyscf-src/grad/test/test_ucasci.py \
+            --deselect pyscf-src/pbc/grad/test/test_krks_stress.py::KnownValues::test_get_vxc_gga \
+            --deselect pyscf-src/pbc/grad/test/test_krks_stress.py::KnownValues::test_get_vxc_lda \
+            --deselect pyscf-src/pbc/grad/test/test_kuks_stress.py::KnownValues::test_get_vxc_gga \
+            --deselect pyscf-src/pbc/grad/test/test_rks_stress.py::KnownValues::test_get_vxc_gga \
+            --deselect pyscf-src/pbc/grad/test/test_rks_stress.py::KnownValues::test_get_vxc_lda \
+            --deselect pyscf-src/pbc/grad/test/test_rks_stress.py::KnownValues::test_get_vxc_mgga \
+            --deselect pyscf-src/lib/test/test_linalg_helper.py::KnownValues::test_davidson_diag_matrix \
+            --deselect pyscf-src/lo/test/test_orth.py::KnownValues::test_weight_orth
+          SCRIPT
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      PYSCF_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # OpenBLAS is compiled with gfortran and pyscf links OpenMP, so
+      # auditwheel vendors the image's libgfortran and libgomp.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyscf-${{ env.PYSCF_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyscf ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyscf-${{ matrix.version }}-py3-manylinux_riscv64
+      gpl-sources-artifact: pyscf-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc

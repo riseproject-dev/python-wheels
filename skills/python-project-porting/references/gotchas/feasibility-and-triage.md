@@ -303,6 +303,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **623** — A libFuzzer/sanitizer package whose upstream pins a pre-riscv64 LLVM is not blocked:
   check the fuzzer arch list per LLVM tag, then the distro's `compiler-rt` file list (the atheris
   case).
+- **627** — A binding to a Qt module that embeds Chromium inherits Chromium's arch list *at the
+  Qt line's frozen Chromium fork*: Qt5 WebEngine is pinned to Chromium 87, which has no riscv64,
+  so check the fork's `build_config.h` and the distros before anything else (the pyqtwebengine
+  case).
 
 ---
 
@@ -5283,3 +5287,38 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     Record the upstream pin's version in the workflow comment. It is the reason this port
     deviates from upstream's recipe, and it is what to re-check if upstream ever bumps its
     LLVM to 17 or later.
+
+627. **A binding to a Chromium-embedding Qt module inherits the arch list of the Qt line's
+    frozen Chromium fork — read that fork, not "does Chromium support riscv64 today".**
+    PyQtWebEngine 5.15.7 looks small: a cp38-abi3 sdist with three SIP binding sets. But it
+    compiles against Qt5 WebEngine, and Qt5 WebEngine is not "Chromium", it is
+    `qt/qtwebengine-chromium` branch **`87-based`** (Chromium 87.0.4280.144, frozen; the 5.15
+    LTS line only takes security backports, it never rebases). Chromium gained
+    `ARCH_CPU_RISCV64` years later. Four read-only checks settle it, no checkout needed:
+    - **The fork's arch gate.** `chromium/build/build_config.h?h=87-based` on code.qt.io has no
+      riscv branch and ends in `#error Please add support for your architecture`; the same file
+      on `130-based` has `ARCH_CPU_RISCV64`. Qt's own wrappers agree: qtwebengine 5.15
+      `configure.pri` `qtConfTest_detectArch` accepts only i386/x86_64/arm/arm64/mips/mips64, and
+      `mkspecs/features/functions.prf` `gnArch` returns `unknown` for anything else.
+    - **The distros.** If Debian (which has an official riscv64 port) lists the WebEngine
+      package as `Architecture: amd64 arm64 armhf i386` in `debian/control`, nobody has carried
+      the patches there. Then check Arch Linux RISC-V (`felixonmars/archriscv-packages`
+      directory names, or the `archriscv.felixc.at/repo/extra/` listing) and openSUSE's
+      `ports/riscv/tumbleweed` repo: both carry Qt **6** WebEngine on riscv64 (via
+      `riscv64.patch`/`riscv-v8.patch`/`riscv-sandbox.patch`/`riscv-dav1d.patch`), neither has
+      Qt5 WebEngine. A downstream patch set for one Qt major does not transfer to the other,
+      because the Chromium underneath differs by ~40 majors.
+    - **Upstream Qt's tracker.** Jira moved to `qt-project.atlassian.net`; query
+      `/rest/api/3/search/jql` with `component = WebEngine AND summary ~ "riscv"`. QTBUG-132451
+      ("Add QtWebEngine support for riscv64") is unresolved and only cites the openSUSE Qt6
+      patches.
+    - **Scale, even if it were patched.** A full Chromium build is far beyond V8 alone, and
+      this repo's V8-only mini-racer port needed ~23h30m for 1970/2176 steps (see
+      `build-mini-racer.yml`'s 48h timeout). For Chromium 87 it is not even "patch a few CPU
+      tables": it would be a new-architecture port of a 2020 Chromium (V8 8.7 predates the
+      upstream riscv64 backend), plus the rest of Qt5 from source, since Rocky 10 ships no Qt5.
+    Park the binding with this evidence, and say in the note where riscv64 users should go
+    instead (here: pyqt6-webengine, whose Qt6 WebEngine has working downstream riscv64 builds).
+    The same reasoning covers any binding to a module of a frozen LTS line that vendors a
+    browser engine, such as `PyQtWebEngine-Qt5`, Qt5 `QtWebView`, or CEF-based wrappers pinned
+    to an old CEF branch.

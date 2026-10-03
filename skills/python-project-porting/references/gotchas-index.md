@@ -467,6 +467,11 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
   compiler-rt's `ALL_FUZZER_SUPPORTED_ARCH` gained RISCV64 in LLVM 17, and Rocky 10's riscv64
   `compiler-rt` RPM already ships `libclang_rt.fuzzer_no_main.a` and the asan/ubsan archives,
   so `dnf install compiler-rt` plus `LIBFUZZER_LIB` replaces the LLVM build (the atheris case).
+- **627** — A binding to a Chromium-embedding Qt module inherits the arch list of that Qt
+  line's frozen Chromium fork: Qt5 WebEngine is `qtwebengine-chromium` `87-based` (Chromium 87,
+  no `ARCH_CPU_RISCV64`, `#error` in `build_config.h`), Debian/Arch RISC-V/openSUSE ship only Qt6
+  WebEngine on riscv64, and QTBUG-132451 is open. Park and point users at the Qt6 binding (the
+  pyqtwebengine case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -1064,6 +1069,9 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
   the segment auditwheel's patchelf prepends for the RPATH lands below it and the binary is
   killed at exec, silently behind a `subprocess.run` wrapper — `readelf -lW` the artifact, then
   link with `-Wl,-Ttext-segment=0x200000` or PIE (pygraphviz / python-gdcm / perf-analyzer).
+- **625** — Conan's `openssl` recipe maps riscv64 to `linux-generic32`; override with
+  `CONAN_OPENSSL_CONFIGURATION=linux-generic64`, not `linux64-riscv64`, whose AES asm `jal`
+  overflows `R_RISCV_JAL` when `libcrypto.a` is linked into a large `.so` (sqlcipher3).
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 
@@ -1443,6 +1451,13 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
   upstream's own CI matrix is a single `['3.12']` entry marked `# Currently unused` — drop
   `cp314` from the port's matrix instead of chasing the C++ (gotcha 322's pattern, settled by
   upstream signals per gotcha 149/468/542, not by debugging the crash).
+- **626** — Since numpy 2.5, `np.linalg.eig` returns complex eigenvectors on *every*
+  architecture (even for a diagonal matrix), so gotcha 170's dtype trap now fails an older
+  release on x86_64 too — check `eig(...)[1].dtype` under numpy 2.5 vs 2.4 on any host, then
+  backport upstream's `eigh` fix rather than pinning numpy (the mdanalysis case).
+- **628** — An upstream aarch64 `test-skip` backed by "N tests fail" is often x86-hardcoded
+  SIMD-alignment / `/proc/cpuinfo` `flags` tests — match the count on riscv64 and deselect
+  exactly that set, class-qualified where names are shared (the pyfftw case).
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
