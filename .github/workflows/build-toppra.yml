@@ -1,0 +1,129 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+name: Build toppra wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/toppra.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-toppra.yml'
+      - 'docs/packages/toppra.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-toppra.yml'
+      - 'docs/packages/toppra.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: toppra
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build toppra ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+    env:
+      TOPPRA_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout toppra ${{ env.TOPPRA_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: hungpham2511/toppra
+          ref: ${{ env.TOPPRA_VERSION }}
+          persist-credentials: false
+
+      # setup.py lives in python/, so setuptools' default licence glob never sees the root LICENSE (gotcha 86).
+      - name: Stage the project licence next to setup.py
+        run: cp LICENSE python/
+
+      - name: Build and test wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: ./python
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Upstream's tox env runs `invoke install-solvers` (tasks.py), which builds their qpOASES fork for the qpoases/hotqpoases solver wrappers.
+          CIBW_BEFORE_TEST: >-
+            pip install cython numpy setuptools &&
+            git clone https://github.com/hungpham2511/qpOASES.git /tmp/tox-qpoases &&
+            git -C /tmp/tox-qpoases checkout fa86c1ce7782c8f4e6784c67b54a71760cd3a334 &&
+            mkdir /tmp/tox-qpoases/bin &&
+            make -C /tmp/tox-qpoases -j"$(nproc)" &&
+            pip install --no-build-isolation /tmp/tox-qpoases/interfaces/python
+          # python/requirements.txt minus cvxpy (no riscv64 wheel yet) and its PyYAML/msgpack ceilings, which predate cp312; pandas ships no cp314t riscv64 wheel.
+          CIBW_TEST_REQUIRES: >-
+            pytest cvxopt msgpack pyyaml tabulate
+            ${{ matrix.python != 'cp314t' && 'pandas' || '' }}
+          CIBW_TEST_SOURCES: tests pytest.ini
+          CIBW_TEST_COMMAND: >-
+            pytest tests
+            --ignore=tests/tests/constraint/test_joint_velocity.py
+            --ignore=tests/tests/lpsolvers/seidel/test_lp2d.py
+            --ignore=tests/tests/solverwrapper/test_basic_can_linear.py
+            --ignore=tests/tests/solverwrapper/test_basic_conic_can_linear.py
+            ${{ matrix.python == 'cp314t' && '--ignore=tests/tests/retime/robustness' || '' }}
+
+      - name: Verify the wheel ships both compiled extensions and the licence
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          exts = {n.split(".")[0] for n in names if n.endswith(".so")}
+          assert exts == {"toppra/_CythonUtils", "toppra/solverwrapper/cy_seidel_solverwrapper"}, exts
+          assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
+          print("ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: toppra-${{ matrix.version }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish toppra ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: toppra-${{ matrix.version }}-*-manylinux_riscv64
