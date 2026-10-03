@@ -1,0 +1,195 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow mirrors Pysa's own `pysa` workflow
+# (https://github.com/facebook/Pysa/blob/v0.10.0/.github/workflows/pysa.yml),
+# followed by the wheel packaging of
+# https://github.com/facebook/Pysa/blob/v0.10.0/scripts/pypi/build_pypi_package.py
+name: Build pyre-check wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyre-check.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyre-check.yml'
+      - 'docs/packages/pyre-check.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyre-check.yml'
+      - 'docs/packages/pyre-check.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # Upstream builds on ubuntu-latest with Ubuntu's own opam; riscv64/ubuntu:24.04
+  # is the same userland, and its glibc 2.39 matches the runner.
+  BUILD_IMAGE: docker.io/riscv64/ubuntu:24.04
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyre-check
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pyre-check ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    # The OCaml compiler (flambda), ~100 opam packages and Pyre itself are all
+    # compiled from source on the riscv64 runner.
+    timeout-minutes: 1440
+
+    env:
+      PYRE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout Pysa v${{ env.PYRE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: facebook/Pysa
+          ref: v${{ env.PYRE_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply riscv64 patches
+        run: git apply -v python-wheels/patches/pyre-check/${{ env.PYRE_VERSION }}/*.patch
+
+      - name: Build pyre.bin and the wheel
+        shell: bash
+        run: |
+          cat > riscv64-build.sh <<'EOF'
+          set -eux
+
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y --no-install-recommends \
+            opam \
+            build-essential bzip2 ca-certificates curl file git m4 make \
+            patch pkg-config python3 python3-venv rsync unzip xz-utils
+
+          git config --global --add safe.directory /workspace
+          export OPAMYES=1 OPAMROOTISOK=1
+
+          python3 -m venv /tmp/buildenv
+          # Ubuntu 24.04's pip 24.0 matches no manylinux_*_riscv64 tag.
+          /tmp/buildenv/bin/pip install --quiet --upgrade pip
+          export PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_PREFER_BINARY=1
+          /tmp/buildenv/bin/pip install --quiet -r requirements.txt
+          export PATH="/tmp/buildenv/bin:${HOME}/.opam/pyre-4.14.2/bin:${PATH}"
+
+          ./scripts/setup.sh --local --release --no-tests
+
+          # The released wheels' WHEEL file names bdist_wheel 0.38.4 as generator.
+          pip install --quiet 'setuptools<70' 'wheel==0.38.4' twine
+          mkdir -p dist
+          cd scripts
+          python -m pypi \
+            --typeshed-path ../stubs/typeshed/typeshed \
+            --version "${PYRE_VERSION}" \
+            --output-dir ../dist
+          cd ..
+          rm dist/*.tar.gz
+          EOF
+
+          # `opam switch create` builds the compiler; tee the whole run to an
+          # artifact since a multi-hour job's log is sometimes dropped.
+          podman run \
+            --log-driver=none \
+            --network=host \
+            -v "$(pwd)":/workspace \
+            --workdir /workspace \
+            -e PYRE_VERSION="${PYRE_VERSION}" \
+            --pull=newer \
+            "${BUILD_IMAGE}" \
+            bash riscv64-build.sh 2>&1 | tee build.log
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyre-check-${{ env.PYRE_VERSION }}-build-log
+          path: build.log
+
+      - name: Store wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyre-check-${{ env.PYRE_VERSION }}-py3-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Test the wheel
+        shell: bash
+        run: |
+          cat > riscv64-test.sh <<'EOF'
+          set -eux
+
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y --no-install-recommends ca-certificates file python3 python3-venv
+
+          file dist/*.whl
+          python3 -m venv /tmp/testenv
+          /tmp/testenv/bin/pip install --quiet --upgrade pip
+          export PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_PREFER_BINARY=1
+          /tmp/testenv/bin/pip install --quiet dist/*.whl
+          export PATH="/tmp/testenv/bin:${PATH}"
+
+          file "$(command -v pyre.bin)"
+          pyre --version
+
+          # Upstream's own `pysa` workflow test, run against the installed wheel.
+          cd documentation/deliberately_vulnerable_flask_app
+          . ./setup.sh
+          ./run_integration_tests.sh
+          EOF
+
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "$(pwd)":/workspace \
+            --workdir /workspace \
+            --pull=newer \
+            "${BUILD_IMAGE}" \
+            bash riscv64-test.sh
+
+  publish:
+    name: Publish pyre-check ${{ matrix.version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyre-check-${{ matrix.version }}-*-manylinux_riscv64
