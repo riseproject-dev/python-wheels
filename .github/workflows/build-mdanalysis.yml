@@ -1,0 +1,169 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/MDAnalysis/mdanalysis/blob/release-2.10.0/.github/workflows/deploy.yaml
+# and the sdist_check_and_build test job of: https://github.com/MDAnalysis/mdanalysis/blob/release-2.10.0/.github/workflows/gh-ci.yaml
+name: Build mdanalysis wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/mdanalysis.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mdanalysis.yml'
+      - 'docs/packages/mdanalysis.yaml'
+      - 'patches/mdanalysis/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mdanalysis.yml'
+      - 'docs/packages/mdanalysis.yaml'
+      - 'patches/mdanalysis/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: mdanalysis
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build mdanalysis ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      MDANALYSIS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout mdanalysis ${{ env.MDANALYSIS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: MDAnalysis/mdanalysis
+          ref: release-${{ env.MDANALYSIS_VERSION }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply python-wheels/patches/mdanalysis/${{ env.MDANALYSIS_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: package
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy,matplotlib,contourpy,kiwisolver,pillow,fonttools,msgpack,hypothesis
+          # Upstream's wheel job runs no tests; run the suite of its sdist install check
+          # against the wheel, with MDAnalysisTests installed from the same checkout.
+          CIBW_BEFORE_TEST: pip install --no-deps {project}/testsuite
+          CIBW_TEST_REQUIRES: pytest hypothesis pytest-xdist pytest-timeout
+          CIBW_TEST_COMMAND: python -m pytest --timeout=200 -n logical --pyargs MDAnalysisTests
+
+      - name: Check the wheel ships the licences and the compiled extensions
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          exts = {n.split("/")[-1].split(".")[0] for n in names if n.endswith(".so") and ".libs/" not in n}
+          expected = {
+              "affinityprop", "cutils", "stochasticproxembed", "timestep", "_augment", "_cutil",
+              "_transformations", "c_distances", "c_distances_openmp", "cython_util", "libdcd",
+              "libmdaxdr", "nsgrid", "qcprot",
+          }
+          assert exts == expected, exts
+          licences = {n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n} - {""}
+          assert licences == {"LICENSE", "AUTHORS"}, licences
+          # -fopenmp makes auditwheel vendor the image's libgomp, hence the gpl_sources job.
+          assert any(n.startswith("mdanalysis.libs/libgomp") for n in names), [n for n in names if ".libs/" in n]
+          EOF
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mdanalysis-${{ env.MDANALYSIS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      MDANALYSIS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mdanalysis-${{ env.MDANALYSIS_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish mdanalysis ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: mdanalysis-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: mdanalysis-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
