@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (554 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (555 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -1535,6 +1535,10 @@ The porting gotchas (554 of them) live in [`references/gotchas/`](gotchas/), spl
   it only reads the tag's first physical line; a bracketed reason wrapped across multiple
   commit-message lines fails "Incorrect format" even though it looks correctly bracketed —
   keep the whole `[reason]` on the tag's own line (the executorch case).
+- **637** — A nanobind extension's musllinux wheel vendors no `libstdc++`/`libgcc_s`
+  (`nanobind_add_module` links them statically when `$AUDITWHEEL_PLAT` is musllinux), so no
+  musl-only `gpl_sources` job; and `SKBUILD_WHEEL_LICENSE_FILES` takes submodule licence paths
+  as-is (the pydemumble case).
 
 ### Local validation & the aarch64/QEMU rehearsal — [`gotchas/local-validation-and-rehearsal.md`](gotchas/local-validation-and-rehearsal.md)
 
