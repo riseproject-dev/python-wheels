@@ -98,6 +98,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
   `maturin-action`'s `--locked` turns into a build failure.
 - **636** — rustup now ships a native riscv64 musl host toolchain, so gotcha 10's "musllinux
   can't build" no longer holds: a Rust extension builds on musllinux_1_2_riscv64 too.
+- **639** — Gotcha 636 has a ceiling: on one very large pyo3 cdylib the musl-hosted rustc
+  segfaulted or hung in 6 of 9 legs, while the glibc-hosted rustc built it reliably.
 
 ---
 
@@ -1554,3 +1556,27 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       `1.97.1` (chialisp) lists only `rust-std` for `riscv64gc-unknown-linux-musl` in
       `channel-rust-1.97.1.toml`, with no `rustc`/`cargo`, so the musl leg cannot honour the pin.
       Use the same `RUSTUP_TOOLCHAIN=stable` override as gotcha 238.
+
+639. **Gotcha 636's musl host toolchain can still be unusable for one big crate: the riscv64
+    musl-hosted rustc segfaulted or hung on the final cdylib compile of longbridge 4.5.0 in 6
+    of 9 musllinux legs, while the glibc-hosted rustc built the same tree reliably (the
+    longbridge case; see `build-longbridge.yml`, issue #2709).** Every dependency crate built;
+    every failure was inside the single `rustc --crate-name longbridge --crate-type cdylib`
+    invocation, which takes about 1 h (fat LTO) and produces a ~40 MB `.so` (tokio, rustls/ring,
+    pyo3, prost and a large generated API surface).
+    - **The musl shapes:** `signal: 11, SIGSEGV` with nothing printed by rustc, 11-15 min into
+      that crate, or a silent hang until cancelled after about 2 h. Fat LTO: 3 green, 1 SIGSEGV,
+      1 hang. `CARGO_PROFILE_RELEASE_LTO=thin`: 2 SIGSEGV, 2 hangs. Thin LTO made musl worse,
+      not better, so it is not about the length of a single-threaded fat-LTO pass.
+    - **The glibc shape:** one fat-LTO leg in 5 aborted with `double free or corruption (out)`
+      (`signal: 6`), 6 min into the same crate. Thin LTO then went 8 of 8 green across two
+      runs, at about 65 min per leg instead of about 85 min. Thin LTO is worth carrying on
+      glibc for a crate this size.
+    - **Telling it from gotcha 228's OOM:** an OOM here is `SIGKILL` from the kernel, or Rust's
+      `memory allocation of N bytes failed` followed by `SIGABRT`. A bare SIGSEGV, a glibc
+      heap-check abort and a hang are none of those, and `CARGO_BUILD_JOBS` cannot help because
+      only one rustc is running at that point.
+    - **Disposition:** drop musllinux (workflow-anatomy's accepted outcome), keep a one-line
+      "why" in the workflow, and open a tracking issue that has the per-leg tallies and run
+      links. Rerun once before you decide, as gotcha 636 says. Here, the rerun of a hung leg
+      segfaulted, which is enough to stop retrying.

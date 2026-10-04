@@ -759,6 +759,9 @@ The porting gotchas (555 of them) live in [`references/gotchas/`](gotchas/), spl
 - **636** — rustup now ships a native riscv64 musl host toolchain (stable manifest has
   `rustc`/`cargo` for `riscv64gc-unknown-linux-musl`), so gotcha 10's "musllinux can't build"
   is outdated; keep upstream's musllinux legs for a Rust port (the spacy-alignments case).
+- **639** — Gotcha 636 has a ceiling: the riscv64 musl-hosted rustc segfaulted or hung on one
+  large pyo3 cdylib's final compile in 6 of 9 legs, while the glibc-hosted one built it
+  reliably; drop musllinux with a tracking issue (the longbridge case).
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
