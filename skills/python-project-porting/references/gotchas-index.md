@@ -1169,6 +1169,10 @@ The porting gotchas (555 of them) live in [`references/gotchas/`](gotchas/), spl
   translation unit (`c10::complex<BFloat16>` constructor mismatch, undefined
   `C10_LIFETIMEBOUND`) once the registry serves 2.14.0. Pin the install to the exact
   version the package's own pin file names instead of dropping the interpreter.
+- **638** — A released wheel can import a module it never declares, which arrived only
+  transitively through a dependency that has since dropped it (`typing_extensions` via typer
+  ≥0.21.2); `import <pkg>` fails in the clean test venv on every interpreter. Backport the
+  upstream fix as a patch instead of adding the module to `CIBW_TEST_REQUIRES`.
 
 ### Build-tool drift & pins — [`gotchas/build-tool-drift-and-pins.md`](gotchas/build-tool-drift-and-pins.md)
 
