@@ -3798,8 +3798,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       `sysconf(_SC_LEVEL1_DCACHE_LINESIZE)`, which the riscv64 runners do not answer with 64,
       so every `import pxr` prints `ArchWarn: ARCH_CACHE_LINE_SIZE !=
       Arch_ObtainCacheLineSize()`. It is `ARCH_WARNING`, not `ARCH_ERROR`; the endianness check
-      beside it is the one that would abort, and riscv64 is little-endian. Leave upstream's own
-      diagnostic alone rather than spending a multi-hour rebuild to silence it.
+      beside it is the one that would abort, and riscv64 is little-endian. It is still
+      worth silencing when the package's tests compare a subprocess's stderr exactly, and
+      it is printed on every user's `import pxr`. Gate it on `ARCH_CPU_RISCV` in the same
+      patch series (gotcha 630).
 
 492. **A declared dependency the build never actually links against still blocks the port —
     pip enforces the *metadata*, not the linkage (the cmeel-assimp/cmeel-zlib case).** Gotcha

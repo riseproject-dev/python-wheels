@@ -1459,10 +1459,11 @@ The porting gotchas (554 of them) live in [`references/gotchas/`](gotchas/), spl
 - **628** — An upstream aarch64 `test-skip` backed by "N tests fail" is often x86-hardcoded
   SIMD-alignment / `/proc/cpuinfo` `flags` tests — match the count on riscv64 and deselect
   exactly that set, class-qualified where names are shared (the pyfftw case).
-- **630** — OpenUSD's own unconditional `ArchWarn: ARCH_CACHE_LINE_SIZE !=
-  Arch_ObtainCacheLineSize()` (no env var gates it) fails the one usd-exchange test
-  asserting a subprocess's stderr is byte-for-byte empty — deselect that one test with a
-  source patch, since `python -m unittest` has no `-k`.
+- **630** — OpenUSD's riscv64 `ArchWarn: ARCH_CACHE_LINE_SIZE !=
+  Arch_ObtainCacheLineSize()` (bare `fprintf`, no env var gates it) lands on every `pxr`
+  process's stderr and fails every exact-stderr test. Patch `arch/assumptions.cpp` once
+  (`#if !defined(ARCH_CPU_RISCV)`) instead of skipping tests by name, and count failures per
+  module from the log before deciding.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
