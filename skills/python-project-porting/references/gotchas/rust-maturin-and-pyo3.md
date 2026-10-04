@@ -1545,3 +1545,12 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       `timeout-minutes` so a wedge fails on its own (gotcha 508), and rerun the job once
       before you treat it as a real musl blocker. If it hangs a second time, look for a
       deadlock in the rustc process before dropping musl.
+    - **It happened again (chialisp 0.5.0, `build-chialisp.yml`).** The musllinux leg sat in
+      `Build wheel` for more than 2 h, while the manylinux leg built the same tree and passed its
+      tests in 43 min. After a cancel and `rerun-failed-jobs`, musl finished in 44 min. That makes
+      two wedges, both on musl legs and both cleared by one rerun. Size `timeout-minutes` at
+      about 2x the manylinux leg's time, so a wedge fails on its own and doesn't hold the runner.
+    - **A pinned *stable* channel can also lack the musl host.** `rust-toolchain.toml` pinning
+      `1.97.1` (chialisp) lists only `rust-std` for `riscv64gc-unknown-linux-musl` in
+      `channel-rust-1.97.1.toml`, with no `rustc`/`cargo`, so the musl leg cannot honour the pin.
+      Use the same `RUSTUP_TOOLCHAIN=stable` override as gotcha 238.
