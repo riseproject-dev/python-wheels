@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (555 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -471,7 +471,13 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
   line's frozen Chromium fork: Qt5 WebEngine is `qtwebengine-chromium` `87-based` (Chromium 87,
   no `ARCH_CPU_RISCV64`, `#error` in `build_config.h`), Debian/Arch RISC-V/openSUSE ship only Qt6
   WebEngine on riscv64, and QTBUG-132451 is open. Park and point users at the Qt6 binding (the
-  pyqtwebengine case).
+  pyqtwebengine case). Re-check per Qt major. Qt 6.11 WebEngine is Chromium 140 with
+  `ARCH_CPU_RISCV64`, and Arch RISC-V and openSUSE build it. A Qt6 binary entry therefore parks
+  on gotcha 385's missing payload, not on Chromium (the pyqt6-webengine-qt6 case).
+- **635** — A release job that repacks prebuilt per-arch binaries into wheels (sentry-cli's
+  `scripts/wheels`) hides a from-source build: `setup.py` is a setuptools-rust `RustBin` and the
+  sdist ships the Rust sources, so no upstream riscv64 binary is needed — gotcha 145's shape, not
+  35's (the sentry-cli case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
@@ -607,6 +613,9 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
   `output-dir`, `config-file`, `only`, `extras`); passing one is silently dropped, and
   cibuildwheel falls back to its default matrix floor instead of the intended abi3
   build list (the vegafusion case) — use `CIBW_BUILD`/`only:` instead.
+- **633** — Gotcha 96's `PY_SSIZE_T_CLEAN` trap starts at CPython 3.13 headers (3.12's
+  `modsupport.h` still aliases `PyArg_ParseTuple` to `_SizeT`), so a fixed `cp37-abi3`
+  floor the riscv64 image can't provide is safe to build on cp312 (the etcpak case).
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
@@ -747,6 +756,9 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
   the crate's own self-entry (release tooling bumps `Cargo.toml` before regenerating the
   lock), which only `--locked` turns into a build failure; drop `--locked` to match upstream's
   own CI rather than patching or regenerating `Cargo.lock` (the nutpie 0.16.11 case).
+- **636** — rustup now ships a native riscv64 musl host toolchain (stable manifest has
+  `rustc`/`cargo` for `riscv64gc-unknown-linux-musl`), so gotcha 10's "musllinux can't build"
+  is outdated; keep upstream's musllinux legs for a Rust port (the spacy-alignments case).
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 
@@ -1013,6 +1025,8 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
   `Utilities/cmcurl/CMakeLists.txt` runs `find_package(OpenSSL)` and the image ships no dev
   headers by default — `CIBW_BEFORE_ALL_LINUX: dnf -y install openssl-devel` fixes it,
   independent of gotcha 207's unrelated CMake-policy-floor case (the executorch case).
+- **634** — Zig 0.16's translate-c (Aro) predefines no RISC-V float-ABI macros, so a Zig
+  extension that translates `Python.h` fails on manylinux_riscv64 only (`unsupported FLEN`).
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
@@ -1155,6 +1169,10 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
   translation unit (`c10::complex<BFloat16>` constructor mismatch, undefined
   `C10_LIFETIMEBOUND`) once the registry serves 2.14.0. Pin the install to the exact
   version the package's own pin file names instead of dropping the interpreter.
+- **638** — A released wheel can import a module it never declares, which arrived only
+  transitively through a dependency that has since dropped it (`typing_extensions` via typer
+  ≥0.21.2); `import <pkg>` fails in the clean test venv on every interpreter. Backport the
+  upstream fix as a patch instead of adding the module to `CIBW_TEST_REQUIRES`.
 
 ### Build-tool drift & pins — [`gotchas/build-tool-drift-and-pins.md`](gotchas/build-tool-drift-and-pins.md)
 
@@ -1179,6 +1197,7 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
 - **361** — Gotcha 29's `pkg_resources` removal also bites `CIBW_TEST_REQUIRES`, not just a
 - **367** — A `setup.py`'s own "distributor customization" import hook can go silently
 - **588** — setuptools-scm >= 10.2 breaks every cp39 build whose in-tree backend declares
+- **629** — A *test-only* dependency pinned upstream as an open range drifts out from
 
 ### Testing: test-sources & shadowing — [`gotchas/testing-and-shadowing.md`](gotchas/testing-and-shadowing.md)
 
@@ -1290,6 +1309,10 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
   venv because the download prints progress into its stdout, yet "passes on rerun"
   locally once the data is cached; run upstream's own pre-download step
   (`make download-datasets`) in `CIBW_TEST_COMMAND` ahead of pytest (the river case).
+- **631** — An old unittest suite calling the `failUnless*`/`failIf*` aliases Python 3.12
+  removed fails on cp312/cp313/cp314 alike; alias them back on `unittest.TestCase` inside the
+  `-c` test command instead of patching a test module that ships in the wheel (the
+  ed25519-blake2b-fork case).
 
 ### Test failures, flakes & arch-specific bugs — [`gotchas/test-failures-and-flakes.md`](gotchas/test-failures-and-flakes.md)
 
@@ -1458,6 +1481,11 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
 - **628** — An upstream aarch64 `test-skip` backed by "N tests fail" is often x86-hardcoded
   SIMD-alignment / `/proc/cpuinfo` `flags` tests — match the count on riscv64 and deselect
   exactly that set, class-qualified where names are shared (the pyfftw case).
+- **630** — OpenUSD's riscv64 `ArchWarn: ARCH_CACHE_LINE_SIZE !=
+  Arch_ObtainCacheLineSize()` (bare `fprintf`, no env var gates it) lands on every `pxr`
+  process's stderr and fails every exact-stderr test. Patch `arch/assumptions.cpp` once
+  (`#if !defined(ARCH_CPU_RISCV)`) instead of skipping tests by name, and count failures per
+  module from the log before deciding.
 
 ### Licensing & GPL sources — [`gotchas/licensing-and-gpl.md`](gotchas/licensing-and-gpl.md)
 
@@ -1511,6 +1539,10 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
   it only reads the tag's first physical line; a bracketed reason wrapped across multiple
   commit-message lines fails "Incorrect format" even though it looks correctly bracketed —
   keep the whole `[reason]` on the tag's own line (the executorch case).
+- **637** — A nanobind extension's musllinux wheel vendors no `libstdc++`/`libgcc_s`
+  (`nanobind_add_module` links them statically when `$AUDITWHEEL_PLAT` is musllinux), so no
+  musl-only `gpl_sources` job; and `SKBUILD_WHEEL_LICENSE_FILES` takes submodule licence paths
+  as-is (the pydemumble case).
 
 ### Local validation & the aarch64/QEMU rehearsal — [`gotchas/local-validation-and-rehearsal.md`](gotchas/local-validation-and-rehearsal.md)
 
@@ -1544,6 +1576,9 @@ The porting gotchas (552 of them) live in [`references/gotchas/`](gotchas/), spl
 - **517** — For a `setup.py`/distutils C++ world, `-fsyntax-only` every translation unit
   inside the real riscv64 image using the flags `setup.py` itself computes — a ~20-minute
   preflight that catches gotcha 226's GCC-14 errors a GCC 13 host cannot (the pybullet case).
+- **632** — An x86/ARM-only `#if`/`#elif` ladder with no `#else` is provable on an x86 host
+  with no docker or QEMU: `clang --target=riscv64-linux-gnu -fsyntax-only` over the host's glibc
+  headers plus a `stubs-32.h` shim (the xpress9 case).
 - **430** — A `-k`/`--ignore` change is verifiable offline with no wheel at all: rebuild the
   failed run's node ids into a synthetic test tree, then run the YAML-folded
   `CIBW_TEST_COMMAND` through `sh -c`.

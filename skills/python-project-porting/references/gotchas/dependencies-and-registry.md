@@ -57,6 +57,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
 - **577** — A musllinux leg that source-builds PyYAML (manylinux-only riscv64 wheels) gets
   a silently pure-Python build with no `CSafeLoader`/`CSafeDumper` — `apk add yaml-dev`
   before testing and set `PYYAML_FORCE_LIBYAML=1` so a missing libyaml fails loudly.
+- **638** — A released wheel can import a module it never declares, which arrived only
+  transitively through a dependency that has since dropped it; `import <pkg>` then fails
+  in cibuildwheel's clean test venv on every interpreter. Backport the upstream fix.
 
 ---
 
@@ -974,3 +977,26 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       affected interpreter (gotcha 614's pattern) — the registry has a wheel for every
       interpreter in the matrix at the pin the package actually wants; the resolver was
       simply never told to stop there.
+
+638. **A released wheel can import a module it never declares, which used to arrive only
+    transitively through a dependency that has since dropped it — so `import <pkg>` fails in
+    cibuildwheel's fresh test venv on every interpreter, before a single test runs (the
+    common-expression-language case).** common-expression-language 0.8.0's
+    `cel/__init__.py` imports `cel.cli`, which does `from typing_extensions import
+    Annotated`. `typing_extensions` is not in `[project] dependencies`; it came in through
+    `typer`, and typer 0.21.2 dropped it. Upstream's own CI never noticed because it tests
+    from `uv sync --dev`, where mypy still pulls `typing_extensions` in. In our job, pip
+    resolves the newest typer into an empty venv, and the `.so` import smoke fails with
+    `ModuleNotFoundError: No module named 'typing_extensions'` on all six interpreters at
+    once. This is not riscv64-specific: the upstream x86_64 wheel fails the same way in a
+    clean venv.
+    - **Tell it apart from a riscv64 problem by its uniformity.** The traceback ends in pure
+      Python (`cli.py`, not the extension), and every interpreter fails identically.
+      Check `requires_dist` of the dependency's newest release on PyPI
+      (`https://pypi.org/pypi/<dep>/json`) to confirm the module is no longer provided.
+    - **Prefer backporting upstream's fix over adding the module to `CIBW_TEST_REQUIRES`.**
+      Adding it only to the test requirements turns the job green, but it ships a wheel
+      that still breaks on `import` for users. Look for the fix with
+      `git log -S <module> v<queued>..origin/HEAD`. Here it was 212cf00, released in
+      0.10.0, which imports `Annotated` from stdlib `typing`. Carry that hunk as a
+      `Backport` patch.

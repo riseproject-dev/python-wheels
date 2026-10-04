@@ -121,6 +121,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
 - **608** — `cmake` built from source as a build dependency (no riscv64 wheel yet for the
   required version) needs `openssl-devel` installed — its own CMake bootstrap looks for
   OpenSSL for `cmcurl` and the image ships no dev headers by default.
+- **634** — Zig 0.16's translate-c (Aro) predefines no RISC-V float-ABI macros, so a Zig
+  extension that translates `Python.h` fails on manylinux_riscv64 only (`unsupported FLEN`).
 ---
 
 26. **The riscv64 runners ship GCC 13; some packages need GCC 14 or later.** The compiler
@@ -1888,3 +1890,23 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/manylinux-image-and-to
       run and the fix never reaches the link. Keying on
       `hashFiles('<checkout>/.github/workflows/build-<pkg>.yml')` rebuilds the prefix whenever
       the recipe changes.
+
+634. **Zig 0.16's `translate-c` predefines no RISC-V float-ABI macros, so a Zig extension
+    that translates `Python.h` builds on musllinux_riscv64 and fails on manylinux_riscv64
+    (the zttp case).** Since 0.16, Zig's `translate-c`/`addTranslateC`/`@cImport` runs on
+    Aro, not clang, and Aro's RISC-V predefines stop at `__riscv`/`__riscv_xlen` — no
+    `__riscv_flen`, no `__riscv_float_abi_double`. glibc's riscv `bits/setjmp.h` (reached
+    via `pthread.h` from `Python.h`) requires one of the `__riscv_float_abi_*` macros, so the
+    translation dies with `/usr/include/bits/setjmp.h:35:3: error: unsupported FLEN`; musl's
+    headers don't test it, so the musllinux legs of the same matrix go green. Zig's own
+    bundled glibc headers carry the same check, so it reproduces on x86 in seconds with
+    `zig translate-c -lc -target riscv64-linux-gnu.2.39 -I <python include> <header>` — no
+    riscv runner needed. Fixed on Zig master (`ziglang/zig` b46a7f3a25a6, Sept 2026,
+    unreleased at the time). Workaround while the project pins Zig 0.16: patch `build.zig`
+    to `defineCMacro("__riscv_flen", "64")` and `defineCMacro("__riscv_float_abi_double",
+    "1")` on the translate step when `target.result.cpu.arch.isRISCV()` and the target has
+    the `d` feature (what clang defines for lp64d). For a hatch-vcs project, the patched
+    tree then needs gotcha 31's `SETUPTOOLS_SCM_PRETEND_VERSION` (plain, not `_FOR_<PKG>`,
+    is the safe spelling under hatch-vcs) and `fetch-depth: 0` can go. The `ziglang` PyPI
+    wheel itself ships `manylinux_2_31_riscv64.musllinux_1_1_riscv64`, so a hatch-ziglang
+    build needs no toolchain setup on either image.

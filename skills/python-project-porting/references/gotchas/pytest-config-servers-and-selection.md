@@ -51,6 +51,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
 - **624** — A doctest that touches a lazily-downloaded dataset fails only on a *fresh* test
   venv, because the library prints its download progress into the doctest's stdout;
   mirror upstream's pre-download step (`make download-datasets`) before pytest.
+- **631** — An old unittest suite calling the `failUnless*`/`failIf*`/`assertEquals` aliases
+  that Python 3.12 removed fails on every default-matrix interpreter; alias them back in the
+  `-c` test command rather than patching the shipped test module.
 
 ---
 
@@ -913,3 +916,28 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
       plus a scan of upstream's test job for any `download`/`fetch` step that runs before
       pytest. Upstream's step is load-bearing whenever it exists, even when it reads like
       a cache warm-up.
+
+631. **An old `unittest` suite that calls the deprecated `TestCase` aliases (`failUnless`,
+     `failUnlessEqual`, `failUnlessRaises`, `failIfEqual`, `assertEquals`, …) fails on every
+     interpreter of the default matrix, because Python 3.12 removed them (the
+     ed25519-blake2b-fork case; see `build-ed25519-blake2b-fork.yml`).** The tests are
+     correct and the extension is fine — upstream's own wheel CI simply never runs them
+     (its last test runner was Travis on 3.7), so nobody noticed. The error is
+     `AttributeError: '<Case>' object has no attribute 'failUnlessEqual'`, and it hits
+     cp312/cp313/cp314 alike, so it reproduces on any x86 host before the first riscv64 cycle.
+    - **Alias them back from the test command, don't patch.** When the test module ships
+      inside the wheel (`ed25519_blake2b/test_ed25519.py`), a patch would change wheel
+      content just to make CI run. Instead set the aliases on `unittest.TestCase` and start
+      the runner in the same `python -c`:
+      `import unittest as u; T = u.TestCase; T.failUnless = T.assertTrue; T.failUnlessEqual =
+      T.assertEqual; ...; u.main(module=None, argv=['unittest', '-v', '<pkg>.test_x',
+      'test_kat'])`. `module=None` plus dotted names in `argv` loads modules from the
+      installed wheel, and `python -c` keeps the cwd on `sys.path`, so a root-level test
+      file staged through `CIBW_TEST_SOURCES` imports too (a `python script.py` shim would
+      put the script's own directory there instead).
+    - **Find the whole alias set up front**:
+      `grep -ohE 'self\.(fail[A-Za-z]*|assert[A-Za-z]*s\b)' <tests> | sort -u`. Missing
+      just one (`failIfEqual` here) costs another cycle.
+    - **Check that the run still includes the tests you added.** `Ran N tests` must count the
+      known-answer case as well. A root-level module that fails to import shows up as a
+      `_FailedTest`, not as a missing test.

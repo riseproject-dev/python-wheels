@@ -68,6 +68,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **564** — `pypa/cibuildwheel`'s action has no `build:` input; passing one is silently
   dropped and cibuildwheel falls back to its default matrix floor instead of the intended
   abi3 build list — use `CIBW_BUILD`/`only:` instead.
+- **633** — Gotcha 96's `_SizeT` trap starts at CPython 3.13 headers, so a fixed old abi3
+  floor the riscv64 image cannot provide (`cp37-abi3`) is safe to build on cp312.
 
 ---
 
@@ -1176,3 +1178,29 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
       writing the cibuildwheel step, whenever the interpreter list sits under `with:` rather
       than as `CIBW_BUILD`/`CIBW_SKIP` under `env:` or `only:`/`skip:` under `with:` — those
       four are the only spellings the action accepts.
+
+633. **Gotcha 96's `PY_SSIZE_T_CLEAN` trap starts at CPython 3.13 *headers*, so a fixed
+    abi3 floor older than anything the riscv64 image ships (`cp37-abi3`, `cp38-abi3`) is
+    safe to build on cp312 — check `modsupport.h`, don't guess (the etcpak case).**
+    Gotcha 96 says build an abi3 wheel on the oldest interpreter its tag claims; the
+    manylinux_riscv64 image starts at cp39, and our test dependencies usually at cp312, so
+    a `setup.py` that hardcodes `cp37` plus `-DPy_LIMITED_API=0x03070000` leaves no such
+    interpreter. The concrete failure gotcha 96 describes only exists from 3.13 on:
+    CPython 3.12's `Include/modsupport.h` still does
+    `#ifdef PY_SSIZE_T_CLEAN / #define PyArg_ParseTuple _PyArg_ParseTuple_SizeT` (and the
+    same for `Py_BuildValue` and friends) unconditionally, while 3.13 and 3.14 drop the
+    block. A `"y#"`-parsing extension built against cp312 headers therefore calls the
+    `_SizeT` entry points every CPython from 3.7 on exports, and the wheel is honest on the
+    old interpreters its tag claims.
+    - **Settle it in one command per header**, no build needed:
+      `curl -s https://raw.githubusercontent.com/python/cpython/3.12/Include/modsupport.h | grep -n _SizeT`
+      (and `3.13`, which prints nothing). Then
+      `grep -n 'PY_SSIZE_T_CLEAN\|PyArg_Parse\|Py_BuildValue' <ext sources>` to see whether
+      the project uses `#` formats at all.
+    - **List cp312 first in `CIBW_BUILD`** (`cp312-* cp313-* cp314-*`) so cibuildwheel
+      compiles there and only retests on cp313/cp314 via `find_compatible_wheel`; letting
+      a 3.13+ interpreter compile the wheel is what reintroduces gotcha 96. Name the job and
+      artifact after the tag the wheel carries (`cp37-abi3`, gotcha 34), and drop cp314t
+      when `setup.py` forces the limited API with no `Py_GIL_DISABLED` guard (CPython's
+      own `#error`).
+    - Same build as `build-pycryptodome.yml`, which ships `cp37-abi3` built on cp312.
