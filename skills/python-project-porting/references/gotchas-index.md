@@ -1176,6 +1176,10 @@ The porting gotchas (555 of them) live in [`references/gotchas/`](gotchas/), spl
   transitively through a dependency that has since dropped it (`typing_extensions` via typer
   ≥0.21.2); `import <pkg>` fails in the clean test venv on every interpreter. Backport the
   upstream fix as a patch instead of adding the module to `CIBW_TEST_REQUIRES`.
+- **640** — A venv created from `/opt/python/cp310-cp310`/`cp311-cp311` seeds ensurepip's
+  bundled pip (23.0.1/24.0, vendored packaging 21.3, no riscv64 manylinux arch), so it
+  rejects our own `manylinux_2_39_riscv64` wheel as unsupported while cp312+ pass;
+  `pip install -U pip` in the venv first.
 
 ### Build-tool drift & pins — [`gotchas/build-tool-drift-and-pins.md`](gotchas/build-tool-drift-and-pins.md)
 

@@ -60,6 +60,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
 - **638** — A released wheel can import a module it never declares, which arrived only
   transitively through a dependency that has since dropped it; `import <pkg>` then fails
   in cibuildwheel's clean test venv on every interpreter. Backport the upstream fix.
+- **640** — A venv made from `/opt/python/cp310`/`cp311` gets ensurepip's old bundled pip
+  (23.0.1/24.0, vendoring packaging 21.3, no riscv64 in its manylinux arch list), so it
+  rejects our own `manylinux_*_riscv64` wheel while cp312+ legs pass. Upgrade pip first.
 
 ---
 
@@ -478,9 +481,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
     - **Two different old-pip environments, same root cause.** Rocky 10's own system
       `python3` (inside the manylinux image, distinct from `/opt/python`) shows the
       identical zero-manylinux-tags symptom with its bundled pip 23.3.2; `/opt/python/
-      cpXY-cpXY`'s bundled pip is unaffected because it ships current. Grep `pip debug
-      --verbose | grep -c manylinux` before trusting any install step that runs outside
-      `/opt/python`.
+      cpXY-cpXY`'s own pip is unaffected because the image upgrades it — but a venv
+      created *from* it is not (gotcha 640). Grep `pip debug --verbose | grep -c
+      manylinux` before trusting any install step that does not run that exact pip.
 
 240. **A registry-hosted wheel that builds and installs cleanly can still be missing an
     *optional* component another test dependency imports unconditionally (the
@@ -1000,3 +1003,25 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       `git log -S <module> v<queued>..origin/HEAD`. Here it was 212cf00, released in
       0.10.0, which imports `Annotated` from stdlib `typing`. Carry that hunk as a
       `Backport` patch.
+
+640. **A venv created from the manylinux image's `/opt/python/cp310-cp310` or `cp311-cp311`
+    rejects our own `manylinux_2_39_riscv64` wheel with `... is not a supported wheel on
+    this platform`, while the cp312/cp313 legs of the same matrix pass (the usd-exchange
+    case).** `python -m venv` seeds pip from the interpreter's own
+    `ensurepip/_bundled` wheel, not from the pip the image has upgraded in
+    `/opt/python/cpXY-cpXY` itself (gotcha 234's last bullet holds only for that exact pip).
+    The bundled pip is frozen per CPython minor: 23.0.1 for 3.10 and 24.0 for 3.11, both
+    vendoring packaging 21.3, whose `_manylinux._have_compatible_abi` allows only
+    `x86_64`/`aarch64`/`ppc64`/`ppc64le`/`s390x`. Such a pip yields no
+    `manylinux_*_riscv64` tag at all, so it refuses a correctly tagged wheel before reading
+    anything else. pip 24.1 (packaging 24.1) adds `riscv64`, and 3.12/3.13 bundle a newer
+    pip, which is why only the older legs fail and why a re-run fails identically. Name,
+    tags, auditwheel output and image are all fine. The tell is the job log's own
+    `[notice] A new release of pip is available: 23.0.1 -> ...` (or `24.0 -> ...`) right
+    under the error.
+    - **Fix:** `"${VENV}/bin/python" -m pip install -U pip` right after creating the venv
+      (or `python -m venv --upgrade-deps`), before any install. cibuildwheel seeds its test venv
+      with its own pinned, current pip, so only hand-driven `docker run` test steps hit it.
+    - **Not image skew.** Each job pulls the image once in its own step, and the later
+      `docker run` reuses the local copy without re-pulling. A floating tag cannot change
+      between a job's build step and its test step, so pinning a digest does not fix this.
