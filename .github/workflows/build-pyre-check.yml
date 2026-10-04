@@ -174,9 +174,23 @@ jobs:
           pyre --version
 
           # Upstream's own `pysa` workflow test, run against the installed wheel.
+          # v0.10.0 removed the Pyre1 backend, but the app still ships only Pyre1
+          # expectations (result.json, no result.pyrefly.json), so upstream's runner
+          # cannot pass on any arch; run its analysis and require taint issues in app.py.
+          # The pyrefly.toml scopes Pyrefly to the app instead of the whole checkout.
           cd documentation/deliberately_vulnerable_flask_app
           . ./setup.sh
-          ./run_integration_tests.sh
+          touch pyrefly.toml
+          python -mPysa.client.pyre --noninteractive analyze --use-pyrefly --no-verify > result.pyrefly.actual
+          python3 - <<'PY'
+          import json
+          found = {(i["code"], i["define"]) for i in json.load(open("result.pyrefly.actual"))}
+          expected = {(i["code"], i["define"]) for i in json.load(open("result.json"))}
+          print(f"{len(found)} issues found, {len(found & expected)} of the {len(expected)} Pyre1 ones")
+          for issue in sorted(found):
+              print(*issue)
+          assert any(define.startswith("app.") for _, define in found)
+          PY
           EOF
 
           podman run -t \
