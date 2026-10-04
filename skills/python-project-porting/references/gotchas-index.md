@@ -471,7 +471,9 @@ The porting gotchas (554 of them) live in [`references/gotchas/`](gotchas/), spl
   line's frozen Chromium fork: Qt5 WebEngine is `qtwebengine-chromium` `87-based` (Chromium 87,
   no `ARCH_CPU_RISCV64`, `#error` in `build_config.h`), Debian/Arch RISC-V/openSUSE ship only Qt6
   WebEngine on riscv64, and QTBUG-132451 is open. Park and point users at the Qt6 binding (the
-  pyqtwebengine case).
+  pyqtwebengine case). Re-check per Qt major. Qt 6.11 WebEngine is Chromium 140 with
+  `ARCH_CPU_RISCV64`, and Arch RISC-V and openSUSE build it. A Qt6 binary entry therefore parks
+  on gotcha 385's missing payload, not on Chromium (the pyqt6-webengine-qt6 case).
 - **635** — A release job that repacks prebuilt per-arch binaries into wheels (sentry-cli's
   `scripts/wheels`) hides a from-source build: `setup.py` is a setuptools-rust `RustBin` and the
   sdist ships the Rust sources, so no upstream riscv64 binary is needed — gotcha 145's shape, not

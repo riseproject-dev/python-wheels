@@ -5327,6 +5327,21 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     The same reasoning covers any binding to a module of a frozen LTS line that vendors a
     browser engine, such as `PyQtWebEngine-Qt5`, Qt5 `QtWebView`, or CEF-based wrappers pinned
     to an old CEF branch.
+    - **Re-run the four checks per Qt major. Do not copy the Qt5 park note onto a Qt6 entry
+      (the pyqt6-webengine-qt6 case).** Qt 6.11.2 WebEngine's `CHROMIUM_VERSION` says
+      Chromium 140.0.7339.264 (`140-based`), and every gate is open: `build_config.h` defines
+      `ARCH_CPU_RISCV64`, `cmake/QtToolchainHelpers.cmake` `get_gn_arch` maps `riscv64`, and
+      `configure.cmake`'s `supported-arch` list (arm/arm64/armv7-a/x86_64) applies only when
+      `CMAKE_CROSSCOMPILING`, so a native build is not refused. Arch Linux RISC-V ships
+      `qt6-webengine` 6.11.2 and openSUSE ships `libQt6WebEngineCore6` 6.11.2 on riscv64.
+      Debian and Ubuntu still exclude riscv64 in their architecture lists, Rocky 10 riscv64
+      has no `qt6-qtwebengine`, and QTBUG-132451 is still open. So a Qt6 WebEngine entry is
+      not blocked by Chromium. A *binary* Qt6 entry still parks, but on a different stop:
+      `PyQt6-WebEngine-Qt6` is a `pyqt-qt-wheel` repackage of the official installer tree
+      (gotcha 385). That tree exists only for `linux_x64` and `linux_arm64`, and the libraries
+      it ships link to the same-version `PyQt6-Qt6` libraries. Record the Chromium base, the
+      gates and the distro builds in the note. Then name gotcha 385 (no payload) and gotcha
+      186 (Chromium-scale source build) as the actual reasons.
 
 635. **A release pipeline that repacks *prebuilt* binaries into wheels does not make the package
     a binary fetcher — read `setup.py` before the release workflow (the sentry-cli case; see
