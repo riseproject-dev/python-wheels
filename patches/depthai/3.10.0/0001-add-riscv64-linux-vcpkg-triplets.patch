@@ -6,14 +6,18 @@ setup.py points VCPKG_OVERLAY_TRIPLETS at cmake/triplets/release, which only
 carries x64/arm64 triplets. On a riscv64 host vcpkg then falls back to its
 community riscv64-linux triplet, which builds every port in both debug and
 release and links libusb/ffmpeg statically, unlike every other Linux wheel.
-These are the arm64-linux triplets with only the architecture changed.
+These are the arm64-linux triplets with the architecture changed and vcpkg's
+default ELF RPATH fixup turned off for the static ports: riscv64 links non-PIE
+executables at 0x10000, which is vm.mmap_min_addr, and patchelf's
+--set-rpath on such an executable maps a new first LOAD segment below it, so
+the patched pkgconf segfaults on exec when ffmpeg's portfile runs it.
 
 diff --git a/cmake/triplets/release/riscv64-linux.cmake b/cmake/triplets/release/riscv64-linux.cmake
 new file mode 100644
-index 0000000..512f59a
+index 0000000..3613a45
 --- /dev/null
 +++ b/cmake/triplets/release/riscv64-linux.cmake
-@@ -0,0 +1,18 @@
+@@ -0,0 +1,22 @@
 +set(VCPKG_TARGET_ARCHITECTURE riscv64)
 +set(VCPKG_CRT_LINKAGE dynamic)
 +set(VCPKG_LIBRARY_LINKAGE static)
@@ -24,6 +28,10 @@ index 0000000..512f59a
 +if(PORT MATCHES "libusb|ffmpeg")
 +    set(VCPKG_LIBRARY_LINKAGE dynamic)
 +    set(VCPKG_FIXUP_ELF_RPATH ON)
++else()
++    # patchelf moves a non-PIE executable's first LOAD segment below riscv64's 0x10000 base,
++    # i.e. below vm.mmap_min_addr, so every vcpkg-built tool (pkgconf, protoc) segfaults on exec
++    set(VCPKG_FIXUP_ELF_RPATH OFF)
 +endif()
 +if(PORT MATCHES "vulkan-loader")
 +    # When building in GH Actions environment, vcpkg's pkg-conf can't find XCB/X11 libraries
@@ -34,10 +42,10 @@ index 0000000..512f59a
 +set(VCPKG_CMAKE_SYSTEM_NAME Linux)
 diff --git a/cmake/triplets/riscv64-linux.cmake b/cmake/triplets/riscv64-linux.cmake
 new file mode 100644
-index 0000000..aae710d
+index 0000000..63dabd0
 --- /dev/null
 +++ b/cmake/triplets/riscv64-linux.cmake
-@@ -0,0 +1,16 @@
+@@ -0,0 +1,20 @@
 +set(VCPKG_TARGET_ARCHITECTURE riscv64)
 +set(VCPKG_CRT_LINKAGE dynamic)
 +set(VCPKG_LIBRARY_LINKAGE static)
@@ -46,6 +54,10 @@ index 0000000..aae710d
 +if(PORT MATCHES "libusb|ffmpeg")
 +    set(VCPKG_LIBRARY_LINKAGE dynamic)
 +    set(VCPKG_FIXUP_ELF_RPATH ON)
++else()
++    # patchelf moves a non-PIE executable's first LOAD segment below riscv64's 0x10000 base,
++    # i.e. below vm.mmap_min_addr, so every vcpkg-built tool (pkgconf, protoc) segfaults on exec
++    set(VCPKG_FIXUP_ELF_RPATH OFF)
 +endif()
 +if(PORT MATCHES "vulkan-loader")
 +    # When building in GH Actions environment, vcpkg's pkg-conf can't find XCB/X11 libraries
