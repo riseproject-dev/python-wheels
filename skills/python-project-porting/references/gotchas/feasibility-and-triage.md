@@ -307,6 +307,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   Qt line's frozen Chromium fork*: Qt5 WebEngine is pinned to Chromium 87, which has no riscv64,
   so check the fork's `build_config.h` and the distros before anything else (the pyqtwebengine
   case).
+- **635** — A release pipeline that repacks *prebuilt* binaries into wheels does not make the
+  package a binary fetcher: read `setup.py` before the release workflow, because a setuptools-rust
+  `RustBin` (or maturin `bin`) project still builds from source (the sentry-cli case).
 
 ---
 
@@ -5324,3 +5327,27 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     The same reasoning covers any binding to a module of a frozen LTS line that vendors a
     browser engine, such as `PyQtWebEngine-Qt5`, Qt5 `QtWebView`, or CEF-based wrappers pinned
     to an old CEF branch.
+
+635. **A release pipeline that repacks *prebuilt* binaries into wheels does not make the package
+    a binary fetcher — read `setup.py` before the release workflow (the sentry-cli case; see
+    `build-sentry-cli.yml`).** sentry-cli's PyPI wheels are produced by `scripts/wheels`, which
+    takes one "base" wheel from `python -m build` and swaps in static musl binaries cross-built
+    by the `linux` job (messense/rust-musl-cross, i686/x86_64/armv7/aarch64 only), retagging each
+    as `manylinux_2_17_<arch>.manylinux2014_<arch>.musllinux_1_2_<arch>`. No riscv64 binary
+    exists anywhere upstream, which reads like gotcha 35's "nothing to bundle" stop. It is not:
+    `setup.py` is `setup(rust_extensions=[RustBin("sentry-cli")])` and `MANIFEST.in` ships
+    `Cargo.toml`/`Cargo.lock`/`src`, so the base wheel *is* a from-source compile of the same
+    binary — the repack is only upstream's way of reusing its cross-built CLI release assets.
+    - **Two reads settle it**: `setup.py`/`pyproject.toml` for `RustBin`/`bindings = "bin"`, and
+      the sdist's `MANIFEST.in`/file list for the Rust sources. Both present ⇒ gotcha 145's
+      ordinary-port shape, not gotcha 35's, whatever the release job does.
+    - **Build from the checkout, not the sdist**, when the repo carries `rust-toolchain.toml` or
+      `.cargo/config.toml` that `MANIFEST.in` leaves out — upstream's release binaries were built
+      with them (sentry-cli: toolchain 1.96, `-C force-unwind-tables`). cibuildwheel with
+      `only: cp312-manylinux_riscv64` builds the one `py3-none` wheel in-tree, and auditwheel
+      retags the `.data/scripts` ELF to `manylinux_2_39_riscv64` with no extension module
+      present. `curl`'s `static-ssl` pulls `openssl-src`, so add `perl-core` (gotcha 46).
+    - **Upstream's Rust `trycmd` cases are replayable without cargo**: offline ones that take a
+      fixture and compare against a checked-in expected tree (`sourcemaps inject` +
+      `_expected_outputs/`, deterministic content-hashed debug IDs) become a `diff -r` against
+      the installed binary — a stronger test than `--version` (gotcha 187).
