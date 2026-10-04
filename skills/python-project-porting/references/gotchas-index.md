@@ -1016,6 +1016,8 @@ The porting gotchas (554 of them) live in [`references/gotchas/`](gotchas/), spl
   `Utilities/cmcurl/CMakeLists.txt` runs `find_package(OpenSSL)` and the image ships no dev
   headers by default — `CIBW_BEFORE_ALL_LINUX: dnf -y install openssl-devel` fixes it,
   independent of gotcha 207's unrelated CMake-policy-floor case (the executorch case).
+- **634** — Zig 0.16's translate-c (Aro) predefines no RISC-V float-ABI macros, so a Zig
+  extension that translates `Python.h` fails on manylinux_riscv64 only (`unsupported FLEN`).
 
 ### Native dependencies & linking — [`gotchas/native-deps-and-linking.md`](gotchas/native-deps-and-linking.md)
 
