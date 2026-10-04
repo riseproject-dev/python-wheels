@@ -62,6 +62,15 @@ jobs:
           ref: v${{ env.XPRESS9_VERSION }}
           persist-credentials: false
 
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch xpress9 source
+        run: git apply python-wheels/patches/xpress9/${{ env.XPRESS9_VERSION }}/*.patch
+
       - name: Build wheels
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         with:
@@ -80,9 +89,35 @@ jobs:
           path: wheelhouse/*.whl
           if-no-files-found: error
 
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources (gcc) for xpress9 ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+    env:
+      XPRESS9_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Collect gcc source RPM from manylinux_riscv64
+        uses: riseproject-dev/python-wheels/actions/collect-gpl-sources@main
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: xpress9-${{ env.XPRESS9_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
   publish:
     name: Publish xpress9 ${{ matrix.version }}
-    needs: [setup, build_wheels]
+    needs: [setup, build_wheels, gpl_sources]
     if: needs.setup.outputs.versions != '[]'
     strategy:
       fail-fast: false
@@ -96,3 +131,5 @@ jobs:
       app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
     with:
       artifact-pattern: xpress9-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: xpress9-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
