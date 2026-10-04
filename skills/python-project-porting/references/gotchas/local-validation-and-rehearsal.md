@@ -46,6 +46,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
   crashes is a throwaway unstripped CI build.
 - **520** — A giant generated translation unit is rarely the dominant cost — time it on
   x86 before copying upstream's constrained-arch `-O0`.
+- **632** — An x86/ARM-only `#if`/`#elif` ladder with no `#else` is provable on an x86 host with no
+  docker or QEMU: `clang --target=riscv64-linux-gnu -fsyntax-only` over host glibc headers (the xpress9 case).
 
 ---
 
@@ -663,3 +665,32 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/local-validation-and-r
        proves the dep's header version, the project's headers and `Py_LIMITED_API` all agree
        before a scarce riscv64 runner is booked — the generated-wrapper equivalent of gotcha
        517's `-fsyntax-only` sweep, and it costs ten minutes on any host.
+
+632. **An x86/ARM-only `#if`/`#elif` ladder with no `#else` is provable on an x86 host with
+    no docker, QEMU or cross sysroot — host `clang --target=riscv64-linux-gnu -fsyntax-only`
+    over the host's own glibc headers (the xpress9 case).** xpress9 0.3.9's
+    `src/Xpress9EncLz77.c` defines `__rdtsc` via `<x86intrin.h>` on x86 and a
+    `clock_gettime` stand-in under `#elif defined(__arm__) || defined(__aarch64__)`, with no
+    `#else`, then calls `__rdtsc()` unconditionally at line 1166 to seed a session signature.
+    riscv64 falls through both arms and GCC 14 (implicit declarations are errors) stops the
+    first CI round. Gotcha 517's in-image sweep needs docker + binfmt; a host with neither
+    (or a full disk) can still settle it in seconds:
+    ```bash
+    mkdir -p shim/gnu && cp /usr/include/x86_64-linux-gnu/gnu/stubs-64.h shim/gnu/stubs-32.h
+    for f in src/*.c; do clang --target=riscv64-linux-gnu -isystem shim \
+      -isystem /usr/include/x86_64-linux-gnu -Iinclude -fsyntax-only -Wno-everything \
+      -Werror=implicit-function-declaration "$f"; done
+    ```
+    - **The `stubs-32.h` shim is the only fix-up needed.** Without x86 macros glibc's
+      `bits/wordsize.h` takes its 32-bit branch and `gnu/stubs.h` includes a header the
+      x86_64 multiarch dir does not ship; copying `stubs-64.h` over it is enough for a
+      syntax pass. Type sizes are not riscv64-faithful, so this proves *which arch branches
+      are taken*, not ABI correctness — the class of bug it catches is exactly the missing
+      `#else`. It reproduced the CI error verbatim unpatched and was clean patched.
+    - **Grep the call sites in full before calling a portable C tree clean.** The triage
+      grep for `rdtsc` here ran through `| head -20`, which showed only the `DEBUG_PERF_*`
+      macros (dead under `XPRESS9_DEBUG_PERF_STAT=0`) and cut the one live call; the fix is
+      to grep for the *uses* of every symbol an arch ladder defines, not its definitions.
+    - **Patch shape:** turn the ARM `#elif` into `#else` and nest the ARM-only include
+      (`<arm_neon.h>`) under its own `#if`, so the existing portable fallback covers every
+      non-x86 target — one hunk, no new code, and correct upstream too.
