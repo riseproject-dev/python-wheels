@@ -1291,6 +1291,10 @@ The porting gotchas (554 of them) live in [`references/gotchas/`](gotchas/), spl
   venv because the download prints progress into its stdout, yet "passes on rerun"
   locally once the data is cached; run upstream's own pre-download step
   (`make download-datasets`) in `CIBW_TEST_COMMAND` ahead of pytest (the river case).
+- **631** — An old unittest suite calling the `failUnless*`/`failIf*` aliases Python 3.12
+  removed fails on cp312/cp313/cp314 alike; alias them back on `unittest.TestCase` inside the
+  `-c` test command instead of patching a test module that ships in the wheel (the
+  ed25519-blake2b-fork case).
 
 ### Test failures, flakes & arch-specific bugs — [`gotchas/test-failures-and-flakes.md`](gotchas/test-failures-and-flakes.md)
 
