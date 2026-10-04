@@ -32,7 +32,6 @@ permissions:
 
 env:
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
 
 jobs:
   setup:
@@ -44,7 +43,7 @@ jobs:
   build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
-    name: Build longbridge ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    name: Build longbridge ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 240
     strategy:
@@ -52,7 +51,6 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
-        platform: [manylinux, musllinux]
 
     env:
       LONGBRIDGE_VERSION: ${{ matrix.version }}
@@ -74,14 +72,15 @@ jobs:
         with:
           package-dir: python
           output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          # musllinux is dropped: the riscv64 musl-hosted rustc segfaulted or hung on the
+          # cdylib's final compile in 6 of 9 legs; the glibc-hosted one is reliable.
+          only: ${{ matrix.python }}-manylinux_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
           CIBW_BEFORE_ALL_LINUX: >-
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          # The workspace's fat `lto = true` link of the cdylib (~1 h single rustc) crashed
-          # rustc nondeterministically on 3 of 10 legs (SIGABRT, SIGSEGV, a 2 h hang).
+          # The workspace's fat `lto = true` compile of the cdylib (~1 h in one rustc) aborted
+          # rustc with heap corruption on 1 of 5 manylinux legs; thin LTO went 4 of 4.
           CIBW_ENVIRONMENT_LINUX: >-
             PATH="$PATH:$HOME/.cargo/bin"
             CARGO_PROFILE_RELEASE_LTO=thin
@@ -97,7 +96,7 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: longbridge-${{ env.LONGBRIDGE_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          name: longbridge-${{ env.LONGBRIDGE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
           path: wheelhouse/*.whl
           if-no-files-found: error
 
@@ -116,4 +115,4 @@ jobs:
     secrets:
       app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
     with:
-      artifact-pattern: longbridge-${{ matrix.version }}-*_riscv64
+      artifact-pattern: longbridge-${{ matrix.version }}-*-manylinux_riscv64
