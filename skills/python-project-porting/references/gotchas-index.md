@@ -754,6 +754,9 @@ The porting gotchas (554 of them) live in [`references/gotchas/`](gotchas/), spl
   the crate's own self-entry (release tooling bumps `Cargo.toml` before regenerating the
   lock), which only `--locked` turns into a build failure; drop `--locked` to match upstream's
   own CI rather than patching or regenerating `Cargo.lock` (the nutpie 0.16.11 case).
+- **636** — rustup now ships a native riscv64 musl host toolchain (stable manifest has
+  `rustc`/`cargo` for `riscv64gc-unknown-linux-musl`), so gotcha 10's "musllinux can't build"
+  is outdated; keep upstream's musllinux legs for a Rust port (the spacy-alignments case).
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 

@@ -96,6 +96,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
 - **608** — A tagged release's committed `Cargo.lock` can have a stale self-version entry
   (the crate's own `[[package]] version` a release behind its `Cargo.toml`), which only
   `maturin-action`'s `--locked` turns into a build failure.
+- **636** — rustup now ships a native riscv64 musl host toolchain, so gotcha 10's "musllinux
+  can't build" no longer holds: a Rust extension builds on musllinux_1_2_riscv64 too.
 
 ---
 
@@ -124,7 +126,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       `CIBW_BEFORE_ALL_LINUX: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y`
       and `CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"`. rustup provisions a
       native `riscv64gc-unknown-linux-gnu` toolchain in the container.
-    - **musllinux can't build** — rustup.rs ships no riscv64 musl toolchain. Restrict
+    - **Superseded by gotcha 636** (rustup now ships a riscv64 musl host toolchain, so
+      musllinux builds; check the manifest before dropping it).
+      **musllinux can't build** — rustup.rs ships no riscv64 musl toolchain. Restrict
       `CIBW_BUILD` to `*-manylinux_riscv64` (or `CIBW_SKIP: '*-musllinux_*'`). Whether
       the matrix is per-interpreter `[cp312, cp313, cp314, cp314t]` or collapses to
       `[cpXY-abi3, cp3Nt]` depends on whether the extension is built abi3 — see
@@ -1513,3 +1517,31 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
     `patches/<pkg>/<version>/` is unnecessary extra surface for a one-line, upstream-caused
     mismatch that plain `cargo build` (no `--locked`) fixes on every run without touching any
     other dependency.
+
+636. **rustup now ships a native `riscv64gc-unknown-linux-musl` host toolchain, so a Rust
+    extension builds on `musllinux_1_2_riscv64` with the same in-container rustup install
+    as manylinux. Gotcha 10's "musllinux can't build" (and gotcha 59's manifest evidence)
+    describe an older channel (the spacy-alignments case; see `build-spacy-alignments.yml`).**
+    The stable channel manifest dated 2026-10-01 lists `[pkg.rustc.target.riscv64gc-unknown-linux-musl]`
+    and `[pkg.cargo.target.riscv64gc-unknown-linux-musl]` with `available = true`, and
+    `https://static.rust-lang.org/rustup/dist/riscv64gc-unknown-linux-musl/rustup-init` answers
+    200. `sh.rustup.rs` already picks `_clibtype=musl` from `ldd --version`, so upstream's own
+    `CIBW_BEFORE_ALL_LINUX: curl -sSf https://sh.rustup.rs | sh -s -- -y` installs
+    `stable-riscv64gc-unknown-linux-musl` in the musllinux image with no change. spacy-alignments
+    0.9.2 (setuptools-rust, pyo3 0.24.2) built and passed its full suite on cp312/cp313
+    musllinux; auditwheel tags the result `musllinux_1_2_riscv64`, and rustc builds the cdylib
+    with `-Ctarget-feature=-crt-static` on its own.
+    - **Check the manifest, not gotcha 10, before dropping musllinux from a Rust port:**
+      `curl -s https://static.rust-lang.org/dist/channel-rust-stable.toml | grep -A1
+      '^\[pkg.rustc.target.riscv64gc-unknown-linux-musl\]'`. `available = true` means keep
+      upstream's musllinux legs. A port that pins an older toolchain
+      (`--default-toolchain <date>`) needs the manifest for *that* date.
+    - **One leg wedged inside rustc once.** On the first run the cp313-musllinux leg went silent
+      in the `rustc --crate-name pyo3` step for 53 minutes until `timeout-minutes: 60` killed
+      it. The cp312-musllinux leg compiled the same crate from the same lock in 60 s, and the
+      only difference in the command line was one extra `--cfg Py_3_13`. A rerun of just that
+      job finished in 9 minutes (`rerun-failed-jobs`). With one hang in four musl legs, the
+      cause is unknown: it could be the runner or the musl-hosted rustc. Keep a
+      `timeout-minutes` so a wedge fails on its own (gotcha 508), and rerun the job once
+      before you treat it as a real musl blocker. If it hangs a second time, look for a
+      deadlock in the rustc process before dropping musl.
