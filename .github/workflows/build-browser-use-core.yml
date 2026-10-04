@@ -1,0 +1,220 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on
+# https://github.com/browser-use/browser-use-terminal/blob/16cdd3ac47261292d88f410abb1f0234577850ce/.github/workflows/browser-use-core-wheels.yml
+name: Build browser-use-core wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/browser-use-core.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-browser-use-core.yml'
+      - 'docs/packages/browser-use-core.yaml'
+      - 'patches/browser-use-core/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-browser-use-core.yml'
+      - 'docs/packages/browser-use-core.yaml'
+      - 'patches/browser-use-core/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # Upstream pushed no browser-use-core-v0.13.3 tag; this is the "Bump
+  # browser-use-core to 0.13.3" commit the PyPI wheels were built from (gotcha 103).
+  # Move it together with the pending version in docs/packages/browser-use-core.yaml.
+  BROWSER_USE_CORE_REF: 16cdd3ac47261292d88f410abb1f0234577850ce
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: browser-use-core
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build browser-use-core ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    env:
+      BROWSER_USE_CORE_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+
+    steps:
+      - name: Checkout browser-use-terminal ${{ env.BROWSER_USE_CORE_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: browser-use/browser-use-terminal
+          ref: ${{ env.BROWSER_USE_CORE_REF }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply -v python-wheels/patches/browser-use-core/${{ env.BROWSER_USE_CORE_VERSION }}/*.patch
+
+      - name: Check package version
+        run: grep -qx "version = \"${BROWSER_USE_CORE_VERSION}\"" packages/browser-use-core/pyproject.toml
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.11'
+          enable-cache: false
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # master
+        with:
+          toolchain: stable
+          targets: riscv64gc-unknown-linux-musl
+
+      - name: Install Linux musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build wheel
+        env:
+          # cc-rs maps upstream's x86_64 musl target to musl-gcc but looks for a
+          # riscv64-linux-musl-gcc that Ubuntu's musl-tools does not ship.
+          CC_riscv64gc_unknown_linux_musl: musl-gcc
+        run: TARGET_TRIPLE=riscv64gc-unknown-linux-musl OUT_DIR=dist scripts/build-browser-use-core-wheel.sh
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: browser-use-core-${{ env.BROWSER_USE_CORE_VERSION }}-manylinux_riscv64
+          path: dist/browser_use_core-*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test browser-use-core ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    env:
+      BROWSER_USE_CORE_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+      UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+      UV_INDEX_STRATEGY: unsafe-best-match
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # No 3.14t: the curl-cffi dependency ships only cp310-abi3 wheels, which
+        # free-threaded CPython cannot load.
+        python-version: ['3.12', '3.13', '3.14']
+
+    steps:
+      - name: Checkout browser-use-terminal ${{ env.BROWSER_USE_CORE_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: browser-use/browser-use-terminal
+          ref: ${{ env.BROWSER_USE_CORE_REF }}
+          path: upstream
+          sparse-checkout: packages/browser-use-core/tests
+          persist-credentials: false
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: browser-use-core-${{ env.BROWSER_USE_CORE_VERSION }}-manylinux_riscv64
+          path: dist
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --only-binary ':all:' --find-links dist "browser-use-core==${BROWSER_USE_CORE_VERSION}" pytest
+
+      - name: Run package tests
+        run: |
+          cp -r upstream/packages/browser-use-core/tests "$RUNNER_TEMP/tests"
+          cd "$RUNNER_TEMP"
+          python -m pytest -q tests
+
+      - name: Smoke installed wheel
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          browser-use-terminal --version
+          but --version
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+
+          import browser_use_core
+
+          binary = browser_use_core.binary_path("browser-use-terminal")
+          assert os.path.exists(binary), binary
+          subprocess.run([binary, "--version"], check=True)
+          subprocess.run([browser_use_core.binary_path("rg"), "--version"], check=True)
+          proc = subprocess.run(
+              [binary, "sdk-server", "--transport", "stdio"],
+              input='{"jsonrpc":"2.0","id":1,"method":"runtime.ping","params":{}}\n',
+              text=True,
+              capture_output=True,
+              timeout=10,
+              check=True,
+          )
+          response = json.loads(proc.stdout.strip())
+          assert response["result"]["ok"] is True, response
+          env = os.environ.copy()
+          env["BROWSER_USE_PYTHON"] = sys.executable
+          proc = subprocess.run(
+              [binary, "sdk-server", "--transport", "stdio"],
+              input='{"jsonrpc":"2.0","id":2,"method":"runtime.python_worker_ping","params":{}}\n',
+              text=True,
+              capture_output=True,
+              timeout=20,
+              check=True,
+              env=env,
+          )
+          response = json.loads(proc.stdout.strip())
+          assert response["result"]["ok"] is True, response
+          assert "browser-use-python-worker-ok" in response["result"]["text"], response
+          PY
+
+  publish:
+    name: Publish browser-use-core ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: browser-use-core-${{ matrix.version }}-manylinux_riscv64
