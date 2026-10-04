@@ -607,6 +607,9 @@ The porting gotchas (554 of them) live in [`references/gotchas/`](gotchas/), spl
   `output-dir`, `config-file`, `only`, `extras`); passing one is silently dropped, and
   cibuildwheel falls back to its default matrix floor instead of the intended abi3
   build list (the vegafusion case) — use `CIBW_BUILD`/`only:` instead.
+- **633** — Gotcha 96's `PY_SSIZE_T_CLEAN` trap starts at CPython 3.13 headers (3.12's
+  `modsupport.h` still aliases `PyArg_ParseTuple` to `_SizeT`), so a fixed `cp37-abi3`
+  floor the riscv64 image can't provide is safe to build on cp312 (the etcpak case).
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
