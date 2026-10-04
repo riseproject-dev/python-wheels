@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build:
+#   https://github.com/Kludex/zttp/blob/v0.0.31/.github/workflows/publish.yml
+name: Build zttp wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/zttp.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-zttp.yml'
+      - 'docs/packages/zttp.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-zttp.yml'
+      - 'docs/packages/zttp.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: zttp
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build zttp ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        libc: [manylinux, musllinux]
+    env:
+      ZTTP_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout zttp v${{ env.ZTTP_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Kludex/zttp
+          ref: v${{ env.ZTTP_VERSION }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # Upstream's build[uv] frontend needs a host uv the runner has none of.
+          CIBW_BUILD_FRONTEND: build
+          # Upstream's wheel test is an import smoke; run its pytest suite (main.yml) instead.
+          CIBW_TEST_REQUIRES: pytest inline-snapshot
+          CIBW_TEST_SOURCES: tests docs pyproject.toml
+          CIBW_TEST_COMMAND: python -m pytest -v
+
+      - name: Check the wheel is compiled and carries the release version
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import os, sys, zipfile
+          for whl in sys.argv[1:]:
+              assert os.path.basename(whl).startswith(f"zttp-{os.environ['ZTTP_VERSION']}-"), whl
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("zttp/_zttp.") and n.endswith(".so") for n in names), names
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: zttp-${{ env.ZTTP_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish zttp ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: zttp-${{ matrix.version }}-*riscv64
