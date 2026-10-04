@@ -1,0 +1,154 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build` job of
+# https://github.com/hughhan1/rtest/blob/v0.0.46/.github/workflows/release.yml
+# and the `test` job of
+# https://github.com/hughhan1/rtest/blob/v0.0.46/.github/workflows/ci.yml
+name: Build rtest wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/rtest.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-rtest.yml'
+      - 'docs/packages/rtest.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-rtest.yml'
+      - 'docs/packages/rtest.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: rtest
+      version: ${{ inputs.version }}
+
+  test_rust:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Test rtest ${{ matrix.version }} Rust crate
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      RTEST_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout rtest v${{ env.RTEST_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: hughhan1/rtest
+          ref: v${{ env.RTEST_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # master
+        with:
+          toolchain: stable
+
+      - name: Run Rust unit tests
+        run: cargo test --lib
+
+      - name: Run Rust integration tests
+        run: cargo test
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build rtest ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # No abi3, so one wheel per interpreter; pp310/pp311 are dropped (PyPy has no riscv64 port).
+        python: ['cp310', 'cp311', 'cp312', 'cp313', 'cp314', 'cp314t']
+
+    env:
+      RTEST_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+
+    steps:
+      - name: Checkout rtest v${{ env.RTEST_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: hughhan1/rtest
+          ref: v${{ env.RTEST_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --out dist -i ${{ steps.interp.outputs.value }}
+          manylinux: '2_39'
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ steps.interp.outputs.value }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install rtest
+        run: |
+          uv pip install rtest --no-index --find-links dist --force-reinstall
+          uv pip install pytest==8.3.5
+
+      - name: Test import
+        run: python -c "import rtest, rtest._rtest as m; assert m.__file__.endswith('.so'), m.__file__; print('Import successful')"
+
+      - name: Run Python integration tests
+        run: rtest tests/ --runner native -n 1
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rtest-${{ env.RTEST_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish rtest ${{ matrix.version }}
+    needs: [setup, test_rust, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: rtest-${{ matrix.version }}-*-manylinux_riscv64
