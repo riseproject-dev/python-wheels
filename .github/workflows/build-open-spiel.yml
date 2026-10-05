@@ -1,0 +1,180 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/google-deepmind/open_spiel/blob/v2.0.2/.github/workflows/wheels.yml
+name: Build open-spiel wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/open-spiel.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-open-spiel.yml'
+      - 'docs/packages/open-spiel.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-open-spiel.yml'
+      - 'docs/packages/open-spiel.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: open-spiel
+      version: ${{ inputs.version }}
+
+  python_sdist:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build open-spiel ${{ matrix.version }} sdist
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    env:
+      OPEN_SPIEL_VERSION: ${{ matrix.version }}
+      OPEN_SPIEL_BUILD_WITH_ACPC: 'ON'
+      OPEN_SPIEL_BUILD_WITH_HANABI: 'ON'
+      # The RoShamBo bots are unlicensed competition code with one GPL-2.0-or-later bot (halbot.h).
+      OPEN_SPIEL_BUILD_WITH_ROSHAMBO: 'OFF'
+
+    steps:
+      - name: Checkout open_spiel v${{ env.OPEN_SPIEL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: google-deepmind/open_spiel
+          ref: v${{ env.OPEN_SPIEL_VERSION }}
+          persist-credentials: false
+
+      - name: Install
+        run: ./install.sh "$(which python3)"
+
+      - name: Bundle the licences of the sources compiled into pyspiel
+        run: |
+          cp pybind11/LICENSE LICENSE.pybind11
+          cp open_spiel/abseil-cpp/LICENSE LICENSE.abseil-cpp
+          cp open_spiel/json/LICENSE.MIT LICENSE.nlohmann-json
+          cp open_spiel/pybind11_json/LICENSE LICENSE.pybind11_json
+          cp open_spiel/pybind11_abseil/LICENSE LICENSE.pybind11_abseil
+          cp open_spiel/games/bridge/double_dummy_solver/LICENSE LICENSE.dds
+          cp open_spiel/games/hanabi/hanabi-learning-environment/LICENSE LICENSE.hanabi-learning-environment
+          cp open_spiel/games/universal_poker/acpc/LICENSE LICENSE.project_acpc_server
+
+      - name: Build sdist
+        run: pipx run build --sdist
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: open-spiel-${{ env.OPEN_SPIEL_VERSION }}-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, python_sdist]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build open-spiel ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314"]
+    env:
+      OPEN_SPIEL_VERSION: ${{ matrix.version }}
+
+    steps:
+      # The sdist omits open_spiel/scripts, which holds upstream's test_wheel.sh.
+      - name: Checkout open_spiel v${{ env.OPEN_SPIEL_VERSION }} test scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: google-deepmind/open_spiel
+          ref: v${{ env.OPEN_SPIEL_VERSION }}
+          path: open_spiel_scripts
+          persist-credentials: false
+          sparse-checkout: open_spiel/scripts
+
+      - name: Fetch sdist artifact
+        id: fetch_sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: open-spiel-${{ env.OPEN_SPIEL_VERSION }}-sdist
+
+      - name: Extract sdist
+        run: |
+          mkdir open_spiel_sdist
+          tar zxf ${{ steps.fetch_sdist.outputs.download-path }}/open_spiel-*.tar.gz --strip-components=1 -C open_spiel_sdist
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: open_spiel_sdist
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            CXX=$(which g++)
+            OPEN_SPIEL_BUILDING_WHEEL='ON'
+            OPEN_SPIEL_BUILD_WITH_ACPC='ON'
+            OPEN_SPIEL_BUILD_WITH_HANABI='ON'
+            OPEN_SPIEL_BUILD_WITH_ROSHAMBO='OFF'
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy,pyyaml
+          CIBW_BEFORE_TEST: python -m pip install --upgrade pip
+          CIBW_TEST_COMMAND: /bin/bash {project}/open_spiel_scripts/open_spiel/scripts/test_wheel.sh basic {package}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: open-spiel-${{ env.OPEN_SPIEL_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+      - name: Check the wheel ships pyspiel and the bundled licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert any(n.startswith("pyspiel.") and n.endswith(".so") for n in names), names
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+          for want in ("LICENSE", "LICENSE.pybind11", "LICENSE.abseil-cpp", "LICENSE.nlohmann-json",
+                       "LICENSE.pybind11_json", "LICENSE.pybind11_abseil", "LICENSE.dds",
+                       "LICENSE.hanabi-learning-environment", "LICENSE.project_acpc_server"):
+              assert want in licences, (want, sorted(licences))
+          print(sys.argv[1], len(licences), "licence files ok")
+          EOF
+
+  publish:
+    name: Publish open-spiel ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: open-spiel-${{ matrix.version }}-*-manylinux_riscv64
