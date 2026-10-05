@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel builder and test workflow:
+#   https://github.com/tarasko/aiofastnet/blob/v1.1.0/.github/workflows/release.yml
+#   https://github.com/tarasko/aiofastnet/blob/v1.1.0/.github/workflows/run-tests.yml
+name: Build aiofastnet wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/aiofastnet.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-aiofastnet.yml'
+      - 'docs/packages/aiofastnet.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-aiofastnet.yml'
+      - 'docs/packages/aiofastnet.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: aiofastnet
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build aiofastnet ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        libc: [manylinux, musllinux]
+
+    env:
+      AIOFASTNET_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout aiofastnet v${{ env.AIOFASTNET_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: tarasko/aiofastnet
+          ref: v${{ env.AIOFASTNET_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT_LINUX: CFLAGS="$CFLAGS -O2 -g0 -DNDEBUG" PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # No musllinux riscv64 uvloop wheel exists; the suite only adds it as an extra loop when importable.
+          CIBW_TEST_REQUIRES: >-
+            aiohttp async_timeout pytest pytest-aiohttp pytest-asyncio pytest-xdist
+            ${{ matrix.libc == 'manylinux' && 'uvloop' || '' }}
+          CIBW_TEST_SOURCES: tests pyproject.toml
+          # test_benchmarks.py is upstream's CodSpeed harness, run in its own benchmarks job.
+          # The riscv64 runner kernel has no CONFIG_TLS, so tests asserting kTLS is active can't pass.
+          # Its software AES-128-GCM (~38 MB/s) can't move multi-MB TLS payloads within the suite's 1-4s timeouts.
+          CIBW_TEST_COMMAND: >-
+            pytest -n auto -v --ignore=tests/test_benchmarks.py
+            -k "not ktls_enabled and not (ktls and (sendfile or membio_enabled))
+            and not ((ssl_ or stls or ktls) and (6291456 or 20971520 or write_huge_close or contextvar or exc_connection_made))"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: aiofastnet-${{ env.AIOFASTNET_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish aiofastnet ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: aiofastnet-${{ matrix.version }}-*riscv64
