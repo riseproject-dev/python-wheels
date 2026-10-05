@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 06 Oct 2026 00:00:00 +0000
+Subject: [PATCH] cargo: redirect lance-core/lance-linalg to a riscv64-patched
+ checkout
+
+lance-core's SIMD_SUPPORT static (src/utils/cpu.rs) and lance-linalg's
+f32x8/f32x16/i32x8/f64x4/f64x8 SIMD types (src/simd/{f32,i32,f64}.rs)
+are compiled for x86_64/aarch64/loongarch64 only, with no fallback arm
+for any other architecture (CLAUDE.md gotcha 300): the SIMD_SUPPORT
+closure has no trailing expression on riscv64 ("expected SimdSupport,
+found ()"), and the SIMD type structs are defined only under those
+three `#[cfg(target_arch = ...)]` attributes while every method
+implementing them is unconditional, so riscv64 hits "cannot find type
+`f32x8` in this scope" as soon as lance-linalg is built.
+
+Both crates are pulled in from crates.io at a pinned `=7.0.0` via
+`crates/lance-context-core`'s `lance = "7.0.0"` (lance-graph's own,
+unused `1.x` copy of the same two crates is dropped entirely by
+0001-remove-unused-lance-graph-dependency.patch instead -- Cargo's
+`[patch]` table can only redirect one semver-incompatible version of a
+given crate name at a time), so the fix cannot be applied in place.
+Redirect them to the riscv64-patched copies the workflow materializes
+at build time from the pinned crates.io release (see
+0002-lance-core-riscv64-simd-fallback.patch and
+0004-lance-linalg-riscv64-simd-fallback.patch), at the same version
+Cargo.lock already pins -- only the `source`/`checksum` lines of the
+lance-core/lance-linalg 7.0.0 entries change there, so every other
+dependency stays pinned exactly as upstream released it.
+
+Upstream-Status: Inappropriate [redirects a pinned dependency to a local checkout materialized at build time; the fix itself belongs in lance-format/lance]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/Cargo.lock b/Cargo.lock
+index 3a467b8..83bb9e5 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -5625,8 +5625,6 @@ dependencies = [
+ [[package]]
+ name = "lance-core"
+ version = "7.0.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "13f84020da5a484e2f07dd1796e09785ed7cd889857ebc4cb77e32ef214ee594"
+ dependencies = [
+  "arrow-array 58.3.0",
+  "arrow-buffer 58.3.0",
+@@ -6219,8 +6217,6 @@ dependencies = [
+ [[package]]
+ name = "lance-linalg"
+ version = "7.0.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "6b4c51cad0ac780b02dc4da48528479e7693c03e8d05390510bbc69ca2a9a1f1"
+ dependencies = [
+  "arrow-array 58.3.0",
+  "arrow-buffer 58.3.0",
+diff --git a/Cargo.toml b/Cargo.toml
+index 2efab19..618ba8b 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -17,3 +17,12 @@ license = "Apache-2.0"
+ 
+ [workspace.metadata]
+ # reserved for future use
++
++# lance-core's SIMD_SUPPORT static and lance-linalg's f32x8/f32x16/i32x8/
++# f64x4/f64x8 SIMD types compile only for x86_64/aarch64/loongarch64
++# upstream (CLAUDE.md gotcha 300); the riscv64-patched copies below are
++# materialized from the pinned crates.io release by the workflow at
++# build time.
++[patch.crates-io]
++lance-core = { path = "lance-core-7.0.0-riscv64" }
++lance-linalg = { path = "lance-linalg-7.0.0-riscv64" }
+-- 
+2.43.0
