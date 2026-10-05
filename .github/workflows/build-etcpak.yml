@@ -1,0 +1,131 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels_qemu` job of
+# https://github.com/K0lb3/etcpak/blob/e2a7464bb4f98cb1765d9756ae6cb8e5f9a24d70/.github/workflows/release.yml
+# and the test steps of .github/workflows/test.yml at the same commit.
+name: Build etcpak wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/etcpak.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-etcpak.yml'
+      - 'docs/packages/etcpak.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-etcpak.yml'
+      - 'docs/packages/etcpak.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # Upstream cuts releases without git tags, so pin the release commit: this is
+  # "chore: bump version to 0.9.15", whose tree is byte-identical to the 0.9.15
+  # PyPI sdist. Update it alongside ETCPAK_VERSION.
+  ETCPAK_REF: e2a7464bb4f98cb1765d9756ae6cb8e5f9a24d70
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: etcpak
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build etcpak ${{ matrix.version }} cp37-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+
+    env:
+      ETCPAK_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout etcpak ${{ env.ETCPAK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: K0lb3/etcpak
+          ref: ${{ env.ETCPAK_REF }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch etcpak source
+        run: git apply python-wheels/patches/etcpak/${{ env.ETCPAK_VERSION }}/00*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          # setup.py tags every CPython build cp37-abi3 with no Py_GIL_DISABLED
+          # guard, so cp314t would hit CPython's limited-API #error; upstream ships
+          # no free-threaded wheel either. Built once on cp312, retested on the rest.
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # abi3audit flags the module's own PyBC7CompressBlockParamsObject global by
+          # its Py prefix; upstream's released aarch64 abi3 wheel exports it too.
+          CIBW_AUDIT_COMMAND: ''
+          CIBW_TEST_EXTRAS: tests
+          CIBW_TEST_COMMAND: pytest {package}/tests -v
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=Pillow,numpy,scipy,PyWavelets,texture2ddecoder
+
+      - name: Check the extension and licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert "etcpak/_etcpak_none.abi3.so" in names, names
+              assert any(n.endswith(".dist-info/LICENSE") for n in names), names
+              assert any(n.endswith(".dist-info/LICENSE.txt") for n in names), names
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: etcpak-${{ env.ETCPAK_VERSION }}-cp37-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish etcpak ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: etcpak-${{ matrix.version }}-*-manylinux_riscv64
