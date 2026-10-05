@@ -1330,6 +1330,9 @@ The porting gotchas (555 of them) live in [`references/gotchas/`](gotchas/), spl
   removed fails on cp312/cp313/cp314 alike; alias them back on `unittest.TestCase` inside the
   `-c` test command instead of patching a test module that ships in the wheel (the
   ed25519-blake2b-fork case).
+- **643** — A test suite that needs Node.js (an npm mock server) still runs on riscv64:
+  `actions/setup-node` with `mirror: https://unofficial-builds.nodejs.org/download/release`
+  installs a riscv64 Node (the eppo-server-sdk case).
 
 ### Test failures, flakes & arch-specific bugs — [`gotchas/test-failures-and-flakes.md`](gotchas/test-failures-and-flakes.md)
 

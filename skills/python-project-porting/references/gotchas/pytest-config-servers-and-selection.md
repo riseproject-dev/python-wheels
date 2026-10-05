@@ -54,6 +54,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
 - **631** — An old unittest suite calling the `failUnless*`/`failIf*`/`assertEquals` aliases
   that Python 3.12 removed fails on every default-matrix interpreter; alias them back in the
   `-c` test command rather than patching the shipped test module.
+- **643** — An upstream test suite that needs a Node.js helper (a mock server via
+  `npm ci`/`npm run`) still runs on the riscv64 runner: `actions/setup-node` with
+  `mirror: https://unofficial-builds.nodejs.org/download/release` installs a riscv64 Node.
 
 ---
 
@@ -941,3 +944,23 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
     - **Check that the run still includes the tests you added.** `Ran N tests` must count the
       known-answer case as well. A root-level module that fails to import shows up as a
       `_FailedTest`, not as a missing test.
+
+643. **An upstream test suite that needs Node.js (a mock HTTP server started with `npm ci` and
+     `npm run with-server ...`) is not a reason to drop the tests on riscv64 (the
+     eppo-server-sdk case).** nodejs.org/dist publishes no `linux-riscv64` build, so a
+     plain `actions/setup-node` fails there, but `unofficial-builds.nodejs.org` does publish
+     one for every current LTS line. `actions/setup-node` (v7) takes a `mirror:` input, and
+     its arch mapping passes `riscv64` through unchanged, so the step needs one extra line:
+     ```yaml
+     - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+       with:
+         node-version: '22'
+         mirror: https://unofficial-builds.nodejs.org/download/release
+     ```
+     After that, upstream's own `npm ci` + `npm run with-server test:python` ran unchanged
+     on `ubuntu-24.04-riscv` (pure-JS deps: http-server, start-server-and-test), with 120
+     passed on each interpreter. Check that the LTS line has a riscv64 entry first:
+     `curl -s https://unofficial-builds.nodejs.org/download/release/index.json`, then
+     filter entries whose `files` include `linux-riscv64`. This covers Node used as a
+     *test-time tool* only. A package that bundles or downloads a Node binary into the
+     wheel is a different question (feasibility gotchas on playwright).
