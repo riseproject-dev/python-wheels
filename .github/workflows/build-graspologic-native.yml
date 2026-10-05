@@ -32,7 +32,6 @@ permissions:
 
 env:
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
 
 jobs:
   setup:
@@ -44,7 +43,7 @@ jobs:
   build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
-    name: Build graspologic-native ${{ matrix.version }} ${{ matrix.tag }}-${{ matrix.platform }}_riscv64
+    name: Build graspologic-native ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
@@ -54,12 +53,7 @@ jobs:
         # pyo3's abi3-py39 feature (Cargo.toml) is on unconditionally, so one
         # abi3 wheel serves every GIL-ful interpreter; pyo3 disables abi3
         # under Py_GIL_DISABLED, giving the free-threaded build its own wheel.
-        platform: [manylinux, musllinux]
         tag: [cp39-abi3, cp314t]
-        exclude:
-          # The riscv64 musllinux image ships no free-threaded interpreter.
-          - platform: musllinux
-            tag: cp314t
 
     env:
       GRASPOLOGIC_NATIVE_VERSION: ${{ matrix.version }}
@@ -87,16 +81,17 @@ jobs:
           # Built on cp39 -- the oldest interpreter the abi3 tag claims -- and
           # re-tested on the newer ones via find_compatible_wheel.
           CIBW_BUILD: >-
-            ${{ matrix.tag == 'cp39-abi3' && format('cp39-{0}_riscv64 cp310-{0}_riscv64 cp311-{0}_riscv64 cp312-{0}_riscv64 cp313-{0}_riscv64 cp314-{0}_riscv64', matrix.platform) || format('cp314t-{0}_riscv64', matrix.platform) }}
+            ${{ matrix.tag == 'cp39-abi3' && 'cp39-manylinux_riscv64 cp310-manylinux_riscv64 cp311-manylinux_riscv64 cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64' || 'cp314t-manylinux_riscv64' }}
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
           # graspologic-native ships no [tool.cibuildwheel], so the Rust
           # toolchain its maturin backend needs is installed in-container here.
           CIBW_BEFORE_ALL_LINUX: >-
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           # numpy and scipy are runtime requirements only our registry has for
           # riscv64; only-binary keeps a newer PyPI release from winning the
-          # resolution and then compiling from sdist.
+          # resolution and then compiling from sdist. musllinux is dropped:
+          # our registry has no musllinux_riscv64 wheel for either, so the
+          # installed wheel's own runtime deps can't resolve there.
           CIBW_ENVIRONMENT_LINUX: >-
             PATH="$PATH:$HOME/.cargo/bin"
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
@@ -113,7 +108,7 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: graspologic-native-${{ env.GRASPOLOGIC_NATIVE_VERSION }}-${{ matrix.tag }}-${{ matrix.platform }}_riscv64
+          name: graspologic-native-${{ env.GRASPOLOGIC_NATIVE_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
           path: wheelhouse/*.whl
           if-no-files-found: error
 
