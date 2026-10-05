@@ -1,0 +1,269 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `U22_SH_Py_CI` job of
+# https://github.com/realsenseai/librealsense/blob/v2.58.4/.github/workflows/buildsCI.yaml
+# and wrappers/python/build_wheel.py
+name: Build pyrealsense2 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyrealsense2.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyrealsense2.yml'
+      - 'docs/packages/pyrealsense2.yaml'
+      - 'patches/pyrealsense2/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyrealsense2.yml'
+      - 'docs/packages/pyrealsense2.yaml'
+      - 'patches/pyrealsense2/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyrealsense2
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyrealsense2 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      PYREALSENSE2_VERSION: ${{ matrix.version }}
+
+    steps:
+      # The fourth component of the PyPI version is upstream's release build number, not part of the tag.
+      - id: tag
+        run: echo "ref=v${PYREALSENSE2_VERSION%.*}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout librealsense ${{ steps.tag.outputs.ref }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: realsenseai/librealsense
+          ref: ${{ steps.tag.outputs.ref }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch librealsense
+        run: git apply python-wheels/patches/pyrealsense2/${{ env.PYREALSENSE2_VERSION }}/*.patch
+
+      - name: Stamp the release build number
+        run: |
+          sed -i -E "s/^(#define RS2_API_BUILD_VERSION[[:space:]]+)0$/\1${PYREALSENSE2_VERSION##*.}/" include/librealsense2/rs.h
+          grep -q "RS2_API_BUILD_VERSION *${PYREALSENSE2_VERSION##*.}$" include/librealsense2/rs.h
+          echo "__version__ = \"${PYREALSENSE2_VERSION}\"" > wrappers/python/pyrealsense2/_version.py
+          cp LICENSE NOTICE.md wrappers/python/
+
+      - name: Stage the licence-collection script
+        run: |
+          cat > collect-licenses.sh <<'COLLECT_EOF'
+          #!/bin/bash
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # Stage, in the wheel's project dir, the licence of every shared library
+          # auditwheel vendors out of the build image alongside libusb/libudev.
+          # hatchling's default LICEN[CS]E* glob copies them into the wheel.
+          set -euo pipefail
+
+          project="${1:?usage: collect-licenses.sh <project-dir>}"
+
+          # ldd is transitive, so the two linked libs alone cover their whole
+          # closure; ldd does not list the root itself, so resolve those too.
+          mapfile -t libs < <(
+              {
+                  ldd /usr/lib64/libusb-1.0.so | tr ' ' '\n' | grep '^/'
+                  readlink -f /usr/lib64/libusb-1.0.so
+                  ldd /usr/lib64/libudev.so | tr ' ' '\n' | grep '^/'
+                  readlink -f /usr/lib64/libudev.so
+              } | sort -u
+          )
+
+          # `rpm -qf` reports unowned files on stdout, so keep only bare package names.
+          # glibc and the gcc runtime are on auditwheel's manylinux allowlist and
+          # are never vendored into the wheel.
+          mapfile -t pkgs < <(
+              rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null |
+                  grep -E '^[A-Za-z0-9._+-]+$' | sort -u |
+                  grep -vE '^(glibc|libgcc|libstdc\+\+|gcc)$'
+          )
+
+          for pkg in "${pkgs[@]}"; do
+              mapfile -t files < <(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
+
+              # Some subpackages leave the licence to a sibling of the same source RPM.
+              if [ -z "${files[0]:-}" ]; then
+                  srpm=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg")
+                  mapfile -t files < <(
+                      rpm -qa --qf '%{SOURCERPM} %{NAME}\n' |
+                          awk -v s="$srpm" '$1 == s { print $2 }' |
+                          xargs -r rpm -q --licensefiles 2>/dev/null | sort -u
+                  )
+              fi
+
+              # Others mark it %doc rather than %license, and the image installs no docs.
+              if [ -z "${files[0]:-}" ]; then
+                  dnf -y --disablerepo=extras reinstall --setopt=tsflags= "$pkg" >/dev/null
+                  mapfile -t files < <(rpm -qd "$pkg" | grep -iE '/(LICEN[CS]E|COPYING|NOTICE)')
+              fi
+
+              for f in "${files[@]}"; do
+                  [ -f "$f" ] || continue
+                  cp "$f" "$project/LICENSE.${pkg}.$(basename "$f")"
+              done
+              compgen -G "$project/LICENSE.$pkg.*" >/dev/null ||
+                  { echo "no licence file found for $pkg" >&2; exit 1; }
+          done
+
+          ls -1 "$project"/LICENSE.* | sed "s|$project/||"
+          COLLECT_EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: wrappers/python
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,opencv-python-headless,zstandard
+          # libudev-devel doesn't exist on Rocky 10; systemd-devel provides libudev.so/libudev.h instead (gotcha 252)
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf install -y libusb1-devel systemd-devel &&
+            bash {project}/collect-licenses.sh {project}/wrappers/python
+          CIBW_BEFORE_BUILD_LINUX: >-
+            cmake -S {project} -B {project}/build
+            -DCMAKE_BUILD_TYPE=Release
+            -DBUILD_SHARED_LIBS=false
+            -DBUILD_EXAMPLES=false
+            -DBUILD_GRAPHICAL_EXAMPLES=false
+            -DBUILD_TOOLS=false
+            -DBUILD_UNIT_TESTS=false
+            -DCHECK_FOR_UPDATES=false
+            -DBUILD_WITH_DDS=false
+            -DBUILD_PYTHON_BINDINGS=true
+            -DPYTHON_EXECUTABLE=$(which python)
+            -DPython_EXECUTABLE=$(which python) &&
+            cmake --build {project}/build -- -j$(nproc) &&
+            cp -L {project}/build/Release/pyrealsense2.cpython-*.so {project}/build/Release/pyrsutils.cpython-*.so {project}/wrappers/python/pyrealsense2/
+          CIBW_TEST_REQUIRES: >-
+            pytest pytest-timeout pytest-rerunfailures pytest-repeat pytest-check
+            numpy opencv-python-headless zstandard
+          CIBW_TEST_SOURCES: unit-tests
+          # upstream's --not-live pytest run, minus the files that read recordings or binaries from a CMake build tree
+          CIBW_TEST_COMMAND: >-
+            python -m pytest unit-tests/log unit-tests/sw-dev unit-tests/syncer unit-tests/post-processing
+            --color=no --not-live --context linux -p no:cacheprovider
+            --ignore=unit-tests/log/pytest-env-log-level-off.py
+            --ignore=unit-tests/log/pytest-env-log-level-on.py
+            --ignore=unit-tests/post-processing/pytest-filters.py
+            --ignore=unit-tests/post-processing/pytest-post-processing-from-bag.py
+
+      - name: Verify the wheel ships both compiled extensions and licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = sorted(n for n in names if ".so" in n)
+          print("\n".join(sos))
+          assert any(n.startswith("pyrealsense2/pyrealsense2.cpython-") for n in sos), sos
+          assert any(n.startswith("pyrealsense2/pyrsutils.cpython-") for n in sos), sos
+
+          lic = sorted(n.split("/")[-1] for n in names if ".dist-info/licenses/" in n and not n.endswith("/"))
+          print("\n".join(lic))
+          assert {"LICENSE", "NOTICE.md"} <= set(lic), lic
+          expected_pkgs = {"libcap", "libusb1", "systemd-libs"}
+          have_pkgs = {f.split(".", 2)[1] for f in lic if f.startswith("LICENSE.")}
+          assert expected_pkgs <= have_pkgs, expected_pkgs - have_pkgs
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyrealsense2-${{ env.PYREALSENSE2_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources for pyrealsense2 ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      PYREALSENSE2_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # libcap/libusb1/systemd-libs are the copyleft (LGPL) libraries auditwheel vendors
+      # out of the build image alongside libusb/libudev.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc libcap libusb1 systemd-libs
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyrealsense2-${{ env.PYREALSENSE2_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyrealsense2 ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyrealsense2-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: pyrealsense2-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc and the copyleft libraries bundled in the wheel
