@@ -1,0 +1,142 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build` job of
+# https://github.com/graspologic-org/graspologic-native/blob/v1.3.1/.github/workflows/CI.yml
+name: Build graspologic-native wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/graspologic-native.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-graspologic-native.yml'
+      - 'docs/packages/graspologic-native.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-graspologic-native.yml'
+      - 'docs/packages/graspologic-native.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: graspologic-native
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build graspologic-native ${{ matrix.version }} ${{ matrix.tag }}-${{ matrix.platform }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # pyo3's abi3-py39 feature (Cargo.toml) is on unconditionally, so one
+        # abi3 wheel serves every GIL-ful interpreter; pyo3 disables abi3
+        # under Py_GIL_DISABLED, giving the free-threaded build its own wheel.
+        # The riscv64 musllinux image ships no free-threaded interpreter, so
+        # cp314t is manylinux-only.
+        include:
+          # Built on cp39 -- the oldest interpreter the abi3 tag claims -- and
+          # re-tested on the newer ones via find_compatible_wheel.
+          - tag: cp39-abi3
+            platform: manylinux
+            build: >-
+              cp39-manylinux_riscv64 cp310-manylinux_riscv64
+              cp311-manylinux_riscv64 cp312-manylinux_riscv64
+              cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          - tag: cp39-abi3
+            platform: musllinux
+            build: >-
+              cp39-musllinux_riscv64 cp310-musllinux_riscv64
+              cp311-musllinux_riscv64 cp312-musllinux_riscv64
+              cp313-musllinux_riscv64 cp314-musllinux_riscv64
+          - tag: cp314t
+            platform: manylinux
+            build: cp314t-manylinux_riscv64
+
+    env:
+      GRASPOLOGIC_NATIVE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout graspologic-native v${{ env.GRASPOLOGIC_NATIVE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: graspologic-org/graspologic-native
+          ref: v${{ env.GRASPOLOGIC_NATIVE_VERSION }}
+          persist-credentials: false
+
+      - name: Stage the licence beside graspologic-native's pyproject.toml
+        # maturin globs LICEN[CS]E* relative to the pyproject directory, which
+        # in this workspace is packages/pyo3/ -- so upstream's published wheels
+        # carry no licence text at all.
+        run: cp LICENSE packages/pyo3/
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: packages/pyo3
+          output-dir: wheelhouse/
+        env:
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # graspologic-native ships no [tool.cibuildwheel], so the Rust
+          # toolchain its maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_SOURCES: >-
+            packages/pyo3/tests
+            packages/network_partitions/tests
+          CIBW_TEST_COMMAND: >-
+            cd packages/pyo3 &&
+            python -c "import graspologic_native as m, importlib.metadata as md;
+            assert m.graspologic_native.__file__.endswith('.so'), m.graspologic_native.__file__;
+            assert any(str(p).endswith('licenses/LICENSE') for p in md.files('graspologic-native'))" &&
+            python -m unittest
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: graspologic-native-${{ env.GRASPOLOGIC_NATIVE_VERSION }}-${{ matrix.tag }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish graspologic-native ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: graspologic-native-${{ matrix.version }}-*_riscv64
