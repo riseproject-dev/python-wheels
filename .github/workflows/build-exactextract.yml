@@ -1,0 +1,174 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/isciences/exactextract/blob/v0.3.0/.github/workflows/python.yml
+name: Build exactextract wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/exactextract.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-exactextract.yml'
+      - 'docs/packages/exactextract.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-exactextract.yml'
+      - 'docs/packages/exactextract.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  GEOS_VERSION: '3.13.1'
+  BASEIMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  GEOS_IMAGE: manylinux_2_39_riscv64_geos_exactextract
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: exactextract
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build exactextract ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp39", "cp310", "cp311", "cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      EXACTEXTRACT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout exactextract v${{ env.EXACTEXTRACT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: isciences/exactextract
+          ref: v${{ env.EXACTEXTRACT_VERSION }}
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+        with:
+          install: true
+          buildkitd-flags: --debug
+
+      # the Python bindings link only GEOS::geos_c (CMakeLists.txt); GDAL is
+      # required only for the CLI target, which pyproject.toml's cmake.define
+      # disables (BUILD_CLI=NO), so no GDAL build is needed here.
+      - name: Write the GEOS image build context
+        run: |
+          mkdir -p "$RUNNER_TEMP/geos-ctx"
+          cat > "$RUNNER_TEMP/geos-ctx/Dockerfile" <<'DOCKER_EOF'
+          ARG BASEIMAGE=quay.io/pypa/manylinux_2_39_riscv64:latest
+          FROM ${BASEIMAGE}
+
+          ARG GEOS_VERSION
+
+          SHELL ["/bin/bash", "-euxo", "pipefail", "-c"]
+
+          RUN cd /tmp \
+              && curl -sSLo geos.tar.bz2 "https://download.osgeo.org/geos/geos-${GEOS_VERSION}.tar.bz2" \
+              && tar xf geos.tar.bz2 \
+              && cd "geos-${GEOS_VERSION}" \
+              && cmake -S . -B build \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_INSTALL_PREFIX=/usr/local \
+                  -DCMAKE_INSTALL_LIBDIR=lib \
+                  -DBUILD_TESTING=OFF \
+                  -DBUILD_DOCUMENTATION=OFF \
+                  -DBUILD_BENCHMARKS=OFF \
+              && cmake --build build -j"$(nproc)" \
+              && cmake --install build \
+              && ldconfig \
+              && rm -rf /tmp/geos*
+          DOCKER_EOF
+
+      - name: Build Docker image with GEOS
+        # using build-push-action (without push) to make use of cache arguments
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: ${{ runner.temp }}/geos-ctx
+          file: ${{ runner.temp }}/geos-ctx/Dockerfile
+          platforms: linux/riscv64
+          tags: ${{ env.GEOS_IMAGE }}:${{ env.GEOS_VERSION }}
+          build-args: |
+            BASEIMAGE=${{ env.BASEIMAGE }}
+            GEOS_VERSION=${{ env.GEOS_VERSION }}
+          push: false
+          load: true
+          cache-from: type=gha,scope=${{ env.GEOS_IMAGE }}
+          cache-to: type=gha,mode=max,scope=${{ env.GEOS_IMAGE }}
+        env:
+          BUILDKIT_PROGRESS: plain
+
+      - name: Add GEOS LICENSE
+        run: cp ci/wheels/licenses/LICENSE_GEOS .
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.GEOS_IMAGE }}:${{ env.GEOS_VERSION }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest numpy
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy
+          CIBW_TEST_COMMAND: >-
+            python -c "import exactextract; exactextract.__version__" &&
+            python -m pytest {package}/python/tests/test_exact_extract.py
+            {package}/python/tests/test_operation.py
+            {package}/python/tests/test_processor.py -s -v
+
+      - name: Check the wheel ships the GEOS licence and the compiled extension
+        run: |
+          python3 - <<'EOF'
+          import glob, zipfile
+
+          names = zipfile.ZipFile(glob.glob("wheelhouse/*.whl")[0]).namelist()
+          assert any(n.endswith("LICENSE_GEOS") for n in names), names
+          assert any(n.startswith("exactextract/_exactextract") and n.endswith(".so") for n in names), names
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: exactextract-${{ env.EXACTEXTRACT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish exactextract ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: exactextract-${{ matrix.version }}-*-manylinux_riscv64
