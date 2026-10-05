@@ -80,6 +80,11 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
   as bare `#define`s on any CPU but x86_64/arm64, so crc32c fails to preprocess on riscv64.
   Carry the one-line default as an `http_archive(patches=)` on `google_cloud_cpp`; stage
   licences per external repo from `bazel cquery 'deps(<target>)'`.
+- **641** — A vcpkg checkout older than 2025.07.25 builds every riscv64 port with an empty
+  `CMAKE_SYSTEM_PROCESSOR` (its `linux.cmake` toolchain has no riscv64 branch but still sets
+  `CMAKE_SYSTEM_NAME`), so Boost.Context falls back to x86_64 assembly and boost-context fails
+  with `unrecognized opcode 'leaq ...'`. Pass `-DCMAKE_SYSTEM_PROCESSOR=riscv64` through the
+  riscv64 triplet's `VCPKG_CMAKE_CONFIGURE_OPTIONS` (the depthai case).
 
 ---
 
@@ -1203,3 +1208,40 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       `$(bazel info output_base)/external/<repo>/{LICENSE*,COPYING*,NOTICE*}` next to
       `setup.py` as `LICENSE.<repo>` — it finds repos a hand list misses (gRPC pulled in
       `envoy_api`, `com_github_cncf_xds`, `com_envoyproxy_protoc_gen_validate`).
+
+641. **A vcpkg checkout older than 2025.07.25 configures every riscv64 CMake port with an
+    empty `CMAKE_SYSTEM_PROCESSOR`, and Boost.Context reads "empty, 64-bit" as x86_64 — so
+    boost-context dies assembling `jump_x86_64_sysv_elf_gas.S` (`Error: unrecognized opcode
+    'leaq -0x40(%rsp),%rsp'`) on a native riscv64 host (the depthai case).** A project that
+    bootstraps vcpkg itself checks the tool out at its manifest's `builtin-baseline`, and
+    that commit's `scripts/toolchains/linux.cmake` maps x64/x86/arm/arm64 to a
+    `CMAKE_SYSTEM_PROCESSOR` but has no riscv64 branch (vcpkg added one in 2025.07.25).
+    It still sets `CMAKE_SYSTEM_NAME Linux`, and a preset system name makes CMake's
+    `CMakeDetermineSystem` treat the build as a cross-compile and skip copying the host
+    processor — so every port sees `CMAKE_SYSTEM_PROCESSOR=""` *and*
+    `CMAKE_CROSSCOMPILING=TRUE`, while `VCPKG_TARGET_ARCHITECTURE` (and the triplet name,
+    and every other log line) correctly says riscv64. Boost.Context's CMakeLists matches
+    the processor against its arch list, then for 64-bit tests only `aarch64`/`arm*`/
+    `mips*` and defaults to `x86_64`. Nothing is wrong with Boost: it has shipped
+    `src/asm/{jump,make,ontop}_riscv64_sysv_elf_gas.S` since 1.71 (same files as gotcha 160).
+    - **Fix the processor, not Boost.Context:** in the riscv64 overlay triplet,
+      `set(VCPKG_CMAKE_CONFIGURE_OPTIONS -DCMAKE_SYSTEM_PROCESSOR=riscv64)` — exactly what
+      newer vcpkg's toolchain does with `set(... CACHE)`, and since the processor then equals
+      the host's, the toolchain's own native check turns `CMAKE_CROSSCOMPILING` back off.
+      If the triplet already sets `VCPKG_CMAKE_CONFIGURE_OPTIONS` for one port, make that a
+      `list(APPEND ...)` so it does not overwrite the global one. Forcing
+      `BOOST_CONTEXT_ARCHITECTURE=riscv64` (or `BOOST_CONTEXT_IMPLEMENTATION=ucontext`) for
+      boost-context alone would keep the binary cache warm but leaves every other port
+      configured as a fake cross-build with no processor. The triplet edit changes every
+      port's ABI hash, so the whole vcpkg tree rebuilds once.
+    - **Prove it on an x86_64 host in seconds:** a two-line `project()` plus Boost.Context's
+      `## ABI`…`unset(_default_arch)` block, configured with
+      `-DCMAKE_TOOLCHAIN_FILE=<pinned vcpkg>/scripts/toolchains/linux.cmake
+      -DVCPKG_TARGET_ARCHITECTURE=riscv64 -DCMAKE_SYSTEM_NAME=Linux`, prints
+      `BOOST_CONTEXT_ARCHITECTURE=x86_64`; add `-DCMAKE_SYSTEM_PROCESSOR=riscv64` and it
+      prints `riscv64`. Check which vcpkg the build really uses with
+      `curl .../microsoft/vcpkg/<baseline>/scripts/toolchains/linux.cmake | grep riscv64`.
+    - **Find who pulls boost-context in before deciding a feature flag can drop it:** in
+      depthai it is `remote-connection-support` → the overlay `websocketpp[recommended]` →
+      `boost-asio` → `boost-context`, and the wheel ships (and tests) remote connection, so
+      the dependency is real. `boost-coroutine` and `boost-fiber` pull it in too.

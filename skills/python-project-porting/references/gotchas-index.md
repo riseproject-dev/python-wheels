@@ -871,6 +871,11 @@ The porting gotchas (555 of them) live in [`references/gotchas/`](gotchas/), spl
   as bare `#define`s on any CPU but x86_64/arm64, so crc32c fails to preprocess on riscv64.
   Carry the one-line default as an `http_archive(patches=)` on `google_cloud_cpp`; stage
   licences per external repo from `bazel cquery 'deps(<target>)'`.
+- **641** — A vcpkg checkout older than 2025.07.25 builds every riscv64 port with an empty
+  `CMAKE_SYSTEM_PROCESSOR` (its `linux.cmake` toolchain has no riscv64 branch but still sets
+  `CMAKE_SYSTEM_NAME`), so Boost.Context falls back to x86_64 assembly and boost-context fails
+  with `unrecognized opcode 'leaq ...'`. Pass `-DCMAKE_SYSTEM_PROCESSOR=riscv64` through the
+  riscv64 triplet's `VCPKG_CMAKE_CONFIGURE_OPTIONS` (the depthai case).
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
