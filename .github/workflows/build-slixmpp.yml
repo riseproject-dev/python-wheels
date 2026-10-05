@@ -1,0 +1,130 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# slixmpp's GitHub mirror (github.com/poezio/slixmpp) is stale (last commit
+# 2022, no tags past slix-1.8.2); the project's real, actively-tagged repo is
+# codeberg.org/poezio/slixmpp, which actions/checkout can't reach.
+name: Build slixmpp wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/slixmpp.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-slixmpp.yml'
+      - 'docs/packages/slixmpp.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-slixmpp.yml'
+      - 'docs/packages/slixmpp.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: slixmpp
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build slixmpp ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Per-interpreter: the pyo3 extension-module feature carries no abi3.
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        platform: ["manylinux", "musllinux"]
+
+    env:
+      SLIXMPP_VERSION: ${{ matrix.version }}
+
+    steps:
+      # codeberg.org isn't github.com, so actions/checkout can't reach it.
+      - name: Checkout slixmpp ${{ env.SLIXMPP_VERSION }}
+        run: |
+          git clone --depth 1 --branch "slix-${SLIXMPP_VERSION}" \
+            https://codeberg.org/poezio/slixmpp.git slixmpp-src
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: slixmpp-src
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # No Rust in either image; the sole extension (slixmpp.jid, a pyo3
+          # accelerator for the JID parser) is `optional = true`, so a toolchain
+          # or crate failure here would still fall back to the pure-Python
+          # slixmpp/jid.py rather than failing the build.
+          CIBW_BEFORE_ALL_LINUX: curl -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # run_tests.py's doctest collection walks every slixmpp submodule, so
+          # xep_0363 (aiohttp) and xep_0454 (cryptography) must be importable;
+          # aiodns/pyasn1/pyasn1-modules are the project's own runtime deps and
+          # install with the wheel. cryptography has no riscv64 wheel on public
+          # PyPI, hence the registry above.
+          CIBW_TEST_REQUIRES: aiohttp cryptography
+          # test_chores.py reads doap.xml and lists slixmpp/plugins/xep_* from
+          # disk (not from the installed wheel) relative to tests/..; stage
+          # just the plugins directory listing (no __init__.py in it) so it
+          # doesn't shadow the installed package's `import slixmpp`.
+          CIBW_TEST_SOURCES: tests run_tests.py doap.xml slixmpp/plugins
+          CIBW_TEST_COMMAND: python run_tests.py
+
+      - name: Check the pyo3 JID accelerator built (not just the pure-Python fallback)
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              has_ext = any(n.startswith("slixmpp/jid") and n.endswith(".so") for n in names)
+              print(whl, "accelerated" if has_ext else "pure-Python fallback (optional extension did not build)")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: slixmpp-${{ env.SLIXMPP_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish slixmpp ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: slixmpp-${{ matrix.version }}-*_riscv64
