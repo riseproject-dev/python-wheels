@@ -33,7 +33,6 @@ permissions:
 
 env:
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
 
 jobs:
   setup:
@@ -45,7 +44,7 @@ jobs:
   build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
-    name: Build slixmpp ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    name: Build slixmpp ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 60
     strategy:
@@ -54,7 +53,6 @@ jobs:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
         # Per-interpreter: the pyo3 extension-module feature carries no abi3.
         python: ["cp312", "cp313", "cp314", "cp314t"]
-        platform: ["manylinux", "musllinux"]
 
     env:
       SLIXMPP_VERSION: ${{ matrix.version }}
@@ -71,25 +69,25 @@ jobs:
         with:
           package-dir: slixmpp-src
           output-dir: wheelhouse/
-          only: ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          only: ${{ matrix.python }}-manylinux_riscv64
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
-          # No Rust in either image; the sole extension (slixmpp.jid, a pyo3
-          # accelerator for the JID parser) is `optional = true`, so a toolchain
-          # or crate failure here would still fall back to the pure-Python
-          # slixmpp/jid.py rather than failing the build.
+          # No Rust in the image; the sole extension (slixmpp.jid, a pyo3
+          # accelerator for the JID parser) is `optional = true`, so a
+          # toolchain or crate failure here would still fall back to the
+          # pure-Python slixmpp/jid.py rather than failing the build.
           CIBW_BEFORE_ALL_LINUX: curl -sSf https://sh.rustup.rs | sh -s -- -y
           CIBW_ENVIRONMENT: >-
             PATH="$PATH:$HOME/.cargo/bin"
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
-          # run_tests.py's doctest collection walks every slixmpp submodule, so
-          # xep_0363 (aiohttp) and xep_0454 (cryptography) must be importable;
-          # aiodns/pyasn1/pyasn1-modules are the project's own runtime deps and
-          # install with the wheel. cryptography has no riscv64 wheel at all on
-          # musllinux (registry included), so it and the xep_0454 test, plus
-          # the doctest walk that needs it, are manylinux-only.
-          CIBW_TEST_REQUIRES: aiohttp${{ matrix.platform == 'manylinux' && ' cryptography' || '' }}
+          # pluginsdict.py imports every XEP plugin unconditionally, so
+          # xep_0363 (aiohttp) and xep_0454 (cryptography) must both be
+          # importable just to collect tests, not only for the doctest walk;
+          # aiodns/pyasn1/pyasn1-modules are the project's own runtime deps
+          # and install with the wheel. cryptography has no riscv64 wheel on
+          # public PyPI, hence the registry above - and none at all on
+          # musllinux (registry included), which is why musllinux is dropped.
+          CIBW_TEST_REQUIRES: aiohttp cryptography
           # test_chores.py reads doap.xml and lists slixmpp/plugins/xep_* from
           # disk (not from the installed wheel) relative to tests/..; stage
           # just the plugins directory listing (no __init__.py in it) so it
@@ -97,7 +95,7 @@ jobs:
           # are relative to the job workspace (gotcha 5), not package-dir, so
           # they keep the slixmpp-src/ prefix; cd into it to match.
           CIBW_TEST_SOURCES: slixmpp-src/tests slixmpp-src/run_tests.py slixmpp-src/doap.xml slixmpp-src/slixmpp/plugins
-          CIBW_TEST_COMMAND: cd slixmpp-src && python run_tests.py${{ matrix.platform == 'musllinux' && ' $(ls tests/test_*.py | grep -v test_xep_0454.py)' || '' }}
+          CIBW_TEST_COMMAND: cd slixmpp-src && python run_tests.py
 
       - name: Check the pyo3 JID accelerator built (not just the pure-Python fallback)
         run: |
@@ -111,7 +109,7 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: slixmpp-${{ env.SLIXMPP_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          name: slixmpp-${{ env.SLIXMPP_VERSION }}-${{ matrix.python }}-manylinux_riscv64
           path: wheelhouse/*.whl
           if-no-files-found: error
 
@@ -130,4 +128,4 @@ jobs:
     secrets:
       app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
     with:
-      artifact-pattern: slixmpp-${{ matrix.version }}-*_riscv64
+      artifact-pattern: slixmpp-${{ matrix.version }}-*-manylinux_riscv64
