@@ -12,13 +12,25 @@ executables at 0x10000, which is vm.mmap_min_addr, and patchelf's
 --set-rpath on such an executable maps a new first LOAD segment below it, so
 the patched pkgconf segfaults on exec when ffmpeg's portfile runs it.
 
+They also pass CMAKE_SYSTEM_PROCESSOR=riscv64 to every CMake port. The vcpkg
+checkout pinned by builtin-baseline predates the riscv64 branch that vcpkg
+2025.07.25 added to scripts/toolchains/linux.cmake, so the toolchain sets
+CMAKE_SYSTEM_NAME (making CMake treat the build as cross) but leaves
+CMAKE_SYSTEM_PROCESSOR empty. Boost.Context's architecture detection then
+falls through to its 64-bit default, x86_64, and boost-context (pulled in by
+websocketpp -> boost-asio) fails assembling jump_x86_64_sysv_elf_gas.S, even
+though Boost has shipped the riscv64 fcontext assembly since 1.71.
+
 diff --git a/cmake/triplets/release/riscv64-linux.cmake b/cmake/triplets/release/riscv64-linux.cmake
 new file mode 100644
-index 0000000..3613a45
+index 0000000..2f79ed7
 --- /dev/null
 +++ b/cmake/triplets/release/riscv64-linux.cmake
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,25 @@
 +set(VCPKG_TARGET_ARCHITECTURE riscv64)
++# The pinned vcpkg's linux toolchain maps no CMAKE_SYSTEM_PROCESSOR for riscv64 (added in 2025.07.25),
++# so every port configures with it empty and Boost.Context falls back to its x86_64 assembly
++set(VCPKG_CMAKE_CONFIGURE_OPTIONS -DCMAKE_SYSTEM_PROCESSOR=riscv64)
 +set(VCPKG_CRT_LINKAGE dynamic)
 +set(VCPKG_LIBRARY_LINKAGE static)
 +set(VCPKG_BUILD_TYPE release)
@@ -35,18 +47,21 @@ index 0000000..3613a45
 +endif()
 +if(PORT MATCHES "vulkan-loader")
 +    # When building in GH Actions environment, vcpkg's pkg-conf can't find XCB/X11 libraries
-+    set(VCPKG_CMAKE_CONFIGURE_OPTIONS "-DPKG_CONFIG_EXECUTABLE=/usr/bin/pkg-config")
++    list(APPEND VCPKG_CMAKE_CONFIGURE_OPTIONS "-DPKG_CONFIG_EXECUTABLE=/usr/bin/pkg-config")
 +
 +endif()
 +
 +set(VCPKG_CMAKE_SYSTEM_NAME Linux)
 diff --git a/cmake/triplets/riscv64-linux.cmake b/cmake/triplets/riscv64-linux.cmake
 new file mode 100644
-index 0000000..63dabd0
+index 0000000..3c90009
 --- /dev/null
 +++ b/cmake/triplets/riscv64-linux.cmake
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,23 @@
 +set(VCPKG_TARGET_ARCHITECTURE riscv64)
++# The pinned vcpkg's linux toolchain maps no CMAKE_SYSTEM_PROCESSOR for riscv64 (added in 2025.07.25),
++# so every port configures with it empty and Boost.Context falls back to its x86_64 assembly
++set(VCPKG_CMAKE_CONFIGURE_OPTIONS -DCMAKE_SYSTEM_PROCESSOR=riscv64)
 +set(VCPKG_CRT_LINKAGE dynamic)
 +set(VCPKG_LIBRARY_LINKAGE static)
 +set(PORT_DEBUG ON)
@@ -61,7 +76,7 @@ index 0000000..63dabd0
 +endif()
 +if(PORT MATCHES "vulkan-loader")
 +    # When building in GH Actions environment, vcpkg's pkg-conf can't find XCB/X11 libraries
-+    set(VCPKG_CMAKE_CONFIGURE_OPTIONS "-DPKG_CONFIG_EXECUTABLE=/usr/bin/pkg-config")
++    list(APPEND VCPKG_CMAKE_CONFIGURE_OPTIONS "-DPKG_CONFIG_EXECUTABLE=/usr/bin/pkg-config")
 +
 +endif()
 +
