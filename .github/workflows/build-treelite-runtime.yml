@@ -1,0 +1,179 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# treelite-runtime 3.9.1 is the last release of this distribution: starting with
+# treelite 4.0.0, runtime/python was dropped from this repo and reborn as
+# tl2cgen_runtime in dmlc/tl2cgen. Based on upstream's own manylinux wheel job,
+# which builds both python/ and runtime/python/ from one CMake build and tags
+# the runtime wheel py3-none via `bdist_wheel --universal`:
+#   https://github.com/dmlc/treelite/blob/3.9.1/ops/build-linux.sh
+name: Build treelite-runtime wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/treelite-runtime.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-treelite-runtime.yml'
+      - 'docs/packages/treelite-runtime.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-treelite-runtime.yml'
+      - 'docs/packages/treelite-runtime.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # Pinned explicitly so the gpl_sources job pulls the same image the wheel's
+  # vendored libgomp came from.
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: treelite-runtime
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build treelite-runtime ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+
+    env:
+      TREELITE_RUNTIME_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout treelite ${{ env.TREELITE_RUNTIME_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: dmlc/treelite
+          ref: ${{ env.TREELITE_RUNTIME_VERSION }}
+          persist-credentials: false
+
+      # setuptools' default license-files glob (LICEN[CSZ]E*) is rooted at
+      # setup.py's own directory, which for the runtime package is
+      # runtime/python/, not the repository root where LICENSE actually lives.
+      - name: Stage licence text for packaging
+        run: cp LICENSE runtime/python/LICENSE
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: runtime/python
+          output-dir: wheelhouse/
+          # runtime/python/setup.py declares ext_modules so cibuildwheel tags
+          # the wheel cp312-cp312; retagged py3-none below since
+          # libtreelite_runtime.so is ctypes-loaded, not interpreter-specific.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # The root CMakeLists builds both the treelite and treelite_runtime
+          # shared libs in one pass; setup.py picks up the latter from
+          # {project}/build instead of rebuilding it.
+          CIBW_BEFORE_BUILD: |
+            cmake -S {project} -B {project}/build -DCMAKE_BUILD_TYPE=Release
+            cmake --build {project}/build --parallel
+          # python/ (the treelite package proper) is not published here -- it
+          # reuses the same {project}/build libtreelite.so and is installed
+          # only so the runtime's own test suite (which upstream always runs
+          # against both packages together) can compile and load a real model.
+          CIBW_BEFORE_TEST: pip install {project}/python
+          CIBW_TEST_REQUIRES: pytest scikit-learn
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,scipy,scikit-learn
+          CIBW_TEST_SOURCES: tests/python tests/examples
+          CIBW_TEST_COMMAND: pytest -v -k gcc tests/python/test_basic.py
+
+      # setup.py's bdist_wheel has no py3-none override for pip-driven builds
+      # (upstream's own ops/build-linux.sh passes --universal by hand), so
+      # cibuildwheel produces a cp312-cp312 tag; restore upstream's tag here.
+      - name: Retag the wheel py3-none (libtreelite_runtime.so is ctypes-loaded)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install -q "wheel>=0.42"
+          python3 -m wheel tags --python-tag py3 --abi-tag none --remove wheelhouse/treelite_runtime-*.whl
+
+      - name: Check the wheel carries libtreelite_runtime and a vendored libgomp
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          for want in ("treelite_runtime/lib/libtreelite_runtime.so", "libgomp"):
+              if not any(want in n for n in names):
+                  raise SystemExit(f"error: {want} missing from {sys.argv[1]}")
+          print("\n".join(n for n in names if ".so" in n))
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: treelite-runtime-${{ env.TREELITE_RUNTIME_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources (gcc) for treelite-runtime ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+    env:
+      TREELITE_RUNTIME_VERSION: ${{ matrix.version }}
+
+    steps:
+      # auditwheel vendors the image's libgomp.so.1 into the wheel.
+      - name: Collect gcc source RPM from manylinux_riscv64
+        uses: riseproject-dev/python-wheels/actions/collect-gpl-sources@main
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: treelite-runtime-${{ env.TREELITE_RUNTIME_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish treelite-runtime ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: treelite-runtime-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: treelite-runtime-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
