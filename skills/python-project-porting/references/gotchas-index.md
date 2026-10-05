@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (555 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (556 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -616,6 +616,12 @@ The porting gotchas (555 of them) live in [`references/gotchas/`](gotchas/), spl
 - **633** — Gotcha 96's `PY_SSIZE_T_CLEAN` trap starts at CPython 3.13 headers (3.12's
   `modsupport.h` still aliases `PyArg_ParseTuple` to `_SizeT`), so a fixed `cp37-abi3`
   floor the riscv64 image can't provide is safe to build on cp312 (the etcpak case).
+- **644** — A `setup.py` that drives CMake into a fixed, non-interpreter-specific build dir
+  (`build/native`, not keyed by Python version) poisons the next interpreter's configure
+  when `CIBW_BUILD` lists several in one job: CMake reuses the previous interpreter's
+  `CMakeCache.txt` and `find_package(Python ...)` fails reporting the *previous*
+  interpreter's version, not the one just hinted — fix with
+  `CIBW_BEFORE_BUILD: rm -rf {package}/build`, no source patch needed (the pypcode case).
 
 ### Rust, maturin & PyO3 — [`gotchas/rust-maturin-and-pyo3.md`](gotchas/rust-maturin-and-pyo3.md)
 
