@@ -762,6 +762,11 @@ The porting gotchas (555 of them) live in [`references/gotchas/`](gotchas/), spl
 - **639** — Gotcha 636 has a ceiling: the riscv64 musl-hosted rustc segfaulted or hung on one
   large pyo3 cdylib's final compile in 6 of 9 legs, while the glibc-hosted one built it
   reliably; drop musllinux with a tracking issue (the longbridge case).
+- **642** — `riscv64gc-unknown-linux-musl` has no `crt-static-default` (x86_64/aarch64 musl
+  do), so a host `cargo build --target` links glibc's `libc.so` and every libm symbol is
+  undefined; set `CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS=-C target-feature=+crt-static`,
+  not `-lm`, plus `-C link-arg=-lgcc` for C deps' `__ffsdi2`; a hand-set
+  `manylinux_2_17_riscv64` tag is uninstallable by uv, use 2_31 (the browser-use-core case).
 
 ### Bazel & driving the build container — [`gotchas/native-build-bazel-and-drivers.md`](gotchas/native-build-bazel-and-drivers.md)
 

@@ -100,6 +100,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
   can't build" no longer holds: a Rust extension builds on musllinux_1_2_riscv64 too.
 - **639** — Gotcha 636 has a ceiling: on one very large pyo3 cdylib the musl-hosted rustc
   segfaulted or hung in 6 of 9 legs, while the glibc-hosted rustc built it reliably.
+- **642** — `riscv64gc-unknown-linux-musl` is not static by default the way x86_64/aarch64 musl
+  are: a host-`cc` build links glibc's `libc.so` (every libm symbol undefined) until you add
+  `+crt-static`, and then C deps may also need `-lgcc` (`__ffsdi2`); tag it
+  `manylinux_2_31_riscv64`, not upstream's 2_17, which uv refuses.
 
 ---
 
@@ -1580,3 +1584,40 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       "why" in the workflow, and open a tracking issue that has the per-leg tallies and run
       links. Rerun once before you decide, as gotcha 636 says. Here, the rerun of a hung leg
       segfaulted, which is enough to stop retrying.
+
+642. **`riscv64gc-unknown-linux-musl` is not static by default: unlike x86_64/aarch64
+    musl, rustc's target spec for it has no `crt-static-default`, so a host `cargo build
+    --target riscv64gc-unknown-linux-musl` on the glibc runner links *dynamically* through the
+    host `cc`, against glibc (the browser-use-core case; see `build-browser-use-core.yml`).**
+    This hits an upstream that builds static musl executables with plain `cargo build
+    --target <arch>-unknown-linux-musl` and `musl-tools` (not a cibuildwheel musllinux
+    container, where gotcha 636's `-crt-static` cdylib is what you want).
+    - **The symptom looks like "musl has no libm":** `undefined reference to 'log'`, `logf`,
+      `expf`, `exp2f`, `sinf`, `cosf`, `pow`, `powf` (sqlite's FTS5 bm25, `image` resampling,
+      tokio stats). The link line gives the real cause: `"-Wl,-Bdynamic" "-lgcc_s" "-lc" ...
+      "-pie" "-nodefaultlibs"`, with no `self-contained/crt1.o`. That `-lc` resolves to the
+      runner's glibc `libc.so`, and glibc keeps math in a separate `libm`. Do **not** add
+      `-lm`: the link would then succeed and produce a musl-ABI binary bound to glibc's
+      `ld-linux`.
+    - **Check:** `RUSTC_BOOTSTRAP=1 rustc -Z unstable-options --print target-spec-json --target
+      <triple> | grep crt-static-default` prints `true` for x86_64/aarch64 musl and nothing for
+      riscv64gc. rust-std for riscv64gc musl still ships `lib/self-contained/{crt1.o,rcrt1.o,
+      libc.a,libunwind.a}`, and that `libc.a` defines all of the math symbols (`nm`).
+    - **Fix:** `CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS: -C target-feature=+crt-static`
+      in the build step's `env:`. It is target-scoped, so build scripts stay on the host, and
+      it reaches every cargo call under the step (here also the patch's `cargo install
+      ripgrep`). rustc then links the self-contained crt objects and `libc.a` with `-static
+      -no-pie`. The target has no `static-position-independent-executables`, so you get
+      static, not static-pie.
+    - **Next wall: `undefined reference to '__ffsdi2'`.** rustc links with `-nodefaultlibs`,
+      so libgcc is never linked. On rv64gc without Zbb, gcc lowers `__builtin_ffsl` (jemalloc,
+      which ripgrep pulls in through `tikv-jemallocator` on 64-bit musl) to a libgcc call.
+      `compiler_builtins` has `__ffsti2` but not `__ffsdi2`. x86_64/aarch64 inline it, so
+      upstream never sees this. Add `-C link-arg=-lgcc` to the same RUSTFLAGS. rustc places
+      user link args after every rlib, so only the missing libgcc members are pulled in.
+    - **Then the tag:** such upstreams hand-set `manylinux_2_17_<arch>` on a static binary
+      carrier (gotcha 27). Copying `manylinux_2_17_riscv64` builds, but uv will not install it:
+      uv's riscv64 manylinux tags start at 2_31 (so does auditwheel's riscv64 policy), so
+      every test leg fails at `uv pip install` with "no wheels with a matching platform tag".
+      pip accepts it. The riscv64 counterpart of "lowest floor" is `manylinux_2_31_riscv64`.
+      Check with a dummy wheel and `uv pip compile --python-platform riscv64-unknown-linux`.
