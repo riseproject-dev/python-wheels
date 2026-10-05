@@ -1,0 +1,149 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/Isotr0py/pillow-jpegxl-plugin/blob/v1.3.8/.github/workflows/release.yml
+name: Build pillow-jxl-plugin wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pillow-jxl-plugin.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pillow-jxl-plugin.yml'
+      - 'docs/packages/pillow-jxl-plugin.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pillow-jxl-plugin.yml'
+      - 'docs/packages/pillow-jxl-plugin.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pillow-jxl-plugin
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pillow-jxl-plugin ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Cargo.toml has `pyo3 = { version="0.29.0", features=["extension-module"] }`
+        # with no abi3 feature, matching upstream's own per-interpreter release
+        # matrix (MATURIN_INTERPRETERS: "3.10 3.11 3.12 3.13 3.14 pypy3.11").
+        # pp311 is dropped: PyPy has no riscv64 port.
+        python: ["cp310", "cp311", "cp312", "cp313", "cp314"]
+
+    env:
+      PILLOW_JXL_PLUGIN_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pillow-jxl-plugin v${{ env.PILLOW_JXL_PLUGIN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Isotr0py/pillow-jpegxl-plugin
+          ref: v${{ env.PILLOW_JXL_PLUGIN_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pillow-jxl-plugin source
+        run: git apply python-wheels/patches/pillow-jxl-plugin/${{ env.PILLOW_JXL_PLUGIN_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # [tool.maturin] already has `features = [..., "vendored"]`, which
+          # builds libjxl/highway/brotli from source via jpegxl-src's CMake
+          # invocation - no MATURIN_PEP517_ARGS needed. `cargo metadata
+          # --features vendored` unpacks jpegxl-src (an optional dependency
+          # gated by that feature) so its bundled licences can be staged here
+          # for the widened `license-files` glob to pick up.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
+            export PATH="$PATH:$HOME/.cargo/bin" &&
+            cargo metadata --manifest-path {package}/Cargo.toml --features vendored --format-version=1 >/dev/null &&
+            JXL_SRC="$(find "$HOME/.cargo/registry/src" -maxdepth 2 -type d -name 'jpegxl-src-*' | head -1)" &&
+            cp "$JXL_SRC/libjxl/LICENSE" {package}/LICENSE.libjxl &&
+            cp "$JXL_SRC/libjxl/PATENTS" {package}/PATENTS.libjxl &&
+            cp "$JXL_SRC/libjxl/third_party/highway/LICENSE" {package}/LICENSE.highway &&
+            cp "$JXL_SRC/libjxl/third_party/brotli/LICENSE" {package}/LICENSE.brotli &&
+            cp "$JXL_SRC/libjxl/third_party/skcms/LICENSE" {package}/LICENSE.skcms
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest numpy
+          CIBW_TEST_SOURCES: test
+          # test/test_plugin.py's OpenEXR/pyexiv2-gated tests are patched to
+          # pytest.importorskip: pyexiv2 has no riscv64 wheel on our registry
+          # at all, and OpenEXR has none for cp310/cp311.
+          CIBW_TEST_COMMAND: >-
+            python -c "import pillow_jxl; from pillow_jxl import JpegXLImagePlugin" &&
+            python -m pytest test/test_plugin.py -v
+
+      - name: Check the wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("pillow_jxl/pillow_jxl") and n.endswith(".so") for n in names), whl
+              licenses = sorted(n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n)
+              print(whl, "licenses:", licenses)
+              for expect in ("LICENSE.libjxl", "PATENTS.libjxl", "LICENSE.highway", "LICENSE.brotli", "LICENSE.skcms"):
+                  assert expect in licenses, (whl, expect, licenses)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pillow-jxl-plugin-${{ env.PILLOW_JXL_PLUGIN_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pillow-jxl-plugin ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pillow-jxl-plugin-${{ matrix.version }}-*-manylinux_riscv64
