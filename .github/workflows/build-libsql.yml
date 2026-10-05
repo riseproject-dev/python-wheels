@@ -1,0 +1,202 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/tursodatabase/libsql-python/blob/v0.1.11/.github/workflows/CI.yml
+# and the `test` job of
+# https://github.com/tursodatabase/libsql-python/blob/v0.1.11/.github/workflows/pr-tests.yml
+name: Build libsql wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/libsql.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-libsql.yml'
+      - 'docs/packages/libsql.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-libsql.yml'
+      - 'docs/packages/libsql.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: libsql
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build libsql ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+
+    env:
+      LIBSQL_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout libsql-python v${{ env.LIBSQL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: tursodatabase/libsql-python
+          ref: v${{ env.LIBSQL_VERSION }}
+          persist-credentials: false
+
+      # libsql-ffi's bundled SQLite3MultipleCiphers CMakeLists adds `-msse4.2 -maes` on every
+      # Linux CPU that is not ARM; its build.rs honours CMAKE_{C,CXX}_COMPILER, so filter them.
+      - name: Build wheels
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --out dist -i python3.12 python3.13 python3.14
+          manylinux: '2_39'
+          before-script-linux: |
+            cat > /usr/local/bin/gcc-no-x86-flags <<'EOF'
+            #!/bin/sh
+            for arg do
+              shift
+              case "$arg" in -msse4.2|-maes) ;; *) set -- "$@" "$arg" ;; esac
+            done
+            cc=${0##*/}
+            exec "${cc%-no-x86-flags}" "$@"
+            EOF
+            chmod +x /usr/local/bin/gcc-no-x86-flags
+            ln -sf gcc-no-x86-flags /usr/local/bin/g++-no-x86-flags
+            export CMAKE_C_COMPILER=/usr/local/bin/gcc-no-x86-flags
+            export CMAKE_CXX_COMPILER=/usr/local/bin/g++-no-x86-flags
+            ffi=$(cargo metadata --format-version 1 | python3 -c 'import json, sys; print(next(p["manifest_path"] for p in json.load(sys.stdin)["packages"] if p["name"] == "libsql-ffi"))')
+            cp "$(dirname "$ffi")/bundled/SQLite3MultipleCiphers/LICENSE" LICENSE.sqlite3mc
+
+      - name: Verify the wheels ship the compiled extension
+        run: |
+          set -euo pipefail
+          ls dist/*.whl
+          for whl in dist/*.whl; do
+            python3 - "$whl" <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = [n for n in names if n.endswith(".so")]
+          assert any(n.startswith("libsql/libsql.") for n in sos), sos
+          for lic in ("LICENSE.md", "LICENSE.sqlite3mc"):
+              assert any(n.endswith(f".dist-info/licenses/{lic}") for n in names), names
+          print(sys.argv[1], "->", sos)
+          EOF
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: libsql-${{ env.LIBSQL_VERSION }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheels:
+    name: Test libsql ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    env:
+      LIBSQL_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14']
+
+    steps:
+      - name: Checkout libsql-python v${{ env.LIBSQL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: tursodatabase/libsql-python
+          ref: v${{ env.LIBSQL_VERSION }}
+          persist-credentials: false
+
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: libsql-${{ env.LIBSQL_VERSION }}-manylinux_riscv64
+          path: dist
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links dist "libsql==${LIBSQL_VERSION}"
+
+      - name: Verify the installed extension is compiled
+        run: python -c "import libsql; print(libsql.__file__); assert libsql.libsql.__file__.endswith('.so')"
+
+      # The `libsql-remote` case needs a sqld server on localhost:8080 that upstream's CI never starts.
+      - name: Test wheel
+        run: |
+          uv pip install pytest
+          python -m pytest -v tests -k 'not libsql-remote'
+
+      - name: Test encryption
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          cd "$work"
+          python - <<'EOF'
+          import sqlite3
+
+          import libsql
+
+          conn = libsql.connect("enc.db", encryption_key="riscv64-key")
+          conn.execute("CREATE TABLE t (x TEXT)")
+          conn.execute("INSERT INTO t VALUES ('hello')")
+          conn.commit()
+          conn.close()
+
+          conn = libsql.connect("enc.db", encryption_key="riscv64-key")
+          assert conn.execute("SELECT x FROM t").fetchall() == [("hello",)]
+          conn.close()
+
+          try:
+              sqlite3.connect("enc.db").execute("SELECT * FROM t").fetchall()
+          except sqlite3.DatabaseError as e:
+              print("plain sqlite3 rejects the encrypted file:", e)
+          else:
+              raise AssertionError("encrypted database was readable without the key")
+          EOF
+
+  publish:
+    name: Publish libsql ${{ matrix.version }}
+    needs: [setup, build_wheels, test_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: libsql-${{ matrix.version }}-manylinux_riscv64
