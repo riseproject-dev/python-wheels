@@ -1,0 +1,885 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 5 Oct 2026 15:50:38 +0000
+Subject: [PATCH] backport numpy 2 / modern scipy & scikit-learn compatibility
+
+The 0.3.0 sdist on PyPI only supports numpy<2, scipy>=0.19.1 and
+scikit-learn>=0.23.0, and still imports distutils (removed in Python
+3.12). None of that builds or imports on the Python/numpy/scipy/
+scikit-learn versions this registry ships for riscv64.
+
+Upstream merged a fix for exactly this on main (not yet released, and
+still reporting itself as "0.3.0dev0" in _version.py) that raises the
+floor to numpy>=1.22.4, scipy>=1.13.1 and scikit-learn>=1.4.2,<2,
+switches Cython extensions to the stable numpy 1.x-compatible C-API via
+NPY_TARGET_VERSION, replaces distutils.version.LooseVersion with
+packaging.version.Version, adopts the scikit-learn validate_data/
+__sklearn_tags__ APIs through a small _compat shim, and updates a
+handful of tests for pytest>=7 and scikit-learn's SGDClassifier
+loss="log_loss" rename.
+
+Carry those changes onto the 0.3.0 tag, leaving _version.py at "0.3.0"
+since we are building the released version, not the upstream dev
+snapshot. Also drop the accompanying [tool.cibuildwheel] i686 image
+pin: cibuildwheel 4.x refuses to even validate the config with
+manylinux-i686-image = "manylinux2010" set, failing every platform's
+build, not just i686, which we never build here anyway.
+
+Upstream-Status: Backport [https://github.com/scikit-learn-contrib/scikit-learn-extra/commit/da55e27dbbc4c028874ab4f1e1057bd073480ba1]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ conftest.py                                   |  6 +-
+ pyproject.toml                                | 10 ++-
+ setup.py                                      | 27 ++++++--
+ sklearn_extra/_compat.py                      | 19 ++++++
+ sklearn_extra/cluster/_commonnn.py            | 19 ++++--
+ sklearn_extra/cluster/_k_medoids.py           | 63 +++++++++++++------
+ sklearn_extra/cluster/tests/test_k_medoids.py |  5 +-
+ .../kernel_approximation/_fastfood.py         | 10 +--
+ sklearn_extra/kernel_methods/_eigenpro.py     | 33 +++++-----
+ .../kernel_methods/tests/test_eigenpro.py     |  2 +-
+ .../_robust_weighted_estimator_helper.pyx     |  4 +-
+ .../robust/robust_weighted_estimator.py       | 50 +++++++++------
+ .../robust/tests/test_mean_estimators.py      |  8 ++-
+ .../tests/test_robust_weighted_estimator.py   |  8 +--
+ sklearn_extra/tests/test_common.py            | 12 ++++
+ 15 files changed, 184 insertions(+), 92 deletions(-)
+ create mode 100644 sklearn_extra/_compat.py
+
+diff --git a/conftest.py b/conftest.py
+index ee8dcf1..d6ff8b6 100644
+--- a/conftest.py
++++ b/conftest.py
+@@ -1,5 +1,5 @@
+ import sys
+-from distutils.version import LooseVersion
++from packaging.version import Version
+ import sklearn
+ 
+ import pytest
+@@ -13,9 +13,9 @@ def pytest_collection_modifyitems(config, items):
+     try:
+         import numpy as np
+ 
+-        if LooseVersion(np.__version__) < LooseVersion("1.14") or LooseVersion(
++        if Version(np.__version__) < Version("1.14") or Version(
+             sklearn.__version__
+-        ) < LooseVersion("0.23.0"):
++        ) < Version("0.23.0"):
+             reason = (
+                 "doctests are only run for numpy >= 1.14 "
+                 "and scikit-learn >=0.23.0"
+diff --git a/pyproject.toml b/pyproject.toml
+index 4408847..7895494 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -3,13 +3,11 @@
+ requires = [
+     "setuptools",
+     "wheel",
+-    "Cython>=0.28.5",
++    # 3.0.10 is the first Cython release that supports the numpy 2 C API
++    "Cython>=3.0.10",
+ 
+-    # use oldest-supported-numpy which provides the oldest numpy version with
+-    # wheels on PyPI
+-    #
+-    # see: https://github.com/scipy/oldest-supported-numpy/blob/master/setup.cfg
+-    "oldest-supported-numpy"
++    # Build against numpy 2.0 for ABI compatibility with both numpy 1.x and 2.x
++    "numpy>=2.0,<3",
+ ]
+ 
+ [tool.black]
+diff --git a/setup.py b/setup.py
+index 6c6399a..4daa97a 100755
+--- a/setup.py
++++ b/setup.py
+@@ -21,7 +21,14 @@ URL = "https://github.com/scikit-learn-contrib/scikit-learn-extra"
+ LICENSE = "new BSD"
+ DOWNLOAD_URL = "https://github.com/scikit-learn-contrib/scikit-learn-extra"
+ VERSION = __version__  # noqa
+-INSTALL_REQUIRES = ["numpy>=1.13.3", "scipy>=0.19.1", "scikit-learn>=0.23.0"]
++INSTALL_REQUIRES = [
++    # 1.22.4 is the oldest numpy compatible with numpy 2 builds and scipy>=1.13.1.
++    "numpy>=1.22.4",
++    # First scipy and scikit-learn releases with numpy 2 support.
++    "scipy>=1.13.1",
++    "scikit-learn>=1.4.2,<2",
++    "packaging",
++]
+ CLASSIFIERS = [
+     "Intended Audience :: Science/Research",
+     "Intended Audience :: Developers",
+@@ -33,10 +40,10 @@ CLASSIFIERS = [
+     "Operating System :: POSIX",
+     "Operating System :: Unix",
+     "Operating System :: MacOS",
+-    "Programming Language :: Python :: 3.6",
+-    "Programming Language :: Python :: 3.7",
+-    "Programming Language :: Python :: 3.8",
+     "Programming Language :: Python :: 3.9",
++    "Programming Language :: Python :: 3.10",
++    "Programming Language :: Python :: 3.11",
++    "Programming Language :: Python :: 3.12",
+     "Programming Language :: Python :: Implementation :: CPython",
+ ]
+ EXTRAS_REQUIRE = {
+@@ -54,6 +61,10 @@ libraries = []
+ if os.name == "posix":
+     libraries.append("m")
+ 
++# Target the numpy C-API level matching the numpy floor in INSTALL_REQUIRES,
++# so it does not drift with the numpy version used to build.
++define_macros = [("NPY_TARGET_VERSION", "NPY_1_22_API_VERSION")]
++
+ args = {
+     "ext_modules": cythonize(
+         [
+@@ -61,22 +72,26 @@ args = {
+                 "sklearn_extra.utils._cyfht",
+                 ["sklearn_extra/utils/_cyfht.pyx"],
+                 include_dirs=[np.get_include()],
++                define_macros=define_macros,
+             ),
+             Extension(
+                 "sklearn_extra.cluster._k_medoids_helper",
+                 ["sklearn_extra/cluster/_k_medoids_helper.pyx"],
+                 include_dirs=[np.get_include()],
++                define_macros=define_macros,
+             ),
+             Extension(
+                 "sklearn_extra.robust._robust_weighted_estimator_helper",
+                 ["sklearn_extra/robust/_robust_weighted_estimator_helper.pyx"],
+                 include_dirs=[np.get_include()],
++                define_macros=define_macros,
+                 libraries=libraries,
+             ),
+             Extension(
+                 "sklearn_extra.cluster._commonnn_inner",
+                 ["sklearn_extra/cluster/_commonnn_inner.pyx"],
+                 include_dirs=[np.get_include()],
++                define_macros=define_macros,
+                 language="c++",
+             ),
+         ]
+@@ -99,6 +114,6 @@ setup(
+     packages=find_packages(),
+     install_requires=INSTALL_REQUIRES,
+     extras_require=EXTRAS_REQUIRE,
+-    python_requires=">=3.6",
+-    **args
++    python_requires=">=3.9",
++    **args,
+ )
+diff --git a/sklearn_extra/_compat.py b/sklearn_extra/_compat.py
+new file mode 100644
+index 0000000..dff09a8
+--- /dev/null
++++ b/sklearn_extra/_compat.py
+@@ -0,0 +1,19 @@
++try:
++    from sklearn.utils.validation import validate_data
++except ImportError:
++
++    def validate_data(estimator, *args, **kwargs):
++        return estimator._validate_data(*args, **kwargs)
++
++
++try:
++    from sklearn.utils import get_tags
++except ImportError:
++
++    def estimator_type(estimator):
++        return estimator._estimator_type
++
++else:
++
++    def estimator_type(estimator):
++        return get_tags(estimator).estimator_type
+diff --git a/sklearn_extra/cluster/_commonnn.py b/sklearn_extra/cluster/_commonnn.py
+index 4683c0e..be98325 100644
+--- a/sklearn_extra/cluster/_commonnn.py
++++ b/sklearn_extra/cluster/_commonnn.py
+@@ -6,7 +6,7 @@
+ #
+ # License: BSD 3 clause
+ 
+-from distutils.version import LooseVersion
++from packaging.version import Version
+ import warnings
+ 
+ import numpy as np
+@@ -15,7 +15,7 @@ from scipy import sparse
+ import sklearn
+ from sklearn.base import BaseEstimator, ClusterMixin
+ 
+-if LooseVersion(sklearn.__version__) < LooseVersion("0.23.0"):
++if Version(sklearn.__version__) < Version("0.23.0"):
+     from sklearn.utils import check_array, check_consistent_length
+ 
+     # In scikit-learn version 0.23.x use
+@@ -28,6 +28,7 @@ else:
+ 
+ from sklearn.neighbors import NearestNeighbors
+ 
++from .._compat import validate_data
+ from ._commonnn_inner import commonnn_inner
+ 
+ 
+@@ -269,6 +270,14 @@ class CommonNNClustering(ClusterMixin, BaseEstimator):
+     # TODO Use
+     # @_deprecate_positional_args
+     #     not in scikit-learn version 0.21.3
++    def _more_tags(self):
++        return {"X_types": ["2darray", "sparse"]}
++
++    def __sklearn_tags__(self):
++        tags = super().__sklearn_tags__()
++        tags.input_tags.sparse = True
++        return tags
++
+     def __init__(
+         self,
+         eps=0.5,
+@@ -317,10 +326,10 @@ class CommonNNClustering(ClusterMixin, BaseEstimator):
+ 
+         """
+ 
+-        if LooseVersion(sklearn.__version__) < LooseVersion("0.23.0"):
++        if Version(sklearn.__version__) < Version("0.23.0"):
+             X = check_array(X, accept_sparse="csr")
+         else:
+-            X = self._validate_data(X, accept_sparse="csr")
++            X = validate_data(self, X, accept_sparse="csr")
+ 
+         if not self.eps > 0.0:
+             raise ValueError("eps must be positive.")
+@@ -329,7 +338,7 @@ class CommonNNClustering(ClusterMixin, BaseEstimator):
+             warnings.warn(
+                 "Sample weights are not fully supported, yet.", UserWarning
+             )
+-            if LooseVersion(sklearn.__version__) < LooseVersion("0.23.0"):
++            if Version(sklearn.__version__) < Version("0.23.0"):
+                 sample_weight = np.asarray(sample_weight)
+                 check_consistent_length(X, sample_weight)
+             else:
+diff --git a/sklearn_extra/cluster/_k_medoids.py b/sklearn_extra/cluster/_k_medoids.py
+index bb5165b..317bb5d 100644
+--- a/sklearn_extra/cluster/_k_medoids.py
++++ b/sklearn_extra/cluster/_k_medoids.py
+@@ -15,11 +15,13 @@ from sklearn.metrics.pairwise import (
+     pairwise_distances,
+     pairwise_distances_argmin,
+ )
+-from sklearn.utils import check_array, check_random_state
++from sklearn.utils import check_random_state
+ from sklearn.utils.extmath import stable_cumsum
+ from sklearn.utils.validation import check_is_fitted
+ from sklearn.exceptions import ConvergenceWarning
+ 
++from .._compat import validate_data
++
+ # cython implementation of steps in PAM algorithm.
+ from ._k_medoids_helper import _compute_optimal_swap, _build
+ 
+@@ -45,7 +47,7 @@ def _compute_inertia(distances):
+     return inertia
+ 
+ 
+-class KMedoids(BaseEstimator, ClusterMixin, TransformerMixin):
++class KMedoids(ClusterMixin, TransformerMixin, BaseEstimator):
+     """k-medoids clustering.
+ 
+     Read more in the :ref:`User Guide <k_medoids>`.
+@@ -120,7 +122,7 @@ class KMedoids(BaseEstimator, ClusterMixin, TransformerMixin):
+     >>> kmedoids.cluster_centers_
+     array([[1., 2.],
+            [4., 2.]])
+-    >>> kmedoids.inertia_
++    >>> float(kmedoids.inertia_)
+     8.0
+ 
+     See scikit-learn-extra/examples/plot_kmedoids_digits.py for examples
+@@ -147,6 +149,14 @@ class KMedoids(BaseEstimator, ClusterMixin, TransformerMixin):
+ 
+     """
+ 
++    def _more_tags(self):
++        return {"X_types": ["2darray", "sparse"]}
++
++    def __sklearn_tags__(self):
++        tags = super().__sklearn_tags__()
++        tags.input_tags.sparse = True
++        return tags
++
+     def __init__(
+         self,
+         n_clusters=8,
+@@ -225,10 +235,12 @@ class KMedoids(BaseEstimator, ClusterMixin, TransformerMixin):
+         random_state_ = check_random_state(self.random_state)
+ 
+         self._check_init_args()
+-        X = check_array(
+-            X, accept_sparse=["csr", "csc"], dtype=[np.float64, np.float32]
++        X = validate_data(
++            self,
++            X,
++            accept_sparse=["csr", "csc"],
++            dtype=[np.float64, np.float32],
+         )
+-        self.n_features_in_ = X.shape[1]
+         if self.n_clusters > X.shape[0]:
+             raise ValueError(
+                 "The number of medoids (%d) must be less "
+@@ -369,8 +381,12 @@ class KMedoids(BaseEstimator, ClusterMixin, TransformerMixin):
+         X_new : {array-like, sparse matrix}, shape=(n_query, n_clusters)
+             X transformed in the new space of distances to cluster centers.
+         """
+-        X = check_array(
+-            X, accept_sparse=["csr", "csc"], dtype=[np.float64, np.float32]
++        X = validate_data(
++            self,
++            X,
++            accept_sparse=["csr", "csc"],
++            dtype=[np.float64, np.float32],
++            reset=False,
+         )
+ 
+         if self.metric == "precomputed":
+@@ -401,8 +417,12 @@ class KMedoids(BaseEstimator, ClusterMixin, TransformerMixin):
+         labels : array, shape = (n_query,)
+             Index of the cluster each sample belongs to.
+         """
+-        X = check_array(
+-            X, accept_sparse=["csr", "csc"], dtype=[np.float64, np.float32]
++        X = validate_data(
++            self,
++            X,
++            accept_sparse=["csr", "csc"],
++            dtype=[np.float64, np.float32],
++            reset=False,
+         )
+ 
+         if self.metric == "precomputed":
+@@ -537,7 +557,7 @@ class KMedoids(BaseEstimator, ClusterMixin, TransformerMixin):
+         return centers
+ 
+ 
+-class CLARA(BaseEstimator, ClusterMixin, TransformerMixin):
++class CLARA(ClusterMixin, TransformerMixin, BaseEstimator):
+     """CLARA clustering.
+ 
+     Read more in the :ref:`User Guide <CLARA>`.
+@@ -594,7 +614,7 @@ class CLARA(BaseEstimator, ClusterMixin, TransformerMixin):
+     >>> clara = CLARA(n_clusters=2, random_state=0).fit(X)
+     >>> clara.predict([[0,0], [4,4]])
+     array([0, 1])
+-    >>> clara.inertia_
++    >>> float(clara.inertia_)
+     122.44919397611667
+ 
+     References
+@@ -650,8 +670,7 @@ class CLARA(BaseEstimator, ClusterMixin, TransformerMixin):
+         -------
+         self
+         """
+-        X = check_array(X, dtype=[np.float64, np.float32])
+-        self.n_features_in_ = X.shape[1]
++        X = validate_data(self, X, dtype=[np.float64, np.float32])
+ 
+         n = len(X)
+ 
+@@ -731,8 +750,12 @@ class CLARA(BaseEstimator, ClusterMixin, TransformerMixin):
+         X_new : {array-like, sparse matrix}, shape=(n_query, n_clusters)
+             X transformed in the new space of distances to cluster centers.
+         """
+-        X = check_array(
+-            X, accept_sparse=["csr", "csc"], dtype=[np.float64, np.float32]
++        X = validate_data(
++            self,
++            X,
++            accept_sparse=["csr", "csc"],
++            dtype=[np.float64, np.float32],
++            reset=False,
+         )
+ 
+         if self.metric == "precomputed":
+@@ -758,8 +781,12 @@ class CLARA(BaseEstimator, ClusterMixin, TransformerMixin):
+         labels : array, shape = (n_query,)
+             Index of the cluster each sample belongs to.
+         """
+-        X = check_array(
+-            X, accept_sparse=["csr", "csc"], dtype=[np.float64, np.float32]
++        X = validate_data(
++            self,
++            X,
++            accept_sparse=["csr", "csc"],
++            dtype=[np.float64, np.float32],
++            reset=False,
+         )
+ 
+         if self.metric == "precomputed":
+diff --git a/sklearn_extra/cluster/tests/test_k_medoids.py b/sklearn_extra/cluster/tests/test_k_medoids.py
+index 30f419a..0cd2881 100644
+--- a/sklearn_extra/cluster/tests/test_k_medoids.py
++++ b/sklearn_extra/cluster/tests/test_k_medoids.py
+@@ -405,12 +405,13 @@ def test_clara_consistency_iris():
+ 
+ 
+ def test_seuclidean():
+-    with pytest.warns(None) as record:
++    with warnings.catch_warnings(record=True) as record:
++        warnings.simplefilter("always")
+         km = KMedoids(2, metric="seuclidean", method="pam")
+         km.fit(np.array([0, 0, 0, 1]).reshape((4, 1)))
+         km.predict(np.array([0, 0, 0, 1]).reshape((4, 1)))
+         km.transform(np.array([0, 0, 0, 1]).reshape((4, 1)))
+-    assert len(record) == 0
++    assert not record
+ 
+ 
+ def test_medoids_indices():
+diff --git a/sklearn_extra/kernel_approximation/_fastfood.py b/sklearn_extra/kernel_approximation/_fastfood.py
+index 47854be..c179a3d 100644
+--- a/sklearn_extra/kernel_approximation/_fastfood.py
++++ b/sklearn_extra/kernel_approximation/_fastfood.py
+@@ -6,12 +6,13 @@ from scipy.stats import chi
+ 
+ from sklearn.base import BaseEstimator
+ from sklearn.base import TransformerMixin
+-from sklearn.utils import check_array, check_random_state
++from sklearn.utils import check_random_state
+ 
++from .._compat import validate_data
+ from ..utils._cyfht import fht2 as cyfht
+ 
+ 
+-class Fastfood(BaseEstimator, TransformerMixin):
++class Fastfood(TransformerMixin, BaseEstimator):
+     """Approximates feature map of an RBF kernel by Monte Carlo approximation
+     of its Fourier transform.
+ 
+@@ -167,8 +168,7 @@ class Fastfood(BaseEstimator, TransformerMixin):
+         self : object
+             Returns the transformer.
+         """
+-        X = check_array(X, order="C", dtype=np.float64)
+-        self.n_features_in_ = X.shape[1]
++        X = validate_data(self, X, order="C", dtype=np.float64)
+ 
+         d_orig = X.shape[1]
+         rng = check_random_state(self.random_state)
+@@ -219,7 +219,7 @@ class Fastfood(BaseEstimator, TransformerMixin):
+         -------
+         X_new : array-like, shape (n_samples, n_components)
+         """
+-        X = check_array(X, order="C", dtype=np.float64)
++        X = validate_data(self, X, order="C", dtype=np.float64, reset=False)
+         X_padded = self._pad_with_zeros(X)
+         HGPHBX = self._apply_approximate_gaussian_matrix(
+             self._B, self._G, self._P, X_padded
+diff --git a/sklearn_extra/kernel_methods/_eigenpro.py b/sklearn_extra/kernel_methods/_eigenpro.py
+index 3016c49..ff774cd 100644
+--- a/sklearn_extra/kernel_methods/_eigenpro.py
++++ b/sklearn_extra/kernel_methods/_eigenpro.py
+@@ -7,7 +7,9 @@ from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
+ from sklearn.metrics.pairwise import pairwise_kernels, euclidean_distances
+ from sklearn.utils import check_random_state
+ from sklearn.utils.multiclass import check_classification_targets
+-from sklearn.utils.validation import check_is_fitted, check_X_y
++from sklearn.utils.validation import check_is_fitted
++
++from .._compat import validate_data
+ 
+ 
+ class BaseEigenPro(BaseEstimator):
+@@ -110,11 +112,11 @@ class BaseEigenPro(BaseEstimator):
+ 
+         W = K / m
+         try:
+-            E, Lambda = eigh(W, eigvals=(m - n_components, m - 1))
++            E, Lambda = eigh(W, subset_by_index=(m - n_components, m - 1))
+         except LinAlgError:
+             # Use float64 when eigh fails due to precision
+             W = np.float64(W)
+-            E, Lambda = eigh(W, eigvals=(m - n_components, m - 1))
++            E, Lambda = eigh(W, subset_by_index=(m - n_components, m - 1))
+             E, Lambda = np.float32(E), np.float32(Lambda)
+         # Flip so eigenvalues are in descending order.
+         E = np.maximum(np.float32(1e-7), np.flipud(E))
+@@ -314,7 +316,8 @@ class BaseEigenPro(BaseEstimator):
+         -------
+         self : returns an instance of self.
+         """
+-        X, Y = check_X_y(
++        X, Y = validate_data(
++            self,
+             X,
+             Y,
+             dtype=np.float32,
+@@ -322,7 +325,6 @@ class BaseEigenPro(BaseEstimator):
+             ensure_min_samples=3,
+             y_numeric=True,
+         )
+-        self.n_features_in_ = X.shape[1]
+         Y = Y.astype(np.float32)
+         random_state = check_random_state(self.random_state)
+ 
+@@ -373,13 +375,7 @@ class BaseEigenPro(BaseEstimator):
+         check_is_fitted(
+             self, ["bs_", "centers_", "coef_", "was_1D_", "gamma_"]
+         )
+-        X = np.asarray(X, dtype=np.float64)
+-
+-        if len(X.shape) == 1:
+-            raise ValueError(
+-                "Reshape your data. X should be a matrix of shape"
+-                " (n_samples, n_features)."
+-            )
++        X = validate_data(self, X, dtype=np.float64, reset=False)
+         n = X.shape[0]
+ 
+         Ys = []
+@@ -394,9 +390,12 @@ class BaseEigenPro(BaseEstimator):
+             Y = np.reshape(Y, Y.shape[0])
+         return Y
+ 
+-    def _get_tags(self):
+-        tags = super()._get_tags()
+-        tags["multioutput"] = True
++    def _more_tags(self):
++        return {"multioutput": True}
++
++    def __sklearn_tags__(self):
++        tags = super().__sklearn_tags__()
++        tags.target_tags.multi_output = True
+         return tags
+ 
+ 
+@@ -631,11 +630,11 @@ class EigenProClassifier(ClassifierMixin, BaseEigenPro):
+         -------
+         self : returns an instance of self.
+         """
+-        X, Y = check_X_y(
++        X, Y = validate_data(
++            self,
+             X,
+             Y,
+             dtype=np.float32,
+-            force_all_finite=True,
+             multi_output=False,
+             ensure_min_samples=3,
+         )
+diff --git a/sklearn_extra/kernel_methods/tests/test_eigenpro.py b/sklearn_extra/kernel_methods/tests/test_eigenpro.py
+index c28322c..7ec24ab 100644
+--- a/sklearn_extra/kernel_methods/tests/test_eigenpro.py
++++ b/sklearn_extra/kernel_methods/tests/test_eigenpro.py
+@@ -31,7 +31,7 @@ def gen_classification(params):
+ @pytest.mark.parametrize(
+     "params, err_msg",
+     [
+-        ({"kernel": "not_a_kernel"}, "Unknown kernel 'not_a_kernel'"),
++        ({"kernel": "not_a_kernel"}, "not_a_kernel"),
+         ({"n_epoch": 0}, "n_epoch should be positive, was 0"),
+         ({"n_epoch": -1}, "n_epoch should be positive, was -1"),
+         ({"n_components": -1}, "n_components should be non-negative, was -1"),
+diff --git a/sklearn_extra/robust/_robust_weighted_estimator_helper.pyx b/sklearn_extra/robust/_robust_weighted_estimator_helper.pyx
+index d05945c..f1769f5 100644
+--- a/sklearn_extra/robust/_robust_weighted_estimator_helper.pyx
++++ b/sklearn_extra/robust/_robust_weighted_estimator_helper.pyx
+@@ -15,7 +15,6 @@ from time import time
+ 
+ from libc.math cimport exp, log, sqrt, pow, fabs
+ cimport numpy as np
+-from numpy.math cimport INFINITY
+ 
+ 
+ # Modified from sklearn.cluster._k_means_fast.pyx
+@@ -66,7 +65,8 @@ cpdef np.ndarray[floating] _kmeans_loss(np.ndarray[floating, ndim=2, mode='c'] X
+         np.ndarray[floating, ndim=2] centers = np.zeros([n_classes,
+                                                          n_features],
+                                                          dtype = dtype)
+-        np.ndarray[long] num_in_cluster = np.zeros(n_classes, dtype = int)
++        np.ndarray[np.npy_intp] num_in_cluster = np.zeros(n_classes,
++                                                          dtype = np.intp)
+         np.ndarray[floating] inertias = np.zeros(n_samples, dtype = dtype)
+     for i in range(n_samples):
+         for j in range(n_features):
+diff --git a/sklearn_extra/robust/robust_weighted_estimator.py b/sklearn_extra/robust/robust_weighted_estimator.py
+index 7614039..4290451 100644
+--- a/sklearn_extra/robust/robust_weighted_estimator.py
++++ b/sklearn_extra/robust/robust_weighted_estimator.py
+@@ -14,6 +14,7 @@ from sklearn.base import (
+     ClassifierMixin,
+     RegressorMixin,
+     ClusterMixin,
++    TransformerMixin,
+ )
+ from sklearn.utils import (
+     check_random_state,
+@@ -26,7 +27,9 @@ from sklearn.multiclass import OneVsRestClassifier, OneVsOneClassifier
+ from sklearn.cluster import MiniBatchKMeans
+ from sklearn.metrics.pairwise import euclidean_distances
+ from sklearn.exceptions import ConvergenceWarning
+-from sklearn.utils.metaestimators import if_delegate_has_method
++from sklearn.utils.metaestimators import available_if
++
++from .._compat import estimator_type, validate_data
+ 
+ # Tool library in which we get robust mean estimators.
+ from .mean_estimators import median_of_means_blocked, block_mom, huber
+@@ -48,7 +51,7 @@ from ._robust_weighted_estimator_helper import (
+ 
+ LOSS_FUNCTIONS = {
+     "hinge": (Hinge,),
+-    "log": (Log,),
++    "log_loss": (Log,),
+     "squared_error": (SquaredLoss,),
+     "squared_loss": (SquaredLoss,),
+     "squared_hinge": (SquaredHinge,),
+@@ -114,8 +117,8 @@ class _RobustWeightedEstimator(BaseEstimator):
+     loss : string or callable, mandatory
+         Name of the loss used, must be the same loss as the one optimized in
+         base_estimator.
+-        Classification losses supported : 'log', 'hinge', 'squared_hinge',
+-        'modified_huber'. If 'log', then the base_estimator must support
++        Classification losses supported : 'log_loss', 'hinge', 'squared_hinge',
++        'modified_huber'. If 'log_loss', then the base_estimator must support
+         predict_proba. Regression losses supported : 'squared_error', 'huber'.
+         If callable, the function is used as loss function ro construct
+         the weights.
+@@ -129,13 +132,13 @@ class _RobustWeightedEstimator(BaseEstimator):
+         Maximum number of iterations.
+         For more information, see the optimization scheme of base_estimator.
+ 
+-    c : float>0 or None, default=None
++    c : float>0 or None, default=1
+         Parameter used for Huber weighting procedure, used only if weightings
+         is 'huber'. Measure the robustness of the weighting procedure. A small
+         value of c means a more robust estimator.
+         Can have a big effect on efficiency.
+         If None, c is estimated at each step using half the Inter-quartile
+-        range, this tends to be conservative (robust).
++        range, this tends to be unstable.
+ 
+     k : int < sample_size/2, default=1
+         Parameter used for mom weighting procedure, used only if weightings
+@@ -211,7 +214,7 @@ class _RobustWeightedEstimator(BaseEstimator):
+         loss,
+         weighting="huber",
+         max_iter=100,
+-        c=None,
++        c=1,
+         k=0,
+         tol=1e-5,
+         n_iter_no_change=10,
+@@ -501,7 +504,7 @@ class _RobustWeightedEstimator(BaseEstimator):
+         return self.base_estimator_.predict(X)
+ 
+     def _check_proba(self):
+-        if self.loss != "log":
++        if self.loss != "log_loss":
+             raise AttributeError(
+                 "Probability estimates are not available for"
+                 " loss=%r" % self.loss
+@@ -518,7 +521,7 @@ class _RobustWeightedEstimator(BaseEstimator):
+ 
+     @property
+     def _estimator_type(self):
+-        return self.base_estimator._estimator_type
++        return estimator_type(self.base_estimator)
+ 
+     def score(self, X, y=None):
+         """Returns the score on the given data, using
+@@ -538,7 +541,13 @@ class _RobustWeightedEstimator(BaseEstimator):
+         check_is_fitted(self, attributes=["base_estimator_"])
+         return self.base_estimator_.score(X, y)
+ 
+-    @if_delegate_has_method(delegate="base_estimator")
++    def _estimator_has(attr):
++        def check(self):
++            return hasattr(self.base_estimator_, attr)
++
++        return check
++
++    @available_if(_estimator_has("decision_function"))
+     def decision_function(self, X):
+         """Predict using the linear model. For classifiers only.
+ 
+@@ -555,7 +564,7 @@ class _RobustWeightedEstimator(BaseEstimator):
+         return self.base_estimator_.decision_function(X)
+ 
+ 
+-class RobustWeightedClassifier(BaseEstimator, ClassifierMixin):
++class RobustWeightedClassifier(ClassifierMixin, BaseEstimator):
+     """Algorithm for robust classification using reweighting algorithm.
+ 
+     This model uses iterative reweighting of samples to make a regression or
+@@ -607,7 +616,7 @@ class RobustWeightedClassifier(BaseEstimator, ClassifierMixin):
+         (using the inter-quartile range), this tends to be conservative
+         (robust).
+ 
+-    loss : string, None or callable, default="log"
++    loss : string, None or callable, default="log_loss"
+         Classification losses supported : 'log', 'hinge', 'modified_huber'.
+         If 'log', then the base_estimator must support predict_proba.
+ 
+@@ -709,7 +718,7 @@ class RobustWeightedClassifier(BaseEstimator, ClassifierMixin):
+         max_iter=100,
+         c=None,
+         k=0,
+-        loss="log",
++        loss="log_loss",
+         sgd_args=None,
+         multi_class="ovr",
+         n_jobs=1,
+@@ -754,7 +763,7 @@ class RobustWeightedClassifier(BaseEstimator, ClassifierMixin):
+             sgd_args = self.sgd_args
+ 
+         # Define the base estimator
+-        X, y = self._validate_data(X, y, y_numeric=False)
++        X, y = validate_data(self, X, y, y_numeric=False)
+ 
+         base_robust_estimator_ = _RobustWeightedEstimator(
+             SGDClassifier(**sgd_args),
+@@ -809,7 +818,7 @@ class RobustWeightedClassifier(BaseEstimator, ClassifierMixin):
+         return self.base_estimator_.predict(X)
+ 
+     def _check_proba(self):
+-        if self.loss != "log":
++        if self.loss != "log_loss":
+             raise AttributeError(
+                 "Probability estimates are not available for"
+                 " loss=%r" % self.loss
+@@ -872,7 +881,7 @@ class RobustWeightedClassifier(BaseEstimator, ClassifierMixin):
+         return self.base_estimator_.decision_function(X)
+ 
+ 
+-class RobustWeightedRegressor(BaseEstimator, RegressorMixin):
++class RobustWeightedRegressor(RegressorMixin, BaseEstimator):
+     """Algorithm for robust regression using reweighting algorithm.
+ 
+     This model uses iterative reweighting of samples to make a regression or
+@@ -1049,7 +1058,7 @@ class RobustWeightedRegressor(BaseEstimator, RegressorMixin):
+ 
+         # Define the base estimator
+ 
+-        X, y = self._validate_data(X, y, y_numeric=True)
++        X, y = validate_data(self, X, y, y_numeric=True)
+ 
+         self.base_estimator_ = _RobustWeightedEstimator(
+             SGDRegressor(**sgd_args),
+@@ -1107,7 +1116,7 @@ class RobustWeightedRegressor(BaseEstimator, RegressorMixin):
+         return self.base_estimator_.score(X, y)
+ 
+ 
+-class RobustWeightedKMeans(BaseEstimator, ClusterMixin):
++class RobustWeightedKMeans(ClusterMixin, TransformerMixin, BaseEstimator):
+     """Algorithm for robust kmeans clustering using reweighting algorithm.
+ 
+     This model uses iterative reweighting of samples to make a regression or
+@@ -1285,7 +1294,8 @@ class RobustWeightedKMeans(BaseEstimator, ClusterMixin):
+             kmeans_args = {}
+         else:
+             kmeans_args = self.kmeans_args
+-        X = self._validate_data(
++        X = validate_data(
++            self,
+             X,
+             accept_sparse="csr",
+             dtype=[np.float64, np.float32],
+@@ -1370,7 +1380,7 @@ class RobustWeightedKMeans(BaseEstimator, ClusterMixin):
+             X transformed in the new space.
+         """
+         check_is_fitted(self)
+-
++        X = validate_data(self, X, accept_sparse="csr", reset=False)
+         return self._transform(X)
+ 
+     def _transform(self, X):
+diff --git a/sklearn_extra/robust/tests/test_mean_estimators.py b/sklearn_extra/robust/tests/test_mean_estimators.py
+index 2f00566..2ed4a4a 100644
+--- a/sklearn_extra/robust/tests/test_mean_estimators.py
++++ b/sklearn_extra/robust/tests/test_mean_estimators.py
+@@ -1,5 +1,6 @@
++import warnings
++
+ import numpy as np
+-import pytest
+ 
+ from sklearn_extra.robust.mean_estimators import median_of_means, huber
+ 
+@@ -27,7 +28,8 @@ def test_mom():
+ 
+ def test_huber():
+     X = np.hstack([np.zeros(90), np.ones(10)])
+-    with pytest.warns(None) as record:
++    with warnings.catch_warnings(record=True) as record:
++        warnings.simplefilter("always")
+         mu = huber(X, c=0.5)
+-    assert len(record) == 0
++    assert not record
+     assert np.abs(mu) < 0.1
+diff --git a/sklearn_extra/robust/tests/test_robust_weighted_estimator.py b/sklearn_extra/robust/tests/test_robust_weighted_estimator.py
+index aaecc60..60266e5 100644
+--- a/sklearn_extra/robust/tests/test_robust_weighted_estimator.py
++++ b/sklearn_extra/robust/tests/test_robust_weighted_estimator.py
+@@ -38,7 +38,7 @@ for f in range(3):
+     X_cc[f] = [10, 5] + rng.normal(size=2) * 0.1
+     y_cc[f] = 0
+ 
+-classif_losses = ["log", "hinge"]
++classif_losses = ["log_loss", "hinge"]
+ weightings = ["huber", "mom"]
+ multi_class = ["ovr", "ovo"]
+ 
+@@ -167,7 +167,7 @@ def test_classif_binary(weighting):
+         multi_class="binary",
+         random_state=rng,
+     )
+-    clf_not_rob = SGDClassifier(loss="log", random_state=rng)
++    clf_not_rob = SGDClassifier(loss="log_loss", random_state=rng)
+     clf.fit(X_cb, y_cb)
+     clf_not_rob.fit(X_cb, y_cb)
+     norm_coef1 = np.linalg.norm(np.hstack([clf.coef_.ravel(), clf.intercept_]))
+@@ -201,7 +201,7 @@ def test_classif_corrupted_weights(weighting):
+     assert np.mean(clf.weights_[:3]) < np.mean(clf.weights_[3:])
+ 
+ 
+-# Case "log" loss, test predict_proba
++# Case "log_loss" loss, test predict_proba
+ @pytest.mark.parametrize("weighting", weightings)
+ def test_predict_proba(weighting):
+     clf = RobustWeightedClassifier(
+@@ -211,7 +211,7 @@ def test_predict_proba(weighting):
+         c=1e7,
+         random_state=rng,
+     )
+-    clf_not_rob = SGDClassifier(loss="log", random_state=rng)
++    clf_not_rob = SGDClassifier(loss="log_loss", random_state=rng)
+     clf.fit(X_c, y_c)
+     clf_not_rob.fit(X_c, y_c)
+     pred1 = clf.base_estimator_.predict_proba(X_c)[:, 1]
+diff --git a/sklearn_extra/tests/test_common.py b/sklearn_extra/tests/test_common.py
+index 3a72dc3..5b71ecf 100644
+--- a/sklearn_extra/tests/test_common.py
++++ b/sklearn_extra/tests/test_common.py
+@@ -34,4 +34,16 @@ def test_all_estimators(estimator, check, request):
+             pytest.mark.xfail(run=False, reason="See issue #41")
+         )
+ 
++    # TODO: fix this later, ask people at sklearn to advise on it.
++    if isinstance(estimator, RobustWeightedRegressor) and (
++        ("function check_regressors_train" in str(check))
++        or ("function check_estimators_dtypes" in str(check))
++    ):
++        request.applymarker(pytest.mark.xfail(run=False))
++    if isinstance(estimator, RobustWeightedClassifier) and (
++        ("function check_classifiers_train" in str(check))
++        or ("function check_estimators_dtypes" in str(check))
++    ):
++        request.applymarker(pytest.mark.xfail(run=False))
++
+     return check(estimator)
