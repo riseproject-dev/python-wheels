@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# Upstream builds Linux wheels via cibuildwheel in .github/workflows/build_wheels.yml
+# (manylinux2014 x86_64/i686) and build_wheels_linux_aarch64.yml (same recipe under QEMU).
+# Both drive invoke's build.deps/build.nassl tasks, which build OpenSSL (twice: a legacy
+# OpenSSL_1_0_2e and a modern OpenSSL_1_1_1w extension) and zlib from source via
+# build_config.py before compiling the C extension against the result.
+---
+name: Build nassl wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/nassl.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-nassl.yml'
+      - 'docs/packages/nassl.yaml'
+      - 'patches/nassl/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-nassl.yml'
+      - 'docs/packages/nassl.yaml'
+      - 'patches/nassl/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: nassl
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build nassl ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp310", "cp311", "cp312", "cp313", "cp314"]
+
+    env:
+      NASSL_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout nassl ${{ env.NASSL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: nabla-c0d3/nassl
+          ref: ${{ env.NASSL_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch nassl source
+        run: git apply python-wheels/patches/nassl/${{ env.NASSL_VERSION }}/*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # The riscv64 image's minimal perl-interpreter lacks FindBin/lib, which
+          # OpenSSL's Configure needs (CLAUDE.md gotcha 46).
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf -y install perl &&
+            python -m pip install setuptools invoke &&
+            invoke build.deps
+          CIBW_BEFORE_BUILD: python -m pip install setuptools invoke && invoke build.nassl
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: python -m pytest {project}/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: nassl-${{ env.NASSL_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish nassl ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: nassl-${{ matrix.version }}-*-manylinux_riscv64
