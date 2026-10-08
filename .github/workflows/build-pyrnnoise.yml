@@ -1,0 +1,155 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build at this commit:
+#   https://github.com/pengzhendong/pyrnnoise/blob/a4edc69/.github/workflows/release.yml
+name: Build pyrnnoise wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyrnnoise.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyrnnoise.yml'
+      - 'docs/packages/pyrnnoise.yaml'
+      - 'patches/pyrnnoise/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyrnnoise.yml'
+      - 'docs/packages/pyrnnoise.yaml'
+      - 'patches/pyrnnoise/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # Upstream cuts releases from a workflow_dispatch that stamps VERSION at
+  # build time (never committed) and tags no commit at all. This is the
+  # commit whose tree (pyrnnoise/pyrnnoise.py, requirements.txt) is
+  # byte-identical to the released 0.4.3 sdist/wheel contents.
+  PYRNNOISE_REF: a4edc697a2f475dcdac14c453d7c06eebbd06b33
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyrnnoise
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pyrnnoise ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+
+    env:
+      PYRNNOISE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyrnnoise ${{ env.PYRNNOISE_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pengzhendong/pyrnnoise
+          ref: ${{ env.PYRNNOISE_REF }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pyrnnoise source
+        run: git apply python-wheels/patches/pyrnnoise/${{ env.PYRNNOISE_VERSION }}/*.patch
+
+      # Matches release.yml's own `echo "$RELEASE_VERSION" > VERSION` step;
+      # setup.py reads VERSION verbatim and the checkout above carries
+      # whatever placeholder was last committed to it.
+      - name: Stamp VERSION
+        run: echo "${{ env.PYRNNOISE_VERSION }}" > VERSION
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # setup.py ships no ext_modules and forces root_is_pure = False
+          # (the C library is loaded via ctypes), so setuptools tags the
+          # wheel py3-none and one build serves every interpreter.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Mirrors release.yml's own `cmake --build ... --target install`
+          # step, run here instead since setup.py does not invoke cmake
+          # itself. The image ships no cmake or wget (gotcha 289); the
+          # CMakeLists.txt wget call fetches the pretrained model weights
+          # that rnnoise_data.c/.h are generated from.
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf install -y cmake wget &&
+            cmake -B build -DCMAKE_BUILD_TYPE=Release &&
+            cmake --build build --target install --parallel
+          # matplotlib, an unconditional runtime dependency, has no
+          # musllinux_riscv64 wheel on this registry, so musllinux is
+          # dropped (same outcome as build-keystone-engine.yml).
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,matplotlib,av,soundfile,soxr
+          CIBW_TEST_COMMAND: >-
+            python -c "import numpy as np;
+            from pyrnnoise.rnnoise import create, destroy, process_frame, FRAME_SIZE;
+            state = create();
+            frame = np.zeros(FRAME_SIZE, dtype=np.int16);
+            out, prob = process_frame(state, frame);
+            assert out.shape == (FRAME_SIZE,), out.shape;
+            destroy(state);
+            print('pyrnnoise OK')"
+
+      - name: Check the wheel carries librnnoise and RNNoise's licence
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith("pyrnnoise/librnnoise.so") for n in names), whl
+              licences = {n.rsplit("/", 1)[-1] for n in names if "dist-info/licenses/" in n and not n.endswith("/")}
+              assert licences == {"LICENSE", "LICENSE.rnnoise"}, (whl, licences)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyrnnoise-${{ env.PYRNNOISE_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyrnnoise ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyrnnoise-${{ matrix.version }}-*riscv64
