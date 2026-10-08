@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the manylinux job of
+# https://github.com/beancount/beancount/blob/3.2.3/.github/workflows/wheels.yaml
+name: Build beancount wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/beancount.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-beancount.yml'
+      - 'docs/packages/beancount.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-beancount.yml'
+      - 'docs/packages/beancount.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: beancount
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build beancount ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp39", "cp310", "cp311", "cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      BEANCOUNT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout beancount ${{ env.BEANCOUNT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: beancount/beancount
+          ref: ${{ env.BEANCOUNT_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch beancount source
+        run: git apply python-wheels/patches/beancount/${{ env.BEANCOUNT_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # bison/flex come from the manylinux image's own package manager, not from
+          # the flex-bin/bison-bin build-system.requires (neither has a riscv64
+          # wheel, and their sdists cross-compile via ziglang, which has none either).
+          # pip's --no-build-isolation skips that requirement check outright (unlike
+          # build's --no-isolation, gotcha 76), so preinstalling meson/meson-python/
+          # ninja ourselves is enough.
+          CIBW_BEFORE_ALL_LINUX: yum install -y flex bison
+          CIBW_BEFORE_BUILD: pip install meson meson-python ninja
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          CIBW_TEST_REQUIRES: pytest
+          # Both deselected tests call find_repository_root(), which walks up from
+          # __file__ looking for a pyproject.toml; that only exists in a checkout,
+          # not next to an installed wheel, so both fail identically on any arch.
+          CIBW_TEST_COMMAND: >-
+            python -m pytest --pyargs beancount
+            --deselect projects/export_test.py::TestExport::test_export_basic
+            --deselect scripts/check_examples_test.py::TestCheckExamples::test_example_files
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: beancount-${{ env.BEANCOUNT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish beancount ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: beancount-${{ matrix.version }}-*-manylinux_riscv64
