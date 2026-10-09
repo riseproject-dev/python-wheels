@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 24 Sep 2026 00:00:00 +0000
+Subject: [PATCH] tests: pin ir_version in test_profiling's _foldable_model
+
+Every other test file that builds an onnx.ModelProto by hand pins
+ir_version explicitly (test_python_api.py, test_function_rewriter.py,
+test_constant_fold_determinism.py, etc. all pass ir_version=... to
+helper.make_model()). test_profiling.py's _foldable_model() is the one
+holdout: it calls helper.make_model(graph, opset_imports=[...]) with no
+ir_version, so the model is stamped with whatever onnx.IR_VERSION the
+currently installed onnx package defines.
+
+onnxsim statically links a vendored onnx (via the onnx-optimizer git
+submodule, frozen at a pinned commit) into its C++ core, and that
+core's checker enforces its own, older notion of the max supported IR
+version. Once the *installed* onnx package (an unpinned "onnx" runtime
+dependency in pyproject.toml) is newer than whatever onnx-optimizer's
+submodule was pinned to at release time, every one of
+_foldable_model()'s callers in this file fails identically:
+
+    RuntimeError: Your model ir_version 14 is higher than the
+    checker's (13).
+
+before reaching any of what the test actually means to check (the
+profiler's spans, the OrtSession nesting, the env var save/restore).
+This is a real ambient-versioning gap, not a riscv64-only symptom: the
+same break reproduces on any platform the moment pip resolves an onnx
+release newer than the vendored submodule tolerates, which is exactly
+why every sibling test file already pins ir_version defensively -
+test_profiling.py just missed doing the same for its one hand-built
+model.
+
+Match the existing convention used throughout the suite (ir_version=10
+regardless of opset) so the fixture stays valid across the wide range
+of onnx versions the unpinned runtime dependency can resolve to.
+
+Upstream-Status: To upstream [no push/issue access to onnxsim/onnxsim from this environment - only riseproject-dev/python-wheels is attached; the fix is a one-line ir_version pin matching every sibling test file's existing convention]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/tests/test_profiling.py b/tests/test_profiling.py
+--- a/tests/test_profiling.py
++++ b/tests/test_profiling.py
+@@ -29,7 +29,18 @@
+     x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 4])
+     y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 4])
+     graph = helper.make_graph([add_const, add_x], "g", [x], [y], [a, b])
+-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
++    model = helper.make_model(
++        graph,
++        opset_imports=[helper.make_opsetid("", 17)],
++        # Pin ir_version like every other model-building test in this suite
++        # already does (test_python_api.py, test_function_rewriter.py, etc.):
++        # onnx.helper.make_model() otherwise stamps the installed onnx package's
++        # current onnx.IR_VERSION, which floats upward with each onnx release and
++        # can exceed what the vendored onnx-optimizer/onnx submodule's checker
++        # (frozen at a pinned commit) accepts, e.g. "Your model ir_version 14 is
++        # higher than the checker's (13)" once a newer onnx is installed.
++        ir_version=10,
++    )
+     onnx.checker.check_model(model)
+     return model
+ 
