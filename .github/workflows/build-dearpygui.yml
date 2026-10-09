@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow mirrors the build-linux-*-wheels jobs of upstream's own
+# .github/workflows/Deployment.yml (setup.py driving CMake over the vendored
+# imgui/implot/glfw submodules), narrowed to riscv64 and run through cibuildwheel.
+name: Build dearpygui wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/dearpygui.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-dearpygui.yml'
+      - 'docs/packages/dearpygui.yaml'
+      - 'patches/dearpygui/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-dearpygui.yml'
+      - 'docs/packages/dearpygui.yaml'
+      - 'patches/dearpygui/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: dearpygui
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build dearpygui ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      DEARPYGUI_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout DearPyGui v${{ env.DEARPYGUI_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: hoffstadt/DearPyGui
+          ref: v${{ env.DEARPYGUI_VERSION }}
+          persist-credentials: false
+
+      - name: Retrieve submodules
+        run: |
+          git submodule update --init --recursive ./thirdparty/imgui
+          git submodule update --init --recursive ./thirdparty/implot
+          git submodule update --init --recursive ./thirdparty/glfw
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch DearPyGui source
+        run: git apply python-wheels/patches/dearpygui/${{ env.DEARPYGUI_VERSION }}/*.patch
+
+      - name: Mark Versions
+        run: echo "${DEARPYGUI_VERSION}" > version_number.txt
+
+      # The extension statically compiles these vendored trees but the wheel ships only
+      # DearPyGui's own LICENSE; setuptools' default LICEN[CS]E* glob picks these up.
+      - name: Stage vendored licences
+        run: |
+          cp thirdparty/imgui/LICENSE.txt LICENSE.imgui
+          cp thirdparty/implot/LICENSE LICENSE.implot
+          cp thirdparty/glfw/LICENSE.md LICENSE.glfw
+          cp thirdparty/imnodes/LICENSE.md LICENSE.imnodes
+          cp thirdparty/ImGuiFileDialog/LICENSE LICENSE.ImGuiFileDialog
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL: dnf install -y libXrandr-devel libXinerama-devel libXcursor-devel libXi-devel mesa-libGL-devel libxcrypt-devel
+          # Rocky's linker does not default to --as-needed like upstream's Ubuntu builder, so
+          # without it the unused -lcrypt/-lGL in distribution.cmake become NEEDED entries.
+          CIBW_ENVIRONMENT: >-
+            LDFLAGS="-Wl,--as-needed"
+            CMAKE_BUILD_PARALLEL_LEVEL="$(nproc)"
+          CIBW_TEST_SOURCES: testing
+          CIBW_TEST_COMMAND: >-
+            python -m unittest -v testing/simple_tests.py &&
+            python -c "import importlib.metadata as m; got = {p.name for p in m.files('dearpygui') if '.dist-info/licenses/' in str(p)}; exp = {'LICENSE', 'LICENSE.imgui', 'LICENSE.implot', 'LICENSE.glfw', 'LICENSE.imnodes', 'LICENSE.ImGuiFileDialog'}; assert got == exp, sorted(got)"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dearpygui-${{ env.DEARPYGUI_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish dearpygui ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: dearpygui-${{ matrix.version }}-*-manylinux_riscv64

@@ -42,6 +42,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
 - **609** — `check_patch.py`'s `Upstream-Status: Inappropriate [...]` regex only reads the
   first physical line of the tag, so a reason wrapped across multiple commit-message lines
   fails the check even though it looks bracketed.
+- **637** — a nanobind extension's musllinux wheel vendors no GCC runtime, so gotcha 409's
+  `gpl_sources` job is not needed; and gotcha 538's override takes subdirectory paths as-is.
 
 ---
 
@@ -769,3 +771,22 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/licensing-and-gpl.md`.
     - **Reproduce locally before a CI cycle**: paste the patch's commit message through the
       same two `re.search` calls `check_upstream_status()` uses — a one-line repro is faster
       than waiting on `check_patches` to fail again.
+
+637. **A nanobind extension's musllinux wheel carries no `<pkg>.libs/libstdc++`, so gotcha 409's
+    musl-only `gpl_sources` trigger does not fire (the pydemumble case).** nanobind's
+    `nanobind_add_module` calls `nanobind_musl_static_libcpp`, which adds
+    `-static-libstdc++ -static-libgcc` whenever `$AUDITWHEEL_PLAT` matches `musllinux` (set in
+    every cibuildwheel musllinux container), unless the project passes `MUSL_DYNAMIC_LIBCPP`.
+    The runtime is linked into the extension as Target Code under the GCC Runtime Library
+    Exception rather than redistributed as a library, so there is nothing for
+    `collect-gpl-sources` to cover — the same outcome as gotcha 409's ruckig case.
+    - **Settle it without downloading the CI artifact** (the session `gh` cannot follow the
+      blob redirect): `pip download` upstream's own `musllinux_1_2_x86_64` wheel and run
+      `readelf -d` on the `.so` — only `libc.musl-*.so.1` is `NEEDED`, no `.libs/` dir. Our
+      riscv64 musl wheel landing within a few kB of upstream's x86_64 one (673 kB vs 662 kB,
+      about 3x the manylinux wheel) is the matching CI-side signal.
+    - **Gotcha 538's `SKBUILD_WHEEL_LICENSE_FILES` accepts submodule paths directly** — no
+      `LICENSE.<dep>` staging at the root. `src/nanobind/LICENSE;src/third_party/llvm/LICENSE.txt`
+      lands as `dist-info/licenses/src/nanobind/LICENSE` etc. (scikit-build-core 1.1.1 keeps the
+      relative path), and a project with no `license-files` key at all (default PEP 639 glob,
+      root `LICENSE` only) is the cheapest case: the env override, listing `LICENSE` first.

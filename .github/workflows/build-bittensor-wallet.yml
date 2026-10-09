@@ -1,0 +1,163 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/opentensor/btwallet/blob/5d63be571deb926aca5597c098ae26d59b85b314/.github/workflows/release.yml
+# and the `pytest` job of
+# https://github.com/opentensor/btwallet/blob/5d63be571deb926aca5597c098ae26d59b85b314/.github/workflows/check-python.yml
+name: Build bittensor-wallet wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/bittensor-wallet.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-bittensor-wallet.yml'
+      - 'docs/packages/bittensor-wallet.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-bittensor-wallet.yml'
+      - 'docs/packages/bittensor-wallet.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # Upstream releases without git tags, so pin the release commit: the merge of
+  # #205, whose tree is byte-identical to the 4.1.1 PyPI sdist. Update it
+  # alongside the version in docs/packages/bittensor-wallet.yaml.
+  BITTENSOR_WALLET_REF: 5d63be571deb926aca5597c098ae26d59b85b314
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: bittensor-wallet
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build bittensor-wallet ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream ships no free-threaded wheel and its #[pymodule] does not
+        # declare gil_used = false.
+        python: ['cp312', 'cp313', 'cp314']
+
+    env:
+      BITTENSOR_WALLET_VERSION: ${{ matrix.version }}
+      RUST_BACKTRACE: full
+
+    steps:
+      - name: Checkout bittensor-wallet ${{ env.BITTENSOR_WALLET_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: opentensor/btwallet
+          ref: ${{ env.BITTENSOR_WALLET_REF }}
+          persist-credentials: false
+
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: >-
+            --release
+            --out dist
+            --bindings pyo3
+            --interpreter ${{ steps.interp.outputs.value }}
+            --features extension-module
+          manylinux: '2_39'
+          # libsodium-sys 0.2.7 passes the Rust triple as `configure --host`, and
+          # no config.sub accepts `riscv64gc`, so build its bundled libsodium
+          # the same way here and hand it over through SODIUM_LIB_DIR.
+          before-script-linux: |
+            yum install -y perl-core openssl openssl-devel pkgconfig libatomic
+            cargo fetch --locked
+            registry=$(echo "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*)
+            cp -a "$registry/libsodium-sys-0.2.7/libsodium" /tmp/libsodium
+            (cd /tmp/libsodium && ./configure --prefix=/opt/libsodium --enable-shared=no --with-pic && make -j"$(nproc)" check && make install)
+            export SODIUM_LIB_DIR=/opt/libsodium/lib
+            cp /tmp/libsodium/LICENSE LICENSE.libsodium
+            cp "$registry/secp256k1-sys-0.9.2/depend/secp256k1/COPYING" LICENSE.secp256k1
+            cp /usr/share/licenses/openssl-libs/LICENSE.txt LICENSE.openssl
+
+      - name: Check the wheel ships the extension and every licence
+        run: |
+          set -euo pipefail
+          python3 - dist/*.whl <<'EOF'
+          import os, sys, zipfile
+          whl = sys.argv[1]
+          assert os.path.basename(whl).startswith(f"bittensor_wallet-{os.environ['BITTENSOR_WALLET_VERSION']}-"), whl
+          names = zipfile.ZipFile(whl).namelist()
+          sos = [n for n in names if n.endswith(".so")]
+          assert any(n.startswith("bittensor_wallet/bittensor_wallet.") for n in sos), sos
+          licences = {n.rsplit("/", 1)[1]
+                      for n in names if ".dist-info/licenses/" in n} - {""}
+          assert licences == {"LICENSE", "LICENSE.libsodium", "LICENSE.openssl", "LICENSE.secp256k1"}, (whl, licences)
+          print(whl, "->", sos)
+          EOF
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ steps.interp.outputs.value }}
+          activate-environment: true
+          enable-cache: false
+
+      # bittensor (imported by test_common_calls.py for test_config_parsing
+      # only) has no riscv64 wheel, so drop that import and deselect that test.
+      - name: Run Python unit tests
+        env:
+          UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+          UV_INDEX_STRATEGY: unsafe-best-match
+          UV_ONLY_BINARY: ':all:'
+        run: |
+          uv pip install dist/*.whl 'pytest==9.0.3' 'substrate-interface==1.7.11'
+          sed -i '/^import bittensor as bt$/d' tests/test_common_calls.py
+          pytest tests/ -v --ignore=tests/test_wallet_legacy.py \
+            --deselect tests/test_common_calls.py::test_config_parsing
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bittensor-wallet-${{ env.BITTENSOR_WALLET_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish bittensor-wallet ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: bittensor-wallet-${{ matrix.version }}-*-manylinux_riscv64

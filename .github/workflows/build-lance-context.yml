@@ -1,0 +1,201 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build`/`linux-x86_64` leg of upstream's own
+# wheel pipeline:
+# https://github.com/lance-format/lance-context/blob/v0.6.5/.github/workflows/python-publish.yml
+name: Build lance-context wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/lance-context.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-lance-context.yml'
+      - 'docs/packages/lance-context.yaml'
+      - 'patches/lance-context/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-lance-context.yml'
+      - 'docs/packages/lance-context.yaml'
+      - 'patches/lance-context/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: lance-context
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    # pyo3 carries `abi3-py39` unconditionally in python/Cargo.toml, so
+    # upstream ships one cp39-abi3 wheel. Our registry's pyarrow (a hard
+    # runtime dependency) has no riscv64 wheel below cp312, so the build
+    # floor here is cp312 instead -- the wheel is still tagged cp39-abi3 by
+    # the pyo3 feature regardless of which interpreter compiles it (CLAUDE.md
+    # gotcha 96), it is simply only tested on cp312 (same as
+    # build-pylance.yml/build-lancedb.yml). python/pyproject.toml's own
+    # `requires-python = ">=3.11,<3.14"` would also rule out cp314/cp314t,
+    # had the pyarrow floor not already stopped at one interpreter.
+    name: Build lance-context ${{ matrix.version }} cp39-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+
+    env:
+      LANCE_CONTEXT_VERSION: ${{ matrix.version }}
+
+    steps:
+      # python/ is a member of the lance-context Cargo workspace and builds
+      # against its sibling crates, so the checkout lands at the workspace root.
+      - name: Checkout lance-context v${{ env.LANCE_CONTEXT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: lance-format/lance-context
+          ref: v${{ env.LANCE_CONTEXT_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          sparse-checkout: patches/lance-context
+          persist-credentials: false
+
+      # lance-graph is declared in crates/lance-context-core/Cargo.toml but
+      # never imported anywhere in this workspace, and its own Cargo.toml
+      # pins lance-core/lance-linalg at an incompatible `1.x` line that
+      # Cargo's [patch] table cannot redirect alongside the `7.0.0` line
+      # crates/lance-context-core depends on directly (CLAUDE.md gotcha 300).
+      - name: Apply lance-context patches
+        run: git apply -v python-wheels/patches/lance-context/${{ env.LANCE_CONTEXT_VERSION }}/0001*.patch
+
+      # lance-core's SIMD_SUPPORT static and lance-linalg's f32x8/f32x16/
+      # i32x8/f64x4/f64x8 SIMD types compile only for x86_64/aarch64/
+      # loongarch64 upstream (CLAUDE.md gotcha 300); both are pulled in from
+      # crates.io at a pinned `lance = "7.0.0"` (crates/lance-context-core/
+      # Cargo.toml), so riscv64-fixed copies are vendored here and wired in
+      # via `[patch.crates-io]`.
+      - name: Vendor riscv64-fixed lance-core and lance-linalg
+        run: |
+          curl -fsSL -A "python-wheels (https://github.com/riseproject-dev/python-wheels)" -o lance-core.tar.gz "https://crates.io/api/v1/crates/lance-core/7.0.0/download"
+          mkdir lance-core-7.0.0-riscv64
+          tar xzf lance-core.tar.gz -C lance-core-7.0.0-riscv64 --strip-components=1
+          rm lance-core.tar.gz
+          patch -p1 -d lance-core-7.0.0-riscv64 < python-wheels/patches/lance-context/${{ env.LANCE_CONTEXT_VERSION }}/0002-lance-core-riscv64-simd-fallback.patch
+
+          curl -fsSL -A "python-wheels (https://github.com/riseproject-dev/python-wheels)" -o lance-linalg.tar.gz "https://crates.io/api/v1/crates/lance-linalg/7.0.0/download"
+          mkdir lance-linalg-7.0.0-riscv64
+          tar xzf lance-linalg.tar.gz -C lance-linalg-7.0.0-riscv64 --strip-components=1
+          rm lance-linalg.tar.gz
+          patch -p1 -d lance-linalg-7.0.0-riscv64 < python-wheels/patches/lance-context/${{ env.LANCE_CONTEXT_VERSION }}/0004-lance-linalg-riscv64-simd-fallback.patch
+
+          git apply python-wheels/patches/lance-context/${{ env.LANCE_CONTEXT_VERSION }}/0003-cargo-patch-lance-crates-for-riscv64.patch
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+
+      # This workspace links ~960 crates (datafusion, arrow, the embedded
+      # lancedb/lance/lance-index Rust crates, the aws/azure/gcp/huggingface/
+      # tencent object-store backends, ...); same OOM guard build-lancedb.yml/
+      # build-rerun-sdk.yml need for a comparably sized Rust workspace.
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 16
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python
+          output-dir: wheelhouse/
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # lance-context ships no [tool.cibuildwheel], so the Rust toolchain
+          # its maturin backend needs is installed in-container here. Rocky
+          # 10's CRB repo (enabled in the manylinux image) has protoc;
+          # PROTOC_INCLUDE is needed because it resolves
+          # google/protobuf/*.proto from disk rather than from the binary
+          # (same as build-pylance.yml/build-lancedb.yml).
+          CIBW_BEFORE_ALL_LINUX: >-
+            yum install -y protobuf-compiler protobuf-devel &&
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          # python/pyproject.toml leaves [tool.maturin] at the default `dev`
+          # profile, so a plain PEP 517 build ships an unoptimised wheel
+          # unless `--profile release` is passed explicitly (CLAUDE.md
+          # gotcha 141; the deltalake case).
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PROTOC=/usr/bin/protoc
+            PROTOC_INCLUDE=/usr/include
+            MATURIN_PEP517_ARGS="--profile release --strip"
+            CARGO_BUILD_JOBS=2
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Without this pip prefers PyPI's pyarrow, which has no riscv64
+          # wheel, and source-builds Arrow's whole C++ library here.
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=pyarrow
+          # The `tests` extra also lists pylance/lance-namespace/lancedb, but
+          # none of this suite imports them (only `pyarrow` and stub
+          # embedding providers -- see test_embeddings.py/
+          # test_multimodal_embeddings.py); pinning the extra as-is would
+          # resolve pylance>=7,<8/lancedb==0.27.1 against versions our
+          # registry doesn't carry (it only hosts pylance==11.0.0/
+          # lancedb==0.37.1+) and either fail or source-build the whole lance
+          # Rust workspace a second time, so the suite's actual requirements
+          # are listed directly instead.
+          CIBW_TEST_REQUIRES: pytest pytest-asyncio moto[s3,server] boto3 botocore
+          CIBW_TEST_SOURCES: python/pyproject.toml python/tests
+          # Mirrors upstream's own `test`/`Run tests` step (python-test.yml:
+          # `pytest -v` from python/, no extra flags). test_rollout_remote.py
+          # skips itself when target/debug/lance-context-server hasn't been
+          # built, which it isn't here (that crate is a workspace member
+          # neither the Python wheel nor its tests otherwise need).
+          CIBW_TEST_COMMAND: >-
+            cd python &&
+            python -m pytest tests -v
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lance-context-${{ env.LANCE_CONTEXT_VERSION }}-cp39-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish lance-context ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: lance-context-${{ matrix.version }}-*-manylinux_riscv64

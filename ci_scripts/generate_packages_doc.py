@@ -12,14 +12,15 @@ import packaging.version as packaging_version
 import yaml
 
 GITHUB_PYTHON_WHEELS_URL = "https://github.com/riseproject-dev/python-wheels/tree/main"
-PYPI_INDEX_URL = "https://pypi.riseproject.dev/simple/"
+PYPI_SITE_URL = "https://pypi.riseproject.dev"
+PYPI_INDEX_URL = f"{PYPI_SITE_URL}/simple/"
 
 # Match RST inline external refs: `Label <url>`_ or `Label <url>`__
 RST_LINK_RE = re.compile(r"`([^`<]+?)\s*<([^>]+)>`_+")
 PACKAGE_NORMALIZE_RE = re.compile(r"[-_.]+")
 
 CI_SCRIPTS_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
-DOCS_DIR = (CI_SCRIPTS_DIR / ".." / "docs" / "packages").resolve()
+REGISTRY_DIR = (CI_SCRIPTS_DIR / ".." / "docs" / "packages").resolve()
 
 
 def normalize_package_name(package_name):
@@ -118,8 +119,14 @@ def generate_simple_page(yaml_file, output_html):
     return package_name, output_html
 
 
-def generate_md_page(yaml_file, output_md):
-    """Generate a Markdown page from a single package YAML file."""
+def generate_md_page(yaml_file, project_dir):
+    """Generate a Markdown page from a single package YAML file.
+
+    The page is written to ``project/<package-name>/index.md`` using the
+    package's exact registered casing (e.g. ``PyYAML``, not ``pyyaml``), so
+    it's served at ``/project/<package-name>/``, matching pypi.org's project
+    URLs. The caller redirects the normalized/lowercase variant here.
+    """
     try:
         with open(yaml_file, "r", encoding="utf-8") as f:
             package_data = yaml.safe_load(f)
@@ -141,6 +148,7 @@ def generate_md_page(yaml_file, output_md):
         key=lambda v: packaging_version.parse(str(v["version"])), reverse=True
     )
     latest_version = str(versions[0]["version"]) if versions else None
+    output_md = os.path.join(project_dir, package_name, "index.md")
 
     lines = [
         "---",
@@ -264,6 +272,7 @@ def generate_md_page(yaml_file, output_md):
         _callout(lines, "warning", warning)
 
     try:
+        os.makedirs(os.path.dirname(output_md), exist_ok=True)
         with open(output_md, "w", encoding="utf-8") as f:
             f.write("\n".join(lines).rstrip() + "\n")
     except IOError as e:
@@ -273,34 +282,86 @@ def generate_md_page(yaml_file, output_md):
     return package_name, output_md
 
 
-def process_all_yaml_files(out_dir):
-    print(f"Processing all YAML files in {out_dir}...")
-    yaml_files = sorted(glob.glob(os.path.join(out_dir, "*.yaml")))
+def generate_redirect_page(output_html, label, target, canonical_url):
+    """Write a static meta-refresh redirect page.
+
+    Used both to retire a page under the keep_files-based deploy (gotcha:
+    gh-pages with ``keep_files: true`` never removes a page we stop
+    generating, so a stale copy would serve forever unless overwritten) and
+    to send a normalized/lowercase project URL to its canonically-cased page.
+    """
+    target = html.escape(target, quote=True)
+    canonical_url = html.escape(canonical_url, quote=True)
+    label = html.escape(label)
+    lines = [
+        "<!DOCTYPE html>",
+        '<html lang="en">',
+        "  <head>",
+        '    <meta charset="utf-8">',
+        f"    <title>Redirecting to {label}</title>",
+        f'    <link rel="canonical" href="{canonical_url}">',
+        f'    <meta http-equiv="refresh" content="0; url={target}">',
+        "  </head>",
+        "  <body>",
+        f'    <p>This page moved to <a href="{target}">{label}</a>.</p>',
+        "  </body>",
+        "</html>",
+    ]
+
+    try:
+        os.makedirs(os.path.dirname(output_html), exist_ok=True)
+        with open(output_html, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except IOError as e:
+        print(f"Error writing {output_html}: {e}")
+
+
+def process_all_yaml_files(registry_dir):
+    print(f"Processing all YAML files in {registry_dir}...")
+    yaml_files = sorted(glob.glob(os.path.join(registry_dir, "*.yaml")))
     if not yaml_files:
-        print(f"No YAML files found in {out_dir}")
+        print(f"No YAML files found in {registry_dir}")
         return
 
     package_entries = []
+
     simple_entries = []
-    simple_dir = os.path.join(os.path.dirname(out_dir), "simple")
+    docs_dir = os.path.dirname(registry_dir)
+    project_dir = os.path.join(docs_dir, "project")
+    simple_dir = os.path.join(docs_dir, "simple")
     for yaml_file in yaml_files:
         print(f"Processing {yaml_file}...")
-        base = os.path.basename(yaml_file).replace(".yaml", ".md")
-        md_file = os.path.join(out_dir, base)
-        name, fname = generate_md_page(yaml_file, md_file)
-        if name and fname:
-            package_entries.append((name, os.path.basename(fname)))
-
-        package_name = os.path.basename(yaml_file).removesuffix(".yaml")
-        simple_file = os.path.join(
-            simple_dir, normalize_package_name(package_name), "index.html"
+        normalized_name = normalize_package_name(
+            os.path.basename(yaml_file).removesuffix(".yaml")
         )
+
+        name, fname = generate_md_page(yaml_file, project_dir)
+        if name and fname:
+            package_entries.append(name)
+            generate_redirect_page(
+                os.path.join(registry_dir, f"{normalized_name}.html"),
+                name,
+                f"../project/{name}/",
+                f"{PYPI_SITE_URL}/project/{name}/",
+            )
+            # pypi.org's project pages keep the owner's registered casing
+            # (e.g. PyYAML) as canonical; send the normalized/lowercase
+            # variant there instead of generating a second copy.
+            if name != normalized_name:
+                generate_redirect_page(
+                    os.path.join(project_dir, normalized_name, "index.html"),
+                    name,
+                    f"../{name}/",
+                    f"{PYPI_SITE_URL}/project/{name}/",
+                )
+
+        simple_file = os.path.join(simple_dir, normalized_name, "index.html")
         simple_name, simple_fname = generate_simple_page(yaml_file, simple_file)
         if simple_name and simple_fname:
             simple_entries.append(simple_name)
 
-    package_entries.sort(key=lambda x: x[0].lower())
-    generate_index(package_entries, out_dir)
+    package_entries.sort(key=str.lower)
+    generate_index(package_entries, registry_dir)
     generate_simple_index(simple_entries, simple_dir)
 
 
@@ -352,9 +413,9 @@ def generate_index(package_entries, out_dir):
         "# List of Supported Packages",
         "",
     ]
-    for name, fname in package_entries:
-        page = fname.replace(".md", ".html")
-        lines.append(f"- [{name}]({page})")
+    # Relative so the links keep working under a PR preview's baseurl.
+    for name in package_entries:
+        lines.append(f"- [{name}](../project/{name}/)")
 
     index_path = os.path.join(out_dir, "index.md")
     try:
@@ -366,4 +427,4 @@ def generate_index(package_entries, out_dir):
 
 
 if __name__ == "__main__":
-    process_all_yaml_files(DOCS_DIR)
+    process_all_yaml_files(REGISTRY_DIR)

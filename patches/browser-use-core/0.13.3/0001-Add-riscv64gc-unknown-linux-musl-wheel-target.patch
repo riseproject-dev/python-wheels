@@ -1,0 +1,72 @@
+From: Ludovic Henry <git@ludovic.dev>
+Subject: [PATCH] Add riscv64gc-unknown-linux-musl wheel target
+
+Upstream-Status: To upstream [not yet submitted; upstream's wheel matrix has no riscv64 leg to carry it]
+
+scripts/build-browser-use-core-wheel.sh maps each supported target triple to a
+wheel platform tag and rejects anything else, so a riscv64 build stops with
+"unsupported target triple for wheel packaging". Add
+riscv64gc-unknown-linux-musl alongside the existing x86_64/aarch64 musl
+targets, tagged with the lowest manylinux floor of the architecture the same
+way (the binaries are static musl executables, so the glibc floor in the tag
+is never exercised). For riscv64 that floor is manylinux_2_31, not 2_17: uv
+and auditwheel's riscv64 policy start there, and uv refuses to install a
+manylinux_2_17_riscv64 wheel. Also detect the target from `uname -m` when
+TARGET_TRIPLE is unset.
+
+scripts/install-agent-ripgrep.sh downloads a pinned ripgrep release binary per
+target, but BurntSushi/ripgrep 15.1.0 publishes no riscv64 asset (neither
+riscv64gc-unknown-linux-gnu nor -musl). For that target, build the same
+RG_VERSION from crates.io with `cargo install --locked --features pcre2` (the
+feature set of ripgrep's own release binaries) for the same musl target, so the
+packaged agent-tools/rg is a real static ripgrep instead of a stub.
+
+diff --git a/scripts/build-browser-use-core-wheel.sh b/scripts/build-browser-use-core-wheel.sh
+index da82dc4..5a7861b 100755
+--- a/scripts/build-browser-use-core-wheel.sh
++++ b/scripts/build-browser-use-core-wheel.sh
+@@ -24,6 +24,7 @@ if [[ -z "$TARGET_TRIPLE" ]]; then
+       case "$(uname -m)" in
+         arm64|aarch64) TARGET_TRIPLE="aarch64-unknown-linux-musl" ;;
+         x86_64|amd64) TARGET_TRIPLE="x86_64-unknown-linux-musl" ;;
++        riscv64) TARGET_TRIPLE="riscv64gc-unknown-linux-musl" ;;
+         *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+       esac
+       ;;
+@@ -45,6 +46,7 @@ case "$TARGET_TRIPLE" in
+   x86_64-apple-darwin) PLAT_NAME="macosx_10_13_x86_64" ;;
+   x86_64-unknown-linux-musl) PLAT_NAME="manylinux_2_17_x86_64" ;;
+   aarch64-unknown-linux-musl) PLAT_NAME="manylinux_2_17_aarch64" ;;
++  riscv64gc-unknown-linux-musl) PLAT_NAME="manylinux_2_31_riscv64" ;;
+   x86_64-pc-windows-msvc) PLAT_NAME="win_amd64" ;;
+   *) echo "unsupported target triple for wheel packaging: $TARGET_TRIPLE" >&2; exit 1 ;;
+ esac
+diff --git a/scripts/install-agent-ripgrep.sh b/scripts/install-agent-ripgrep.sh
+index c71ddaa..687a8ad 100755
+--- a/scripts/install-agent-ripgrep.sh
++++ b/scripts/install-agent-ripgrep.sh
+@@ -31,6 +31,7 @@ if [[ -z "$TARGET_TRIPLE" ]]; then
+       case "$(uname -m)" in
+         arm64|aarch64) TARGET_TRIPLE="aarch64-unknown-linux-musl" ;;
+         x86_64|amd64) TARGET_TRIPLE="x86_64-unknown-linux-musl" ;;
++        riscv64) TARGET_TRIPLE="riscv64gc-unknown-linux-musl" ;;
+         *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+       esac
+       ;;
+@@ -82,6 +83,16 @@ file_sha256() {
+   exit 1
+ }
+ 
++if [[ "$TARGET_TRIPLE" == "riscv64gc-unknown-linux-musl" ]]; then
++  tmp="$(mktemp -d)"
++  trap 'rm -rf "$tmp"' EXIT
++  cargo install --locked --features pcre2 --target "$TARGET_TRIPLE" --root "$tmp" ripgrep --version "$RG_VERSION"
++  mkdir -p "$DEST_DIR"
++  cp "$tmp/bin/rg" "$DEST_DIR/rg"
++  chmod 0755 "$DEST_DIR/rg"
++  exit 0
++fi
++
+ url=""
+ digest=""
+ member=""

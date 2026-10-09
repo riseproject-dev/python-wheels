@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow mirrors the build_wheels job of upstream's own
+# .github/workflows/publish-to-test-and-live-pypi.yml, narrowed to riscv64.
+name: Build spiceypy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/spiceypy.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-spiceypy.yml'
+      - 'docs/packages/spiceypy.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-spiceypy.yml'
+      - 'docs/packages/spiceypy.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MIRROR_BASE: https://raw.githubusercontent.com/AndrewAnnex/cspice-release-mirror/refs/heads/main/artifacts
+  CSPICE_ARCHIVE: N67_lin_x64_cspice.tar.gz
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: spiceypy
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build spiceypy ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp310", "cp311", "cp312", "cp313", "cp314"]
+
+    env:
+      SPICEYPY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout SpiceyPy v${{ env.SPICEYPY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: AndrewAnnex/SpiceyPy
+          ref: v${{ env.SPICEYPY_VERSION }}
+          persist-credentials: false
+
+      # Upstream's own CI provisions CSPICE the same way for its Linux wheels
+      # (aarch64 included): the C source is architecture-independent, so the
+      # x86_64 mirror archive is reused here too. The mirror exists because
+      # NAIF's own server has had TLS/reliability issues in upstream's CI.
+      - name: Provision CSPICE source from mirror
+        run: |
+          set -euo pipefail
+          curl -fsSL "${MIRROR_BASE}/${CSPICE_ARCHIVE}" -o "${CSPICE_ARCHIVE}"
+          curl -fsSL "${MIRROR_BASE}/${CSPICE_ARCHIVE}.sha256" -o "${CSPICE_ARCHIVE}.sha256"
+          expected="$(tr -d '[:space:]' < "${CSPICE_ARCHIVE}.sha256")"
+          actual="$(sha256sum "${CSPICE_ARCHIVE}" | awk '{print $1}')"
+          test "$expected" = "$actual"
+          mkdir -p cspice-src-cache
+          tar xzf "${CSPICE_ARCHIVE}" -C cspice-src-cache
+          test -d cspice-src-cache/cspice/src/cspice
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+          extras: "uv"
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT_LINUX: >-
+            CSPICE_SRC=/project/cspice-src-cache/cspice
+            SPICEYPY_CSPICE_PREFIX=/project/cspice-prefix
+            CMAKE_BUILD_PARALLEL_LEVEL="$(nproc)"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # dependency-groups=dev also pulls in black/twine/build/scikit-build-core,
+          # packaging/lint tools the test command never calls; black has no riscv64
+          # wheel for cp310/cp311 on PyPI or our registry and would otherwise have to
+          # mypyc-compile from source on every job.
+          CIBW_TEST_GROUPS: ""
+          CIBW_TEST_REQUIRES: "numpy>=1.23.5 pandas>=2.2.2 pytest>=7.0.0 pytest-benchmark coverage>=7.0.0"
+
+      - name: Check the wheel ships the compiled extension and CSPICE
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("spiceypy/cyice/cyice") and n.endswith(".so") for n in names), (whl, names)
+              assert any(n.endswith("spiceypy/utils/libcspice.so") for n in names), (whl, names)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: spiceypy-${{ env.SPICEYPY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish spiceypy ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: spiceypy-${{ matrix.version }}-*-manylinux_riscv64

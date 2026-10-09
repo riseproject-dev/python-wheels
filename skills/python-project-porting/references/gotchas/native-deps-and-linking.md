@@ -54,6 +54,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
   which is also `vm.mmap_min_addr`; the segment auditwheel's patchelf prepends for the RPATH
   lands below it and the binary is killed at exec, often silently — link with
   `-Wl,-Ttext-segment=0x200000` (or PIE) (the pygraphviz / python-gdcm / perf-analyzer case).
+- **625** — Conan's `openssl` recipe has no riscv64 row and silently builds `linux-generic32`;
+  `CONAN_OPENSSL_CONFIGURATION` overrides it, but `linux64-riscv64`'s AES asm `jal`s a global
+  symbol and overflows `R_RISCV_JAL` once `libcrypto.a` lands in a big `.so` — use
+  `linux-generic64` (the sqlcipher3 case).
 ---
 
 16. **All-static BUNDLED build + a dep the project can't bundle = link failure.**
@@ -856,3 +860,33 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
       `check_pie_supported()` it never passes `-pie`, so the result is still `ET_EXEC`.
     - Unrelated but seen alongside it: a CLI's `--version` may print to stderr
       (perf_analyzer's `PrintVersion()` uses `std::cerr`); capture `2>&1` before grepping it.
+
+625. **Conan's `openssl` recipe has no riscv64 target, falls back to a *32-bit* OpenSSL
+    configuration without a word, and the obvious 64-bit fix fails to link into a large
+    extension (the sqlcipher3 case; see `build-sqlcipher3.yml`).** A `setup.py` that runs
+    `conan install` for `openssl/3.x` (sqlcipher3 does, to statically link `libcrypto.a`) gets no
+    conancenter binary for `arch=riscv64` and builds from source with `-b missing`. That part
+    works (~20 min on the runners). The problem is the target. The recipe's `_targets` table
+    maps `Linux-<arch>-*` to an OpenSSL `Configure` target, has no `riscv64` row, and ends in
+    `"Linux-*-*": "linux-generic32"`. The build then uses 32-bit bignum limbs
+    (`THIRTY_TWO_BIT`) on an LP64 machine and prints only
+    `using target: conan-Release-Linux-riscv64-gcc-14 -> linux-generic32`.
+    - **The recipe's documented override is the `CONAN_OPENSSL_CONFIGURATION` env var**
+      (`_ancestor_target` reads it before the table). Conan runs the recipe in its own
+      process, which inherits the environment, so `CIBW_ENVIRONMENT` reaches it through
+      cibuildwheel, `build`'s isolated env and `setup.py`'s `subprocess.run(['conan', ...])`.
+    - **Don't pick `linux64-riscv64`.** OpenSSL builds with it, but the final
+      `gcc -shared ... -lcrypto` fails with `libcrypto.a(libcrypto-lib-aes-riscv64.o):
+      relocation truncated to fit: R_RISCV_JAL against symbol 'AES_set_encrypt_key'`.
+      `crypto/aes/asm/aes-riscv64.pl` calls the exported `AES_set_encrypt_key` with a plain
+      `jal` (still the case in 3.6.5 and master). In a shared object a default-visibility
+      global is preemptible, so the call is routed through the PLT. With a ~20 MB `.text`
+      (the 9 MB SQLite amalgamation plus libcrypto) the PLT is beyond `jal`'s ±1 MiB reach.
+      Nothing about the package is riscv-specific; only the asm is.
+    - **Use `CONAN_OPENSSL_CONFIGURATION=linux-generic64`**: the 64-bit no-asm C build
+      (`SIXTY_FOUR_BIT_LONG`). It links and passes an encryption round-trip.
+      `-Wl,-Bsymbolic` would also resolve the `jal` locally, but it changes symbol binding for
+      the whole extension to work around one asm call site.
+    - The same recipe falls through to `linux-generic32` for any other arch it doesn't
+      list, so check its `_targets` table whenever a Conan-built OpenSSL targets a new arch.
+

@@ -686,6 +686,13 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/testing-and-shadowing.
       reason. Run the metadata check *after* that `cd`, not before it: writing the check
       first (chronologically, before the later `import <pkg>` smoke test was added) is why
       it alone stayed exposed.
+    - **The same shadowing happens through the *script's* directory.** Python puts the
+      directory of `python <script>` on `sys.path[0]`, whatever the cwd is. A smoke test written
+      into `{project}` for cibuildwheel to carry into the container (gotcha 7) therefore finds
+      `{project}/<pkg>.egg-info`, the in-tree build's leftover, even though cibuildwheel's
+      test cwd is a fresh temp dir (the sqlcipher3 case). `cd` doesn't help there. Run it as
+      `python -P {project}/<script>.py` (3.11+, which the default matrix always is): `-P`
+      skips that `sys.path[0]` entry, and the script itself still runs.
 
 618. **`--import-mode=importlib` does not immunize a package-nested test suite against
     gotcha 148's shadowing — it reaches the same in-place build by a wholly different route

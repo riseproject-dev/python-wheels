@@ -128,6 +128,16 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
   pickling tensors through `_share_fd_cpu_()` is `/dev/shm` exhaustion from Docker's 64MB
   default, not disk space or a riscv64 bug — raise it with `CIBW_CONTAINER_ENGINE`'s
   `create_args` (same knob as gotcha 552) rather than deselecting an addressable failure.
+- **626** — Since numpy 2.5, `np.linalg.eig` returns complex eigenvectors on *every* arch, even
+  for a diagonal matrix: gotcha 170's dtype trap is no longer riscv64-only, so a released
+  package calling `eig` on a symmetric matrix fails everywhere — look for upstream's `eigh` fix.
+- **628** — Tests that hardcode x86 SIMD alignment (16/32 bytes) or read `/proc/cpuinfo`'s
+  `flags` fail as a fixed, countable set on every non-x86 arch; an upstream that `test-skip`s
+  the whole suite on aarch64 for "N failing tests" is usually this — match N, deselect only those.
+- **630** — OpenUSD's riscv64 `ArchWarn: ARCH_CACHE_LINE_SIZE != Arch_ObtainCacheLineSize()`
+  goes to the stderr of every `pxr` process and breaks every exact-stderr test (5 in
+  usd-exchange, across 2 helpers). Gate the check on `!ARCH_CPU_RISCV` in one OpenUSD patch;
+  skipping tests one by one failed two CI rounds in a row.
 
 ---
 
@@ -1834,3 +1844,105 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
     gotcha-33 way: deselect exactly those tests, generated once in the `run:` step from
     `matrix.python_version` (`if [ "$v" != "3.12" ]; then deselect+=(--deselect ...); fi`) so
     3.12 keeps exercising all of them and the list isn't tripled across the matrix.
+
+626. **Since numpy 2.5, `np.linalg.eig` returns `complex128` eigenvectors on every
+    architecture, even for a real diagonal matrix — gotcha 170's dtype trap is no longer a
+    riscv64-OpenBLAS quirk, and an older release that calls `eig` on a symmetric matrix now
+    fails on x86_64 too (the mdanalysis case).** MDAnalysis 2.10.0's
+    `Masses.principal_axes()` calls `np.linalg.eig(moment_of_inertia)`; against the registry's
+    numpy 2.5.3 the complex vectors reach `np.degrees(mdamath.angle(...))` in
+    `align_principal_axis()` and raise `TypeError: ufunc 'degrees' not supported for the
+    input types` on all three legs. On x86_64, `eig(np.diag([3., 2., 1.]))[1].dtype` is
+    `complex128` with numpy 2.5.3 and `float64` with 2.4.6 — one line in a throwaway
+    `uv run --with numpy==2.5.3` settles which gotcha you are in before any riscv64
+    debugging.
+    - **The fix is upstream's, not a deselect or a numpy pin**: switching to `np.linalg.eigh`
+      (real by construction for symmetric input) is what both statsmodels-shaped code and
+      MDAnalysis need; MDAnalysis landed it as "Fix compatibility with numpy 2.5" (#5404) and
+      it backports cleanly onto the release. Pinning `numpy<2.5` in the test env would hide a
+      runtime break every user of the wheel hits.
+    - **Expect a second, unrelated drift failure in the same first run.** A release that
+      predates both numpy 2.5 and pytest 9.1 also tripped pytest 9.1 reading
+      `parametrize("btype,", [...])`'s trailing comma as a one-element tuple of names
+      ("the number of names (1) must be equal to the number of values (4)"), a collection
+      error that fails the whole run; upstream's one-character fix (8783f8d) backports too.
+      Read the full FAILED/ERROR list before assuming one cause.
+
+628. **An upstream `test-skip = "*aarch64"` backed by an issue that only says "N tests fail on
+    aarch64" is often x86-hardcoded SIMD-alignment tests — run the suite on riscv64, match the
+    count, and deselect exactly that set (the pyfftw case).** pyFFTW skips its entire suite on
+    aarch64 for pyFFTW/pyFFTW#326 ("21 failing tests", no names). On riscv64 the full suite
+    (~1h on cp312) gave **exactly 21** failures, all one shape: `include/cpu.h` probes SSE/AVX
+    with `cpuid` and returns a 4-byte `simd_alignment` on any other arch, while the tests assert
+    `fft.input_alignment == 16`, `simd_aligned` on 8-byte-offset arrays, an implicit
+    `FFTW_UNALIGNED` flag, or read `/proc/cpuinfo`'s `flags` key, which riscv64 (`isa`) and
+    aarch64 (`Features`) do not have (`KeyError: 'flags'`). The other 1699 tests passed,
+    including every long-double transform (128-bit software quad on riscv64, like aarch64).
+    - **The count is the triage signal.** An identical count to upstream's aarch64 report, plus
+      a failure list that is all one theme, means a test-side arch assumption, not a riscv64
+      bug — no need to reproduce on aarch64.
+    - **Deselect narrowly with `-k`** (gotcha 14), qualifying by class where a test name is
+      shared: here `test_alignment` also runs on the `*LongDouble*` classes and passes (16-byte
+      long double), and `test_auto_align_input` exists in a passing numpy-interface class too,
+      so `not (test_alignment and not LongDouble)` / `not (BuildersTest and
+      test_auto_align_input)`. Dry-run the expression with `pytest --collect-only -k` against a
+      stub file of `unittest.TestCase` classes carrying the real names (plain classes not named
+      `Test*` are not collected, so the stub collects nothing). Same "don't inherit the
+      arch-wide skip" reasoning as gotcha 304, different failure shape.
+
+630. **OpenUSD's riscv64 `ArchWarn: ARCH_CACHE_LINE_SIZE != Arch_ObtainCacheLineSize()`
+    lands on the stderr of every process that imports `pxr`, so it breaks every test that
+    compares a subprocess's stderr exactly. Fix it once in OpenUSD's `arch/assumptions.cpp`,
+    not test by test (the usd-exchange case, where skipping tests one at a time failed two
+    CI rounds in a row).**
+    `Arch_ValidateAssumptions()` runs when `libusd_arch` loads. It compares the hardcoded
+    `ARCH_CACHE_LINE_SIZE` (`pxr/base/arch/align.h`: 128 on Apple ARM, 64 everywhere else)
+    with `sysconf(_SC_LEVEL1_DCACHE_LINESIZE)`. On a mismatch it prints a four-line
+    `ArchWarn:` / `Function:` / `File:` / `Line: 140` block with a bare
+    `fprintf(stderr, ...)` in `arch/error.cpp`. That is below Tf, so no `PXR_*`/`TF_*` env var and no diagnostic delegate can stop it. On riscv64 the
+    comparison has no correct answer. glibc's riscv `sysconf` returns `AT_L1D_CACHEGEOMETRY &
+    0xffff` from the auxv, or -1 if that entry is missing. The kernel fills it from the
+    firmware's devicetree/ACPI cache description and writes 0 when there is none
+    (`arch/riscv/kernel/cacheinfo.c`). So any constant you pick is wrong on some boards.
+    - **Count the failures per test from the log; don't trust a summary.** Round 2 read
+      `FAILED (failures=15)` as "14 testMaterialAlgo + 1 testSettings", so its fix skipped
+      the one `testSettings.py::testEnableTranscodingSetting`. The real split was 10 + **4
+      testDiagnostics** + 1, and the 4 failed again in round 3. Grep the log for `FAIL: `
+      lines (CI adds a timestamp prefix, so don't anchor on `^`) and group them by module
+      before choosing a fix. When every
+      failure prints the same foreign stderr block, the cause is shared.
+    - **Map the blast radius by assertion style, across the whole suite.** In usd-exchange
+      3.0.0, two helpers compare stderr exactly. In `testDiagnostics.py`,
+      `assertOutputStreams()` checks `assertEqual(len(error), len(expectedStderr))` on the
+      success path, so all 4 callers fail with `7 != 3` / `4 != 0`: `testLevel`,
+      `testOutputFormatting`, `testOutputStream`, `testUtf8Diagnostics`. In
+      `testSettings.py`, `assertEnvSetting(..., expectedOutputPattern="")` checks
+      `assertEqual(result.stderr, "")`. Everything else tolerates extra lines.
+      `assertOutputStreams`' crash path (`testFatal`) uses `assertLessEqual`/`assertIn`. The
+      other `assertEnvSetting` callers use `assertRegex`, which is a search. `testCore`
+      checks `assertIn`/`assertNotIn` on strings the warning doesn't contain. `testPxr`
+      checks only the return code. `usdex.test.ScopedDiagnosticChecker` goes through a Tf
+      delegate, so it never sees the `fprintf`. Skipping tests by name chases whichever
+      callers fail today and misses any helper caller added later.
+    - **The fix is one OpenUSD source patch, gated on the CPU:** wrap only the
+      `if (ARCH_CACHE_LINE_SIZE != cacheLineSize) ARCH_WARNING(...)` in `#if
+      !defined(ARCH_CPU_RISCV)` (that define comes from gotcha 484's arch patch), with
+      `(void)cacheLineSize;` in the `#else`. That keeps it clean under `-Wall -Wextra
+      -Werror`. Leave `ARCH_CACHE_LINE_SIZE` at 64. It only sizes padding and alignment, so a
+      mismatch costs performance, never correctness. Leave the rest of
+      `Arch_ValidateAssumptions()` (the big-endian `ARCH_ERROR`, the demangler check) alone.
+      This also removes a real wart from the wheel, since the warning printed on every
+      `import pxr` for every user, not only in tests. Tag it `Upstream-Status: To upstream`
+      with the arch-support patch, because an upstream riscv64 port needs the same change.
+      Apply it from the same `git -C OpenUSD apply .../00*.patch` step as the arch patch.
+      Whatever patch you remove from the old fix, also remove its `git apply` step, because
+      an unmatched glob fails the job.
+    - **Only patch the test helper when the dependency's source is out of reach** (a
+      prebuilt vendor OpenUSD you don't compile). In that case, strip the known 4-line
+      `ArchWarn` block in each shared helper before it compares, not in each test method.
+      `python -m unittest discover` has no `-k`, so any test-side change must be a source
+      patch against the project checkout.
+    - Gotcha 484 called the warning harmless for the *build*. That still holds. This entry
+      covers the case where the project's tests read stderr. Any OpenUSD-based port
+      (usd-core, usd-exchange, a future OpenUSD consumer) built on these runners prints the
+      warning unless it carries this patch.

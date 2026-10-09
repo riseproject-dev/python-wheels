@@ -38,6 +38,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **356** — A pybind11 3.x CMake build can silently target the wrong Python on cp314t.
 - **360** — A `setup.py`'s own `bdist_wheel --plat-name` insertion can hardcode
   `manylinux1_` + `platform.machine()` regardless of the actual container libc, making
+- **644** — A `setup.py` that drives CMake into a fixed, non-interpreter-specific build dir
+  poisons the next interpreter's configure when `CIBW_BUILD` lists several in one job.
   musllinux unbuildable no matter how the CMake/C++ side is patched.
 - **396** — A `cpXY-none-<platform>` wheel is the third plat-name shape: `setup.py` declares
   no `ext_modules` at all, and a sibling CMake build both compiles the extension modules and
@@ -68,6 +70,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
 - **564** — `pypa/cibuildwheel`'s action has no `build:` input; passing one is silently
   dropped and cibuildwheel falls back to its default matrix floor instead of the intended
   abi3 build list — use `CIBW_BUILD`/`only:` instead.
+- **633** — Gotcha 96's `_SizeT` trap starts at CPython 3.13 headers, so a fixed old abi3
+  floor the riscv64 image cannot provide (`cp37-abi3`) is safe to build on cp312.
 
 ---
 
@@ -1176,3 +1180,71 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
       writing the cibuildwheel step, whenever the interpreter list sits under `with:` rather
       than as `CIBW_BUILD`/`CIBW_SKIP` under `env:` or `only:`/`skip:` under `with:` — those
       four are the only spellings the action accepts.
+
+633. **Gotcha 96's `PY_SSIZE_T_CLEAN` trap starts at CPython 3.13 *headers*, so a fixed
+    abi3 floor older than anything the riscv64 image ships (`cp37-abi3`, `cp38-abi3`) is
+    safe to build on cp312 — check `modsupport.h`, don't guess (the etcpak case).**
+    Gotcha 96 says build an abi3 wheel on the oldest interpreter its tag claims; the
+    manylinux_riscv64 image starts at cp39, and our test dependencies usually at cp312, so
+    a `setup.py` that hardcodes `cp37` plus `-DPy_LIMITED_API=0x03070000` leaves no such
+    interpreter. The concrete failure gotcha 96 describes only exists from 3.13 on:
+    CPython 3.12's `Include/modsupport.h` still does
+    `#ifdef PY_SSIZE_T_CLEAN / #define PyArg_ParseTuple _PyArg_ParseTuple_SizeT` (and the
+    same for `Py_BuildValue` and friends) unconditionally, while 3.13 and 3.14 drop the
+    block. A `"y#"`-parsing extension built against cp312 headers therefore calls the
+    `_SizeT` entry points every CPython from 3.7 on exports, and the wheel is honest on the
+    old interpreters its tag claims.
+    - **Settle it in one command per header**, no build needed:
+      `curl -s https://raw.githubusercontent.com/python/cpython/3.12/Include/modsupport.h | grep -n _SizeT`
+      (and `3.13`, which prints nothing). Then
+      `grep -n 'PY_SSIZE_T_CLEAN\|PyArg_Parse\|Py_BuildValue' <ext sources>` to see whether
+      the project uses `#` formats at all.
+    - **List cp312 first in `CIBW_BUILD`** (`cp312-* cp313-* cp314-*`) so cibuildwheel
+      compiles there and only retests on cp313/cp314 via `find_compatible_wheel`; letting
+      a 3.13+ interpreter compile the wheel is what reintroduces gotcha 96. Name the job and
+      artifact after the tag the wheel carries (`cp37-abi3`, gotcha 34), and drop cp314t
+      when `setup.py` forces the limited API with no `Py_GIL_DISABLED` guard (CPython's
+      own `#error`).
+    - Same build as `build-pycryptodome.yml`, which ships `cp37-abi3` built on cp312.
+
+644. **A `setup.py` that drives CMake into a fixed, non-interpreter-specific build dir
+    poisons the *next* interpreter's configure when `CIBW_BUILD` lists several in one job —
+    CMake reuses the stale cache and reports whatever Python it found last time, not the
+    one just hinted (the pypcode case; see `build-pypcode.yml`).** pypcode's `setup.py`
+    always runs `cmake -S . -B build/native -DPython_EXECUTABLE=<this interpreter>` — the
+    same `build/native` path on every call, since it is relative to the project root, not
+    to `sys.executable`. cibuildwheel builds `cp312-*`, `cp313-*`, `cp314-*` sequentially
+    inside one container against the one checkout `CIBW_BUILD` names, so cp312's configure
+    leaves a `CMakeCache.txt` in `build/native` that cp313's configure inherits. The new
+    `-DPython_EXECUTABLE=` on the command line overrides only that one cache entry;
+    `find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)` revalidates
+    the *other* Python-component cache entries (include dir, version) against it, finds
+    them stale, and fails with `Could NOT find Python (missing: Python_INCLUDE_DIRS
+    Interpreter Development.Module) (found version "<the PREVIOUS interpreter's version>")`
+    — a message that misleadingly looks like a missing-headers or wrong-interpreter
+    problem on *this* Python, when the headers for every interpreter are fine. The tell is
+    in what's missing from the log, not what's in the error: cp313's configure jumps
+    straight from `running build_ext` to the `CMake Error` with none of the `-- The C
+    compiler identification is ...` / `-- Detecting C compiler ABI info` lines cp312's
+    configure printed moments earlier — proof CMake read an existing cache instead of
+    reconfiguring from scratch.
+    - **Not a riscv64 or manylinux-image issue** — reproduced by configuring the same
+      minimal `find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)`
+      CMakeLists.txt twice into one build dir, once per hinted interpreter, on an unmodified
+      `quay.io/pypa/manylinux_2_39_riscv64`; a single configure with either interpreter
+      alone, or two configures into separate build dirs, both succeed every time.
+    - **Upstream's own CI never hits this**: their `build.yml` matrix is
+      `CIBW_BUILD: ${{ matrix.py }}-${{ matrix.platform.wheel_tag }}` — one interpreter,
+      one job, one checkout — so `build/native` is always fresh. Our `CIBW_BUILD` packs
+      three interpreters into a single riscv64 job (standard for this repo, to spend fewer
+      self-hosted-runner minutes), which is what exposes a latent bug in `setup.py` that
+      upstream's own job-per-interpreter shape papers over.
+    - **Fix with `CIBW_BEFORE_BUILD: rm -rf {package}/build`**, the same knob
+      `build-praat-parselmouth.yml` uses for its own stale `_skbuild` dir — no source patch
+      needed, since the failure is a property of *this* workflow's multi-interpreter job,
+      not of the project's `CMakeLists.txt`/`setup.py` being wrong in isolation (so this is
+      not an `Upstream-Status: To upstream` patch candidate the way gotcha 374 is).
+    - **Confirm from the log, not the error message**: if a later interpreter's `CMake
+      Error` names a Python version that belongs to an *earlier* entry in `CIBW_BUILD`
+      (check the identifiers' build order, gotcha 96/633), and the failing configure has no
+      compiler-identification lines, suspect a shared build dir before suspecting the image.

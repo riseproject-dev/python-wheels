@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 5 Oct 2026 00:00:00 +0000
+Subject: [PATCH] build_config: fetch zlib from GitHub's tag archive
+
+ZlibBuildConfig.src_tar_gz_url points at
+"https://www.zlib.net/fossils/zlib-1.2.13.tar.gz" - the "fossils" path
+zlib.net uses for anything that isn't the single current release, served
+with none of the CDN the front-page download gets.
+
+In one riscv64 run of this workflow, the 5 interpreter legs all start
+their CIBW_BEFORE_ALL_LINUX (and so this exact fetch) within the same
+few seconds. 3 of the 5 (cp310, cp311, cp312) got stuck on it: cp311's
+urlopen() timed out after ~1018s and failed the job in ~20 minutes;
+cp310 and cp312 hung with no timeout firing at all until the job's own
+90-minute ceiling cancelled them. The other two legs (cp313, cp314)
+fetched the same URL in seconds. That split - most legs fine, a few
+stuck on the exact same small legacy archive at the exact same moment -
+is a thundering-herd/under-provisioned-server pattern, not a one-off
+single-job blip or a general riscv64 runner reachability problem.
+
+GitHub's own tag archive for zlib carries the identical tree (zlib's
+release tarball is a plain export of the tagged commit, nothing
+generated on top), sits behind GitHub's CDN, and is already exactly how
+this same file fetches OpenSSL two classes up
+(OpenSslBuildConfig.src_tar_gz_url). Swapping to it needs no change to
+src_path: GitHub's archive for a "vX.Y.Z"-shaped tag already extracts to
+"<repo>-X.Y.Z" (the leading "v" dropped), i.e. "zlib-1.2.13" - the exact
+directory src_path already points at, the same convention this repo's
+own build-cvxopt.yml already relies on for SuiteSparse's GitHub tag
+archive.
+
+Upstream-Status: Inappropriate [our own CI matrix's concurrent fetches are what overload zlib.net's small, CDN-less fossils archive; GitHub's CDN-backed tag archive carries the identical tree and isn't worth carrying as an upstream change]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ build_config.py | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/build_config.py b/build_config.py
+index 41da25f..2358f5e 100644
+--- a/build_config.py
++++ b/build_config.py
+@@ -377,7 +377,12 @@ class ModernOpenSslBuildConfig(OpenSslBuildConfig):
+ class ZlibBuildConfig(BuildConfig):
+     @property
+     def src_tar_gz_url(self) -> str:
+-        return "https://www.zlib.net/fossils/zlib-1.2.13.tar.gz"
++        # zlib.net's "fossils" archive (old releases aren't on the front page/CDN)
++        # stalls under concurrent fetches: 3 of 5 riscv64 CI jobs in one run either
++        # timed out or hung to the 90-minute job ceiling fetching this exact URL while
++        # the other 2 fetched it in seconds. Same tree, via GitHub's tag archive, which
++        # this file already relies on for OpenSSL two classes up.
++        return "https://github.com/madler/zlib/archive/refs/tags/v1.2.13.tar.gz"
+
+     @property
+     def src_path(self) -> Path:
+--
+2.43.0

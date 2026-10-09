@@ -26,6 +26,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
 - **361** — Gotcha 29's `pkg_resources` removal also bites `CIBW_TEST_REQUIRES`, not just a
 - **367** — A `setup.py`'s own "distributor customization" import hook can go silently
 - **588** — setuptools-scm >= 10.2 breaks every cp39 build whose in-tree backend declares
+- **629** — A *test-only* dependency pinned upstream as an open range drifts out from
 
 ---
 
@@ -618,3 +619,49 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
     the release-era toolchain without changing upstream's interpreter. `ls <pkg>.egg-info`
     after the failure shows only the two `scm_*.json` files — no `PKG-INFO` — which
     confirms it in one command.
+
+629. **A *test-only* dependency pinned by upstream as an open range (`>=X,<X+1`) drifts
+    out from under a frozen test fixture the moment a new release lands — same shape as
+    gotcha 588, but the floating package is pure Python and the break is semantic, not an
+    exception (the usd-exchange case).** `usd-exchange` v3.0.0's own `py_package.py`
+    writes the published wheel's `[test]` extra as `usd-validation-nvidia>=1.21.0,<2`
+    (mirrored verbatim by our staging script, since goal 2 says replicate upstream's own
+    metadata, not tighten it), while `tools/repoman/repo_tools.toml` pins the *exact*
+    release (`1.21.0`) upstream's own CI installs via `install_usdex.py --install-test`.
+    `pytest.sh` — the script this workflow's "Test usd-exchange wheel" step mirrors —
+    installs through the wheel's `[test]` extra, not `install_usdex.py`, so it resolves
+    whatever is newest in the range: 1.22.0 the day it shipped. 14 `testMaterialAlgo.py`
+    tests then failed `assertIsValidUsd` with `AssertionError: UsdShadeShaderSdrCompliance:
+    shaderId 'ND_test_shader' (or 'UsdTestShader') ... not found in sdrRegistry`, on every
+    interpreter leg identically — the plugin/resource staging was never the issue.
+    - **The test fixture's own filter is the tell.** Both affected `TestCase` subclasses
+      set `defaultValidationIssuePredicates` to `IsRule("ShaderSdrCompliance")` precisely
+      *because* their invented shader ids (`ND_test_shader`/`UsdTestShader`) are expected
+      to fail OpenUSD's native `ShaderSdrCompliance` Sdr-registry check — the test authors
+      anticipated this exact issue and meant to swallow it. A `ValidationEngine` issue
+      exposes `issue.rule.__name__`, and `IsRule` compares against it exactly
+      (`usd_validation_nvidia/_issues.py`), so the filter only works if the class that
+      produced the issue is actually named `ShaderSdrCompliance`.
+    - **`usdex.test.ValidationRules.registerNativeValidators()` only creates that class
+      when nothing else already covers it.** It builds a `UsdValidatorAdapter` subclass
+      literally named `name.rpartition(":")[2]` (`"ShaderSdrCompliance"`) for each native
+      OpenUSD validator in its list, but skips registering it when
+      `"usdShadeValidators:ShaderSdrCompliance" in registered` — the set of
+      `validator_name()`s already claimed by some other registered `UsdValidatorAdapter`
+      subclass. `usd_validation_nvidia` 1.22.0 added exactly that: a built-in
+      `rules/_materials.py` class named `UsdShadeShaderSdrCompliance` (not
+      `ShaderSdrCompliance`) wrapping the same native validator, registered at import
+      time. With 1.22.0 installed, usdex's own adapter is skipped, the 1.22.0 one runs
+      instead, and its issues carry `rule.__name__ == "UsdShadeShaderSdrCompliance"` —
+      which `IsRule("ShaderSdrCompliance")` does not match, so the issue surfaces instead
+      of being filtered. `unzip`-ing the two wheels from PyPI and `grep -rn
+      ShaderSdrCompliance` is a two-minute way to confirm which release added the class,
+      with no riscv64 runner needed — both are `py3-none-any`.
+    - **Fix: repin the test-time install to the exact version, after the open-range
+      extra installs, not by editing the wheel's declared metadata.** Changing
+      `py_package.py`'s range to an exact pin would diverge our wheel's `Requires-Dist`
+      from what upstream's own build of the identical source produces today — the thing
+      goal 2 forbids. Re-running `pip install usd-validation-nvidia==<repo_tools.toml's
+      pin>` as a step *after* `pip install "<wheel>[test]"` leaves the shipped metadata
+      alone and reproduces exactly what `install_usdex.py --install-test` gives upstream's
+      own CI.

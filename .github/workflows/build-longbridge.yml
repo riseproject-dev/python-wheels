@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-python-sdk`/`build-python-sdk-musl` jobs of
+# https://github.com/longbridge/openapi/blob/v4.5.0/.github/workflows/release.yml
+name: Build longbridge wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/longbridge.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-longbridge.yml'
+      - 'docs/packages/longbridge.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-longbridge.yml'
+      - 'docs/packages/longbridge.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: longbridge
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build longbridge ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      LONGBRIDGE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout longbridge v${{ env.LONGBRIDGE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: longbridge/openapi
+          ref: v${{ env.LONGBRIDGE_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Stage the licences beside longbridge's pyproject.toml
+        run: cp LICENSE-APACHE LICENSE-MIT python/
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python
+          output-dir: wheelhouse/
+          # musllinux is dropped: the riscv64 musl-hosted rustc segfaulted or hung on the
+          # cdylib's final compile in 6 of 9 legs; the glibc-hosted one is reliable.
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          # The workspace's fat `lto = true` compile of the cdylib (~1 h in one rustc) aborted
+          # rustc with heap corruption on 1 of 5 manylinux legs; thin LTO went 4 of 4.
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            CARGO_PROFILE_RELEASE_LTO=thin
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as md, longbridge;
+            from longbridge.openapi import Config, Market;
+            files = [str(p) for p in md.files('longbridge')];
+            assert any(p.endswith('.so') for p in files), files;
+            assert any(p.endswith('licenses/LICENSE-MIT') for p in files), files;
+            assert any(p.endswith('licenses/LICENSE-APACHE') for p in files), files;
+            Config.from_apikey('app-key', 'app-secret', 'access-token');
+            print(Market.US)"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: longbridge-${{ env.LONGBRIDGE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish longbridge ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: longbridge-${{ matrix.version }}-*-manylinux_riscv64

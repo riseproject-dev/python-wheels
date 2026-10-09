@@ -1,0 +1,132 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the build job of
+# https://github.com/astropy/reproject/blob/v0.21.0/.github/workflows/ci_workflows.yml,
+# which calls OpenAstronomy/github-actions-workflows' publish.yml.
+name: Build reproject wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/reproject.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-reproject.yml'
+      - 'docs/packages/reproject.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-reproject.yml'
+      - 'docs/packages/reproject.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Upstream's build job sets this; pyproject.toml's environment-pass forwards it
+  # into the container, where extension-helpers turns it into an abi3 build.
+  EXTENSION_HELPERS_PY_LIMITED_API: 'cp311'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: reproject
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build reproject ${{ matrix.version }} cp311-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    env:
+      REPROJECT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout reproject v${{ env.REPROJECT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: astropy/reproject
+          ref: v${{ env.REPROJECT_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # One abi3 wheel, built on cp311 -- the oldest interpreter its tag
+          # claims -- and re-tested on the newer ones via find_compatible_wheel.
+          CIBW_BUILD: >-
+            cp311-manylinux_riscv64 cp312-manylinux_riscv64
+            cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          # astropy-healpix, numcodecs and google-crc32c (runtime dependencies) have
+          # no cp311 riscv64 wheel on any index, so the floor is built but not tested.
+          CIBW_TEST_SKIP: cp311-*
+          # numpy is a build and a runtime requirement, and only our registry has
+          # it for riscv64; only-binary keeps a newer PyPI release from winning the
+          # resolution and then compiling from sdist.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_REPROJECT=${{ env.REPROJECT_VERSION }}
+          CIBW_TEST_EXTRAS: test
+          CIBW_TEST_COMMAND: pytest -p no:warnings --pyargs reproject --log-cli-level=INFO
+          CIBW_TEST_ENVIRONMENT: >-
+            PIP_ONLY_BINARY=numpy,scipy,astropy,astropy-healpix,pyerfa,pillow,pyyaml,numcodecs,google-crc32c
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          path = sys.argv[1]
+          assert "-cp311-abi3-" in path, path
+          names = zipfile.ZipFile(path).namelist()
+          exts = {n.rsplit("/", 1)[1] for n in names if n.endswith(".so")}
+          assert exts == {"compiler_version.abi3.so", "deforest.abi3.so",
+                          "_overlap.abi3.so"}, exts
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          assert licences == {"LICENSE"}, licences
+          EOF
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: reproject-${{ env.REPROJECT_VERSION }}-cp311-abi3-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish reproject ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: reproject-${{ matrix.version }}-*-manylinux_riscv64

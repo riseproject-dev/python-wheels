@@ -51,6 +51,12 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
 - **624** — A doctest that touches a lazily-downloaded dataset fails only on a *fresh* test
   venv, because the library prints its download progress into the doctest's stdout;
   mirror upstream's pre-download step (`make download-datasets`) before pytest.
+- **631** — An old unittest suite calling the `failUnless*`/`failIf*`/`assertEquals` aliases
+  that Python 3.12 removed fails on every default-matrix interpreter; alias them back in the
+  `-c` test command rather than patching the shipped test module.
+- **643** — An upstream test suite that needs a Node.js helper (a mock server via
+  `npm ci`/`npm run`) still runs on the riscv64 runner: `actions/setup-node` with
+  `mirror: https://unofficial-builds.nodejs.org/download/release` installs a riscv64 Node.
 
 ---
 
@@ -913,3 +919,48 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
       plus a scan of upstream's test job for any `download`/`fetch` step that runs before
       pytest. Upstream's step is load-bearing whenever it exists, even when it reads like
       a cache warm-up.
+
+631. **An old `unittest` suite that calls the deprecated `TestCase` aliases (`failUnless`,
+     `failUnlessEqual`, `failUnlessRaises`, `failIfEqual`, `assertEquals`, …) fails on every
+     interpreter of the default matrix, because Python 3.12 removed them (the
+     ed25519-blake2b-fork case; see `build-ed25519-blake2b-fork.yml`).** The tests are
+     correct and the extension is fine — upstream's own wheel CI simply never runs them
+     (its last test runner was Travis on 3.7), so nobody noticed. The error is
+     `AttributeError: '<Case>' object has no attribute 'failUnlessEqual'`, and it hits
+     cp312/cp313/cp314 alike, so it reproduces on any x86 host before the first riscv64 cycle.
+    - **Alias them back from the test command, don't patch.** When the test module ships
+      inside the wheel (`ed25519_blake2b/test_ed25519.py`), a patch would change wheel
+      content just to make CI run. Instead set the aliases on `unittest.TestCase` and start
+      the runner in the same `python -c`:
+      `import unittest as u; T = u.TestCase; T.failUnless = T.assertTrue; T.failUnlessEqual =
+      T.assertEqual; ...; u.main(module=None, argv=['unittest', '-v', '<pkg>.test_x',
+      'test_kat'])`. `module=None` plus dotted names in `argv` loads modules from the
+      installed wheel, and `python -c` keeps the cwd on `sys.path`, so a root-level test
+      file staged through `CIBW_TEST_SOURCES` imports too (a `python script.py` shim would
+      put the script's own directory there instead).
+    - **Find the whole alias set up front**:
+      `grep -ohE 'self\.(fail[A-Za-z]*|assert[A-Za-z]*s\b)' <tests> | sort -u`. Missing
+      just one (`failIfEqual` here) costs another cycle.
+    - **Check that the run still includes the tests you added.** `Ran N tests` must count the
+      known-answer case as well. A root-level module that fails to import shows up as a
+      `_FailedTest`, not as a missing test.
+
+643. **An upstream test suite that needs Node.js (a mock HTTP server started with `npm ci` and
+     `npm run with-server ...`) is not a reason to drop the tests on riscv64 (the
+     eppo-server-sdk case).** nodejs.org/dist publishes no `linux-riscv64` build, so a
+     plain `actions/setup-node` fails there, but `unofficial-builds.nodejs.org` does publish
+     one for every current LTS line. `actions/setup-node` (v7) takes a `mirror:` input, and
+     its arch mapping passes `riscv64` through unchanged, so the step needs one extra line:
+     ```yaml
+     - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+       with:
+         node-version: '22'
+         mirror: https://unofficial-builds.nodejs.org/download/release
+     ```
+     After that, upstream's own `npm ci` + `npm run with-server test:python` ran unchanged
+     on `ubuntu-24.04-riscv` (pure-JS deps: http-server, start-server-and-test), with 120
+     passed on each interpreter. Check that the LTS line has a riscv64 entry first:
+     `curl -s https://unofficial-builds.nodejs.org/download/release/index.json`, then
+     filter entries whose `files` include `linux-riscv64`. This covers Node used as a
+     *test-time tool* only. A package that bundles or downloads a Node binary into the
+     wheel is a different question (feasibility gotchas on playwright).

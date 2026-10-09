@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 4 Oct 2026 01:30:19 +0000
+Subject: [PATCH] Skip the cache-line size assumption check on riscv64
+
+Arch_ValidateAssumptions() runs on every load of libusd_arch and compares
+ARCH_CACHE_LINE_SIZE (pxr/base/arch/align.h: 128 on Apple ARM, 64 everywhere
+else) with Arch_ObtainCacheLineSize(), i.e. sysconf(_SC_LEVEL1_DCACHE_LINESIZE)
+on Linux. On a mismatch it prints a four-line " ArchWarn: ARCH_CACHE_LINE_SIZE
+!= Arch_ObtainCacheLineSize()" block straight to stderr with fprintf
+(arch/error.cpp), below the Tf diagnostics layer, so no environment setting or
+diagnostic delegate can silence it.
+
+On riscv64 the comparison has nothing to check. The ISA defines no cache-line
+size; it varies between implementations. glibc's riscv sysconf reads it from
+the AT_L1D_CACHEGEOMETRY auxv entry, which the kernel fills from the
+firmware's devicetree/ACPI cache description and sets to 0 when there is none
+(arch/riscv/kernel/cacheinfo.c). Whatever value align.h picks for riscv64 is
+therefore "wrong" on some machines, and the warning fires on every process
+that imports pxr on those machines: every user of the wheel sees it, and
+every test that checks a subprocess's stderr exactly fails because of it
+(usd-exchange's testDiagnostics.py assertOutputStreams() and
+testSettings.py's empty-stderr assertion).
+
+Keep ARCH_CACHE_LINE_SIZE at its 64 default (it only sizes padding and
+alignment, so a mismatch costs performance, never correctness) and skip the
+comparison when ARCH_CPU_RISCV is defined (added by the previous patch). The
+other checks in Arch_ValidateAssumptions(), including the big-endian
+ARCH_ERROR, are unchanged.
+
+Upstream-Status: To upstream [not submitted from this automated port run; belongs with the riscv64 arch support of the previous patch in a pull request against PixarAnimationStudios/OpenUSD]
+---
+ pxr/base/arch/assumptions.cpp | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/pxr/base/arch/assumptions.cpp b/pxr/base/arch/assumptions.cpp
+index 1029b32..f0c63df 100644
+--- a/pxr/base/arch/assumptions.cpp
++++ b/pxr/base/arch/assumptions.cpp
+@@ -135,10 +135,18 @@ Arch_ValidateAssumptions()
+     /*
+      * Make sure that the ARCH_CACHE_LINE_SIZE constant is set as expected
+      * on the current hardware architecture.
++     *
++     * RISC-V has no architectural cache-line size: it varies between
++     * implementations, and Linux reports whatever the firmware describes
++     * (0 when it describes none), so there is no constant to validate.
+      */ 
++#if !defined(ARCH_CPU_RISCV)
+     if (ARCH_CACHE_LINE_SIZE != cacheLineSize) {
+         ARCH_WARNING("ARCH_CACHE_LINE_SIZE != Arch_ObtainCacheLineSize()");
+     }
++#else
++    (void)cacheLineSize;
++#endif
+ 
+     /*
+      * Make sure that the machine is little-endian.  We do not support
+-- 
+2.43.0
+

@@ -303,6 +303,13 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **623** — A libFuzzer/sanitizer package whose upstream pins a pre-riscv64 LLVM is not blocked:
   check the fuzzer arch list per LLVM tag, then the distro's `compiler-rt` file list (the atheris
   case).
+- **627** — A binding to a Qt module that embeds Chromium inherits Chromium's arch list *at the
+  Qt line's frozen Chromium fork*: Qt5 WebEngine is pinned to Chromium 87, which has no riscv64,
+  so check the fork's `build_config.h` and the distros before anything else (the pyqtwebengine
+  case).
+- **635** — A release pipeline that repacks *prebuilt* binaries into wheels does not make the
+  package a binary fetcher: read `setup.py` before the release workflow, because a setuptools-rust
+  `RustBin` (or maturin `bin`) project still builds from source (the sentry-cli case).
 
 ---
 
@@ -3794,8 +3801,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       `sysconf(_SC_LEVEL1_DCACHE_LINESIZE)`, which the riscv64 runners do not answer with 64,
       so every `import pxr` prints `ArchWarn: ARCH_CACHE_LINE_SIZE !=
       Arch_ObtainCacheLineSize()`. It is `ARCH_WARNING`, not `ARCH_ERROR`; the endianness check
-      beside it is the one that would abort, and riscv64 is little-endian. Leave upstream's own
-      diagnostic alone rather than spending a multi-hour rebuild to silence it.
+      beside it is the one that would abort, and riscv64 is little-endian. It is still
+      worth silencing when the package's tests compare a subprocess's stderr exactly, and
+      it is printed on every user's `import pxr`. Gate it on `ARCH_CPU_RISCV` in the same
+      patch series (gotcha 630).
 
 492. **A declared dependency the build never actually links against still blocks the port —
     pip enforces the *metadata*, not the linkage (the cmeel-assimp/cmeel-zlib case).** Gotcha
@@ -5283,3 +5292,77 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     Record the upstream pin's version in the workflow comment. It is the reason this port
     deviates from upstream's recipe, and it is what to re-check if upstream ever bumps its
     LLVM to 17 or later.
+
+627. **A binding to a Chromium-embedding Qt module inherits the arch list of the Qt line's
+    frozen Chromium fork — read that fork, not "does Chromium support riscv64 today".**
+    PyQtWebEngine 5.15.7 looks small: a cp38-abi3 sdist with three SIP binding sets. But it
+    compiles against Qt5 WebEngine, and Qt5 WebEngine is not "Chromium", it is
+    `qt/qtwebengine-chromium` branch **`87-based`** (Chromium 87.0.4280.144, frozen; the 5.15
+    LTS line only takes security backports, it never rebases). Chromium gained
+    `ARCH_CPU_RISCV64` years later. Four read-only checks settle it, no checkout needed:
+    - **The fork's arch gate.** `chromium/build/build_config.h?h=87-based` on code.qt.io has no
+      riscv branch and ends in `#error Please add support for your architecture`; the same file
+      on `130-based` has `ARCH_CPU_RISCV64`. Qt's own wrappers agree: qtwebengine 5.15
+      `configure.pri` `qtConfTest_detectArch` accepts only i386/x86_64/arm/arm64/mips/mips64, and
+      `mkspecs/features/functions.prf` `gnArch` returns `unknown` for anything else.
+    - **The distros.** If Debian (which has an official riscv64 port) lists the WebEngine
+      package as `Architecture: amd64 arm64 armhf i386` in `debian/control`, nobody has carried
+      the patches there. Then check Arch Linux RISC-V (`felixonmars/archriscv-packages`
+      directory names, or the `archriscv.felixc.at/repo/extra/` listing) and openSUSE's
+      `ports/riscv/tumbleweed` repo: both carry Qt **6** WebEngine on riscv64 (via
+      `riscv64.patch`/`riscv-v8.patch`/`riscv-sandbox.patch`/`riscv-dav1d.patch`), neither has
+      Qt5 WebEngine. A downstream patch set for one Qt major does not transfer to the other,
+      because the Chromium underneath differs by ~40 majors.
+    - **Upstream Qt's tracker.** Jira moved to `qt-project.atlassian.net`; query
+      `/rest/api/3/search/jql` with `component = WebEngine AND summary ~ "riscv"`. QTBUG-132451
+      ("Add QtWebEngine support for riscv64") is unresolved and only cites the openSUSE Qt6
+      patches.
+    - **Scale, even if it were patched.** A full Chromium build is far beyond V8 alone, and
+      this repo's V8-only mini-racer port needed ~23h30m for 1970/2176 steps (see
+      `build-mini-racer.yml`'s 48h timeout). For Chromium 87 it is not even "patch a few CPU
+      tables": it would be a new-architecture port of a 2020 Chromium (V8 8.7 predates the
+      upstream riscv64 backend), plus the rest of Qt5 from source, since Rocky 10 ships no Qt5.
+    Park the binding with this evidence, and say in the note where riscv64 users should go
+    instead (here: pyqt6-webengine, whose Qt6 WebEngine has working downstream riscv64 builds).
+    The same reasoning covers any binding to a module of a frozen LTS line that vendors a
+    browser engine, such as `PyQtWebEngine-Qt5`, Qt5 `QtWebView`, or CEF-based wrappers pinned
+    to an old CEF branch.
+    - **Re-run the four checks per Qt major. Do not copy the Qt5 park note onto a Qt6 entry
+      (the pyqt6-webengine-qt6 case).** Qt 6.11.2 WebEngine's `CHROMIUM_VERSION` says
+      Chromium 140.0.7339.264 (`140-based`), and every gate is open: `build_config.h` defines
+      `ARCH_CPU_RISCV64`, `cmake/QtToolchainHelpers.cmake` `get_gn_arch` maps `riscv64`, and
+      `configure.cmake`'s `supported-arch` list (arm/arm64/armv7-a/x86_64) applies only when
+      `CMAKE_CROSSCOMPILING`, so a native build is not refused. Arch Linux RISC-V ships
+      `qt6-webengine` 6.11.2 and openSUSE ships `libQt6WebEngineCore6` 6.11.2 on riscv64.
+      Debian and Ubuntu still exclude riscv64 in their architecture lists, Rocky 10 riscv64
+      has no `qt6-qtwebengine`, and QTBUG-132451 is still open. So a Qt6 WebEngine entry is
+      not blocked by Chromium. A *binary* Qt6 entry still parks, but on a different stop:
+      `PyQt6-WebEngine-Qt6` is a `pyqt-qt-wheel` repackage of the official installer tree
+      (gotcha 385). That tree exists only for `linux_x64` and `linux_arm64`, and the libraries
+      it ships link to the same-version `PyQt6-Qt6` libraries. Record the Chromium base, the
+      gates and the distro builds in the note. Then name gotcha 385 (no payload) and gotcha
+      186 (Chromium-scale source build) as the actual reasons.
+
+635. **A release pipeline that repacks *prebuilt* binaries into wheels does not make the package
+    a binary fetcher — read `setup.py` before the release workflow (the sentry-cli case; see
+    `build-sentry-cli.yml`).** sentry-cli's PyPI wheels are produced by `scripts/wheels`, which
+    takes one "base" wheel from `python -m build` and swaps in static musl binaries cross-built
+    by the `linux` job (messense/rust-musl-cross, i686/x86_64/armv7/aarch64 only), retagging each
+    as `manylinux_2_17_<arch>.manylinux2014_<arch>.musllinux_1_2_<arch>`. No riscv64 binary
+    exists anywhere upstream, which reads like gotcha 35's "nothing to bundle" stop. It is not:
+    `setup.py` is `setup(rust_extensions=[RustBin("sentry-cli")])` and `MANIFEST.in` ships
+    `Cargo.toml`/`Cargo.lock`/`src`, so the base wheel *is* a from-source compile of the same
+    binary — the repack is only upstream's way of reusing its cross-built CLI release assets.
+    - **Two reads settle it**: `setup.py`/`pyproject.toml` for `RustBin`/`bindings = "bin"`, and
+      the sdist's `MANIFEST.in`/file list for the Rust sources. Both present ⇒ gotcha 145's
+      ordinary-port shape, not gotcha 35's, whatever the release job does.
+    - **Build from the checkout, not the sdist**, when the repo carries `rust-toolchain.toml` or
+      `.cargo/config.toml` that `MANIFEST.in` leaves out — upstream's release binaries were built
+      with them (sentry-cli: toolchain 1.96, `-C force-unwind-tables`). cibuildwheel with
+      `only: cp312-manylinux_riscv64` builds the one `py3-none` wheel in-tree, and auditwheel
+      retags the `.data/scripts` ELF to `manylinux_2_39_riscv64` with no extension module
+      present. `curl`'s `static-ssl` pulls `openssl-src`, so add `perl-core` (gotcha 46).
+    - **Upstream's Rust `trycmd` cases are replayable without cargo**: offline ones that take a
+      fixture and compare against a checked-in expected tree (`sourcemaps inject` +
+      `_expected_outputs/`, deterministic content-hashed debug IDs) become a `diff -r` against
+      the installed binary — a stronger test than `--version` (gotcha 187).

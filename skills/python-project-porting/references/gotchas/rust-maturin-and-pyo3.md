@@ -96,6 +96,14 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
 - **608** — A tagged release's committed `Cargo.lock` can have a stale self-version entry
   (the crate's own `[[package]] version` a release behind its `Cargo.toml`), which only
   `maturin-action`'s `--locked` turns into a build failure.
+- **636** — rustup now ships a native riscv64 musl host toolchain, so gotcha 10's "musllinux
+  can't build" no longer holds: a Rust extension builds on musllinux_1_2_riscv64 too.
+- **639** — Gotcha 636 has a ceiling: on one very large pyo3 cdylib the musl-hosted rustc
+  segfaulted or hung in 6 of 9 legs, while the glibc-hosted rustc built it reliably.
+- **642** — `riscv64gc-unknown-linux-musl` is not static by default the way x86_64/aarch64 musl
+  are: a host-`cc` build links glibc's `libc.so` (every libm symbol undefined) until you add
+  `+crt-static`, and then C deps may also need `-lgcc` (`__ffsdi2`); tag it
+  `manylinux_2_31_riscv64`, not upstream's 2_17, which uv refuses.
 
 ---
 
@@ -124,7 +132,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
       `CIBW_BEFORE_ALL_LINUX: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y`
       and `CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"`. rustup provisions a
       native `riscv64gc-unknown-linux-gnu` toolchain in the container.
-    - **musllinux can't build** — rustup.rs ships no riscv64 musl toolchain. Restrict
+    - **Superseded by gotcha 636** (rustup now ships a riscv64 musl host toolchain, so
+      musllinux builds; check the manifest before dropping it).
+      **musllinux can't build** — rustup.rs ships no riscv64 musl toolchain. Restrict
       `CIBW_BUILD` to `*-manylinux_riscv64` (or `CIBW_SKIP: '*-musllinux_*'`). Whether
       the matrix is per-interpreter `[cp312, cp313, cp314, cp314t]` or collapses to
       `[cpXY-abi3, cp3Nt]` depends on whether the extension is built abi3 — see
@@ -1513,3 +1523,101 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/rust-maturin-and-pyo3.
     `patches/<pkg>/<version>/` is unnecessary extra surface for a one-line, upstream-caused
     mismatch that plain `cargo build` (no `--locked`) fixes on every run without touching any
     other dependency.
+
+636. **rustup now ships a native `riscv64gc-unknown-linux-musl` host toolchain, so a Rust
+    extension builds on `musllinux_1_2_riscv64` with the same in-container rustup install
+    as manylinux. Gotcha 10's "musllinux can't build" (and gotcha 59's manifest evidence)
+    describe an older channel (the spacy-alignments case; see `build-spacy-alignments.yml`).**
+    The stable channel manifest dated 2026-10-01 lists `[pkg.rustc.target.riscv64gc-unknown-linux-musl]`
+    and `[pkg.cargo.target.riscv64gc-unknown-linux-musl]` with `available = true`, and
+    `https://static.rust-lang.org/rustup/dist/riscv64gc-unknown-linux-musl/rustup-init` answers
+    200. `sh.rustup.rs` already picks `_clibtype=musl` from `ldd --version`, so upstream's own
+    `CIBW_BEFORE_ALL_LINUX: curl -sSf https://sh.rustup.rs | sh -s -- -y` installs
+    `stable-riscv64gc-unknown-linux-musl` in the musllinux image with no change. spacy-alignments
+    0.9.2 (setuptools-rust, pyo3 0.24.2) built and passed its full suite on cp312/cp313
+    musllinux; auditwheel tags the result `musllinux_1_2_riscv64`, and rustc builds the cdylib
+    with `-Ctarget-feature=-crt-static` on its own.
+    - **Check the manifest, not gotcha 10, before dropping musllinux from a Rust port:**
+      `curl -s https://static.rust-lang.org/dist/channel-rust-stable.toml | grep -A1
+      '^\[pkg.rustc.target.riscv64gc-unknown-linux-musl\]'`. `available = true` means keep
+      upstream's musllinux legs. A port that pins an older toolchain
+      (`--default-toolchain <date>`) needs the manifest for *that* date.
+    - **One leg wedged inside rustc once.** On the first run the cp313-musllinux leg went silent
+      in the `rustc --crate-name pyo3` step for 53 minutes until `timeout-minutes: 60` killed
+      it. The cp312-musllinux leg compiled the same crate from the same lock in 60 s, and the
+      only difference in the command line was one extra `--cfg Py_3_13`. A rerun of just that
+      job finished in 9 minutes (`rerun-failed-jobs`). With one hang in four musl legs, the
+      cause is unknown: it could be the runner or the musl-hosted rustc. Keep a
+      `timeout-minutes` so a wedge fails on its own (gotcha 508), and rerun the job once
+      before you treat it as a real musl blocker. If it hangs a second time, look for a
+      deadlock in the rustc process before dropping musl.
+    - **It happened again (chialisp 0.5.0, `build-chialisp.yml`).** The musllinux leg sat in
+      `Build wheel` for more than 2 h, while the manylinux leg built the same tree and passed its
+      tests in 43 min. After a cancel and `rerun-failed-jobs`, musl finished in 44 min. That makes
+      two wedges, both on musl legs and both cleared by one rerun. Size `timeout-minutes` at
+      about 2x the manylinux leg's time, so a wedge fails on its own and doesn't hold the runner.
+    - **A pinned *stable* channel can also lack the musl host.** `rust-toolchain.toml` pinning
+      `1.97.1` (chialisp) lists only `rust-std` for `riscv64gc-unknown-linux-musl` in
+      `channel-rust-1.97.1.toml`, with no `rustc`/`cargo`, so the musl leg cannot honour the pin.
+      Use the same `RUSTUP_TOOLCHAIN=stable` override as gotcha 238.
+
+639. **Gotcha 636's musl host toolchain can still be unusable for one big crate: the riscv64
+    musl-hosted rustc segfaulted or hung on the final cdylib compile of longbridge 4.5.0 in 6
+    of 9 musllinux legs, while the glibc-hosted rustc built the same tree reliably (the
+    longbridge case; see `build-longbridge.yml`, issue #2709).** Every dependency crate built;
+    every failure was inside the single `rustc --crate-name longbridge --crate-type cdylib`
+    invocation, which takes about 1 h (fat LTO) and produces a ~40 MB `.so` (tokio, rustls/ring,
+    pyo3, prost and a large generated API surface).
+    - **The musl shapes:** `signal: 11, SIGSEGV` with nothing printed by rustc, 11-15 min into
+      that crate, or a silent hang until cancelled after about 2 h. Fat LTO: 3 green, 1 SIGSEGV,
+      1 hang. `CARGO_PROFILE_RELEASE_LTO=thin`: 2 SIGSEGV, 2 hangs. Thin LTO made musl worse,
+      not better, so it is not about the length of a single-threaded fat-LTO pass.
+    - **The glibc shape:** one fat-LTO leg in 5 aborted with `double free or corruption (out)`
+      (`signal: 6`), 6 min into the same crate. Thin LTO then went 8 of 8 green across two
+      runs, at about 65 min per leg instead of about 85 min. Thin LTO is worth carrying on
+      glibc for a crate this size.
+    - **Telling it from gotcha 228's OOM:** an OOM here is `SIGKILL` from the kernel, or Rust's
+      `memory allocation of N bytes failed` followed by `SIGABRT`. A bare SIGSEGV, a glibc
+      heap-check abort and a hang are none of those, and `CARGO_BUILD_JOBS` cannot help because
+      only one rustc is running at that point.
+    - **Disposition:** drop musllinux (workflow-anatomy's accepted outcome), keep a one-line
+      "why" in the workflow, and open a tracking issue that has the per-leg tallies and run
+      links. Rerun once before you decide, as gotcha 636 says. Here, the rerun of a hung leg
+      segfaulted, which is enough to stop retrying.
+
+642. **`riscv64gc-unknown-linux-musl` is not static by default: unlike x86_64/aarch64
+    musl, rustc's target spec for it has no `crt-static-default`, so a host `cargo build
+    --target riscv64gc-unknown-linux-musl` on the glibc runner links *dynamically* through the
+    host `cc`, against glibc (the browser-use-core case; see `build-browser-use-core.yml`).**
+    This hits an upstream that builds static musl executables with plain `cargo build
+    --target <arch>-unknown-linux-musl` and `musl-tools` (not a cibuildwheel musllinux
+    container, where gotcha 636's `-crt-static` cdylib is what you want).
+    - **The symptom looks like "musl has no libm":** `undefined reference to 'log'`, `logf`,
+      `expf`, `exp2f`, `sinf`, `cosf`, `pow`, `powf` (sqlite's FTS5 bm25, `image` resampling,
+      tokio stats). The link line gives the real cause: `"-Wl,-Bdynamic" "-lgcc_s" "-lc" ...
+      "-pie" "-nodefaultlibs"`, with no `self-contained/crt1.o`. That `-lc` resolves to the
+      runner's glibc `libc.so`, and glibc keeps math in a separate `libm`. Do **not** add
+      `-lm`: the link would then succeed and produce a musl-ABI binary bound to glibc's
+      `ld-linux`.
+    - **Check:** `RUSTC_BOOTSTRAP=1 rustc -Z unstable-options --print target-spec-json --target
+      <triple> | grep crt-static-default` prints `true` for x86_64/aarch64 musl and nothing for
+      riscv64gc. rust-std for riscv64gc musl still ships `lib/self-contained/{crt1.o,rcrt1.o,
+      libc.a,libunwind.a}`, and that `libc.a` defines all of the math symbols (`nm`).
+    - **Fix:** `CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS: -C target-feature=+crt-static`
+      in the build step's `env:`. It is target-scoped, so build scripts stay on the host, and
+      it reaches every cargo call under the step (here also the patch's `cargo install
+      ripgrep`). rustc then links the self-contained crt objects and `libc.a` with `-static
+      -no-pie`. The target has no `static-position-independent-executables`, so you get
+      static, not static-pie.
+    - **Next wall: `undefined reference to '__ffsdi2'`.** rustc links with `-nodefaultlibs`,
+      so libgcc is never linked. On rv64gc without Zbb, gcc lowers `__builtin_ffsl` (jemalloc,
+      which ripgrep pulls in through `tikv-jemallocator` on 64-bit musl) to a libgcc call.
+      `compiler_builtins` has `__ffsti2` but not `__ffsdi2`. x86_64/aarch64 inline it, so
+      upstream never sees this. Add `-C link-arg=-lgcc` to the same RUSTFLAGS. rustc places
+      user link args after every rlib, so only the missing libgcc members are pulled in.
+    - **Then the tag:** such upstreams hand-set `manylinux_2_17_<arch>` on a static binary
+      carrier (gotcha 27). Copying `manylinux_2_17_riscv64` builds, but uv will not install it:
+      uv's riscv64 manylinux tags start at 2_31 (so does auditwheel's riscv64 policy), so
+      every test leg fails at `uv pip install` with "no wheels with a matching platform tag".
+      pip accepts it. The riscv64 counterpart of "lowest floor" is `manylinux_2_31_riscv64`.
+      Check with a dummy wheel and `uv pip compile --python-platform riscv64-unknown-linux`.

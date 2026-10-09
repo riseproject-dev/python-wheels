@@ -1,0 +1,172 @@
+From f765ecd77c8d51d79bec87c9780a0fab80c7d43c Mon Sep 17 00:00:00 2001
+From: Irfan Alibay <IAlibay@users.noreply.github.com>
+Date: Tue, 23 Jun 2026 08:24:58 +0100
+Subject: [PATCH] Fix compatibility with numpy 2.5 (#5404)
+
+numpy 2.5's np.linalg.eig returns complex eigenvectors even for the real
+symmetric moment of inertia tensor, so Masses.principal_axes() hands
+complex vectors on and align_principal_axis() raises "ufunc 'degrees'
+not supported for the input types" with the current numpy on every
+architecture. Use np.linalg.eigh, which is meant for symmetric matrices
+and returns real results, and update the reference values of the tests
+whose axis signs change with it (upstream issue #5403). The CHANGELOG
+hunk is left out.
+
+Upstream-Status: Backport [https://github.com/MDAnalysis/mdanalysis/pull/5404]
+---
+ package/MDAnalysis/core/topologyattrs.py      |  2 +-
+ .../MDAnalysisTests/core/test_atomgroup.py    | 39 ++++++++++++-------
+ testsuite/MDAnalysisTests/core/test_groups.py | 18 ++++-----
+ .../core/test_topologyattrs.py                | 23 ++++++-----
+ 4 files changed, 50 insertions(+), 32 deletions(-)
+
+diff --git a/package/MDAnalysis/core/topologyattrs.py b/package/MDAnalysis/core/topologyattrs.py
+index 359bd20..63a637c 100644
+--- a/package/MDAnalysis/core/topologyattrs.py
++++ b/package/MDAnalysis/core/topologyattrs.py
+@@ -2084,7 +2084,7 @@ class Masses(AtomAttr):
+            is deprecated and will be removed in version 3.0.
+         """
+         atomgroup = group.atoms
+-        e_val, e_vec = np.linalg.eig(atomgroup.moment_of_inertia(wrap=wrap))
++        e_val, e_vec = np.linalg.eigh(atomgroup.moment_of_inertia(wrap=wrap))
+ 
+         # Sort
+         indices = np.argsort(e_val)[::-1]
+diff --git a/testsuite/MDAnalysisTests/core/test_atomgroup.py b/testsuite/MDAnalysisTests/core/test_atomgroup.py
+index b285a35..81f7572 100644
+--- a/testsuite/MDAnalysisTests/core/test_atomgroup.py
++++ b/testsuite/MDAnalysisTests/core/test_atomgroup.py
+@@ -1280,8 +1280,8 @@ class TestPBCFlag(object):
+         ),
+         "principal_axes": np.array(
+             [
+-                [0.78787867, 0.26771575, -0.55459488],
+-                [-0.40611024, -0.45112859, -0.7947059],
++                [-0.78787867, -0.26771575, 0.55459488],
++                [0.40611024, 0.45112859, 0.7947059],
+                 [-0.46294889, 0.85135849, -0.24671249],
+             ]
+         ),
+@@ -1315,8 +1315,8 @@ class TestPBCFlag(object):
+         ),
+         "principal_axes": np.array(
+             [
+-                [0.85911708, -0.19258726, -0.4741603],
+-                [0.07520116, 0.96394227, -0.25526473],
++                [-0.85911708, 0.19258726, 0.4741603],
++                [-0.07520116, -0.96394227, 0.25526473],
+                 [0.50622389, 0.18364489, 0.84262206],
+             ]
+         ),
+@@ -1355,6 +1355,14 @@ class TestPBCFlag(object):
+         if method_name == "bsphere":
+             assert_almost_equal(result[0], ref[method_name][0], self.prec)
+             assert_almost_equal(result[1], ref[method_name][1], self.prec)
++        elif method_name == "principal_axes":
++            # See PR #5404
++            # The direction (sign) of the principal axes is dependent on the
++            # specific algorithm used, but the direction itself is not physically
++            # relevant, so we get the signs to flip any anti-parallel vectors before
++            # comparing the two results arrays
++            signs = np.sign(np.einsum("ij,ij->i", result, ref[method_name]))
++            assert_almost_equal(result * signs[:, np.newaxis], ref[method_name], self.prec)
+         else:
+             assert_almost_equal(result, ref[method_name], self.prec)
+ 
+@@ -1620,16 +1628,21 @@ class TestAtomGroup(object):
+         )
+ 
+     def test_principal_axes(self, ag):
+-        assert_almost_equal(
+-            ag.principal_axes(),
+-            np.array(
+-                [
+-                    [1.53389276e-03, 4.41386224e-02, 9.99024239e-01],
+-                    [1.20986911e-02, 9.98951474e-01, -4.41539838e-02],
+-                    [-9.99925632e-01, 1.21546132e-02, 9.98264877e-04],
+-                ]
+-            ),
++        ref = np.array(
++            [
++                [-1.53389276e-03, -4.41386224e-02, -9.99024239e-01],
++                [-1.20986911e-02, -9.98951474e-01, 4.41539838e-02],
++                [-9.99925632e-01, 1.21546132e-02, 9.98264877e-04],
++            ]
+         )
++        result = ag.principal_axes()
++        # See PR #5404
++        # The direction (sign) of the principal axes is dependent on the
++        # specific algorithm used, but the direction itself is not physically
++        # relevant, so we get the signs to flip any anti-parallel vectors before
++        # comparing the two results arrays
++        signs = np.sign(np.einsum("ij,ij->i", result, ref))
++        assert_almost_equal(result * signs[:, np.newaxis], ref)
+ 
+     def test_principal_axes_duplicates(self, ag):
+         ag2 = ag + ag[0]
+diff --git a/testsuite/MDAnalysisTests/core/test_groups.py b/testsuite/MDAnalysisTests/core/test_groups.py
+index 7cd890b..c455b96 100644
+--- a/testsuite/MDAnalysisTests/core/test_groups.py
++++ b/testsuite/MDAnalysisTests/core/test_groups.py
+@@ -243,16 +243,16 @@ class TestEmptyAtomGroup(object):
+         assert_almost_equal(ag.radius_of_gyration(), 2.400527938286)
+         assert_almost_equal(ag.shape_parameter(), 0.61460819)
+         assert_almost_equal(ag.asphericity(), 0.4892751412)
+-        assert_almost_equal(
+-            ag.principal_axes(),
+-            np.array(
+-                [
+-                    [0.7574113, -0.113481, 0.643001],
+-                    [0.5896252, 0.5419056, -0.5988993],
+-                    [-0.2804821, 0.8327427, 0.4773566],
+-                ]
+-            ),
++        ref_pa = np.array(
++            [
++                [-0.7574113, 0.113481, -0.643001],
++                [-0.5896252, -0.5419056, 0.5988993],
++                [-0.2804821, 0.8327427, 0.4773566],
++            ]
+         )
++        result_pa = ag.principal_axes()
++        signs_pa = np.sign(np.einsum("ij,ij->i", result_pa, ref_pa))
++        assert_almost_equal(result_pa * signs_pa[:, np.newaxis], ref_pa)
+         assert_almost_equal(
+             ag.center_of_charge(),
+             np.array([11.0800112, 8.8885659, -8.9886632]),
+diff --git a/testsuite/MDAnalysisTests/core/test_topologyattrs.py b/testsuite/MDAnalysisTests/core/test_topologyattrs.py
+index 5155933..064b08c 100644
+--- a/testsuite/MDAnalysisTests/core/test_topologyattrs.py
++++ b/testsuite/MDAnalysisTests/core/test_topologyattrs.py
+@@ -417,16 +417,21 @@ class TestAttr(object):
+         return universe.atoms  # prototypical AtomGroup
+ 
+     def test_principal_axes(self, ag):
+-        assert_almost_equal(
+-            ag.principal_axes(),
+-            np.array(
+-                [
+-                    [1.53389276e-03, 4.41386224e-02, 9.99024239e-01],
+-                    [1.20986911e-02, 9.98951474e-01, -4.41539838e-02],
+-                    [-9.99925632e-01, 1.21546132e-02, 9.98264877e-04],
+-                ]
+-            ),
++        ref = np.array(
++            [
++                [-1.53389276e-03, -4.41386224e-02, -9.99024239e-01],
++                [-1.20986911e-02, -9.98951474e-01, 4.41539838e-02],
++                [-9.99925632e-01, 1.21546132e-02, 9.98264877e-04],
++            ]
+         )
++        result = ag.principal_axes()
++        # See PR #5404
++        # The direction (sign) of the principal axes is dependent on the
++        # specific algorithm used, but the direction itself is not physically
++        # relevant, so we get the signs to flip any anti-parallel vectors before
++        # comparing the two results arrays
++        signs = np.sign(np.einsum("ij,ij->i", result, ref))
++        assert_almost_equal(result * signs[:, np.newaxis], ref)
+ 
+     @pytest.fixture()
+     def universe_pa(self):

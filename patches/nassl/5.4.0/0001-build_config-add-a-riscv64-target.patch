@@ -1,0 +1,98 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 5 Oct 2026 00:00:00 +0000
+Subject: [PATCH] build_config: add a riscv64 target
+
+CURRENT_PLATFORM's Linux/64-bit branch only checks machine() == "aarch64"
+before falling back to LINUX_64 for everything else, so on riscv64 it
+silently selects LINUX_64 and both OpenSSL builds Configure with
+"linux-x86_64" - the wrong target, picked only because riscv64 was never
+considered rather than because it was ruled out.
+
+Add a LINUX_RISCV64 platform and route it to each OpenSSL build's own
+target:
+
+- ModernOpenSslBuildConfig (pinned to OpenSSL_1_1_1w) uses
+  "linux64-riscv64", a real Configure target on that tag. It carries no
+  riscv64-specific assembly in this OpenSSL release (RISC-V crypto asm
+  landed in the 3.x series, well after 1.1.1 went EOL) - verified there is
+  no crypto/*/asm/*riscv64* source anywhere in the OpenSSL_1_1_1w tree -
+  so the build is effectively the same portable C codegen as any other
+  target here, without the relocation-range asm pitfalls newer OpenSSL
+  riscv64 asm can hit in a large shared object (see CLAUDE.md gotcha 625
+  in the RISE python-wheels repo, hit by a different, newer-OpenSSL
+  package).
+- LegacyOpenSslBuildConfig (pinned to OpenSSL_1_0_2e) predates riscv64
+  entirely - that tag's Configure has no riscv* target at all - so it
+  falls back to "linux-generic64" the same way this class already special
+  -cases OSX_ARM64 to "linux-aarch64" two lines above. _OPENSSL_CONF_CMD
+  already hardcodes "no-asm" for this legacy build on every platform, so
+  the generic target's C fallback is exactly what was going to be built
+  anyway.
+
+Also add LINUX_RISCV64 to all_linux_platforms(), so setup.py's
+-Wl,--exclude-libs=ALL (hiding the statically-linked OpenSSL symbols to
+avoid colliding with a system libssl/libcrypto the interpreter may also
+load, see upstream issue #95) applies on riscv64 too, the same as on
+every other Linux architecture nassl supports.
+
+Upstream-Status: To upstream [not yet submitted; riscv64 is not part of nabla-c0d3/nassl's own CI matrix, so nothing depends on it, but the fix is small, has no RISE-specific assumptions, and is generally applicable]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ build_config.py | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/build_config.py b/build_config.py
+index 4cf8af5..41da25f 100644
+--- a/build_config.py
++++ b/build_config.py
+@@ -30,6 +30,7 @@ class SupportedPlatformEnum(Enum):
+     OSX_ARM64 = 7
+     LINUX_ARM64 = 8
+     LINUX_ARM32 = 9
++    LINUX_RISCV64 = 10
+
+     @classmethod
+     def all_linux_platforms(cls) -> List["SupportedPlatformEnum"]:
+@@ -38,6 +39,7 @@ class SupportedPlatformEnum(Enum):
+             cls.LINUX_64,
+             cls.LINUX_ARM32,
+             cls.LINUX_ARM64,
++            cls.LINUX_RISCV64,
+         ]
+
+
+@@ -51,6 +53,8 @@ if architecture()[0] == "64bit":
+     elif platform in ["linux", "linux2"]:
+         if machine() == "aarch64":
+             CURRENT_PLATFORM = SupportedPlatformEnum.LINUX_ARM64
++        elif machine() == "riscv64":
++            CURRENT_PLATFORM = SupportedPlatformEnum.LINUX_RISCV64
+         else:
+             CURRENT_PLATFORM = SupportedPlatformEnum.LINUX_64
+     elif platform == "win32":
+@@ -158,6 +162,8 @@ class OpenSslBuildConfig(BuildConfig, ABC):
+             openssl_target = "linux-aarch64"
+         elif self.platform == SupportedPlatformEnum.LINUX_ARM32:
+             openssl_target = "linux-armv4"
++        elif self.platform == SupportedPlatformEnum.LINUX_RISCV64:
++            openssl_target = "linux64-riscv64"
+         else:
+             raise ValueError("Unknown platform")
+
+@@ -263,6 +269,12 @@ class LegacyOpenSslBuildConfig(OpenSslBuildConfig):
+         if self.platform == SupportedPlatformEnum.OSX_ARM64:
+             # Note there's no debug build variant available here
+             return "linux-aarch64"
++        if self.platform == SupportedPlatformEnum.LINUX_RISCV64:
++            # OpenSSL 1.0.2e (this legacy build's pinned tag) predates riscv64 support;
++            # it has no "linux64-riscv64" Configure target at all. Fall back to the
++            # generic 64-bit target, which the base _OPENSSL_CONF_CMD above already
++            # builds with "no-asm" regardless of target.
++            return "linux-generic64"
+         return super()._get_build_target(should_build_for_debug)
+
+     @property
+--
+2.43.0
