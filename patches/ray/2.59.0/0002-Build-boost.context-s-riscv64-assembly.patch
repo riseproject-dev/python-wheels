@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 27 Aug 2026 15:12:28 +0200
+Subject: [PATCH] Build boost.context's riscv64 assembly
+
+Boost.Context implements its stack switching primitives -- jump_fcontext,
+make_fcontext, ontop_fcontext -- in hand-written assembly, one file per
+(architecture, ABI, object format).  rules_boost selects them in
+BOOST_CTX_ASM_SOURCES, which enumerates aarch64, arm, ppc64, x86_64, the
+Apple targets and Windows, and ends in "//conditions:default": [].
+
+riscv64 hits that default, so @boost//:context is compiled with no assembly
+at all.  Nothing fails while building: the three symbols are simply left
+undefined in _raylet.so, which links @boost//:fiber, and the failure only
+appears the first time the extension is loaded --
+
+    OSError: .../ray/_raylet.so: undefined symbol: jump_fcontext
+
+Boost has shipped libs/context/src/asm/{jump,make,ontop}_riscv64_sysv_elf_gas.S
+since 1.71.0, and ray pins 1.81.0, so the sources are already present in the
+archive.  Add the linux_riscv64 config_setting and point the select at them,
+exactly as every other ELF target does.
+
+Carried as one more entry in ray's existing thirdparty/patches list because
+rules_boost is pinned as a third-party archive; the fix itself belongs in
+nelhage/rules_boost, whose master branch still has no riscv64 branch in this
+select.
+
+Upstream-Status: To upstream [the change is to nelhage/rules_boost, which ray pins by commit hash; ray itself can only carry it as a patch, and rules_boost has no riscv64 support to bump to]
+---
+ bazel/ray_deps_setup.bzl                      |  1 +
+ .../patches/boost-riscv64-context.patch       | 30 +++++++++++++++++++
+ 2 files changed, 31 insertions(+)
+ create mode 100644 thirdparty/patches/boost-riscv64-context.patch
+
+diff --git a/bazel/ray_deps_setup.bzl b/bazel/ray_deps_setup.bzl
+index bbf3c84..c1d5710 100644
+--- a/bazel/ray_deps_setup.bzl
++++ b/bazel/ray_deps_setup.bzl
+@@ -242,6 +242,7 @@ def ray_deps_setup():
+         sha256 = "490d11425393eed068966a4990ead1ff07c658f823fd982fddac67006ccc44ab",
+         patches = [
+             "//thirdparty/patches:boost-headers.patch",
++            "//thirdparty/patches:boost-riscv64-context.patch",
+         ],
+         patch_args = ["-p1"],
+     )
+diff --git a/thirdparty/patches/boost-riscv64-context.patch b/thirdparty/patches/boost-riscv64-context.patch
+new file mode 100644
+index 0000000..bae3ec6
+--- /dev/null
++++ b/thirdparty/patches/boost-riscv64-context.patch
+@@ -0,0 +1,30 @@
++diff --git BUILD.boost BUILD.boost
++--- a/BUILD.boost
+++++ b/BUILD.boost
++@@ -37,6 +37,14 @@ config_setting(
++ )
++ 
++ config_setting(
+++    name = "linux_riscv64",
+++    constraint_values = [
+++        "@platforms//os:linux",
+++        "@platforms//cpu:riscv64",
+++    ],
+++)
+++
+++config_setting(
++     name = "linux_x86_64",
++     constraint_values = [
++         "@platforms//os:linux",
++@@ -111,6 +119,11 @@ BOOST_CTX_ASM_SOURCES = selects.with_or({
++         "libs/context/src/asm/make_ppc64_sysv_elf_gas.S",
++         "libs/context/src/asm/ontop_ppc64_sysv_elf_gas.S",
++     ],
+++    ":linux_riscv64": [
+++        "libs/context/src/asm/jump_riscv64_sysv_elf_gas.S",
+++        "libs/context/src/asm/make_riscv64_sysv_elf_gas.S",
+++        "libs/context/src/asm/ontop_riscv64_sysv_elf_gas.S",
+++    ],
++     ":linux_x86_64": [
++         "libs/context/src/asm/jump_x86_64_sysv_elf_gas.S",
++         "libs/context/src/asm/make_x86_64_sysv_elf_gas.S",

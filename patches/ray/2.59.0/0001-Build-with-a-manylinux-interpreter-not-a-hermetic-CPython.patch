@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Tue, 25 Aug 2026 22:30:00 +0200
+Subject: [PATCH] Build with a manylinux interpreter, not a hermetic CPython 3.10
+
+WORKSPACE calls python_register_toolchains(python_version = "3.10") and then
+load()s @python3_10 at the top level, so every bazel invocation downloads a
+python-build-standalone interpreter for the host platform before anything is
+analysed. The rules_python version ray resolves declares no riscv64 platform,
+so that load fails with
+
+    No platform declared for host OS linux on arch riscv64
+
+Point the py310 runtime and pip_parse at the manylinux image's own CPython
+3.10 instead. It has to stay 3.10 rather than follow the interpreter each
+wheel is built for: the pip vendored by that rules_python imports distutils,
+which 3.12 removed.
+
+Upstream-Status: Inappropriate [riscv64 build environment; upstream's own fix would be a rules_python bump, python-build-standalone does publish riscv64 CPython now]
+---
+diff --git a/WORKSPACE b/WORKSPACE
+index 927840e..c70da8c 100644
+--- a/WORKSPACE
++++ b/WORKSPACE
+@@ -51,15 +51,6 @@ load("@hedron_compile_commands//:workspace_setup.bzl", "hedron_compile_commands_
+ 
+ hedron_compile_commands_setup()
+ 
+-load("@rules_python//python:repositories.bzl", "python_register_toolchains")
+-
+-python_register_toolchains(
+-    name = "python3_10",
+-    python_version = "3.10",
+-    register_toolchains = False,
+-)
+-
+-load("@python3_10//:defs.bzl", python310 = "interpreter")
+ load("@rules_python//python/pip_install:repositories.bzl", "pip_install_dependencies")
+ 
+ pip_install_dependencies()
+@@ -69,7 +60,7 @@ load("@rules_python//python:pip.bzl", "pip_parse")
+ # For CI scripts use only; not for ray testing.
+ pip_parse(
+     name = "py_deps_py310",
+-    python_interpreter_target = python310,
++    python_interpreter = "/opt/python/cp310-cp310/bin/python3",
+     requirements_lock = "//release:requirements_py310.txt",
+ )
+ 
+diff --git a/bazel/BUILD.bazel b/bazel/BUILD.bazel
+index 9d422c1..cb3c32d 100644
+--- a/bazel/BUILD.bazel
++++ b/bazel/BUILD.bazel
+@@ -1,4 +1,3 @@
+-load("@python3_10//:defs.bzl", python310 = "interpreter")
+ load("@py_deps_py310//:requirements.bzl", ci_require = "requirement")
+ load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_runtime", "py_runtime_pair")
+ 
+@@ -72,7 +71,7 @@ config_setting(
+ 
+ py_runtime(
+     name = "py310_runtime",
+-    interpreter = python310,
++    interpreter_path = "/opt/python/cp310-cp310/bin/python3",
+     python_version = "PY3",
+     visibility = ["//visibility:private"],
+ )
