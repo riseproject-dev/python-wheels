@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 01 Oct 2026 00:00:00 +0000
+Subject: [PATCH] molecules, io/lammpsdata: replace ndarray.resize for Python 3.14
+
+From NumPy 2.4 on, ndarray.resize(refcheck=True) on Python >= 3.14 uses
+PyUnstable_Object_IsUniquelyReferenced, which an attribute-held array
+never satisfies, so Molecules.__init__ and LAMMPSData's setter/reader
+raise "ValueError: cannot resize an array that may be referenced by
+another object" on cp314 only (test_newmb.py, test_neighbours.py,
+test_io.py collection errors, test_manybody_molecules.py setup errors).
+Upstream replaced every such resize with a fresh np.empty of the same
+dtype in libAtoms/matscipy#312 (commits 1b006eb4 and 3a1ec1dc, released
+in 1.3.0); this is those two hunks unchanged.
+
+Upstream-Status: Backport [https://github.com/libAtoms/matscipy/pull/312]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/matscipy/io/lammpsdata.py b/matscipy/io/lammpsdata.py
+index 4525a786..e7200f0a 100644
+--- a/matscipy/io/lammpsdata.py
++++ b/matscipy/io/lammpsdata.py
+@@ -193,10 +193,15 @@ class LAMMPSData:
+         """Set data component."""
+         if name in self._type_names:
+             name = self._type_names[name]
+-            self.__data[name].resize(len(value))
++            old = self.__data[name]
++            new_arr = np.empty(len(value), dtype=self._dtypes[name])
++            n = min(len(old), len(value))
++            if n > 0:
++                new_arr[:n] = old[:n]
++            self.__data[name] = new_arr
+             self.__data[name]['type'] = value
+         elif name in self._data_names:
+-            self.__data[name].resize(len(value))
++            self.__data[name] = np.empty(len(value), dtype=self._dtypes[name])
+             data = self.__data[name]
+             try:
+                 data[data.dtype.names[-1]] = np.array(value)
+@@ -309,16 +314,15 @@ class LAMMPSData:
+         for linum, line in enumerate(fd):
+             if 'Masses' in line:
+                 ntypes = type_counts['atom types']
+-                self['masses'].resize(ntypes)
+-                self['masses'][:] = \
++                self.__data['masses'] = \
+                     np.genfromtxt(fd, skip_header=1,
+-                                  max_rows=ntypes, usecols=(1,))
++                                  max_rows=ntypes, usecols=(1,), dtype=self._dtypes['masses'])
+ 
+             else:
+                 for label in self._data_names:
+                     if self.__headers[label] in line:
+                         nlines = data_counts[label]
+-                        self[label].resize(nlines)
++                        self.__data[label] = np.empty(nlines, dtype=self._dtypes[label])
+                         dtype = self[label].dtype
+ 
+                         raw_dtype = np.dtype([('num', np.int32)] + [
+diff --git a/matscipy/molecules.py b/matscipy/molecules.py
+index 4657da62..d9a88996 100644
+--- a/matscipy/molecules.py
++++ b/matscipy/molecules.py
+@@ -72,19 +72,19 @@ class Molecules:
+             self.__dict__[data] = np.array([], dtype=dtype)
+ 
+         if bonds_connectivity is not None:
+-            self.bonds.resize(len(bonds_connectivity))
++            self.bonds = np.empty(len(bonds_connectivity), dtype=self._dtypes["bonds"])
+             self.bonds["atoms"][:] = bonds_connectivity
+             self.bonds["type"][:] = bonds_types \
+                 if bonds_types is not None else default_type
+ 
+         if angles_connectivity is not None:
+-            self.angles.resize(len(angles_connectivity))
++            self.angles = np.empty(len(angles_connectivity), dtype=self._dtypes["angles"])
+             self.angles["atoms"][:] = angles_connectivity
+             self.angles["type"][:] = angles_types \
+                 if angles_types is not None else default_type
+ 
+         if dihedrals_connectivity is not None:
+-            self.dihedrals.resize(len(dihedrals_connectivity))
++            self.dihedrals = np.empty(len(dihedrals_connectivity), dtype=self._dtypes["dihedrals"])
+             self.dihedrals["atoms"][:] = dihedrals_connectivity
+             self.dihedrals["type"][:] = dihedrals_types \
+                 if dihedrals_types is not None else default_type
