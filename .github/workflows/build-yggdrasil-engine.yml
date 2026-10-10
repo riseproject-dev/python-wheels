@@ -166,15 +166,27 @@ jobs:
       - name: Install wheel
         run: uv pip install --reinstall --no-index --find-links . yggdrasil-engine==${{ env.YGGDRASIL_ENGINE_VERSION }}
 
+      # 2.0.0 changed is_enabled from returning Optional[bool] (None for an
+      # unknown toggle) to returning a FeatureToggle, whose unknown-toggle
+      # answer is is_enabled=False, is_found=False and whose __bool__ raises
+      # TypeError (upstream python-engine/tests/test_engine.py,
+      # test_is_enabled_reports_not_found_when_toggle_missing_without_fallback).
       - name: Test wheel
         run: |
           python -c "
+          from importlib.metadata import version
           from yggdrasil_engine.engine import UnleashEngine
 
           engine = UnleashEngine()
           engine.take_state('{\"version\": 2, \"features\": [{\"name\": \"my-toggle\", \"enabled\": true, \"strategies\": [{\"name\": \"default\"}]}]}')
-          assert engine.is_enabled('my-toggle', {}) is True
-          assert engine.is_enabled('missing-toggle', {}) is None
+          hit = engine.is_enabled('my-toggle', {})
+          miss = engine.is_enabled('missing-toggle', {})
+          if int(version('yggdrasil-engine').split('.')[0]) >= 2:
+              assert (hit.name, hit.is_enabled, hit.is_found) == ('my-toggle', True, True), hit
+              assert (miss.name, miss.is_enabled, miss.is_found) == ('missing-toggle', False, False), miss
+          else:
+              assert hit is True, hit
+              assert miss is None, miss
           print('Smoke test passed')
           "
 
