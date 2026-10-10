@@ -1,0 +1,152 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/llvm/circt/blob/firtool-1.157.0/.github/workflows/uploadWheels.yml
+name: Build circt wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/circt.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-circt.yml'
+      - 'docs/packages/circt.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-circt.yml'
+      - 'docs/packages/circt.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: circt
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build circt ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp313", "cp314"]
+
+    env:
+      CIRCT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Get CIRCT
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: llvm/circt
+          ref: firtool-${{ env.CIRCT_VERSION }}
+          fetch-depth: 2
+          submodules: "true"
+          persist-credentials: false
+
+      - name: Unshallow CIRCT
+        run: |
+          git fetch --force --unshallow --tags --no-recurse-submodules
+
+      # The wheel bundles LLVM/MLIR, nanobind and robin-map; upstream's wheel ships no licence text.
+      - name: Stage licences
+        run: |
+          set -euo pipefail
+          nanobind_version="$(sed -n 's/.*"nanobind==\([^"]*\)".*/\1/p' lib/Bindings/Python/pyproject.toml)"
+          git clone --depth 1 --branch "v${nanobind_version}" --recurse-submodules --shallow-submodules \
+            https://github.com/wjakob/nanobind.git "${RUNNER_TEMP}/nanobind"
+          cp LICENSE lib/Bindings/Python/LICENSE
+          cp llvm/llvm/LICENSE.TXT lib/Bindings/Python/LICENSE.llvm
+          cp "${RUNNER_TEMP}/nanobind/LICENSE" lib/Bindings/Python/LICENSE.nanobind
+          cp "${RUNNER_TEMP}/nanobind/ext/robin_map/LICENSE" lib/Bindings/Python/LICENSE.robin-map
+
+      # Upstream runs integration_test/Bindings/Python through the build tree's lit.site.cfg;
+      # this config runs the same tests against the installed wheel instead.
+      - name: Write lit config for the Python bindings tests
+        run: |
+          cat > integration_test/Bindings/Python/lit.cfg.py <<'EOF'
+          import os
+          import sys
+
+          import lit.formats
+
+          config.name = "CIRCT Python bindings"
+          config.test_format = lit.formats.ShTest()
+          config.suffixes = [".py"]
+          config.excludes = ["lit.cfg.py"]
+          config.test_source_root = os.path.dirname(__file__)
+          config.test_exec_root = "/tmp/circt-lit"
+          config.available_features.add("bindings_python")
+          config.substitutions.append(("%PYTHON%", f'"{sys.executable}"'))
+          EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: lib/Bindings/Python
+          output-dir: wheelhouse
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BUILD_FRONTEND: build
+          # Default ninja -j and ld.bfd exhaust the runner's 15GB (it went silent 7h in); setup.py switches to lld when present.
+          CIBW_BEFORE_ALL: dnf -y install lld
+          CIBW_ENVIRONMENT: >-
+            CMAKE_BUILD_PARALLEL_LEVEL=3
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_BEFORE_TEST: dnf -y install llvm
+          CIBW_TEST_COMMAND: python {project}/llvm/llvm/utils/lit/lit.py -v {project}/integration_test/Bindings/Python
+
+      - name: Check wheel licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          assert len(sys.argv) == 2, sys.argv
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          assert licences == {"LICENSE", "LICENSE.llvm", "LICENSE.nanobind", "LICENSE.robin-map"}, licences
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: circt-${{ env.CIRCT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish circt ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: circt-${{ matrix.version }}-*-manylinux_riscv64
