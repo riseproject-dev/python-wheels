@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 25 Sep 2026 14:30:00 +0000
+Subject: [PATCH] cpu: riscv64: do not read vlenb unless RVV 1.0 is usable
+
+mayiuse() constructs the Xbyak_riscv::CPU singleton on every call, for
+every ISA. That constructor JIT-compiles and runs `csrr a0, vlenb` whenever
+AT_HWCAP advertises V -- with no SIGILL handler around it, unlike the RVV 1.0
+probe in can_compile_rvv100(). On cores whose kernel sets the V hwcap but
+whose vector unit is not RVV 1.0 (T-Head Xuantie C906/C910/C920, RVV 0.7.1),
+a vector-CSR access is exactly the kind of instruction that can trap, and
+nothing would catch it. The only callers outside this file ask for gv or
+gv_zvfh, reached from compile_model() (transformation pipeline, eltwise
+executor), so this sits on every model compilation.
+
+Evaluate the RVV 1.0 probe first in the gv case, and build the CPU object
+only for the g case. With can_compile_rvv100() hardcoded to false by the
+previous patch, mayiuse(gv)/mayiuse(gv_zvfh) now return false without
+executing any vector instruction. Behaviour on RVV 1.0 hardware with the
+probe restored is unchanged: the probe runs under its own SIGILL handler
+before the HWCAP/vlenb query instead of after it.
+
+This one is defensive: the SIGILL observed on the CI hardware comes from
+oneDNN being compiled with -march=rv64gcv (a static initializer at plugin
+dlopen time), which is handled at configure time, not here. It has not been
+seen crashing on hardware by itself, so there is no backtrace to report yet.
+
+Upstream-Status: To upstream [defensive fix, no hardware crash observed from this path yet to accompany a report]
+---
+ .../intel_cpu/src/nodes/kernels/riscv64/cpu_isa_traits.cpp     | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/src/plugins/intel_cpu/src/nodes/kernels/riscv64/cpu_isa_traits.cpp b/src/plugins/intel_cpu/src/nodes/kernels/riscv64/cpu_isa_traits.cpp
+index cc2293de..d3e15af7 100644
+--- a/src/plugins/intel_cpu/src/nodes/kernels/riscv64/cpu_isa_traits.cpp
++++ b/src/plugins/intel_cpu/src/nodes/kernels/riscv64/cpu_isa_traits.cpp
+@@ -96,19 +96,23 @@ bool can_compile_zvfh() {
+ }  // namespace
+ 
+ bool mayiuse(const cpu_isa_t cpu_isa) {
+-    const auto cpu = CPU::getInstance();
++    // Xbyak_riscv::CPU's constructor JIT-executes `csrr a0, vlenb` with no SIGILL handler whenever
++    // AT_HWCAP advertises V. Build it only for `g` (which nothing outside this file queries), and have
++    // `gv` consult the RVV 1.0 probe first so that it never gets that far on this target.
+     switch (cpu_isa) {
+-    case g:
++    case g: {
++        const auto& cpu = CPU::getInstance();
+         return cpu.hasExtension(RISCVExtension::I) && cpu.hasExtension(RISCVExtension::M) &&
+                cpu.hasExtension(RISCVExtension::A) && cpu.hasExtension(RISCVExtension::F) &&
+                cpu.hasExtension(RISCVExtension::D);
++    }
+     // cpu.hasExtension(RISCVExtension::V) checks only RVV support on the device.
+     // To figure out RVV version, we try to execute code with RVV1.0 instructions.
+     // If there is no `SEGILL`, the device supports RVV1.0.
+     // Otherwise we consider that there is no RVV support
+     // [TODO] If needed, support other RVV versions
+     case gv:
+-        return mayiuse(g) && cpu.hasExtension(RISCVExtension::V) && can_compile_rvv100();
++        return can_compile_rvv100() && mayiuse(g) && CPU::getInstance().hasExtension(RISCVExtension::V);
+     case gv_zvfh:
+         return mayiuse(gv) && can_compile_zvfh();
+     case isa_all:
+-- 
+2.43.0
+
