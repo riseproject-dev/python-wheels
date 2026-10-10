@@ -98,6 +98,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
   every CPython version's eval-loop/GC frame on riscv64 except 3.13+, where the exact same 28
   tests fail identically on 3.13, 3.14 *and* 3.14t while 3.12 is fully green — deselect per
   interpreter, don't skip the whole suite.
+- **645** — Gotcha 616's gap recurs per-feature, not just per-version: pystack 1.7.2's new
+  signal-frame-unwind tests fail on riscv64 on every interpreter (not just 3.13+), because
+  elfutils has no riscv64 unwind backend at all — deselect both unconditionally.
 - **598** — A single long build-then-test job gives its test step whatever is left of the
   job's `timeout-minutes`, so a hang holds the runner for hours (openvino cp314t: 11h22m, then
   `cancelled`): put a step-level `timeout-minutes` on the test step and upload wheels before it.
@@ -1844,6 +1847,30 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/test-failures-and-flak
     gotcha-33 way: deselect exactly those tests, generated once in the `run:` step from
     `matrix.python_version` (`if [ "$v" != "3.12" ]; then deselect+=(--deselect ...); fi`) so
     3.12 keeps exercising all of them and the list isn't tripled across the matrix.
+
+645. **Gotcha 616 named the shape; pystack 1.7.2 confirms it recurs per-feature, not just
+    per-version — `test_stack_of_thread_in_signal_handler[python]` and `..._for_core[python]`
+    (new in 1.7.2, bloomberg/pystack #348) fail on riscv64 on *all four* interpreters
+    (3.12/3.13/3.14/3.14t alike), where gotcha 616's gap only hit 3.13+.** The fix that made
+    these tests pass upstream, `build_scripts/elfutils-aarch64-signal-frame.patch`, teaches
+    *only* elfutils' AArch64 backend (`backends/aarch64_unwind.c`) to recognize the Linux
+    `rt_sigreturn` vdso trampoline and pull the interrupted frame's saved registers back out
+    of the kernel's `rt_sigframe`/`sigcontext` off the stack, so CFI-based unwinding can
+    continue past the signal boundary into the frame that was actually interrupted (here, the
+    CPython eval loop that called into the native extension). elfutils ships no
+    `backends/riscv64_unwind.c` at all — not even the frame-pointer fallback aarch64/arm/x86
+    get, let alone a signal-frame special case — so on riscv64 the unwind simply *stops* at
+    the trampoline: the resulting `native_frames` list has the trampoline and the frames
+    inside the signal handler (confirmed consistent across logs: `__vdso_rt_sigreturn`,
+    `signalReadinessThenBlock`, `pause`), but nothing beyond it, so no frame is ever
+    classified `NativeFrame.FrameType.EVAL` and `assert eval_frames` fails with `assert []`
+    identically on every target interpreter. This is architecture-gated, not version-gated:
+    writing a correct equivalent (`riscv64_unwind.c`, from scratch, including the RISC-V
+    Linux `rt_sigframe`/`__riscv_mc_fp_state ucontext` layout and the `li a7, 139 ... ecall`
+    trampoline bytes) is a genuine upstream elfutils feature gap with no riscv64 hardware
+    available here to validate it against — not a one-line fix to carry as our own patch.
+    Fix: deselect both tests unconditionally (all four `python_version` matrix legs), the
+    same `--deselect` mechanism gotcha 616 uses, rather than a speculative unwinder patch.
 
 626. **Since numpy 2.5, `np.linalg.eig` returns `complex128` eigenvectors on every
     architecture, even for a real diagonal matrix — gotcha 170's dtype trap is no longer a

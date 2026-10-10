@@ -1478,6 +1478,10 @@ The porting gotchas (556 of them) live in [`references/gotchas/`](gotchas/), spl
   except 3.13+, where 28 identical tests fail on 3.13/3.14/3.14t and 3.12 is fully green —
   a documented per-arch native-unwind gap (pystack's `elfutils-aarch64-signal-frame.patch`
   exists only for AArch64), so deselect per interpreter rather than skip the whole suite.
+- **645** — Gotcha 616's gap recurs per-feature: pystack 1.7.2's new signal-frame-unwind tests
+  fail on riscv64 on every interpreter (not just 3.13+), because elfutils has no riscv64
+  unwind backend at all — writing one blind, with no riscv64 hardware to validate it, is not
+  a minimal fix; deselect both tests unconditionally instead.
 - **598** — A single long build-then-test job's test step inherits the rest of the job's
   `timeout-minutes`, so a hang (openvino's cp314t pytest) holds the runner ~11h and ends `cancelled`;
   cap the test step with its own `timeout-minutes`, upload wheels first, reproduce from the artifact.
