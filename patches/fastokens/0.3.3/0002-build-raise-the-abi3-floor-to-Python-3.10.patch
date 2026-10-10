@@ -1,0 +1,53 @@
+From 2ecab7833976452b9555ce7932c2a444d92557a8 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sat, 10 Oct 2026 07:53:55 +0000
+Subject: [PATCH] build: raise the abi3 floor to Python 3.10
+
+python/src/lib.rs declares PyUnicode_AsUTF8AndSize by hand on
+abi3-py39 builds and calls it only when the running interpreter is
+3.10+, where it joined the stable ABI. CPython 3.9 exports the symbol
+too, so the cp39-abi3 wheel imports fine there, but the extension still
+links a symbol that is not in the 3.9 stable ABI. cibuildwheel's default
+audit-command (abi3audit --strict) therefore rejects the wheel: baseline
+3.9, computed 3.10, future_abi3_objects {PyUnicode_AsUTF8AndSize: 3.10}.
+
+Build with pyo3's abi3-py310 instead, so the wheel is tagged cp310-abi3
+and the borrowed-str path is selected at compile time (Py_3_10) rather
+than through the hand-declared symbol. requires-python follows so the
+metadata floor matches the tag. Python 3.9 is end-of-life.
+
+Upstream-Status: Inappropriate [upstream deliberately ships cp39-abi3 wheels with a runtime-gated PyUnicode_AsUTF8AndSize call and does not run abi3audit; the floor is raised only for the riscv64 build, whose cibuildwheel abi3audit --strict rejects the 3.10 symbol in a cp39-abi3 wheel]
+---
+ pyproject.toml    | 2 +-
+ python/Cargo.toml | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/pyproject.toml b/pyproject.toml
+index 7373e4a..d853417 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -5,7 +5,7 @@ build-backend = "maturin"
+ [project]
+ name = "fastokens"
+ dynamic = ["version"]
+-requires-python = ">=3.9"
++requires-python = ">=3.10"
+ 
+ [tool.maturin]
+ manifest-path = "python/Cargo.toml"
+diff --git a/python/Cargo.toml b/python/Cargo.toml
+index a3ec5fb..bf1aa8c 100644
+--- a/python/Cargo.toml
++++ b/python/Cargo.toml
+@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
+ 
+ [dependencies]
+ fastokens = { path = ".." }
+-pyo3 = {version = "0.25", features = ["extension-module", "abi3-py39"] }
++pyo3 = {version = "0.25", features = ["extension-module", "abi3-py310"] }
+ serde_json = "1"
+ 
+ [build-dependencies]
+-- 
+2.43.0
+
