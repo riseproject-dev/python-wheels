@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 1 Oct 2026 00:00:00 +0000
+Subject: [PATCH] result_collector: don't clobber live QueryResults on reuse
+
+Upstream-Status: Backport [https://github.com/LadybugDB/ladybug/commit/47443cd683adaf6b34d717cf751ecd6cb22c0869]
+
+The cached-physical-plan fast path clones the template operator tree
+per execution and calls prepareForReuse(). The plan template shares the
+ResultCollectorSharedState (and its FactorizedTable) with every
+executed clone, and prepareForReuse() unconditionally clear()ed that
+table. A QueryResult from a previous execution holds a shared_ptr to
+the same table, so overlapping executions (e.g. AsyncConnection's pool,
+running the same parameterized statement concurrently) corrupted live
+results: queries returned other queries' rows or empty tables.
+
+This is exactly what test_async_connection.py::
+test_async_prepare_and_execute_concurrent hits on 0.20.0 (upstream's own
+commit message cites this same test by name: "asserted [96] == [1]").
+Not free-threading- or riscv64-specific. Fixed upstream before 0.20.1.
+
+The companion simple_table_function.h fix in the same upstream commit
+(resetState() for pandas/polars/arrow table-function rescans) isn't
+known to be exercised by anything failing in this port's test suite on
+0.20.0, but it's included here too since it's part of the same commit
+and trivially small.
+---
+ src/include/function/table/simple_table_function.h |  4 ++++
+ src/include/processor/operator/result_collector.h  |  2 ++
+ src/processor/operator/result_collector.cpp         | 18 +++++++++++++++---
+ 3 files changed, 21 insertions(+), 3 deletions(-)
+
+diff --git a/src/include/function/table/simple_table_function.h b/src/include/function/table/simple_table_function.h
+index 5314b73..32abebc 100644
+--- a/src/include/function/table/simple_table_function.h
++++ b/src/include/function/table/simple_table_function.h
+@@ -39,6 +39,10 @@ public:
+
+     virtual TableFuncMorsel getMorsel();
+
++    // Reset the scan position so a reused physical plan (cached-plan fast path)
++    // rescans from the beginning instead of finding an exhausted morsel cursor.
++    void resetState() override { curRowIdx = 0; }
++
+     common::row_idx_t curRowIdx = 0;
+     common::offset_t maxMorselSize = common::DEFAULT_VECTOR_CAPACITY;
+ };
+diff --git a/src/include/processor/operator/result_collector.h b/src/include/processor/operator/result_collector.h
+index bad840e..1b52db1 100644
+--- a/src/include/processor/operator/result_collector.h
++++ b/src/include/processor/operator/result_collector.h
+@@ -22,6 +22,8 @@ public:
+
+     std::shared_ptr<FactorizedTable> getTable() { return table; }
+
++    void setTable(std::shared_ptr<FactorizedTable> newTable) { table = std::move(newTable); }
++
+ private:
+     std::mutex mtx;
+     std::shared_ptr<FactorizedTable> table;
+diff --git a/src/processor/operator/result_collector.cpp b/src/processor/operator/result_collector.cpp
+index 2685d0f..ee45bef 100644
+--- a/src/processor/operator/result_collector.cpp
++++ b/src/processor/operator/result_collector.cpp
+@@ -58,9 +58,21 @@ void ResultCollector::executeInternal(ExecutionContext* context) {
+ }
+
+ void ResultCollector::prepareForReuse(storage::MemoryManager* memoryManager) {
+-    // Clear the existing result table instead of freeing + re-allocating.
+-    // This keeps the DataBlocks alive so the next execution reuses them.
+-    sharedState->getTable()->clear();
++    auto table = sharedState->getTable();
++    if (table.use_count() <= 1) {
++        // No QueryResult outside this shared state references the table, so we can
++        // keep the DataBlocks alive and reset the bookkeeping (Phase 2 fast path).
++        table->clear();
++    } else {
++        // A previous execution's QueryResult still holds this table (e.g. overlapping
++        // AsyncConnection executions of the same prepared statement on the cached-plan
++        // fast path, which shares one ResultCollectorSharedState with the plan template).
++        // Clearing it would corrupt that live result, so hand this execution a fresh
++        // table with the same schema instead. The old table stays alive until the
++        // QueryResult that references it is destroyed.
++        sharedState->setTable(
++            std::make_shared<FactorizedTable>(memoryManager, info.tableSchema.copy()));
++    }
+     PhysicalOperator::prepareForReuse(memoryManager);
+ }
+
+--
+2.43.0
