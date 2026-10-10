@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 28 Sep 2026 00:00:00 +0000
+Subject: [PATCH] use schedule(static) for dist2holes's dynamic OpenMP loops
+
+Upstream-Status: Inappropriate [works around a libgomp defect on the riscv64 runners, riseproject-dev/python-wheels#617]
+
+CI's cp313 leg segfaulted with "Fatal Python error: Segmentation
+fault" in test_dist2holes.py::test_dist2holes_no_hole_filter, at the
+line calling hp.dist2holes(mask) (PR #2430, run 36412601673, job
+108896142667, head sha e9bbe3baf5). This is a different crash than the
+one 0002 already fixes: same commit, different test and different
+function, so 0002's libsharp loops are not involved here.
+
+hp.dist2holes (src/_masktools.pyx) calls straight into
+cextern/healpix's Healpix_cxx dist2holes() (mask_tools.cc), which
+contains two OpenMP loops using non-static schedules: the border-pixel
+scan (schedule(dynamic,10000)) and the final per-pixel distance walk
+(schedule(dynamic)). Because the input mask here is RING-ordered,
+dist2holes() also calls Healpix_Map::swap_scheme() (healpix_map.h) on
+its way out, which has its own schedule(dynamic,1) loop. All three run
+on every dist2holes() call with a RING mask, matching gotcha 166's
+signature exactly: a fault inside the OpenMP runtime on the riscv64
+runners' libgomp, specific to the dynamic/guided work-share schedules,
+regardless of loop size.
+
+Moving these three loops to schedule(static) costs load balancing,
+not correctness. Tag it Inappropriate and revert once the runners'
+toolchain is fixed, per gotcha 166.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ cextern/healpix/src/cxx/Healpix_cxx/healpix_map.h | 2 +-
+ cextern/healpix/src/cxx/Healpix_cxx/mask_tools.cc | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/cextern/healpix/src/cxx/Healpix_cxx/healpix_map.h b/cextern/healpix/src/cxx/Healpix_cxx/healpix_map.h
+index 126fdf8..79d63c7 100644
+--- a/cextern/healpix/src/cxx/Healpix_cxx/healpix_map.h
++++ b/cextern/healpix/src/cxx/Healpix_cxx/healpix_map.h
+@@ -183,7 +183,7 @@ template<typename T> class Healpix_Map: public Healpix_Base
+ 
+       arr<int> cycle=swap_cycles();
+ 
+-#pragma omp parallel for schedule(dynamic,1)
++#pragma omp parallel for schedule(static)
+       for (tsize m=0; m<cycle.size(); ++m)
+         {
+         int istart = cycle[m];
+diff --git a/cextern/healpix/src/cxx/Healpix_cxx/mask_tools.cc b/cextern/healpix/src/cxx/Healpix_cxx/mask_tools.cc
+index 9756a50..093076e 100644
+--- a/cextern/healpix/src/cxx/Healpix_cxx/mask_tools.cc
++++ b/cextern/healpix/src/cxx/Healpix_cxx/mask_tools.cc
+@@ -75,7 +75,7 @@ Healpix_Map<double> dist2holes(const Healpix_Map<double> &mask, double maxdist)
+     for (int i=0; i<mask.Npix(); ++i)
+       maxmask[i] = (mask[i]==0) ? FULLY_IN_MASK : 0;
+   // find border pixels
+-#pragma omp parallel for schedule(dynamic,10000)
++#pragma omp parallel for schedule(static)
+   for (int i=0; i<mask.Npix(); ++i)
+     if (maxmask[i])
+       {
+@@ -163,7 +163,7 @@ Healpix_Map<double> dist2holes(const Healpix_Map<double> &mask, double maxdist)
+       submask.push_back(i);
+       subvec.push_back(omask[0].pix2vec(i));
+       }
+-#pragma omp parallel for schedule(dynamic)
++#pragma omp parallel for schedule(static)
+   for (int i=0; i<omask[0].Npix(); ++i)
+     process(0, i, submask, subvec);
+ 
+-- 
+2.43.0
