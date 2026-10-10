@@ -1,4 +1,4 @@
-From ec81148de2a5306b6ee5c98ecbbf2a05ccc2a40f Mon Sep 17 00:00:00 2001
+From bf7858b9c1bd280ae3f15fa61aac95991261bb14 Mon Sep 17 00:00:00 2001
 From: Ludovic Henry <git@ludovic.dev>
 Date: Wed, 16 Sep 2026 23:32:33 +0200
 Subject: [PATCH] native: build the OTel thread context only where libdatadog
@@ -47,14 +47,14 @@ index 90a76ea..6cd3ffc 100644
 +++ b/ddtrace/internal/opentelemetry/thread_context.py
 @@ -23,11 +23,19 @@ _ContextSwitchListener = Callable[[], None]
  _ThreadContextListeners = tuple[_ContextActivationListener, _ContextSwitchListener]
-
-
+ 
+ 
 -if sys.platform == "linux":
 +try:
      from ddtrace.internal.native._native import detach_otel_thread_context
      from ddtrace.internal.native._native import update_otel_thread_context_from_context
      from ddtrace.internal.native._native import update_otel_thread_context_from_span
-
+ 
 +    _native_thread_context = sys.platform == "linux"
 +except ImportError:
 +    # libdatadog only builds the TLSDESC shim behind these functions on
@@ -67,20 +67,20 @@ index 90a76ea..6cd3ffc 100644
          if not config._otel_thread_context_enabled:
              return None
 diff --git a/src/native/Cargo.toml b/src/native/Cargo.toml
-index 5a382d8..cd8883e 100644
+index 9f2929f..02696b8 100644
 --- a/src/native/Cargo.toml
 +++ b/src/native/Cargo.toml
 @@ -74,9 +74,11 @@ tracing = { version = "0.1", default-features = false }
  pyo3-ffi = { version = "0.28", optional = true }
-
+ 
  [target.'cfg(target_os = "linux")'.dependencies]
 +libc = "0.2"
 +
 +[target.'cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
- libdd-library-config = { git = "https://github.com/DataDog/libdatadog", rev = "v43.0.0", features = ["otel-thread-ctx"]}
- libdd-otel-thread-ctx = { git = "https://github.com/DataDog/libdatadog", rev = "v43.0.0" }
+ libdd-library-config = { git = "https://github.com/DataDog/libdatadog", rev = "v43.0.2", features = ["otel-thread-ctx"]}
+ libdd-otel-thread-ctx = { git = "https://github.com/DataDog/libdatadog", rev = "v43.0.2", features = ["thread-exit-autoclean"] }
 -libc = "0.2"
-
+ 
  [target.'cfg(target_os = "macos")'.dependencies]
  libc = "0.2"
 diff --git a/src/native/build.rs b/src/native/build.rs
@@ -90,7 +90,7 @@ index 7aea389..1aef370 100644
 @@ -64,7 +64,12 @@ fn main() {
          pyo3_build_config::add_extension_module_link_args();
      }
-
+ 
 -    if env::var("CARGO_CFG_TARGET_OS").ok().as_deref() == Some("linux") {
 +    if env::var("CARGO_CFG_TARGET_OS").ok().as_deref() == Some("linux")
 +        && matches!(
@@ -117,7 +117,7 @@ index 61cb600..d1a5795 100644
 @@ -68,7 +68,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
      m.add_class::<library_config::PyAnonymousFileHandle>()?;
      m.add_wrapped(wrap_pyfunction!(library_config::store_metadata))?;
-
+ 
 -    #[cfg(target_os = "linux")]
 +    #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
      {
@@ -149,13 +149,13 @@ index 0bf60ba..03890f6 100644
 @@ -82,7 +82,8 @@ if __name__ == "__main__":
          # Skip the test for 32-bit Linux systems
          print("Skipping test, 32-bit DDWAF not ready yet")
-
+ 
 -    if platform.system() == "Linux":
 +    # libdatadog exports otel_thread_ctx_v1 on x86_64 and aarch64 only.
 +    if platform.system() == "Linux" and platform.machine() in ("x86_64", "aarch64"):
          from ddtrace.internal.native import _native
-
+ 
          print("Running OTel thread context symbol smoke test...")
---
-2.50.1 (Apple Git-155)
+-- 
+2.43.0
 
