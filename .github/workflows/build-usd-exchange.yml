@@ -206,7 +206,11 @@ jobs:
           # Stage every native library beside the plugInfo.json files above, under its own SONAME rather than
           # auditwheel's content-hash name: usd-exchange 3.0.1's check_wheel_imports.py requires the exact SONAME,
           # matching upstream's own staging (tools/repoman/py_package.py's __stage_linux_libraries).
-          for source_lib in (f"{usd}/lib", f"{usdex}/lib"):
+          # build_usd.py's own pxr install always uses "lib" (it never calls GNUInstallDirs), but the --onetbb
+          # dependency it builds does: oneTBB's CMakeLists calls include(GNUInstallDirs) and never overrides
+          # CMAKE_INSTALL_LIBDIR, so on this Rocky Linux 10 image (64-bit, no /etc/debian_version) GNUInstallDirs'
+          # own default resolves to "lib64" - libtbb.so.12 lands in {usd}/lib64, not {usd}/lib.
+          for source_lib in (f"{usd}/lib", f"{usd}/lib64", f"{usdex}/lib"):
               for lib in sorted(glob.glob(f"{source_lib}/*.so*")):
                   if os.path.islink(lib):
                       continue
@@ -279,7 +283,7 @@ jobs:
           done < <(cat /work/_build/staged_sonames.txt; find /work/_build/pyproject -name '*.so*' -type f \
               -exec sh -c 'head -c4 "$1" | grep -q ELF && readelf -d --wide "$1"' _ {} \; \
               | awk '/\(NEEDED\)/ {gsub(/[][]/, "", $NF); print $NF}' | grep '^libcrypt\.so' | sort -u)
-          LD_LIBRARY_PATH="/work/_build/install/lib:/work/_build/usd/lib:${LD_LIBRARY_PATH:-}" \
+          LD_LIBRARY_PATH="/work/_build/install/lib:/work/_build/usd/lib:/work/_build/usd/lib64:${LD_LIBRARY_PATH:-}" \
             auditwheel repair -w /work/_build/wheelhouse "${exclude_args[@]}" /work/_build/pyproject/dist/*.whl
 
           cp /work/_build/wheelhouse/*.whl /work/dist/
