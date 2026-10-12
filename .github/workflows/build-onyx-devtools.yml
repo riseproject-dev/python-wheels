@@ -1,0 +1,185 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `pypi` job of
+# https://github.com/onyx-dot-app/onyx/blob/ods/v0.13.0/.github/workflows/release-devtools.yml
+name: Build onyx-devtools wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/onyx-devtools.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-onyx-devtools.yml'
+      - 'docs/packages/onyx-devtools.yaml'
+      - 'patches/onyx-devtools/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-onyx-devtools.yml'
+      - 'docs/packages/onyx-devtools.yaml'
+      - 'patches/onyx-devtools/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: onyx-devtools
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build onyx-devtools ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      ONYX_DEVTOOLS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout onyx ods/v${{ env.ONYX_DEVTOOLS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: onyx-dot-app/onyx
+          ref: ods/v${{ env.ONYX_DEVTOOLS_VERSION }}
+          sparse-checkout: tools/ods
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply -v python-wheels/patches/onyx-devtools/${{ env.ONYX_DEVTOOLS_VERSION }}/*.patch
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: false
+          version: "0.11.25"
+
+      # hatch_build.py and internal/_version.py read the version and commit from the
+      # ods/v* tag push upstream releases from; the MIT LICENSE only lives at the repo root.
+      - name: Build wheel
+        working-directory: tools/ods
+        run: |
+          cp ../../LICENSE LICENSE
+          GITHUB_REF_NAME="ods/v${ONYX_DEVTOOLS_VERSION}" GITHUB_SHA="$(git rev-parse HEAD)" \
+            GOOS=linux GOARCH=riscv64 uv build --wheel
+
+      - name: Verify the wheel ships the riscv64 ods binary
+        run: |
+          python3 - tools/ods/dist/*.whl <<'EOF'
+          import os, sys, zipfile
+          version = os.environ["ONYX_DEVTOOLS_VERSION"]
+          with zipfile.ZipFile(sys.argv[1]) as zf:
+              names = zf.namelist()
+              assert sys.argv[1].endswith(f"onyx_devtools-{version}-py3-none-manylinux_2_27_riscv64.whl"), sys.argv[1]
+              binary = f"onyx_devtools-{version}.data/scripts/ods"
+              assert binary in names, names
+              licenses = sorted(n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n)
+              assert licenses == ["LICENSE"], licenses
+              header = zf.read(binary)[:20]
+              assert header[:4] == b"\x7fELF", header
+              assert header[18] == 0xF3, header  # e_machine EM_RISCV
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: onyx-devtools-${{ env.ONYX_DEVTOOLS_VERSION }}-py3-none-manylinux_riscv64
+          path: tools/ods/dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test onyx-devtools ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    env:
+      ONYX_DEVTOOLS_VERSION: ${{ matrix.version }}
+      UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_ONLY_BINARY: ':all:'
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: onyx-devtools-${{ env.ONYX_DEVTOOLS_VERSION }}-py3-none-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --find-links . onyx-devtools
+
+      # Upstream's Go tests (pr-golang-tests.yml) run from source and are never
+      # packaged; drive the installed binary instead.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          version=$(ods --version)
+          echo "$version"
+          [ "$(sed -n 1p <<<"$version")" = "ods version v${ONYX_DEVTOOLS_VERSION}" ]
+          ods --help >/dev/null
+          python -c 'import fastapi'
+
+          work=$(mktemp -d)
+          cd "$work"
+          git init -q
+          mkdir -p backend/onyx
+          printf 'def f():\n    import openai\n    return openai\n' > backend/onyx/lazy.py
+          ods check-lazy-imports
+
+          printf 'import openai\n' > backend/onyx/eager.py
+          if ods check-lazy-imports 2> eager.log; then
+            echo "eager import of openai was not reported" >&2
+            exit 1
+          fi
+          grep -q 'onyx/eager.py' eager.log
+
+  publish:
+    name: Publish onyx-devtools ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: onyx-devtools-${{ matrix.version }}-py3-none-manylinux_riscv64
