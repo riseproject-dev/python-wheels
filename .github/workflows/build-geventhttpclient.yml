@@ -78,8 +78,10 @@ jobs:
           persist-credentials: false
 
       # llhttp is compiled into the extension under its own MIT notice, which
-      # upstream's wheels do not ship.
+      # upstream's wheels before 2.6.0 do not ship; 2.6.0 declares it itself
+      # (upstream fbe33ef), so later versions have no patches/ directory.
       - name: Patch geventhttpclient source
+        if: hashFiles(format('python-wheels/patches/geventhttpclient/{0}/*.patch', env.GEVENTHTTPCLIENT_VERSION)) != ''
         run: |
           git apply python-wheels/patches/geventhttpclient/${{ env.GEVENTHTTPCLIENT_VERSION }}/00*.patch
 
@@ -91,15 +93,22 @@ jobs:
           CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           # gevent and brotli have no riscv64 wheel on public PyPI.
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # 2.6.0 takes its version from git tags (setuptools-scm); pin it rather than
+          # rely on the shallow checkout's tag reaching the container.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_GEVENTHTTPCLIENT=${{ env.GEVENTHTTPCLIENT_VERSION }}
           CIBW_TEST_SKIP: ${{ matrix.test_skip }}
           # pyproject.toml registers the `network` marker.
           CIBW_TEST_SOURCES: tests pyproject.toml
-          CIBW_TEST_EXTRAS: dev
+          # The test tools were a `dev` extra up to 2.5.1 and a `dev` dependency group
+          # from 2.6.0; name them directly so every version gets them (mypy omitted:
+          # the suite never runs it).
+          CIBW_TEST_REQUIRES: pytest pytest-rerunfailures dpkt requests httplib2
           CIBW_TEST_COMMAND: >-
             python -c "import importlib.metadata as m;
             l = {str(p).split('.dist-info/licenses/')[1] for p in m.files('geventhttpclient') if '.dist-info/licenses/' in str(p)};
-            assert l == {'LICENSE-MIT', 'llhttp/LICENSE-MIT'}, l" &&
+            assert l in ({'LICENSE-MIT', 'llhttp/LICENSE-MIT'}, {'LICENSE-MIT', 'llhttp/LICENSE'}), l" &&
             python -m pytest tests
 
       # The only proof the untested cp314t wheel really carries the extension.
