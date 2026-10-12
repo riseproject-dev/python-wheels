@@ -192,7 +192,7 @@ packages:
   version: 24.19.0
   home: https://github.com/njzjz/nodejs-wheel
   repo: https://github.com/njzjz/nodejs-wheel
-  status: publishing
+  status: published
   pr: 860
   notes: 'Not vendored-binary: builds Node.js from source via CMake ExternalProject (configure && make), same as upstream''s own x86_64/aarch64 wheels. Node 24.19.0 configure.py/V8 BUILD.gn support riscv64 natively; unofficial-builds.nodejs.org confirms a working riscv64 build exists. Full compile (V8+ICU) on riscv64 runner, timeout-minutes: 1440. First CI run failed 30min in: gcc rejected -m64 while compiling OpenSSL, because Node''s deps/openssl/openssl_asm.gypi has no riscv64 branch and its catch-all fallback wrongly includes the linux-x86_64 asm config. Fixed with patches/nodejs-wheel-binaries/24.19.0/0001-riscv64-pass-openssl-no-asm-to-Node-s-configure.patch (adds --openssl-no-asm to configure on riscv64 only), validated locally under linux/riscv64 QEMU (configure command line + absence of -m64 in generated openssl.target.mk) before pushing. Re-running in CI. Worktree at .claude/worktrees/nodejs-wheel-binaries, branch nodejs-wheel-binaries. PR https://github.com/riseproject-dev/python-wheels/pull/860. Build itself then succeeded (V8+ICU compile completed after ~23h), but the publish dry-run job failed: "No wheels found in dist". Root cause: the upload-artifact name (nodejs-wheel-binaries-24.19.0-manylinux_riscv64) had no segment between version and manylinux_riscv64, but the publish job''s artifact-pattern requires one (nodejs-wheel-binaries-24.19.0-*-manylinux_riscv64) - the glob matched 0 artifacts. The built wheel is tagged py2.py3-none (universal, not per-interpreter), so renamed the artifact to nodejs-wheel-binaries-24.19.0-py2.py3-none-manylinux_riscv64 to match. Re-running jobs failed on the same commit SHA would have reused the old (buggy) workflow definition per GitHub''s documented behavior, so this required a fresh full push (new commit touching the workflow file re-triggers pull_request: paths, meaning another full V8+ICU recompile from scratch) rather than a job re-run. Pushed fix commit e6220aeba, new CI run in progress as of 2026-09-04. That re-run then hit a different failure: the build job''s own 24h timeout-minutes killed it mid-compile (started 2026-09-04T20:31:00Z, killed 2026-09-05T20:31:21Z while still compiling V8 objects, e.g. js-collator-tq-csa.o) - this build''s runtime is close to the 24h edge (the first successful run took ~23h16m). Bumped timeout-minutes to 2880 (48h) in commit 8e14cbd56 and re-pushed; new CI run (33990804990) in progress as of 2026-09-05.'
 - pkg: aiokafka
@@ -437,7 +437,7 @@ packages:
   version: 1.9.2
   home: https://github.com/cvxpy/cvxpy
   repo: https://github.com/cvxpy/cvxpy
-  status: blocked-on-dependency
+  status: queued
   pr: null
   notes: 'Own build is trivial and fully validated locally (docker, aarch64): cvxcore is a plain cibuildwheel C++ extension, Eigen vendored, SWIG wrapper pre-generated in the sdist (no swig/cmake needed), builds clean with just numpy+scipy+setuptools+wheel from `pip wheel . --no-deps --no-build-isolation`, imports and solves a real LP. osqp/clarabel/scs are already on the registry (build-time not actually required, only runtime). Blocked on sparsediffpy>=0.3.0,<0.4.0 (hard runtime dep, imported by cvxpy''s NLP diff-engine but still a hard install_requires): no riscv64 wheel anywhere, and its 0.3.0 sdist cannot build with any installable scikit-build-core (pins >=0.10 but uses the cmake.minimum-version key, removed in scikit-build-core >=0.8 - filed SparseDifferentiation/SparseDiffPy#22, one-line pyproject.toml fix, already patched and open as PR #920 in this repo). Once #920 merges and publishes, resume with: matrix cp312/cp313/cp314 (drop cp314t - scs and highspy, also hard deps, have no riscv64 wheel for cp314t on PyPI or our registry either); plain build-from-checkout cibuildwheel, `CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https:// pypi.riseproject.dev/simple/` (covers numpy/scipy/osqp/clarabel/scs/highspy/ sparsediffpy), qdldl needs no registry wheel - builds cleanly from sdist via cmake+pybind11, both already resolvable from PyPI for riscv64, no patch needed. Test with upstream''s own `pytest cvxpy/tests` (mirrors their test_script.sh). No GPL sources job needed for cvxpy''s own wheel (no OpenMP/BLAS linkage). Worktree/branch removed per blocked-on-dependency convention; full validated build-cvxpy.yml content is captured in this note and PR #920/queue''s sparsediffpy entry - no re-research needed, just re-author and push once unblocked.'
 - pkg: jsonschema-rs
@@ -2243,7 +2243,7 @@ packages:
   version: 0.14.1
   home: https://github.com/bpcreech/PyMiniRacer
   repo: https://github.com/bpcreech/PyMiniRacer
-  status: ci-running
+  status: published
   pr: 1875
   notes: '4 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev. v8 has a mature riscv64 codegen backend; build routes around Chromium''s prebuilt clang via v8''s own riscv64-linux-gnu- gcc_toolchain, with eleven patches against builder/v8_build.py (riscv64 as a native v8_target_cpu and its manylinux tag, gclient/DEPS fixes for the reclient+siso CIPD packages that have no linux-riscv64 build, use_sysroot/use_custom_libcxx/enable_rust/temporal off, and the two GCC-vs-clang source stoppers: unicode.h''s in-class explicit specializations and third_party/highway falling back to HWY_SCALAR so json-stringifier.cc asks for a FixedTag<T,16> that does not exist there). Runner cost, measured and accepted: a full V8 compile is ~27h wall on a 4-core riscv64 runner (23h30m of ninja reached 1970/2176 and was still progressing when the old 1440-minute ceiling killed it), so build_dll carries timeout-minutes: 2880 and build_wheel 720, the same values build-nodejs-wheel-binaries.yml and build-vtk.yml already use for V8/VTK-from-source work. The 2026-09-19 run (35433322684) was NOT a build failure and NOT the timeout: build_dll died 3h20m in with every step from ''Build dll with v8'' onwards left in_progress, no job log at all (404 BlobNotFound while the setup job of the same run returns 200), and a single job-level annotation ''Fatal glibc error: pthread_mutex_lock.c:130 (___pthread_mutex_lock): assertion failed: mutex->__data.__owner == 0''. That is a dead runner, not the build: the identical annotation and identical shape appear on two other packages on two other runners in the same window -- tensor-grep at 11 minutes and litellm 7 SECONDS after its job started -- 3 of 749 failed jobs over eight days, which rules out any resource wall or anything mini-racer''s build did. New gotcha 458 records the diagnosis (no log + unfinished steps => read /check-runs/<job id>/annotations, correlate across packages, re-run rather than push). Re-ran the dead job in place via rerun-failed-jobs on 2026-09-20 -- same commit, same merge ref, no push, so the rest of the matrix and the 48h ceiling are untouched. Attempt 2 (job 106152918611) then hit a SECOND, different fleet fault and died in 14 seconds: it landed on machine riscv-runner-11, whose Docker daemon is not running (''Cannot connect to the Docker daemon at unix:///var/run/docker.sock'' in Initialize containers, then ''Value cannot be null. (Parameter ''''network'''')''), so every container job that node picks up fails instantly -- worth draining if it keeps taking work. Attempt 3 (job 106153424056) queued 2026-09-20 21:36Z behind a busy pool (37 riscv64 jobs running, 22 queued), picked up a healthy node (rise-riscv-runner-ouemsff1n) at 21:37Z and cleared the checkpoint: Initialize containers green, checkout + git apply of all eleven patches green, now in the build. Expect ~27h in Build dll with v8, i.e. green around 2026-09-22 00-01Z, then build_wheel (four pytest legs). If it dies in seconds on Initialize containers again that is another sick node, not the port -- just rerun-failed-jobs, it costs nothing. Do NOT push to this branch: every push restarts the ~27h V8 compile. No rebase is needed either -- the branch adds only new files (build-mini-racer.yml, docs/packages/mini-racer.yaml, patches/mini-racer/0.14.1/**), _setup.yml / _publish-wheel.yml / pr-checks.yml have not changed since the branch caught up with them on 2026-09-19, and reusable workflows resolve from the PR merge ref anyway (gotcha 158). All four PR checks green; awaiting build_dll attempt 2. Merge is a maintainer call on the ~27h-per-release runner cost, which the PR body flags explicitly. UPDATE 2026-09-27: attempt 3 of run 35995947527 (job 107620840172, 12:32 2026-09-24 to 18:09 2026-09-25, 29h37m) got past the sandbox guard (0012) and finished every compile: 2170/2176 ninja steps, including all mini_racer objects. It then failed at [2171/2176] LINK ./mksnapshot with ld: maglev-ir-riscv.o: in Float64Min::GenerateCode / Float64Max::GenerateCode, undefined reference to MacroAssembler::FloatMinMaxHelper<double>(FPURegister, FPURegister, FPURegister, MaxMinKind). These are the only undefined references in the whole link, and GN source_sets pass every V8 object to the linker. This is not a V8-on-riscv64 gap. It is a V8 source bug (V8 branch-heads/14.4) exposed by building with GCC instead of Chromium''s clang: the member template is declared in src/codegen/riscv/macro-assembler-riscv.h but defined only in macro-assembler-riscv.cc and never explicitly instantiated, and GCC inlines its four in-file uses (Float32/64 Min/Max) and emits no out-of-line copy. V8 main has already changed maglev to call the public Float64Min/Float64Max wrappers, which generate the same code; the 14.4-15.4 lkgr branches still have the template call. Fix pushed as 19173a6c79 (patch 0013): that change is added to builder/0001-riscv64-gcc-compat.patch. patch -p0 --dry-run applies cleanly to 14.4''s maglev-ir-riscv.cc, and all 13 patches apply in order onto v0.14.1. Rerun 36309317325 started (~30h). Residual risks, not guessed at: (1) the 5 remaining steps run mksnapshot natively. mksnapshot calls CpuFeatures::Probe(true) (static features only), and nodejs-wheel-binaries already runs a GCC-built V8 mksnapshot on this fleet, so this should be low risk. (2) In build_wheel, V8 14.4''s base::CPU uses riscv_hwprobe (glibc>=2.39 build) and, if the kernel reports IMA_V, runs csrr vlenb and enables RISCV_SIMD. On this T-Head fleet (gotchas 272/449) that could SIGILL at V8 init. If it does, the cause can be diagnosed against the retained dll artifact without repeating the 30h compile, although any source fix still needs a new build.'
 - pkg: brotlipy
@@ -2841,7 +2841,7 @@ packages:
   version: 0.29.0
   home: https://statsig.com/
   repo: https://github.com/statsig-io/statsig-server-core/tree/main/statsig-pyo3
-  status: publishing
+  status: published
   pr: 2142
   notes: '4 Linux wheels upstream (abi: cp310); no riscv64 on PyPI or pypi.riseproject.dev. Genuinely a separate distribution, not an alias of the statsig-python-core entry: same statsig-pyo3 crate but renamed (statsig-rust -> oai-statsig-rust), own version line (0.29.0 uploaded 2026-08-04, ten days before statsig-python-core 0.22.0), authors "Statsig, Daniel Loomb", and an extra [profile.python-release] the public tree does not have. Source is sdist-only: statsig-io/statsig-server-core stops at 0.23.0 across all 164 tags, all 68 releases/* branches and main''s workspace version, so 0.24.0+ are cut from a non-public tree -- gotcha 156 shape (fetch the released sdist, extract it, point package-dir at the extracted dir so CIBW_TEST_SOURCES still resolves against the workspace cwd). Content is genuinely divergent, not a version-string rename: statsig_base_py.rs 770 -> 984 lines, interned_store_py.rs 71 -> 217 vs public 0.23.0, so pinning a public commit was not an option. Workflow mirrors build-statsig-python-core.yml (same crate): one cp310-abi3 wheel, protoc from Rocky 10 CRB, rustup in-container. Two deviations: CARGO_PROFILE_RELEASE_DEBUG=1 + CARGO_PROFILE_RELEASE_STRIP=none reproduce the python-release profile rather than naming it in MATURIN_PEP517_ARGS (gotcha 141 -- the name exists only in this Cargo.toml and would break unrelated maturin sdists in the same container); inferred from the artifact, since upstream''s published .so is 39.6 MB with debug_info and not stripped while [profile.release] sets strip = true. The sdist ships no licence file at all (gotcha 146), so the build stages the project''s ISC text from a run: heredoc and the test command asserts dist-info/licenses/LICENSE. The CI.yml bundled in the sdist is maturin boilerplate (--release, builds a cp313t wheel that does not exist on PyPI), not the real pipeline. Patches 0001/0002 carry forward the 0.22.0/0.23.0 ones: specs_sync_interval_ms=1 is now rejected (< MIN_SYNC_INTERVAL 1000) so six test_data_store.py polling tests fail on upstream''s own published x86_64 wheel, and fork_runner.py''s 50 SDK inits need more than 10s on riscv64. Validated locally on x86_64: cargo metadata --filter-platform riscv64gc-unknown-linux-gnu resolves all 335 crates with the lock a pure prune (no version drift) and the same native pins the 0.23.0 riscv64 build already compiled (ring 0.17.14, zstd-sys 2.0.13, prost 0.13.4, tonic 0.12.3); protoc 3.19.6 + /usr/include/google/protobuf confirmed inside quay.io/pypa/manylinux_2_39_riscv64 under QEMU, and the .proto is byte-identical to 0.23.0''s. Full wheel built from the patched sdist in manylinux (needed protoc 3.19.6; the x86_64 image''s 3.14 predates stable proto3 optional): cp310-abi3 tag, dist-info/licenses/LICENSE present, .so unstripped with debug_info, and 229 tests pass against that wheel in a replica of the CIBW_TEST_SOURCES staging. Worktree at .claude/worktrees/oai-statsig-python-core, branch oai-statsig-python-core. PR https://github.com/riseproject-dev/python-wheels/pull/2142 (draft), lint checks green, riscv64 build running. CI green on the second run (35548712809): 229 passed, no reruns, publish dry-run clean, wheel oai_statsig_python_core-0.29.0-cp310-abi3-manylinux_2_34_riscv64.manylinux_2_39_riscv64.whl. The first run failed 2/229 in test_exposure_logging.py: _find_exposure_callsite reads frame.f_code.co_qualname, which CPython only has from 3.11, while the package declares requires-python >= 3.10 and this abi3 build is compiled AND tested under cp310 -- the error boundary swallows the AttributeError, so callsite metadata silently falls back to "unknown". Not riscv64 and not the Rust crate: pure Python in py_src/, and it reproduces on x86_64 under 3.10 against upstream''s own published cp310-abi3-manylinux_2_17_x86_64 wheel (passes under 3.11). The earlier 229-passed rehearsal ran cp312, which has the attribute. Patch 0003 falls back to co_name (new gotcha 469: an abi3 build tests on its floor interpreter -- rehearse there). Merged (#2142). Push-triggered build+publish on main run 35573357950 succeeded. 404 on pypi.riseproject.dev/simple/oai-statsig-python-core/ as of this check, pending docs catalog PR #2133; move to published once it merges and the index returns 200.'
 - pkg: resiliparse
@@ -2945,7 +2945,7 @@ packages:
   version: 2.5.2
   home: https://www.ibm.com/quantum/qiskit
   repo: https://github.com/Qiskit/qiskit
-  status: publishing
+  status: published
   pr: 2144
   notes: '4 Linux wheels upstream (abi: cp310); no riscv64 on PyPI or pypi.riseproject.dev. setuptools-rust + PyO3 0.29 with abi3-py310, NOT maturin: build-backend is setuptools.build_meta and setup.py wires crates/pyext through RustExtension with features cache_pygates (+ mimalloc when QISKIT_BUILD_WITH_MIMALLOC=1, which upstream sets in [tool.cibuildwheel]). PR #2144, CI running (run 35549492620). Triage came out clean on every axis, all of it checked locally: `cargo metadata --locked --filter-platform riscv64gc-unknown-linux-gnu --features mimalloc,cache_pygates` resolves 302 packages with no `*-sys` crate other than libmimalloc-sys; a cross `cargo check --target riscv64gc-unknown-linux-gnu --features pyo3/extension-module,cache_pygates` type-checked all 265 crates for riscv64 in 1m51s with zero warnings (faer 0.24 / pulp 0.22 reach riscv64 through their scalar arms - pulp''s `compile_error!("unsupported arch")` lives in a macro body the riscv64 build never expands, so gotcha 78''s two-arm-cfg signature does not apply here); and mimalloc v2.3.2, vendored by libmimalloc-sys 0.1.49, compiles clean for riscv64 with the manylinux_2_39_riscv64 image''s GCC 14.3.1 under QEMU - it carries a generic `sleep(0)` mi_atomic_yield fallback for arches with no pause instruction and its build.rs only special-cases arm32. symengine is NOT a blocker: it moved to the `qpy-compat` extra, and core Requires-Dist is only numpy<3/>=2.0, scipy>=1.14, rustworkx>=0.15, dill, stevedore and typing-extensions, every one of which resolves on riscv64 for cp310 through cp314t (registry: numpy 2.2.2 + scipy 1.15.2 at cp310, numpy 2.4.3 at cp311, numpy 2.5.3 + scipy 1.18.1 at cp312+, rustworkx 0.18.1 cp310-abi3). The matrix is a single cp310-abi3 leg, not the repo default four, for two independent reasons: setup.py sets `options={"bdist_wheel": {"py_limited_api": "cp310"}}` unconditionally (gotcha 34), so cp310 is both the wheel''s tag and the only interpreter it may be compiled on (gotcha 96); and upstream''s `[tool.cibuildwheel] build = ["cp3??-*"]` cannot match the six-character cp314t, so upstream ships no free-threaded wheel at all and the unguarded py_limited_api would mis-tag one if we forced a cp314t leg (new gotcha 468 - `cibuildwheel --platform linux --archs riscv64 --print-build-identifiers` against upstream''s unmodified config prints cp310..cp315-manylinux_riscv64 and no `t` tag). Upstream''s extra cp311-cp315 entries are test-only re-runs of the whole stestr suite and were dropped for riscv64 runner cost; upstream itself sets `test-skip = ["*ppc64le", "*s390x"]`, i.e. it does not run the suite on its own slower platforms. Local rehearsal (gotcha 101 adapted - manylinux_2_39 exists only for aarch64 and riscv64 and this host is x86_64, so manylinux_2_34_x86_64 natively): the whole recipe ran for real, including upstream''s before-all (dnf wget + tools/install_rust.sh), the replaced CIBW_ENVIRONMENT_LINUX, the pipx-free repair command, auditwheel, and cibuildwheel''s own default `abi3audit --strict`, which reported is_abi3 true, baseline 3.10, computed 3.10, non_abi3_symbols []. Rust build 5m47s; upstream''s full stestr suite 62952 tests in 260s -> 62759 passed, 193 skipped, 0 failed, 0 unexpected success; whole cibuildwheel run 13 minutes. Wheel is qiskit-2.5.2-cp310-abi3-manylinux_2_34_x86_64.whl with one qiskit/_accelerate.abi3.so (22 MB) plus dist-info/licenses/LICENSE.txt, the same shape as upstream''s published wheels. No patches. Licensing needs nothing added: upstream declares license-files = ["LICENSE.txt"], the wheel carries it, and the checkout has no THIRDPARTY/NOTICE inventory to forward (gotcha 153). rust-toolchain.toml pins channel 1.87 in the git checkout, but upstream''s own RUSTUP_TOOLCHAIN=stable overrides it, so gotcha 238 is already handled upstream. timeout-minutes: 1440 per gotcha 365, generous for the real cost. CI GREEN FIRST TRY on PR #2144 (run 35549492620): build_wheels 1h51m on rise-riscv-runner-90bl0h0wx - Rust compile ~1h07m, then upstream''s unmodified stestr suite 62964 tests in 2132s -> 62771 passed, 193 skipped, 0 failed, 0 unexpected success (the x86 rehearsal''s 62952/62759/193/0 reproduced almost test-for-test). abi3audit --strict clean on qiskit-2.5.2-cp310-abi3-manylinux_2_39_riscv64.whl (one qiskit/_accelerate.abi3.so, 18 MB). Publish job dry-ran cleanly off the PR branch (would create qiskit-v2.5.2, add qiskit to packages.txt, open the docs PR). All four pr-checks green. Awaiting maintainer review/merge; not yet published. Merged (#2144). Push-triggered build+publish on main run 35573401257 succeeded. 404 on pypi.riseproject.dev/simple/qiskit/ as of this check, pending docs catalog PR #2133; move to published once it merges and the index returns 200.'
 - pkg: pyhmmer
@@ -2966,7 +2966,7 @@ packages:
   version: '26.8'
   home: https://openusd.org
   repo: https://github.com/PixarAnimationStudios/OpenUSD
-  status: publishing
+  status: published
   pr: 2145
   notes: 'PR #2145 green (cp312/cp313/cp314 wheels + publish dry-run), awaiting review. Core (non-imaging) OpenUSD build, so no OpenGL/Vulkan/Metal/X11 - every GPU find_package is inside if (PXR_BUILD_IMAGING). Bindings use the vendored pxr_boost::python, no external Boost since 24.11. Only dependency is TBB 2020.3.1, which builds unpatched on riscv64. One patch adds riscv64 to pxr/base/arch (defines.h #error, math.h gate, stackTrace.cpp execve asm). Merged (#2145). Push-triggered build+publish on main run 35573428656 in progress as of 2026-09-21T07:32Z (three-leg C++ compile, expect hours); move to published once it completes and https://pypi.riseproject.dev/simple/usd-core/ returns 200 (docs catalog PR #2133 also pending merge).'
 - pkg: asyncmy
@@ -3081,7 +3081,7 @@ packages:
   version: 3.13.0
   home: https://github.com/cmake-wheel/eigenpy
   repo: https://github.com/cmake-wheel/eigenpy
-  status: blocked-on-dependency
+  status: queued
   pr: null
   notes: '10 Linux wheels upstream (abi: 0); no riscv64 on PyPI or pypi.riseproject.dev. home/repo correctly point at cmake-wheel/eigenpy, not stack-of-tasks/eigenpy: confirmed via `gh api repos/cmake-wheel/eigenpy` that it is a fork whose parent is stack-of-tasks/eigenpy, and upstream''s own checked-in pyproject.toml (v3.13.0 tag) carries no [build-system] at all -- a plain CMake project (Boost.Python bindings between Eigen and NumPy, BSD-2-Clause) consumed via conda/robotpkg/apt, not buildable with pip. The fork''s own pyproject.toml is what actually produces the wheels PyPI publishes as eigenpy: build-backend = "cmeel", and project.dependencies is ["cmeel-boost ~= 1.90.0"] -- confirmed against the live eigenpy PyPI JSON''s info.requires_dist, not just the fork''s source. cmeel-boost is a runtime dependency (eigenpy''s compiled .so links its Boost.Python shared libraries), not just a build input, so pip install eigenpy cannot resolve on riscv64 until cmeel-boost itself has a riscv64 wheel. cmeel (build dep) and cmeel-eigen (build dep, Eigen is header-only) are both py3-none-any -- zero riscv64 concern, already installable from public PyPI as-is. cmeel-boost is the opposite: its sdist is a 4KB CMakeLists.txt whose ExternalProject_Add downloads the entire upstream boost_1_90_0.tar.bz2 and runs ./bootstrap.sh && ./b2 link=shared python=3.X with no --with-libraries filter, i.e. it compiles Boost''s whole default library set once per interpreter -- a build on the order of this repo''s largest to date (libclang''s ~10h from-scratch LLVM/Clang compile), plausibly portable (no architectural riscv64 blocker) but a full dedicated port of its own, which is why cmeel-boost already carries its own separate .queue.yml entry (status: queued) rather than being something to inline into eigenpy''s build. Per gotcha 125 a pip-resolvable sdist isn''t automatically a reasonable one either: cmeel-boost would likely build from sdist inside a cibuildwheel container (a green CI run), but that same full-Boost compile would then re-run for every future end user''s pip install eigenpy on riscv64 (no riscv64 wheel to resolve to), and most end-user environments won''t have the toolchain for it (CMake >= 4.0, a C++ compiler, numpy headers) -- defeating the "simple index to install riscv64 wheels from" goal even on a green run. Sequenced behind cmeel-boost''s own port, same shape as the k-means-constrained/ortools and cvxpy/sparsediffpy cases; filed as gotcha 338 (feasibility-and-triage.md). No worktree/branch opened -- resolved fully read-only via PyPI JSON, gh api, and one cmeel-boost sdist download, no checkout needed. Revisit once cmeel-boost lands on the registry.'
 - pkg: torch-memory-saver
@@ -3095,7 +3095,7 @@ packages:
   version: 0.6.0
   home: https://github.com/pyocd/cmsis-pack-manager/
   repo: https://github.com/pyocd/cmsis-pack-manager/
-  status: publishing
+  status: published
   pr: 2149
   notes: 'The py3 abi tag is honest, not a hand-set plat-name: maturin builds the Rust core as a cdylib and cffi ABI mode dlopens it, so one wheel serves every interpreter (gotcha 479). 133-crate graph, rustls not openssl, nothing arch-specific; rustup has a riscv64 host build of the 1.71.1 upstream pins. CI green on PR #2149 - built once on cp312 in 15 minutes, 11 tests pass on each of cp312/cp313/cp314/cp314t, publish dry-run clean. cp314t needed PIP_ONLY_BINARY=hypothesis (gotcha 210). Merged (#2149). Push-triggered build+publish on main run 35573490402 succeeded. 404 on pypi.riseproject.dev/simple/cmsis-pack-manager/ as of this check, pending docs catalog PR #2133; move to published once it merges and the index returns 200.'
 - pkg: ulid-transform
@@ -3375,7 +3375,7 @@ packages:
   version: 6.0.0
   home: https://github.com/cmake-wheel/cmeel-urdfdom
   repo: https://github.com/cmake-wheel/cmeel-urdfdom
-  status: blocked-on-dependency
+  status: queued
   pr: null
   notes: '2 Linux wheels upstream (abi: 0); no riscv64 on PyPI or pypi.riseproject.dev.
     The "abi: 0" is PEP 427''s optional build number, not an ABI tag (gotcha 470):
@@ -3543,7 +3543,7 @@ packages:
   version: 6.0.5
   home: https://github.com/cmake-wheel/cmeel-assimp
   repo: https://github.com/cmake-wheel/cmeel-assimp.git
-  status: blocked-on-dependency
+  status: queued
   pr: null
   notes: '2 Linux wheels upstream (abi: 0); no riscv64 on PyPI or pypi.riseproject.dev.
     The "abi: 0" is PEP 427''s optional build number, not an ABI tag (gotcha 470): the
@@ -4019,8 +4019,8 @@ packages:
   version: 3.2.6
   home: https://github.com/tfmoraes/python-gdcm/
   repo: https://github.com/tfmoraes/python-gdcm/
-  status: ci-running
-  pr: https://github.com/riseproject-dev/python-wheels/pull/2179
+  status: queued
+  pr: null
   notes: '10 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev. PR #2179 opened (draft) after a container restart lost the original agent; the port commit was already complete and local, just unpushed. SWIG bindings + GDCM C++ libs built via cibuildwheel-equivalent manylinux_riscv64 image; swig from Rocky 10, cmake/ninja from pypi.riseproject.dev. Two licensing patches (GDCM bundled libs, OpenSSL). CI just triggered, not yet confirmed green.'
 - pkg: vosk
   version: 0.3.45
@@ -4636,7 +4636,7 @@ packages:
   version: 2.5.8
   home: https://pyga.me
   repo: https://github.com/pygame-community/pygame-ce
-  status: publishing
+  status: published
   pr: 1819
   notes: '21 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp315,pp311); no riscv64 on PyPI
     or pypi.riseproject.dev. CI green on PR #1819 (run 35554793349, commit 25cc84add4): all three legs
@@ -4868,7 +4868,7 @@ packages:
   version: 4.8.7
   home: https://github.com/k9securityio/cedar-py
   repo: https://github.com/k9securityio/cedar-py
-  status: publishing
+  status: published
   pr: 2190
   notes: '16 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp39,pp311); no riscv64 on PyPI or pypi.riseproject.dev. PyPI records no project URL, and PyPI/Cargo.toml metadata point nowhere obvious either -- found via PKG-INFO''s long-description badge, which links k9securityio/cedar-py (not an official cedar-policy/awslabs repo): a third-party PyO3/maturin wrapper around AWS''s cedar-policy crate. Confirmed maturin build-backend and no-abi3 pyo3 (plain `extension-module` feature) from the sdist''s pyproject.toml/Cargo.toml. Dependency graph (168 crates via `cargo metadata --filter-platform riscv64gc-unknown-linux-gnu`) is pure Rust: only -sys crates are libc/linux-raw-sys (no C libs, no TLS/crypto). `cargo check --target riscv64gc-unknown-linux-gnu` passed cleanly in a rust:trixie container with the cross gcc/libssl-dev:riscv64 packages (gotcha 186); psm (pulled in transitively via stacker) ships a native `src/arch/riscv64.s` in its build.rs arch table, so no scalar-fallback patch is needed. Per-interpreter build (cp39-cp314 + cp314t, mirroring valkey-glide''s identical abi shape); pp311 dropped since PyPy has no riscv64 port. PR #2190 opened, CI running.'
 - pkg: taplo
@@ -5023,7 +5023,7 @@ packages:
   version: 0.7.3
   home: https://github.com/onnxsim/onnxsim
   repo: https://github.com/onnxsim/onnxsim
-  status: ci-running
+  status: published
   pr: 2266
   notes: 'PR #2266: mirrors build-onnxoptimizer.yml (onnxsim vendors onnx-optimizer, which vendors onnx, both linked statically); cp310 dropped, no riscv64 onnx wheel for it.'
 - pkg: multimark
@@ -5114,7 +5114,7 @@ packages:
   version: 0.3.0
   home: https://github.com/rapidsai/rapids-logger
   repo: https://github.com/rapidsai/rapids-logger
-  status: publishing
+  status: published
   pr: 2273
   notes: 'CPU-only C++20 shim around a statically-linked spdlog (scikit-build-core+CMake); no CUDA/GPU code. CI green (build + publish dry-run); 2 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: hyperscan
@@ -5799,7 +5799,7 @@ packages:
   version: 0.23.2
   home: https://github.com/bab2min/kiwipiepy
   repo: https://github.com/bab2min/kiwipiepy
-  status: ci-running
+  status: published
   pr: 2346
   notes: '4 Linux wheels upstream (abi: cp314,cp39); no riscv64 on PyPI or pypi.riseproject.dev. Run 1 (36206969217): both legs build (~75 min), 66/68 tests pass; test_space_issue_189 and test_template fail identically on x86_64 with upstream''s own wheel under KIWI_ARCH_TYPE=none (the non-SIMD tier riscv64 gets), so deselected (gotcha 589). Run 2 (36213307647) in progress.'
 - pkg: libuuu
@@ -5841,7 +5841,7 @@ packages:
   version: 2.60.0
   home: https://github.com/triton-inference-server/perf_analyzer
   repo: https://github.com/triton-inference-server/perf_analyzer
-  status: ci-running
+  status: published
   pr: 2350
   notes: '2 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev. NVIDIA Triton Performance Analyzer: C++ CLI (gRPC/HTTP client, no CUDA needed with TRITON_ENABLE_GPU=OFF) wrapped in a py3-none wheel; source is triton-inference-server/perf_analyzer, untagged, 2.60.0 = r26.04 head 3a49a23 (the commit the PyPI binary reports). 2026-09-27: run 36239530305 passed all unit tests (145 passed, flake skips held) but the wheel test found `perf_analyzer --version` silent: auditwheel''s patchelf moved the non-PIE binary''s first PT_LOAD to 0xc000, below mmap_min_addr (readelf of the artifact), so exec dies before main; also PrintVersion() writes to stderr. Fixed in b7d5931f99 (LDFLAGS=-Wl,-Ttext-segment=0x200000, --version 2>&1; gotcha 595); rebuild run 36307879691 started.'
 - pkg: pylibraft-cu12
@@ -6110,7 +6110,7 @@ packages:
   version: 0.4.2
   home: https://github.com/onnx/optimizer
   repo: https://github.com/onnx/optimizer
-  status: publishing
+  status: published
   pr: 2258
   notes: 'PR #2258: cp311/cp312 built (cp310 dropped, no riscv64 onnx wheel or py3-none-any fallback for it).'
 - pkg: tensorrt-cu12-bindings
@@ -6271,7 +6271,7 @@ packages:
   version: 0.19.0
   home: https://github.com/Chia-Network/clvm_rs/
   repo: https://github.com/Chia-Network/clvm_rs/
-  status: publishing
+  status: published
   pr: 2407
   notes: '2 Linux wheels upstream (abi: cp310); no riscv64 on PyPI or pypi.riseproject.dev. Pure PyO3/maturin crate, no arch-gated code; only native dep is blst (chia-bls), which already builds portable on riscv64 for the chia-rs port. PR #2407 opened (draft), mirrors upstream build-test.yml, drops the openssl feature. CI queued/running on the riscv64 runner.'
 - pkg: ydf
@@ -6355,7 +6355,7 @@ packages:
   version: 2.2.0
   home: https://icechunk.io
   repo: https://github.com/earth-mover/icechunk
-  status: publishing
+  status: published
   pr: 2419
   notes: '4 Linux wheels upstream (abi: cp312); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: nutpie
@@ -6404,14 +6404,14 @@ packages:
   version: 3.9.1
   home: https://github.com/mitsuba-renderer/mitsuba3
   repo: https://github.com/mitsuba-renderer/mitsuba3
-  status: blocked-on-dependency
+  status: queued
   pr: null
   notes: 'Blocked on drjit (no PR/branch/publish yet as of this triage; pypi.riseproject.dev/simple/drjit/ 404s). Triage otherwise positive: upstream is scikit-build-core + nanobind (2.14.0, py3-none-any wheel on PyPI, no arch blocker), CMake, with ext/drjit vendored as a git submodule pinned to commit 671cbb2 (matches drjit v1.5.0). Confirmed from the real CMakeLists.txt: when SKBUILD is set, mitsuba does NOT build the vendored ext/drjit submodule itself -- it runs `python -c "import drjit; print(drjit.get_cmake_dir())"` then `find_package(drjit CONFIG REQUIRED)`, i.e. it hard-requires an already-installed drjit wheel carrying compiled libs (drjit-core, drjit-extra) plus a drjitConfig.cmake; pyproject.toml pins `drjit==1.5.0` in both [build-system].requires and [project].dependencies (exact pin, not a floor). drjit CMakeLists.txt defaults DRJIT_ENABLE_CUDA=ON and DRJIT_ENABLE_LLVM=ON on non-Apple Linux, so a CPU-only riscv64 drjit build needs -DDRJIT_ENABLE_CUDA=OFF (no CUDA toolkit on riscv64 runners), which is independent of scalar-array support and does not need CUDA hardware; LLVM stays ON since drjit dlopens libLLVM at runtime rather than linking it at build time. mitsuba upstream wheels.yml builds every variant (scalar_*, llvm_ad_*, cuda_ad_*, metal_ad_*) via one MI_DEFAULT_VARIANTS cmake.args string; a riscv64 build should trim this to scalar_rgb/scalar_spectral (+ llvm_ad_rgb if the drjit LLVM backend is proven on riscv64) and drop cuda_ad_*/metal_ad_* outright, mirroring whatever variant set the drjit port validates. Considered building drjit from mitsubas own vendored ext/drjit submodule inside build-mitsuba.ymls CIBW_BEFORE_BUILD (matching commit) instead of waiting -- rejected: it would duplicate the full set of riscv64-specific drjit gotchas (RVV/SIMD gates, LLVM backend wiring, manylinux toolchain) as throwaway logic inside a downstream workflow, diverge hard from upstreams own wheels.yml (goal 2), and immediately fork from the real drjit port the moment it lands. No worktree/branch/PR created. Re-triage once drjit is published to pypi.riseproject.dev (or has an open PR) -- at that point mitsuba should build cleanly against it with a CIBW_BEFORE_BUILD `pip install drjit==1.5.0` from our index and a trimmed MI_DEFAULT_VARIANTS, no patches expected for the CPU-only variants.'
 - pkg: restate-sdk
   version: 1.0.4
   home: https://restate.dev
   repo: https://github.com/restatedev/sdk-python
-  status: publishing
+  status: published
   pr: 2436
   notes: '31 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,pp310,pp311); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: jdk4py
@@ -6495,7 +6495,7 @@ packages:
   version: 2.8.25
   home: https://pypi.org/project/ray-haproxy/
   repo: https://github.com/ray-project/ray-haproxy
-  status: ci-running
+  status: published
   pr: 2428
   notes: 'Bundles a prebuilt HAProxy binary (OpenSSL/Lua built from source, PCRE/libxcrypt vendored via ldd); public source repo found at ray-project/ray-haproxy, ported by mirroring its release.yml against manylinux_2_39_riscv64.'
 - pkg: valkey-glide-sync
@@ -6523,7 +6523,7 @@ packages:
   version: 1.4.1
   home: https://pytorch.org/executorch/
   repo: https://github.com/pytorch/executorch
-  status: ci-running
+  status: publishing
   pr: 2434
   notes: '10 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev. Triaged as feasible despite the size (large CMake C++ world: XNNPACK, cpuinfo, pthreadpool, flatbuffers/flatcc, Eigen, pocketfft, CoreML''s portable pieces, pybind11) -- mirrors upstream''s own default `--preset pybind` setup.py+CMake build (XNNPACK CPU delegate, portable/optimized/quantized kernels, OpenVINO backend; QNN/CUDA/Vulkan all opt-in and stay off, same as upstream''s own CI off-x86_64). The apparent hard dependency wall (torch>=2.13.0a0, torchao>=0.18.0, pytorch-tokenizers>=1.4.1, coremltools==9.0 on Linux, all unconditional install_requires) is not a blocker: torch (2.13.0+cpu/2.14.0+cpu) and pytorch-tokenizers (1.4.1/1.5.0) are already published for riscv64 cp312/cp313/cp314; coremltools 9.0 is already published for riscv64 cp312/cp313 (its `python_version < "3.14"` marker means cp314 never needs it); torchao has no riscv64 wheel on PyPI but does publish a `py3-none-any` fallback wheel (confirmed via `pip download torchao==0.18.0 --platform manylinux_2_39_riscv64 --python-version 312 --only-binary=:all:`), and its own x86_64 abi3 wheel never matches riscv64 anyway, so pip always resolves the pure-Python one. cp310/cp311 dropped (torch/pytorch-tokenizers ship neither for riscv64); cp314t dropped (upstream itself ships no free-threaded wheel). XNNPACK''s CMake build (not Bazel, so gotcha 442''s Bazel-omission risk does not apply) already builds and ships cleanly on this exact manylinux_2_39_riscv64 image/runner inside our own published torch wheel (PyTorch''s default CPU build also vendors XNNPACK-via-CMake), which is strong precedent against the zvfh/RVV gotchas (420/442) actually firing here -- worth re-checking gotcha 442''s runtime-dispatch-safety question directly if XNNPACK-related SIGILLs ever show up in CI. CoreML backend on Linux only compiles its portable pieces (coreml_util/coreml_inmemoryfs/executorchcoreml pybind module); the Apple-only delegate/.mm sources and protobuf SDK sources stay gated (`if(APPLE)` / `EXECUTORCH_BUILD_DEVTOOLS`, both false here), so no Xcode/Apple-framework dependency. Smoke test keeps upstream''s own registered-backend assertions but replaces its torchvision-based MobileNetV3 example (torchvision has no riscv64 wheel) with a small hand-built model run through both the portable (non-delegated) and a real XNNPACK-delegated export+execute path. One patch (0001, Inappropriate) widens `license-files` to bundle the licences of the third-party libraries statically linked in (XNNPACK, cpuinfo, pthreadpool, FP16, FXdiv, flatbuffers, flatcc, Eigen, pocketfft, nlohmann/json, pybind11) -- upstream''s own wheel ships only its own LICENSE. PR #2434 (draft) opened, CI kicked off; not yet watched to green -- this is a large from-source C++ build (XNNPACK+cpuinfo+pthreadpool+Eigen+pocketfft+CoreML pieces), expect long per-leg build times, in the same cost class as openvino/lalsuite rather than a quick pybind11 wrapper. Worktree .claude/worktrees/executorch, branch executorch.'
 - pkg: fatfs-ng
@@ -6603,7 +6603,7 @@ packages:
   version: 0.13.4
   home: https://github.com/cohere-ai/melody
   repo: https://github.com/cohere-ai/melody
-  status: publishing
+  status: published
   pr: 2431
   notes: 'Pure-Rust pyo3/maturin ext (templating/generation parsing), no GPU/SIMD/vendored native deps; mirrors upstream python-build-wheels.yml linux job with cp310-cp314+cp314t (riscv64 image has cp310/cp311 per gotcha 96), no patches.'
 - pkg: spacy-transformers
@@ -6946,7 +6946,7 @@ packages:
   version: 2026.8.28.post2
   home: https://github.com/adamtheturtle/strict-kwargs
   repo: https://github.com/adamtheturtle/strict-kwargs
-  status: ci-running
+  status: published
   pr: 2559
   notes: '2 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev. Not pure Python despite the py3 tag: the wheels are maturin bindings = "bin" (gotcha 145), a ~10 MB Rust CLI in .data/scripts/strict-kwargs. Runtime dep ty already ships manylinux_2_31_riscv64 on PyPI. Draft PR 2559 builds it with maturin-action in manylinux_2_39 (upstream tag 2026.8.28-post.2 derived from the version) and tests the installed binary on cp312/cp313/cp314/cp314t.'
 - pkg: pyjnius
@@ -7044,7 +7044,7 @@ packages:
   version: 1.157.0
   home: https://circt.llvm.org
   repo: https://github.com/llvm/circt
-  status: ci-running
+  status: publishing
   pr: https://github.com/riseproject-dev/python-wheels/pull/2593
   notes: 'PR #2593 open (branch circt, draft); first build run 36961848996 (cp313 + cp314 legs, ~12-16h each expected) in progress. Upstream located although PyPI records no project URL: llvm/circt lib/Bindings/Python/setup.py declares name=circt, author Mike Urbach, description "CIRCT Python Bindings" (byte-identical to the 1.157.0 wheel METADATA), and its pyproject.toml derives the version with setuptools_scm from firtool-* tags (firtool-1.157.0 -> 1.157.0). No sdist was ever published (308 releases, wheels only; Linux has only ever been x86_64), so the port builds from the upstream checkout. The wheel is genuinely compiled: libCIRCTBindingsPythonCAPI.so (126 MB, all of the linked LLVM/MLIR/CIRCT), _circt/_mlir/_mlirDialects* nanobind extensions, libnanobind-circt.so and libMLIRPythonSupport-circt.so; DT_NEEDED is only manylinux system libs + libz.so.1, so nothing GPL is bundled and there is no gpl_sources job. Feasibility: setup.py cmake-builds the pinned llvm submodule (6279700538) with LLVM_ENABLE_PROJECTS=mlir, LLVM_EXTERNAL_PROJECTS=circt, LLVM_TARGETS_TO_BUILD=host (RISCV on riscv64) and only --target install-CIRCTPythonModules; no arch gate anywhere in CIRCT''s CMake, no vendored binaries. The CAPI aggregate links MLIRToLLVMIRTranslationRegistration (pulls LLVMFrontendOpenMP and the mid-end) and every CIRCT conversion, sized from the source trees at roughly 1,200 LLVM + ~1,000 MLIR + 645 CIRCT + ~120 tablegen TUs, i.e. ~3,000 ninja steps against clang-tidy''s 3,546 that built in ~11h50m on these runners - so each leg should fit timeout-minutes 1440 (libclang/clang-tidy/tosa-tools precedent). build-circt.yml mirrors upstream''s uploadWheels.yml: one job per interpreter, cp313+cp314 exactly as upstream (not the default four: each leg is a full LLVM/MLIR/CIRCT build, and setup.py deletes CMakeCache.txt per interpreter, so looping in one job is gotcha 456''s unmeasured risk), cibuildwheel over lib/Bindings/Python with CIBW_BUILD_FRONTEND=build, checkout firtool-<ver> with submodules + upstream''s unshallow step so setuptools_scm sees the tag. No patches. All build requirements resolve on riscv64 for cp313/cp314 (check_riscv64_deps.py: cmake 4.4.3/ninja 1.13.2 riscv64 wheels on PyPI, numpy 2.5.3/PyYAML 6.0.3 from our registry, nanobind 2.9.2/pybind11 2.12/setuptools_scm 7.1.0 pure). Testing: upstream''s wheel CI runs no tests, so the workflow writes a minimal lit.cfg.py and runs upstream''s integration_test/Bindings/Python suite (34 tests, the subset upstream''s buildAndTest integration legs run) against the installed wheel, with lit from the llvm submodule and FileCheck from the image''s Rocky 10 llvm 21.1.8 package (dnf in before-test). Building FileCheck from the wheel''s own build tree does not work: build.ninja depends on nanobind''s *.cmake in the frontend''s deleted isolated env, so ninja would try to re-run cmake. Discovery verified locally (34 tests found, lit.cfg.py excluded); a full local run against the released x86_64 wheel was skipped because the host disk was full. Licences: upstream''s wheel ships none; the build stages LICENSE (circt), LICENSE.llvm, LICENSE.nanobind and LICENSE.robin-map (nanobind cloned at the version pyproject.toml pins) into lib/Bindings/Python for setuptools'' default glob, asserted after the build. Note PyPI''s latest is 1.161.0; 1.157.0 kept as queued.'
 - pkg: apache-flink
@@ -7170,7 +7170,7 @@ packages:
   version: 3.0.0
   home: https://docs.omniverse.nvidia.com/usd/code-docs/usd-exchange-sdk
   repo: https://github.com/NVIDIA-Omniverse/usd-exchange
-  status: ci-running
+  status: published
   pr: 2644
   notes: 'PR #2644 (draft), CI running. Feasible: not a closed NVIDIA blob. The x86_64/aarch64 wheels hold only open-source builds - stock OpenUSD 26.08 libs + pxr bindings (no usdrt/omni/Kit), MaterialX 1.39.5, oneTBB 2021.13, and usd-exchange''s own Apache-2.0 usdex_core/usdex_rtx C++ + pybind11 bindings. Upstream links prebuilt packman OpenUSD/MaterialX/oneTBB packages (x86_64/aarch64 only), but its root CMakeLists explicitly supports building against any OpenUSD via USDEX_USD_ROOT/USDEX_TBB_ROOT/USDEX_MATERIALX_ROOT. The workflow builds OpenUSD v26.08 with build_usd.py (--onetbb, MaterialX on, imaging off, PXR_PY_UNDEFINED_DYNAMIC_LOOKUP=ON, same arch patch as usd-core 26.8), then usdex with CMake, then replicates install_usdex.py/py_package.py staging (module/plugin selection, auditwheel, plugInfo LibraryPath rewrite) and runs upstream''s whl suite (check_wheel_imports.py + core/rtx unittests). cp310-cp313 (requires-python <3.14); each leg rebuilds OpenUSD (~4h, like usd-core). Risk to watch: usdex compiles with -Wall -Wextra -Wconversion -Werror, upstream on GCC 11, here GCC 14. First run: all 4 legs failed OpenUSD configure - MaterialXConfig.cmake.in unconditionally find_dependency(X11 REQUIRED COMPONENTS Xt) regardless of our -DMATERIALX_BUILD_RENDER=OFF (only the OpenGL/RenderGlsl component is actually gated), and the image has no X11 dev packages. Fixed by dnf install libX11-devel libXt-devel before the build (satisfies the cmake check; nothing actually links X11 since render stays off) - precedent already in cadquery-ocp-novtk/kivy/pygame/vtk workflows. Second run (37069096053): OpenUSD, usdex build and install all succeeded (~4.5h per leg), then all 4 legs failed in the pxr staging step with "pxr.Ar has no _ar binding". Not a missing or broken binding: OpenUSD 26.08 changed the default PXR_PYTHON_INSTALL_DIR from lib/python to lib/pythonX.Y/site-packages (cmake/defaults/Packages.cmake; build_usd.py ends with "PYTHONPATH: /work/_build/usd/lib/python3.13/site-packages"), while the staging (like upstream install_usdex.py, written for packman''s lib/python layout) globs <usd>/lib/python/pxr/<Module>, so it found nothing and exited on the first module, Ar. Fixed in 2279f3e by passing -DPXR_PYTHON_INSTALL_DIR=lib/python in the USD build-args, as build-usd-core.yml already does. Checked against the v26.08 sources: all 29 staged modules have compiled bindings (schema libs via INCLUDE_SCHEMA_FILES module.cpp). The usdex v3.0.0 files the staging reads after that point (tools/repoman/repo_tools.toml [repo_install_usdex] usd_validation_version, tools/pyproject/*, pyboost11 licence) all exist. Third run (37097098270, job 111129170750 for cp312) built and installed clean on all 4 legs, then all 4 failed identically at the unit-test stage: "Ran 1192 tests in 175.862s - FAILED (failures=15, skipped=2)". Two unrelated root causes, neither riscv64-specific: (1) 14 failures in testMaterialAlgo.py (testConnect/testInvalidInput/testInvalidNames/testAllInputTypes[WithSdrRegistry] x2 classes), all "UsdShadeShaderSdrCompliance: shaderId ''ND_test_shader''/''UsdTestShader'' ... not found in sdrRegistry". usdex''s own py_package.py declares the wheel''s [test] extra as usd-validation-nvidia>=1.21.0,<2 (an open range, mirrored verbatim here per goal 2), which our test step (mirroring pytest.sh) resolves to whatever is newest - 1.22.0 as of this run, confirmed both are plain py3-none-any wheels by unzipping them from PyPI, so this is not an arch issue. 1.22.0 added its own built-in UsdShadeShaderSdrCompliance native-validator adapter, which pre-empts usdex''s own same-named ShaderSdrCompliance adapter (ValidationRules.registerNativeValidators()''s dedup-by-validator_name logic) and reports issues under rule.__name__ == "UsdShadeShaderSdrCompliance" instead of "ShaderSdrCompliance", which the test fixtures'' defaultValidationIssuePredicates (IsRule("ShaderSdrCompliance")) do not match, so the intentionally-swallowed issue (both test classes use fake shader ids on purpose) surfaces instead. tools/repoman/repo_tools.toml pins the exact version (1.21.0) that upstream''s own install_usdex.py --install-test uses, which has no such adapter. Fixed in a follow-up commit by re-pinning usd-validation-nvidia to that exact repo_tools.toml version in a step right after the open-range [test] extra install, reproducing install_usdex.py''s own behaviour without changing the wheel''s declared metadata. (2) 1 failure, testSettings.py::testEnableTranscodingSetting: asserts a subprocess''s stderr is byte-for-byte empty, but gets OpenUSD''s own " ArchWarn: ARCH_CACHE_LINE_SIZE != Arch_ObtainCacheLineSize()" (pxr/base/arch/assumptions.cpp) - pxr/base/arch/align.h hardcodes ARCH_CACHE_LINE_SIZE to 64 for every arch but Apple ARM, and these riscv64 runners'' real L1 line size disagrees; already documented as a non-fatal build-time ArchWarn (gotcha 484), but this one test has no tolerance for it (sibling tests in the same file use assertRegex, not assertEqual, so they pass). No env var gates the warning (bare fprintf below Tf''s diagnostics layer) and there is no single correct constant to hardcode (riscv64 L1 line size varies by implementation, unlike x86_64''s near-universal 64), so fixed by skipping just that one test on riscv64 via a new patch against the usd-exchange checkout itself (0002-*.patch, Upstream-Status: Inappropriate), applied by a new "Patch usd-exchange" step alongside the existing OpenUSD patch step. Both fixes pushed; added gotcha 629 (open-range test-dependency drift) and gotcha 630 (OpenUSD ArchWarn breaking an exact-stderr test) for reuse by other OpenUSD-dependent ports. Fourth run (37115585492) failed all 4 legs at the unit tests with "FAILED (failures=4, skipped=3)": testDiagnostics.py testLevel/testOutputFormatting/testOutputStream/testUtf8Diagnostics, all on the same ArchWarn. They had already failed in the third run: its 15 were 10 testMaterialAlgo + 4 testDiagnostics + 1 testSettings, not 14 + 1, so the single-test skip could never have fixed the run. Blast radius over the whole suite: two helpers compare stderr exactly, assertOutputStreams() (exact line count, all 4 success-path callers) and assertEnvSetting() with expectedOutputPattern="" (1 caller). Everything else that reads stderr uses assertIn/assertRegex/returncode, and the rtx suite captures nothing. Replaced the usd-exchange test-skip patch with an OpenUSD patch (0002-Skip-the-cache-line-size-assumption-check-on-riscv64.patch, To upstream) that gates only the cache-line comparison in pxr/base/arch/assumptions.cpp on !ARCH_CPU_RISCV. riscv64 has no architectural line size, glibc riscv sysconf reads the kernel''s firmware-derived AT_L1D_CACHEGEOMETRY auxv (0 when undescribed), and the warning also printed on every user''s import pxr. Both patches now apply from the single Patch OpenUSD step (00*.patch); the Patch usd-exchange step is gone. Pushed b2b5e9d31aa; gotcha 630 rewritten (and 484 cross-referenced). Fifth run (37168268413): cp312 and cp313 green (build + full unit suite), cp310 and cp311 failed identically twice (attempt 1 and a rerun_failed_jobs) at the first pip install of the test step: "usd_exchange-3.0.0-cp310-cp310-manylinux_2_39_riscv64.whl is not a supported wheel on this platform". Not image skew (each job pulls the image once and docker run reuses the local copy; cp312''s test step even ran after cp310''s) and not a wrong tag. python -m venv seeds pip from the interpreter''s ensurepip bundle, and the job log''s own notice shows 23.0.1 (cp310) and 24.0 (cp311). Both vendor packaging 21.3, whose _have_compatible_abi lists no riscv64, so they generate no manylinux_*_riscv64 tags at all. pip 24.1+ (packaging 24.1) and the 3.12/3.13 bundles are fine. Fixed in 2c15b2b506e by upgrading pip in the test venv right after creating it; added gotcha 640 (and amended 234''s "/opt/python pip is unaffected" bullet). Sixth run pending.'
 - pkg: sqlcipher3
@@ -7205,28 +7205,28 @@ packages:
   version: 5.3.29
   home: https://github.com/BobTheBuidler/faster-eth-utils
   repo: https://github.com/BobTheBuidler/faster-eth-utils
-  status: ci-running
+  status: published
   pr: 2648
   notes: '60 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev. mypyc-compiled (setup.py mypycify, group faster_eth_utils), cibuildwheel from checkout. Build/runtime deps all have riscv64 wheels upstream (cchecksum, cytoolz, pydantic-core cp312-cp314t) or on RISE (pycryptodome); safe-pysha3 (via cchecksum) is sdist-only everywhere and builds from source. Test suite (pytest tests/core, 775 tests) rehearsed on x86 against upstream wheel with tests/fixtures/build/pyproject.toml staged. PR https://github.com/riseproject-dev/python-wheels/pull/2648.'
 - pkg: gseapy
   version: 1.3.1
   home: https://github.com/zqfang/gseapy
   repo: https://github.com/zqfang/GSEApy
-  status: ci-running
+  status: published
   pr: 2650
   notes: 'setuptools-rust PyO3 extension (pyo3 0.29, not abi3), pure-Rust crate graph; per-interpreter cp312/cp313/cp314/cp314t. Deps (numpy/scipy/pandas/matplotlib) resolve from pypi.riseproject.dev for cp312-cp314 (PIP_ONLY_BINARY: PyPI matplotlib 3.11.2 is newer than our 3.11.1). cp314t builds but tests are skipped: our registry has no cp314t riscv64 pandas (gotcha 149 shape). Draft PR #2650 opened, CI running.'
 - pkg: no-defaults
   version: 2026.9.1
   home: https://github.com/adamtheturtle/no-defaults
   repo: https://github.com/adamtheturtle/no-defaults
-  status: ci-running
+  status: published
   pr: 2647
   notes: 'PR #2647 opened (draft), run 37078957963. 1 Linux wheel upstream (abi: py3) but NOT pure Python: py3-none-manylinux_2_39_x86_64 (~2.9 MB) is a maturin bindings = "bin" Rust CLI (gotchas 117/145), same author and shape as strict-kwargs (#2559), whose workflow it mirrors (gotcha 150): maturin-action in manylinux_2_39 riscv64, one wheel, test matrix 3.12/3.13/3.14/3.14t. Runtime dep ty ships riscv64 wheels on PyPI (manylinux_2_31_riscv64). Test job runs two of upstream''s cargo cli.rs cases (real_project fixture JSON, --fix call-site updates) against the installed binary; rehearsed green locally against upstream''s x86_64 wheel. Worktree .claude/worktrees/no-defaults, branch no-defaults.'
 - pkg: openmm
   version: 8.6.0
   home: https://openmm.org
   repo: https://github.com/openmm/openmm
-  status: ci-running
+  status: published
   pr: https://github.com/riseproject-dev/python-wheels/pull/2651
   notes: '10 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev. Triage: feasible. PyPI ships no sdist; upstream wheels come from openmm/openmm-build-wheels BuildWheels.yml (manylinux_2_34 x86_64+aarch64 containers, CMake make install + make PythonBdistWheel, then add_plugins_and_headers.py + auditwheel with libOpenMM*.so excluded; CUDA/HIP as separate OpenMM-CUDA-*/OpenMM-HIP-* wheels). Portability evidence: vectorize.h dispatches NEON/PPC/SSE and otherwise includes vectorize_portable.h (GCC vector extensions, scalar exp/log), added by upstream PRs #4328/#4466 as the generic backup; TargetArch.cmake returns ''unknown'' on riscv64 so X86/ARM/PPC stay unset -> no -msse/-mavx flags, vecmath and asmjit skipped (Lepton uses its interpreter), SFMT built with -UHAVE_SSE2, lbfgs without USE_SSE; CpuPlatform/CpuPme register via isVec4Supported() which is true in the portable header, so the CPU platform exists on riscv64. Debian already builds openmm 8.1.2 on riscv64 (buildd Installed, rv-manda-01) via a SIMDe patch that #4328 superseded. Residual risk: hardware.h''s x86 cpuid inline asm is guarded only by !__PPC__/__ARM*__/__LOONGARCH64__, so it is parsed on riscv64; it sits in an unused static function and GCC only rejects impossible asm constraints when it expands the function (reproduced on x86 g++: error at -O0, clean at -O3), and the Release build is -O3; a To-upstream ''&& !defined(__riscv)'' patch is the fix if CI disagrees. Workflow: container manylinux_2_39_riscv64, checks out openmm-build-wheels at db99636 (Build 8.6.0) and applies its library_path/cxx11_abi/link_args patches + uses its add_plugins_and_headers.py; dnf doxygen/zip/opencl-headers/ocl-icd (CRB/AppStream on Rocky 10 riscv64); OpenCL plugin built like upstream; C++ built once with BUILD_TESTING=OFF (upstream compiles ctest but never runs it), bindings looped cp312/cp313/cp314 (no free-threaded upstream); test job per python runs testInstallation (CPU vs Reference forces), asserts the CPU platform is registered, and runs wrappers/python/tests with pytest -n auto as upstream CI.yml does. One patch (To upstream): stage docs-source/licenses into the Python staging dir + license_files, since upstream''s wheel ships no licence text at all. Worktree .claude/worktrees/openmm, branch openmm.'
 - pkg: pyqtwebengine
@@ -7254,7 +7254,7 @@ packages:
   version: 0.12.4
   home: https://github.com/MarkusSintonen/pyreqwest
   repo: https://github.com/MarkusSintonen/pyreqwest
-  status: ci-running
+  status: published
   pr: https://github.com/riseproject-dev/python-wheels/pull/2654
   notes: '36 Linux wheels upstream (abi: cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: pyqtwebengine-qt5
@@ -7296,7 +7296,7 @@ packages:
   version: 1.7.5
   home: https://dynamictimewarping.github.io/
   repo: https://github.com/DynamicTimeWarping/dtw-python
-  status: ci-running
+  status: published
   pr: https://github.com/riseproject-dev/python-wheels/pull/2652
   notes: 'PR #2652 (draft) CI green: run 37087145670 built and tested all four riscv64 legs (cp312/cp313/cp314/cp314t; 18 passed, 4 skipped on cp312), publish dry-run green, pr-checks green. Awaiting maintainer review/merge. 14 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp39); no riscv64 on PyPI or pypi.riseproject.dev. Triaged feasible: one setuptools+Cython extension (dtw._dtw_utils from _dtw_utils.pyx + dtw_core.c, the R dtw package core) using only stdlib/math/alloca, no SIMD or arch intrinsics. Build deps numpy>=2 and Cython; runtime numpy+scipy, both on the registry for all four interpreters (PIP_ONLY_BINARY=numpy,scipy). Workflow mirrors upstream build_wheels_on_release.yml (cibuildwheel, musllinux skipped as upstream does, pytest {project}/tests). Upstream x86 wheel carries COPYING (GPL-3.0-or-later) in dist-info/licenses and has no .libs/, so no gpl_sources job; the workflow asserts .so present, COPYING present, no dtw_python.libs/. Local x86 cp314 build: 18 passed, 4 skipped (matplotlib plot tests, as upstream). Worktree .claude/worktrees/dtw-python, branch dtw-python.'
 - pkg: libscrc
@@ -7317,14 +7317,14 @@ packages:
   version: 0.3.12
   home: https://pypi.org/project/speedict/
   repo: https://pypi.org/project/speedict/
-  status: ci-running
+  status: published
   pr: https://github.com/riseproject-dev/python-wheels/pull/2658
   notes: 'PR #2658 opened (draft), CI running. Source is rocksdict/RocksDict tag speedict-v0.3.12 (Speedb 2.7.0 = RocksDB 8.1.1 fork via Congyuwang/rust-rocksdb tag speedict-v2.7.0, libspeedb-sys builds C++ from source with cc + bindgen 0.65). Triage: x86 SSE/PCLMUL flags are target-gated in build.rs, port_posix/crc32c have portable fallbacks, range_tree toku_time.h (rdcycle) not in lib sources; compression crates are vendored C. Mirrors build-rocksdict.yml. Matrix cp312/cp313 only: pyo3 0.19 (gotcha 322/306).'
 - pkg: bittensor-wallet
   version: 4.1.1
   home: https://github.com/opentensor/btwallet
   repo: https://github.com/opentensor/btwallet
-  status: ci-running
+  status: published
   pr: https://github.com/riseproject-dev/python-wheels/pull/2660
   notes: 'PR #2660 opened (draft), CI running. Upstream pushes no tags: pinned release commit 5d63be5 (tree identical to the 4.1.1 sdist, gotcha 103). Triage: no ring/blst; secp256k1-sys/openssl portable; blocker was libsodium-sys 0.2.7 passing --host=riscv64gc-unknown-linux-gnu, which every config.sub (incl. 2026-05) rejects, so the before-script builds its bundled libsodium 1.0.18 static (--with-pic, make check) and sets SODIUM_LIB_DIR. Mirrors upstream release.yml linux job via maturin-action (same before-script as build-portforward.yml). Matrix cp312/cp313/cp314 (upstream ships no cp314t, pymodule lacks gil_used=false). Tests: upstream pytest minus test_config_parsing (bittensor has no riscv64 wheel). Upstream repo superseded by RaoFoundation/subtensor monorepo.'
 - pkg: xpress
@@ -7405,21 +7405,21 @@ packages:
   version: 4.1.0
   home: https://bleak-esphome.readthedocs.io
   repo: https://github.com/bluetooth-devices/bleak-esphome
-  status: ci-running
+  status: published
   pr: 2659
   notes: '21 Linux wheels upstream (abi: cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev. Genuinely compiled (not mislabeled pure): poetry build script cythonizes src/bleak_esphome/backend/scanner.py (+ scanner.pxd) into a C extension, falling back silently to pure Python unless REQUIRE_CYTHON is set. Built with REQUIRE_CYTHON=1 on x86 (latest Cython 3.3.0 compiles it fine, no Cython<3.3 pin needed unlike habluetooth) and all 245 upstream tests passed against the installed wheel. Every compiled runtime dep is on our registry for cp312-cp314t (aioesphomeapi 46.6.0, habluetooth 7.1.2, bluetooth-data-tools 1.29.24, lru-dict 1.4.1, zeroconf 0.151.5, cryptography, cffi; dbus-fast ships riscv64 upstream), none for cp311, so default four-interpreter matrix. Workflow mirrors build-habluetooth.yml/build-aioesphomeapi.yml: manylinux only (no musl cryptography), test zeroconf<0.151.0 dev pin dropped (0.150.x not on registry). Draft PR #2659 opened 2026-10-03.'
 - pkg: habachen
   version: 0.6.0
   home: https://github.com/Hizuru3/python-habachen
   repo: https://github.com/Hizuru3/python-habachen
-  status: ci-running
+  status: published
   pr: 2656
   notes: '36 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp38,cp39); no riscv64 on PyPI or pypi.riseproject.dev. Single portable C file (ext/habachen.c, Python.h only, no SIMD intrinsics, declares Py_MOD_GIL_NOT_USED) so cp312/cp313/cp314/cp314t manylinux. Tag v0.6.0 carries placeholder version 0.6.0rc; upstream upload.yml seds setup.py/_version.py at release (commit 339e197), mirrored as its Update Version step (stamped files byte-identical to 339e197). Tests: upstream doctest.yml (habachen_doctest.py over README.md + docs/_sources) via test-sources. Local x86 build with -funsigned-char passes all doctests. musllinux dropped per repo convention.'
 - pkg: python-pkcs11
   version: 0.9.5
   home: https://python-pkcs11.readthedocs.io/en/latest/
   repo: https://github.com/pyauth/python-pkcs11
-  status: ci-running
+  status: published
   pr: 2657
   notes: 'Cython extension over vendored PKCS#11 headers only; the module is dlopen''d at runtime, so no link-time native dep. cibuildwheel build-from-checkout, cp312/cp313/cp314 (upstream skips free-threaded). Wheels build fine; tests run upstream''s suite against SoftHSMv2 built from a pinned main commit in before-all (Rocky 10 AppStream softhsm 2.6.1 aborts on an empty-plaintext AES-GCM vector). Rocky OpenSSL needs crypto policy LEGACY for the SHA-1 RSA tests and drops P-192, so test_ecc::test_derive_key is deselected. First full run on cp314: 150 passed before those fixes, ML-DSA tests pass.'
 - pkg: unicode-segmentation-rs
@@ -7433,7 +7433,7 @@ packages:
   version: 0.10.0
   home: https://pyre-check.org/
   repo: https://github.com/facebook/Pysa
-  status: ci-running
+  status: published
   pr: https://github.com/riseproject-dev/python-wheels/pull/2661
   notes: '1 Linux wheel upstream: pyre_check-0.10.0-py3-none-manylinux1_x86_64.whl, a py3-none-any wheel renamed by scripts/pypi/build_pypi_package.py (inner WHEEL Tag: py3-none-any). Its only arch content is one x86_64 OCaml executable, data/bin/pyre.bin (131 MB, e_machine 62, OCaml 4.14.2, GCC 11.5). It is not a multi-arch bundle and not a dispatcher. Source is public (MIT). facebook/pyre-check was archived in June 2026; 0.10.0 comes from facebook/Pysa tag v0.10.0, and the PyPI upload was made from f3057a5 a day later, a packaging-only commit that renames the module to Pysa. Feasible, same shape as the published semgrep port (gotcha 95). scripts/setup.py pins ocaml-variants.4.14.2+options with flambda; 4.14.2 configure.ac maps riscv64-*-linux* to arch=riscv. Ubuntu noble ships opam 2.1.5 for riscv64, which mirrors upstream''s apt opam. The deps are core v0.16.2, re2 (vendored RE2, which falls back to generic barriers), pyre-ast (vendors CPython 3.12 and builds it with ./configure), capnp (generated .ml is checked in) and lwt/menhir/yojson, and none of them uses core_unix or ocaml_intrinsics. Two real riscv64 defects in hack_parallel hh_shared.c are fixed by a patch. (1) The spin-wait falls back to x86 `pause`, which does not assemble on rv64gc without Zihintpause (checked with clang); the patch emits it with .insn. (2) The shared heap is mapped with MAP_FIXED at 0x500000000000 (80 TiB), outside Sv39''s 256 GiB (gotcha 572); the patch moves it to 0x1000000000 on riscv64. The packaging script also needed the riscv64 ld.so and a manylinux_2_39_riscv64 suffix. The Python packaging step was rehearsed on x86 with setuptools<70 and wheel==0.38.4, and its metadata and layout match the released wheel. Runtime deps resolve for cp312 (pyrefly, libcst, lxml, psutil and nh3 from PyPI or our registry; testslide is pure Python and installs from its sdist). The test is upstream''s deliberately_vulnerable_flask_app Pysa integration test, run against the installed wheel. Draft PR #2661, first CI run 37104401350. That run failed at the very end of the build job (37104401350, job 111150126490), after the wheel packaged successfully: scripts/pypi/build_pypi_package.py builds under tempfile.mkdtemp() (default /tmp) then os.replace()s into --output-dir (../dist); inside the riscv64/ubuntu:24.04 podman container /tmp is the container''s own overlay/tmpfs, a different device from /workspace (bind-mounted via `podman run -v`), so os.replace() hit OSError 18 Invalid cross-device link. Fixed in the workflow, not upstream''s script, by exporting TMPDIR=/workspace/tmp (mkdir -p''d first) inside riscv64-build.sh before the `python -m pypi` call, so the wheel''s tempdir and ../dist share a device. Second run 37114940382 (job 111179847610, on ac09e42f638): the TMPDIR fix held, the wheel built and installed, pyre.bin ran (shared memory at the patched address, taint config and models parsed), then the flask-app test died with `pyrefly.pysa.json: No such file or directory`, exit 14. Root cause, not riscv64-specific and not from TMPDIR: with no pyrefly config, Pyrefly auto-roots at /workspace/pyproject.toml and walks the whole checkout following links; scripts/setup.py had made source/pyrefly.exe a symlink to the build container''s /tmp/buildenv/bin/pyrefly (shutil.which at setup time), which dangles in the separate test container, and pyrefly 1.3.2 treats any dangling symlink in the walk as fatal (anyhow error, exit 1). The Pysa client reads exit 1 as type errors found, so pyre.bin ran on a report that was never written. Deeper, upstream-only: v0.10.0 removed the Pyre1 backend (--use-pyre1 raises), so tools/pysa_integration_tests always compares against result.pyrefly.json, which the app never shipped (only Pyre1 result.json); the runner cannot pass on any arch, and upstream''s pysa.yml badge is failing on main. Fix (81be149ffb9 on pyre-check): keep upstream''s setup.sh, add an empty pyrefly.toml in the app dir to scope Pyrefly to it, run the same `python -mPysa.client.pyre --noninteractive analyze --use-pyrefly --no-verify` the runner runs, and assert taint issues in app.* (prints overlap with the Pyre1 result.json). This still exercises our riscv64 pyrefly wheel and pyre.bin''s capnp report ingestion end to end. Not validated locally (no container daemon); awaiting CI.'
 - pkg: hydraters
@@ -7461,7 +7461,7 @@ packages:
   version: 4.10.2
   home: https://kreuzberg.dev
   repo: https://github.com/kreuzberg-dev/kreuzberg-lts
-  status: ci-running
+  status: published
   pr: https://github.com/riseproject-dev/python-wheels/pull/2681
   notes: 'Upstream ships a single cp310-abi3 wheel per platform (PyO3 abi3-py310), hence only 2 Linux wheels. Rust/maturin, features bundled-pdfium + full: tesseract 5.5.2/leptonica 1.87.0 built from source by crates/kreuzberg-tesseract, libpdfium embedded via include_bytes!, ONNX Runtime linked dynamically (ORT_LIB_LOCATION + ORT_PREFER_DYNAMIC_LINK, grafted into kreuzberg.libs). Blockers and their fixes: (1) bblanchon/pdfium-binaries has no linux-riscv64 asset (build.rs would even map riscv64 to x64) -> cross-build bblanchon''s own recipe at chromium/7678 (upstream publish.yaml PDFIUM_VERSION) with the liteparse skia/BUILD.gn riscv64 patch, fed via KREUZBERG_PDFIUM_PREBUILT; (2) Microsoft ships no riscv64 ORT archive -> libonnxruntime.so.1.30.0 from our onnxruntime riscv64 wheel (self-contained, GLIBC_2.38). maturin-action forwards only prefixed env vars, so PDFIUM_VERSION never reaches upstream''s Linux container and KREUZBERG_PDFIUM_PREBUILT must be exported in before-script-linux. PR #2681 opened; CI running.'
 - pkg: aspose-slides
@@ -7496,7 +7496,7 @@ packages:
   version: 0.9.0
   home: https://github.com/codypiersall/pynng
   repo: https://github.com/codypiersall/pynng
-  status: publishing
+  status: published
   pr: 1454
   notes: '32 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp38,cp39); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: py-ed25519-zebra-bindings
@@ -7854,7 +7854,7 @@ packages:
   version: 2.0.2
   home: https://github.com/deepmind/open_spiel
   repo: https://github.com/deepmind/open_spiel.git
-  status: ci-running
+  status: published
   pr: 2711
   notes: '8 Linux wheels upstream (abi: cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: depthai
@@ -7994,7 +7994,7 @@ packages:
   version: 1.9.2
   home: https://github.com/cvxpy/cvxpy
   repo: https://github.com/cvxpy/cvxpy
-  status: blocked-on-dependency
+  status: queued
   pr: null
   notes: 'Same source tree and same blocker as the full `cvxpy` entry above (line ~436): PyPI METADATA for cvxpy-base 1.9.2 shows an unconditional (non-extra) install_requires on sparsediffpy>=0.3.0,<0.4.0, identical to cvxpy itself - cvxpy-base is not a lighter dependency set, just the same cvxcore C++ extension packaged separately. sparsediffpy has no riscv64 wheel anywhere and its 0.3.0 sdist cannot build with any installable scikit-build-core (filed upstream, already patched in this repo''s open PR #920). The cvxpy entry''s note already captures a fully validated, ready-to-author build-cvxpy.yml (plain cibuildwheel, Eigen vendored, SWIG pre-generated, no patches needed for cvxpy''s own wheel) - once PR #920 merges and publishes, re-author the same workflow under cvxpy-base''s own package name/matrix (cp312/cp313/cp314, no cp314t per the same scs/highspy gap) rather than re-researching from scratch.'
 - pkg: intel-opencl-rt
@@ -10042,7 +10042,7 @@ packages:
   version: 1.5.2.20260107.153442
   home: https://github.com/Dynatrace/OneAgent-SDK-for-Python
   repo: https://github.com/Dynatrace/OneAgent-SDK-for-Python
-  status: publishing
+  status: published
   pr: 2274
   notes: '2 Linux wheels upstream (abi: py2.py3); no riscv64 on PyPI or pypi.riseproject.dev.
     Triage (2026-09-21): looks feasible, not a park candidate -- deferred only because of the
@@ -10883,7 +10883,7 @@ packages:
   version: 2.4.0
   home: https://rigour.followthemoney.tech/
   repo: https://github.com/opensanctions/rigour.git
-  status: publishing
+  status: published
   pr: https://github.com/riseproject-dev/python-wheels/pull/1473
   notes: '20 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: passagemath-cmr
@@ -11408,7 +11408,7 @@ packages:
   version: 5.0.13
   home: https://github.com/biosustain/swiglpk
   repo: https://github.com/biosustain/swiglpk
-  status: publishing
+  status: published
   pr: https://github.com/riseproject-dev/python-wheels/pull/1379
   notes: 'SWIG bindings for GLPK (GPLv3); GLPK has no riscv64 distro package, so build-swiglpk.yml builds it from the pinned upstream tarball (ftp.gnu.org) in CIBW_BEFORE_ALL_LINUX, with swig/gmp-devel from Rocky 10''s repos. gpl_sources job collects gcc/gmp RPM sources plus the pinned GLPK tarball. PR #1379 open, watching CI.'
 - pkg: dolphin-memory-engine
@@ -11527,7 +11527,7 @@ packages:
   version: 0.4.18
   home: https://github.com/ail-project/faup-rs
   repo: https://github.com/ail-project/faup-rs
-  status: publishing
+  status: published
   pr: https://github.com/riseproject-dev/python-wheels/pull/1474
   notes: '104 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp38,cp39,pp310,pp311,pp39); no riscv64 on PyPI or pypi.riseproject.dev. CI green: cp312/cp313/cp314/cp314t on manylinux_riscv64, publish dry-run OK.'
 - pkg: cyseq
