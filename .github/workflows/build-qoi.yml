@@ -69,14 +69,23 @@ jobs:
         env:
           CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # USE_CYTHON=1 matches upstream's own [tool.cibuildwheel] table
-          # (re-cythonize rather than build from the checked-in qoi.c).
-          # numpy is both a build-time header dependency (setup.py's
-          # np.get_include()) and a runtime one (install_requires); only our
-          # registry has it for riscv64, and only-binary keeps a newer PyPI
-          # release from winning the resolution and compiling from sdist.
-          CIBW_ENVIRONMENT: >-
-            USE_CYTHON=1
+          # 0.8.0 rewrote the extension in Rust (PyO3 via maturin), replacing
+          # the setup.py+Cython build 0.7.2 still needs. maturin's own Rust
+          # auto-install (puccinialin) computes the wrong rustup target triple
+          # for riscv64 ("riscv64-unknown-linux-gnu" instead of
+          # "riscv64gc-unknown-linux-gnu") and fails, so a working toolchain
+          # has to be on PATH before it gets the chance to try, same as
+          # build-minijinja.yml.
+          CIBW_BEFORE_ALL_LINUX: ${{ matrix.version != '0.7.2' && 'curl --proto ''=https'' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y' || 'true' }}
+          # USE_CYTHON=1 matches upstream's own [tool.cibuildwheel] table for
+          # 0.7.2 (re-cythonize rather than build from the checked-in qoi.c).
+          # numpy is both a build-time header dependency (0.7.2's setup.py
+          # np.get_include(), 0.8.0's pyo3-numpy) and a runtime one
+          # (install_requires); only our registry has it for riscv64, and
+          # only-binary keeps a newer PyPI release from winning the
+          # resolution and compiling from sdist.
+          CIBW_ENVIRONMENT_LINUX: >-
+            ${{ matrix.version == '0.7.2' && 'USE_CYTHON=1' || 'PATH="$PATH:$HOME/.cargo/bin"' }}
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             PIP_ONLY_BINARY=numpy,pillow
 
@@ -87,7 +96,10 @@ jobs:
           for whl in sys.argv[1:]:
               names = zipfile.ZipFile(whl).namelist()
               exts = {n.split("/")[-1].split(".")[0] for n in names if n.endswith(".so")}
-              assert exts == {"qoi"}, exts
+              # 0.7.2's Cython extension is the top-level `qoi` module; 0.8.0's
+              # maturin/PyO3 build compiles the `_qoi` submodule (Cargo.toml's
+              # [lib] name, from pyproject.toml's module-name = "qoi._qoi").
+              assert exts == ({"qoi"} if "${{ matrix.version }}" == "0.7.2" else {"_qoi"}), exts
               assert any(n.endswith("dist-info/licenses/LICENSE") for n in names), names
               print(whl, "ok")
           EOF
