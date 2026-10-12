@@ -34,7 +34,6 @@ permissions:
 
 env:
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
 
 jobs:
   setup:
@@ -46,7 +45,7 @@ jobs:
   build_wheels:
     needs: [setup]
     if: needs.setup.outputs.versions != '[]'
-    name: Build selectolax ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    name: Build selectolax ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 90
     strategy:
@@ -54,7 +53,6 @@ jobs:
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
         python: ["cp312", "cp313", "cp314", "cp314t"]
-        libc: [manylinux, musllinux]
 
     env:
       SELECTOLAX_VERSION: ${{ matrix.version }}
@@ -79,20 +77,26 @@ jobs:
       - name: Patch selectolax source
         run: git apply python-wheels/patches/selectolax/${{ env.SELECTOLAX_VERSION }}/*.patch
 
+      # musllinux is dropped: all 4 interpreters segfault (SIGSEGV, exit 139) in
+      # tests/test_encoding.py::test_http_equiv_content_type_is_honored, a plain charset-
+      # detection test with no recursion, while the identical manylinux legs pass. 0.4.11-
+      # 0.4.13 published musllinux wheels fine, so this is a 1.0.0 regression, most likely
+      # in the lexbor bump this release carries; upstream's own release workflow never runs
+      # the test suite against its musllinux wheels, so a musl-only memory bug like this
+      # would ship there unnoticed. Revisit on a future selectolax release.
       - name: Build wheels
         uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
         env:
           CIBW_ARCHS: riscv64
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
           CIBW_TEST_REQUIRES: pytest
           CIBW_TEST_SOURCES: tests
           CIBW_TEST_COMMAND: python -m pytest tests -v
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: selectolax-${{ env.SELECTOLAX_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          name: selectolax-${{ env.SELECTOLAX_VERSION }}-${{ matrix.python }}-manylinux_riscv64
           path: wheelhouse/*.whl
           if-no-files-found: error
 
@@ -111,4 +115,4 @@ jobs:
     secrets:
       app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
     with:
-      artifact-pattern: selectolax-${{ matrix.version }}-*riscv64
+      artifact-pattern: selectolax-${{ matrix.version }}-*-manylinux_riscv64
