@@ -88,9 +88,30 @@ jobs:
             cp /usr/local/share/doc/CGAL/LICENSE {project}/LICENSE.CGAL &&
             cp /usr/local/share/doc/CGAL/LICENSE.GPL {project}/LICENSE.CGAL.GPL &&
             cp /usr/local/share/doc/CGAL/LICENSE.LGPL {project}/LICENSE.CGAL.LGPL
+          # CIBW_BEFORE_ALL_LINUX replaces upstream's pyproject.toml [tool.cibuildwheel.linux]
+          # before-all rather than adding to it, so it has to repeat that before-all's own
+          # boost/CGAL install (the CIBW_BEFORE_BUILD license copy above depends on it) in
+          # addition to the rustup install below.
+          # The `test` extra (cp312/313/314) pulls in graphed, a maturin/PyO3 package with no
+          # riscv64 wheel. maturin's own Rust auto-install (puccinialin) computes the wrong rustup
+          # target triple for riscv64 and fails, so install a working toolchain via rustup.rs
+          # before it gets the chance to try, same as build-minijinja.yml/build-qoi.yml.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl -L https://archives.boost.io/release/1.88.0/source/boost_1_88_0.tar.bz2 -o boost_1_88_0.tar.bz2 &&
+            tar --bzip2 -xf boost_1_88_0.tar.bz2 &&
+            mv boost_1_88_0/boost /usr/include/boost &&
+            curl -L https://github.com/CGAL/cgal/releases/download/v6.0.1/CGAL-6.0.1-library.zip -o CGAL-6.0.1-library.zip &&
+            unzip -q CGAL-6.0.1-library.zip &&
+            mkdir CGAL-6.0.1/build &&
+            cmake -S CGAL-6.0.1 -B CGAL-6.0.1/build -DCMAKE_BUILD_TYPE="Release" &&
+            cmake --build CGAL-6.0.1/build --clean-first &&
+            cmake --install CGAL-6.0.1/build &&
+            rm -r CGAL-6.0.1 CGAL-6.0.1-library.zip &&
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           # Our registry carries awkward-cpp 56, not PyPI's newest 57: stay on awkward 2.13.0.
           CIBW_ENVIRONMENT: >-
             SETUPTOOLS_SCM_PRETEND_VERSION_FOR_FASTJET=${{ env.FASTJET_VERSION }}
+            PATH="$PATH:$HOME/.cargo/bin"
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             PIP_ONLY_BINARY=numpy,awkward-cpp,pyarrow,pandas,boost-histogram
           # pandas (via dask-awkward[test]) has no free-threaded riscv64 wheel, so cp314t gets
