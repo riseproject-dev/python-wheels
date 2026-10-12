@@ -1,0 +1,72 @@
+From ecea0c42d8146c1a216773266edfcf40b14fc1ce Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 12 Oct 2026 20:33:20 +0000
+Subject: [PATCH] tests: make the raising callbacks in
+ test_error_callback_exception_different_error_types raise once
+
+test_error_callback_exception_different_error_types installs three
+error_cbs that raise unconditionally, asserts each exception surfaces out
+of consume(), and then calls close() with the callback still armed.
+librdkafka keeps retrying the unresolvable bootstrap broker, and close()
+dispatches whatever error is queued, so if a retry lands between the
+assertion and close() the callback fires again and its exception escapes
+close(), failing the test. Seen on a riscv64 runner as a RuntimeError out
+of consumer3.close(); reproduced on x86_64 by inserting time.sleep(1.2)
+before each close() -- the test fails there unmodified and passes with
+this change.
+
+Raise only on the first invocation, the same way 4170247 ("[NOGIL] Add
+Free Threading Support (#2347)") already made the callbacks in
+test_callback_exception_no_system_error raise once. The assertions are
+unchanged; only the redundant later raises during close() go away.
+
+Upstream-Status: To upstream [not submitted yet: confluentinc requires a signed CLA before a pull request can be accepted]
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ tests/test_Consumer.py | 25 +++++++++++++++++++------
+ 1 file changed, 19 insertions(+), 6 deletions(-)
+
+diff --git a/tests/test_Consumer.py b/tests/test_Consumer.py
+index 9d60f73..4c8e30a 100644
+--- a/tests/test_Consumer.py
++++ b/tests/test_Consumer.py
+@@ -581,17 +581,30 @@ def test_callback_exception_no_system_error():
+ def test_error_callback_exception_different_error_types():
+     """Test error callback with different exception types"""
+ 
++    # Each callback raises only the first time: librdkafka keeps retrying the
++    # unresolvable broker, and close() dispatches any error queued since the
++    # assertion, so an unconditional raise can escape the unguarded close().
++    kafka_errors = []
++    value_errors = []
++    runtime_errors = []
++
+     def error_cb_kafka_exception(error):
+-        """Error callback that raises KafkaException"""
+-        raise KafkaException(error)
++        """Error callback that raises KafkaException, but only the first time"""
++        kafka_errors.append(error)
++        if len(kafka_errors) == 1:
++            raise KafkaException(error)
+ 
+     def error_cb_value_error(error):
+-        """Error callback that raises ValueError"""
+-        raise ValueError(f"Custom error: {error}")
++        """Error callback that raises ValueError, but only the first time"""
++        value_errors.append(error)
++        if len(value_errors) == 1:
++            raise ValueError(f"Custom error: {error}")
+ 
+     def error_cb_runtime_error(error):
+-        """Error callback that raises RuntimeError"""
+-        raise RuntimeError(f"Runtime error: {error}")
++        """Error callback that raises RuntimeError, but only the first time"""
++        runtime_errors.append(error)
++        if len(runtime_errors) == 1:
++            raise RuntimeError(f"Runtime error: {error}")
+ 
+     # Test with KafkaException
+     consumer1 = TestConsumer(
+-- 
+2.43.0
+
