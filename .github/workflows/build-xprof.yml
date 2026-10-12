@@ -46,6 +46,13 @@ env:
   RULES_PYTHON_VERSION: '0.33.2'
   RULES_JAVA_VERSION: '7.6.5'
   HERMETIC_PYTHON_VERSION: '3.12'
+  # aspect_bazel_lib version rules_js 2.1.0 pins (xprof's own WORKSPACE calls
+  # rules_js_dependencies()); its bundled yq toolchain needs a riscv64 fix below.
+  ASPECT_BAZEL_LIB_VERSION: '2.9.1'
+  # mikefarah/yq started publishing linux_riscv64 release binaries at this version;
+  # aspect_bazel_lib's own mirror table predates that and has no riscv64 entry.
+  YQ_RISCV64_VERSION: '4.47.1'
+  YQ_RISCV64_INTEGRITY: 'sha384-PQobvA4QlrqMpF46M1RYGqYA1+rEhX4zVMOm4rUsTrS7DwKjWOW7Vk1TArtE2ju2'
 
 jobs:
   setup:
@@ -225,6 +232,9 @@ jobs:
             -w /work \
             -e HERMETIC_PYTHON_VERSION \
             -e XPROF_VERSION \
+            -e ASPECT_BAZEL_LIB_VERSION \
+            -e YQ_RISCV64_VERSION \
+            -e YQ_RISCV64_INTEGRITY \
             "${MANYLINUX_RISCV64_IMAGE}" \
             bash <<'SCRIPT' 2>&1 | tee build.log
           set -eux
@@ -254,6 +264,28 @@ jobs:
 
           cd /work/xprof
 
+          # aspect_bazel_lib (pulled in by rules_js_dependencies(), for the npm/node
+          # toolchain xprof's own WORKSPACE sets up for its frontend) resolves a "yq"
+          # host toolchain from a YQ_PLATFORMS table with no riscv64 entry
+          # (bazel-contrib/bazel-lib, lib/private/yq_toolchain.bzl). WORKSPACE files are
+          # evaluated unconditionally top-to-bottom regardless of the requested target,
+          # so even this native-only build hits xprof's own `load("@npm//:repositories.bzl",
+          # ...)` and fails before reaching //xprof/pywrap at all ("Cycle in the workspace
+          # file detected ... @@yq_linux_riscv64" - actually a missing-repo error, since
+          # aspect_bazel_lib never defines a yq repo for a platform absent from its table).
+          # mikefarah/yq does publish a linux_riscv64 binary (since v4.47.1); patch it in.
+          mkdir -p /tmp/aspect_bazel_lib
+          curl -fsSLo /tmp/aspect_bazel_lib.tar.gz \
+            "https://github.com/aspect-build/bazel-lib/releases/download/v${ASPECT_BAZEL_LIB_VERSION}/bazel-lib-v${ASPECT_BAZEL_LIB_VERSION}.tar.gz"
+          tar -xzf /tmp/aspect_bazel_lib.tar.gz -C /tmp/aspect_bazel_lib --strip-components=1
+          YQ_TOOLCHAIN_BZL=/tmp/aspect_bazel_lib/lib/private/yq_toolchain.bzl
+          sed -i '0,/^}$/{s/^}$/    "linux_riscv64": struct(\n        compatible_with = [\n            "@platforms\/\/os:linux",\n            "@platforms\/\/cpu:riscv64",\n        ],\n    ),\n}/}' \
+            "${YQ_TOOLCHAIN_BZL}"
+          sed -i "/^YQ_VERSIONS = {\$/a\\    \"${YQ_RISCV64_VERSION}\": {\\n        \"linux_riscv64\": \"${YQ_RISCV64_INTEGRITY}\",\\n    }," \
+            "${YQ_TOOLCHAIN_BZL}"
+          sed -i "s/^DEFAULT_YQ_VERSION = \"4.25.2\"\$/DEFAULT_YQ_VERSION = \"${YQ_RISCV64_VERSION}\"/" \
+            "${YQ_TOOLCHAIN_BZL}"
+
           # Only the native extension: the frontend and every pure-Python file come
           # from the reference package built in the reference_build job, which is
           # architecture-independent (confirmed byte-identical across upstream's own
@@ -267,17 +299,24 @@ jobs:
             --repo_env=PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             --strategy=Javac=standalone
             --curses=no --show_progress_rate_limit=60
+            --override_repository=aspect_bazel_lib=/tmp/aspect_bazel_lib
           )
           TARGET=//xprof/pywrap:profiler_plugin_c_api.so
 
           # patches/xprof/<version> are against @llvm-raw (the LLVM @xla pins), not
-          # xprof: the image's clang 21.1.8 crashes on MLIR's BuiltinDialectBytecode.cpp
-          # (llvm/llvm-project#188249). Fetch without building, then patch in place.
+          # xprof: some versions' @xla pin a clang-21-vulnerable LLVM commit that
+          # crashes on MLIR's BuiltinDialectBytecode.cpp (llvm/llvm-project#188249).
+          # Later xprof releases can pin an LLVM commit past the upstream fix and need
+          # no patch at all, so patches/xprof/<version>/ may not exist; nullglob makes
+          # the loop a no-op then instead of handing git the literal glob string.
+          # Fetch without building, then patch in place.
           bazel build "${BAZEL_FLAGS[@]}" --nobuild "${TARGET}"
           LLVM_RAW="$(bazel info output_base)/external/llvm-raw"
+          shopt -s nullglob
           for patch in /work/python-wheels/patches/xprof/"${XPROF_VERSION}"/*.patch; do
             git -C "${LLVM_RAW}" apply -v "${patch}"
           done
+          shopt -u nullglob
           bazel build "${BAZEL_FLAGS[@]}" "${TARGET}"
 
           cp -a /work/dist-reference /work/dist
