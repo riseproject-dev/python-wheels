@@ -1,0 +1,42 @@
+From 8508835032bf42315bf84331ed11bcec53d6a5c0 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sun, 6 Sep 2026 13:07:57 +0200
+Subject: [PATCH] Don't fail the build on backward-cpp's unknown-architecture
+ warning on riscv64
+
+aws-lambda-cpp vendors backward-cpp for enhanced stack traces on crash and
+compiles it under its own -Wall -Wextra -Werror. backward-cpp's
+SignalHandling::handleSignal() dispatches the crash program-counter lookup on
+the target architecture (__aarch64__, __arm__, __ppc__, ...) and has no case
+for riscv64 (__riscv), so it falls into the catch-all #else branch: a bare
+#warning plus an unused ucontext_t* variable in that branch. Neither is a
+correctness bug - the fallback just leaves error_addr unset, so the crash
+handler still fires and unwinds the stack, only without pinpointing the
+faulting instruction - but -Werror turns both into hard compile errors and
+the build never reaches the extension.
+
+-Wno-error=cpp neutralises the #warning-as-error; -Wno-error=unused-variable
+covers the now-unused uctx in that same branch. Both stay warnings (visible in
+the build log) rather than being silenced outright.
+
+Upstream-Status: To upstream [not submitted from this automated port run; needs a pull request against aws/aws-lambda-python-runtime-interface-client]
+---
+ scripts/preinstall.sh | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/scripts/preinstall.sh b/scripts/preinstall.sh
+index fdc436c..71fb871 100755
+--- a/scripts/preinstall.sh
++++ b/scripts/preinstall.sh
+@@ -50,7 +50,7 @@ else
+             cd ./aws-lambda-cpp-$AWS_LAMBDA_CPP_RELEASE/build
+ 
+         $CMAKE .. \
+-                -DCMAKE_CXX_FLAGS="-fPIC" \
++                -DCMAKE_CXX_FLAGS="-fPIC -Wno-error=cpp -Wno-error=unused-variable" \
+                 -DCMAKE_INSTALL_PREFIX="$ARTIFACTS_DIR" \
+                 -DENABLE_LTO=$ENABLE_LTO \
+                 -DCMAKE_MODULE_PATH="$ARTIFACTS_DIR"/lib/pkgconfig && \
+-- 
+2.50.1 (Apple Git-155)
+
