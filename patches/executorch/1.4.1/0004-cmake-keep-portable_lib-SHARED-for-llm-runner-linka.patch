@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000004 Mon Sep 17 00:00:00 2001
+From: RISE Project CI <ci@riseproject.dev>
+Date: Mon, 28 Sep 2026 00:00:00 +0000
+Subject: [PATCH] cmake: keep portable_lib SHARED for llm/runner linkage
+
+0003 converted all six pybind11_add_module(<name> SHARED ...) call sites to
+plain pybind11_add_module(<name> ...) (MODULE), since vanilla manylinux
+images never satisfy Python_add_library(SHARED)'s Python::Python
+(Development.Embed) requirement. portable_lib is not like the other five,
+though: extension/llm/runner/CMakeLists.txt does
+target_link_libraries(_llm_runner PRIVATE ... portable_lib ...), and CMake
+refuses to link a MODULE_LIBRARY into another target at all:
+
+  CMake Error: Target "portable_lib" of type MODULE_LIBRARY may not be
+  linked into another target. One may link only to INTERFACE, OBJECT,
+  STATIC or SHARED libraries, or to executables with the ENABLE_EXPORTS
+  property set.
+
+This is a CMake generator restriction on the target type itself (checked in
+every CMake version's link-dependency analysis), not something any
+pybind11_add_module() argument can opt out of -- so portable_lib has to stay
+SHARED, and the Development.Embed gap has to be closed some other way.
+
+FindPython's __Python_ADD_LIBRARY() (Modules/FindPython/Support.cmake)
+requires the Python::Python target to already exist before it will even
+add_library(... SHARED ...), and then links the new target against it:
+
+  if (NOT type STREQUAL "MODULE" AND NOT TARGET ${prefix}::Python)
+    message (SEND_ERROR "...dependent target '${prefix}::Python' is not
+    defined. Did you miss to request COMPONENT 'Development.Embed'?")
+  ...
+  target_link_libraries (${name} PRIVATE ${prefix}::Python)
+
+Nothing requires that target to carry a real embeddable libpython, though:
+defining Python::Python ourselves as a link-free INTERFACE IMPORTED target
+when Development.Embed didn't find one satisfies the existence check, and
+strip_python_lib() (already applied to portable_lib right below) then
+removes Python::Python/pybind11::embed from portable_lib's real link line
+exactly as it already does for the other five, now-MODULE targets -- so no
+embeddable libpython is ever actually linked, and portable_lib comes out
+identical to what it built as on upstream's own manylinux-builder CI, which
+does have Development.Embed and never exercises this fallback.
+
+Upstream-Status: To upstream [not yet submitted; a real portability bug on any vanilla manylinux image lacking an embeddable libpython (Development.Embed), independent of riscv64, same as 0003]
+
+Signed-off-by: RISE Project CI <ci@riseproject.dev>
+---
+ CMakeLists.txt | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 72ee20a..52da31b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1155,7 +1155,20 @@ if(EXECUTORCH_BUILD_PYBIND)
+   target_link_libraries(util PRIVATE torch c10 executorch extension_tensor)
+
+   # pybind portable_lib
+-  pybind11_add_module(portable_lib extension/pybindings/pybindings.cpp)
++  # Unlike the other five pybind11_add_module() call sites, portable_lib is
++  # itself target_link_libraries()'d into extension/llm/runner's _llm_runner,
++  # and CMake refuses to link a MODULE_LIBRARY into another target -- so this
++  # one has to stay SHARED. Python_add_library(SHARED) unconditionally
++  # requires a Python::Python target to already exist (Development.Embed),
++  # which vanilla manylinux images never provide; define it as a link-free
++  # stand-in when missing so the SHARED add_library() call is allowed to
++  # proceed. strip_python_lib() below removes it (and pybind11::embed) from
++  # portable_lib's real link line either way, so no embeddable libpython is
++  # ever actually required.
++  if(NOT TARGET Python::Python)
++    add_library(Python::Python INTERFACE IMPORTED)
++  endif()
++  pybind11_add_module(portable_lib SHARED extension/pybindings/pybindings.cpp)
+   strip_python_lib(portable_lib)
+   # The actual output file needs a leading underscore so it can coexist with
+   # portable_lib.py in the same python package. PyTorch requires C++20, so
+--
+2.34.1
