@@ -210,7 +210,7 @@ jobs:
             echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope
           fi
 
-      # gotcha 597: riscv64's native-frame reporting can't find the CPython eval-loop or
+      # gotcha 616: riscv64's native-frame reporting can't find the CPython eval-loop or
       # GC-collecting frame on 3.13+ targets (28 identical failures on 3.13/3.14/3.14t,
       # all pass on 3.12) — deselect only those tests on the affected interpreters. With
       # PYTHON_TEST_VERSION=auto, pystack's tests id the target python from
@@ -256,6 +256,17 @@ jobs:
               --deselect "tests/integration/test_subinterpreters.py::test_subinterpreters_with_native[all-python]"
             )
           fi
+          # gotcha 619: pystack 1.7.2 adds signal-frame unwinding tests (bloomberg/pystack#348)
+          # whose fix only taught elfutils' AArch64 backend to unwind through the Linux
+          # rt_sigreturn trampoline (build_scripts/elfutils-aarch64-signal-frame.patch);
+          # elfutils has no such backend for riscv64 at all, so the native stack can't be
+          # walked past the trampoline and the interrupted eval-loop frame is never found,
+          # on every interpreter. Deselect on all of them, like upstream already does for
+          # x86-64 Alpine via ALL_PYTHONS_BUT_XFAIL_ON_ALPINE in test_gather_stacks.py.
+          deselect+=(
+            --deselect "tests/integration/test_gather_stacks.py::test_stack_of_thread_in_signal_handler[python]"
+            --deselect "tests/integration/test_gather_stacks.py::test_stack_of_thread_in_signal_handler_for_core[python]"
+          )
           python -m pytest tests -n auto -vvv "${deselect[@]}"
 
   gpl_sources:
