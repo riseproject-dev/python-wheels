@@ -116,6 +116,13 @@ jobs:
           cp third_party/spdlog-1.14.1/LICENSE LICENSE.spdlog
           cp third_party/croaring/LICENSE LICENSE.croaring
           cp third_party/rapidjson/LICENSE LICENSE.rapidjson
+          # From 0.4.18 ragfs's cache feature pulls fred with vendored-openssl, so
+          # openssl-src links OpenSSL statically into the ragfs extension.
+          openssl=$(grep -A1 '^name = "openssl-src"$' Cargo.lock | sed -nE 's/^version = "[0-9.]+\+([0-9.]+)"$/\1/p' || true)
+          if [ -n "${openssl}" ]; then
+            curl -fsSL -o LICENSE.openssl "https://raw.githubusercontent.com/openssl/openssl/openssl-${openssl}/LICENSE.txt"
+            echo "OV_EXTRA_LICENCES=LICENSE.openssl" >> "${GITHUB_ENV}"
+          fi
 
       - name: Write smoke test
         run: |
@@ -186,10 +193,21 @@ jobs:
           CIBW_ARCHS: riscv64
           CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
           CIBW_SKIP: "*-musllinux_*"
+          # openssl-src (0.4.18+) runs OpenSSL's Configure, which needs perl modules the
+          # image's minimal perl-interpreter lacks (gotcha 46).
           CIBW_BEFORE_ALL_LINUX: >-
+            dnf -y --disablerepo=extras install perl &&
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          # Fat LTO of ragfs-python (workspace [profile.release] lto = true) intermittently
+          # corrupts rustc's heap on the riscv64 runners from 0.4.17.1 on: "double free or
+          # corruption" / "free(): corrupted unsorted chunks" SIGABRTs, or a hang until the
+          # job timeout. Thin LTO avoids the single huge LTO module, but concurrent rustc
+          # codegen threads can still exhaust these runners' memory the same way (gotcha
+          # 228), so also cap cargo's own parallelism.
           CIBW_ENVIRONMENT: >-
             PATH="$PATH:$HOME/.cargo/bin"
+            CARGO_PROFILE_RELEASE_LTO=thin
+            CARGO_BUILD_JOBS=2
             PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
             OV_REQUIRE_RAGFS_BUILD=1
             SETUPTOOLS_SCM_PRETEND_VERSION_FOR_OPENVIKING=${{ env.OPENVIKING_VERSION }}
@@ -201,7 +219,7 @@ jobs:
           CIBW_TEST_SOURCES: tests pyproject.toml smoke_test.py
           CIBW_TEST_COMMAND: >-
             python smoke_test.py &&
-            python -c "import importlib.metadata as m; l = set(p.name for p in m.files('openviking') if '.dist-info/licenses/' in str(p)); assert set(['LICENSE', 'LICENSE.leveldb', 'LICENSE.spdlog', 'LICENSE.croaring', 'LICENSE.rapidjson']) <= l, l" &&
+            python -c "import importlib.metadata as m; l = set(p.name for p in m.files('openviking') if '.dist-info/licenses/' in str(p)); assert set(['LICENSE', 'LICENSE.leveldb', 'LICENSE.spdlog', 'LICENSE.croaring', 'LICENSE.rapidjson'] + '${{ env.OV_EXTRA_LICENCES }}'.split()) <= l, l" &&
             python -m pytest -q -o addopts=''
             tests/vectordb/test_cuvs_config.py
             tests/vectordb/test_cuvs_index.py
