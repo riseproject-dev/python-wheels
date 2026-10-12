@@ -1,0 +1,143 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build_wheels` job of
+# https://github.com/mitsuba-renderer/mitsuba3/blob/v3.9.1/.github/workflows/wheels.yml
+name: Build mitsuba wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/mitsuba.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mitsuba.yml'
+      - 'docs/packages/mitsuba.yaml'
+      - 'patches/mitsuba/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mitsuba.yml'
+      - 'docs/packages/mitsuba.yaml'
+      - 'patches/mitsuba/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: mitsuba
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build mitsuba ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      MITSUBA_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout mitsuba v${{ env.MITSUBA_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: mitsuba-renderer/mitsuba3
+          ref: v${{ env.MITSUBA_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch mitsuba source
+        run: git apply -v python-wheels/patches/mitsuba/${{ env.MITSUBA_VERSION }}/00*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # nasm only feeds libjpeg-turbo's x86 SIMD, and is in Rocky 10's CRB.
+          CIBW_BEFORE_ALL: yum install -y libatomic
+          # drjit's LLVM backend needs x86 FMA or NEON and shuts down on riscv64,
+          # and there is no CUDA, so only the scalar variants can run; Embree is
+          # x86/NEON-only; MI_NATIVE_FLAGS otherwise defaults to -march=haswell.
+          CIBW_CONFIG_SETTINGS: >-
+            cmake.args=-DMI_DEFAULT_VARIANTS=scalar_rgb,scalar_spectral,scalar_spectral_polarized;-DMI_ENABLE_EMBREE=OFF;-DMI_NATIVE_FLAGS=
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_REPAIR_WHEEL_COMMAND: >-
+            pip install 'wheel>=0.40';
+            new_whl_name=$(python -m wheel tags --platform-tag manylinux_2_39_riscv64 {wheel} | tail -1 | cat);
+            cp $(dirname {wheel})/$new_whl_name {dest_dir}
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          path = sys.argv[1]
+          names = zipfile.ZipFile(path).namelist()
+          variants = {n.split("/")[1].split(".")[0] for n in names
+                      if n.startswith("mitsuba/") and n.count("/") == 1 and ".cpython-" in n}
+          assert {"scalar_rgb", "scalar_spectral", "scalar_spectral_polarized"} <= variants, variants
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          assert licences == {
+              "LICENSE",
+              "ext/fastfloat/LICENSE-MIT",
+              "ext/libjpeg-turbo/LICENSE.md",
+              "ext/libjpeg-turbo/README.ijg",
+              "ext/libpng/LICENSE",
+              "ext/nanobind/LICENSE",
+              "ext/nanobind/ext/robin_map/LICENSE",
+              "ext/openexr/LICENSE.md",
+              "ext/pugixml/LICENSE.md",
+              "ext/rgb2spec/LICENSE",
+              "ext/struct-jit/LICENSE",
+          }, licences
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mitsuba-${{ env.MITSUBA_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish mitsuba ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: mitsuba-${{ matrix.version }}-*-manylinux_riscv64

@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 12 Oct 2026 00:00:00 +0000
+Subject: [PATCH] struct-jit: convert half floats via _Float16 on riscv64
+
+src/half.cpp assumes "not aarch64" means x86 and unconditionally pulls in
+<immintrin.h> for the F16C _mm_cvtps_ph/_mm_cvtph_ps conversions, so
+libstruct-jit (linked into libmitsuba) fails to build on riscv64:
+
+    fatal error: immintrin.h: No such file or directory
+
+The rest of struct-jit already handles this case: jit.cpp only emits
+machine code on x86_64/aarch64 and otherwise falls back to its software
+converter. Only the scalar half<->float helpers lack a portable path. GCC
+(13+) and Clang support _Float16 on every RISC-V configuration, lowering
+the conversions to Zfh instructions or the libgcc/compiler-rt
+__truncsfhf2/__extendhfsf2 routines, both round-to-nearest-even like the
+F16C path.
+
+Upstream-Status: To upstream [not yet submitted; struct-jit does not otherwise build or test riscv64, so this needs its own PR against mitsuba-renderer/struct-jit]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/ext/struct-jit/src/half.cpp b/ext/struct-jit/src/half.cpp
+--- a/ext/struct-jit/src/half.cpp
++++ b/ext/struct-jit/src/half.cpp
+@@ -2,7 +2,7 @@
+ 
+ #if defined(__aarch64__)
+ #  include <arm_neon.h>
+-#else
++#elif !defined(__riscv)
+ #  include <immintrin.h>
+ #endif
+ 
+@@ -18,6 +18,8 @@ template <typename T, typename U> inline T memcpy_cast(const U &val) {
+ uint16_t float32_to_float16(float value) {
+     #if defined(__ARM_NEON)
+         return memcpy_cast<uint16_t>((__fp16) value);
++    #elif defined(__riscv)
++        return memcpy_cast<uint16_t>((_Float16) value);
+     #else
+         return (uint16_t) _mm_cvtsi128_si32(
+             _mm_cvtps_ph(_mm_set_ss(value), _MM_FROUND_CUR_DIRECTION));
+@@ -27,6 +29,8 @@ uint16_t float32_to_float16(float value) {
+ float float16_to_float32(uint16_t value) {
+     #if defined(__ARM_NEON)
+         return (float) memcpy_cast<__fp16>(value);
++    #elif defined(__riscv)
++        return (float) memcpy_cast<_Float16>(value);
+     #else
+         return _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtsi32_si128((int32_t) value)));
+     #endif
