@@ -1,0 +1,39 @@
+From 87f2462219287d68f873d7b3d12b5cd2bce0e47a Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 28 Sep 2026 12:50:24 +0000
+Subject: [PATCH] sdk: fall back to prost-build's own protoc lookup on riscv64
+
+Upstream-Status: Inappropriate [protoc-bin-vendored ships no riscv64 binary; prost-build already honours $PROTOC and falls back to protoc on PATH, so only overriding PROTOC when the vendored lookup succeeds is the whole fix]
+
+protoc_bin_vendored::protoc_bin_path() returns Err on any platform outside
+its small enum of prebuilt targets (x86, x86_64, aarch64, ppc64le, s390x,
+macOS, Windows), and build.rs unwrap()ed it, panicking before prost-build
+ever got a chance to look for a protoc on PATH or via $PROTOC. Only
+setting PROTOC when the vendored lookup succeeds restores that fallback,
+documented in prost-build's "Sourcing protoc" section.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ rust/sdk/build.rs | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/rust/sdk/build.rs b/rust/sdk/build.rs
+index 3e080ec..c75eaa9 100644
+--- a/rust/sdk/build.rs
++++ b/rust/sdk/build.rs
+@@ -5,7 +5,11 @@ use std::env;
+ mod zeroparser_proto_build;
+ 
+ fn main() {
+-    env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path().unwrap());
++    // protoc-bin-vendored ships no riscv64 binary; falling through leaves
++    // prost_build's own PROTOC-env/PATH lookup in charge.
++    if let Ok(protoc) = protoc_bin_vendored::protoc_bin_path() {
++        env::set_var("PROTOC", protoc);
++    }
+     tonic_prost_build::compile_protos("zerobus_service.proto")
+         .unwrap_or_else(|e| panic!("Failed to compile protos {:?}", e));
+ 
+-- 
+2.43.0
+
