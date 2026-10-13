@@ -1,0 +1,140 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/intrepidcs/libicsneo/blob/1.4.1/.gitlab-ci.yml (build python/linux/*)
+name: Build icsneopy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/icsneopy.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-icsneopy.yml'
+      - 'docs/packages/icsneopy.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-icsneopy.yml'
+      - 'docs/packages/icsneopy.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: icsneopy
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build icsneopy ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      ICSNEOPY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout libicsneo ${{ env.ICSNEOPY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: intrepidcs/libicsneo
+          ref: ${{ env.ICSNEOPY_VERSION }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # libpcap, protobuf, abseil, libredxx, pybind11 and the in-tree third-party code are compiled into the extension; upstream ships none of their notices.
+      - name: Stage the vendored dependencies' licences
+        run: |
+          set -euo pipefail
+          tag() { sed -n "/GIT_REPOSITORY .*\/$1\.git/{n;s/.*GIT_TAG *//p}" "$2"; }
+          gh=https://raw.githubusercontent.com
+          icspb=$(sed -n '/FetchContent_Declare(icspb/,/)/s/.*GIT_TAG *//p' CMakeLists.txt)
+          protobuf=$(curl -fsSL --retry 5 "$gh/intrepidcs/icspb/$icspb/CMakeLists.txt" | sed -n 's/.*set(ICSPB_BOOTSTRAP_PROTOBUF_VERSION \([0-9.]*\)).*/\1/p')
+          abseil=$(curl -fsSL --retry 5 "$gh/protocolbuffers/protobuf/v$protobuf/cmake/dependencies.cmake" | sed -n 's/^set(abseil-cpp-version "\(.*\)")$/\1/p')
+          libpcap=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' ci/bootstrap-libpcap.sh)
+          curl -fsSL --retry 5 "$gh/protocolbuffers/protobuf/v$protobuf/LICENSE" -o LICENSE.protobuf
+          curl -fsSL --retry 5 "$gh/protocolbuffers/protobuf/v$protobuf/third_party/utf8_range/LICENSE" -o LICENSE.utf8_range
+          curl -fsSL --retry 5 "$gh/abseil/abseil-cpp/$abseil/LICENSE" -o LICENSE.abseil-cpp
+          curl -fsSL --retry 5 "$gh/the-tcpdump-group/libpcap/libpcap-$libpcap/LICENSE" -o LICENSE.libpcap
+          curl -fsSL --retry 5 "$gh/Zeranoe/libredxx/$(tag libredxx CMakeLists.txt)/LICENSE" -o LICENSE.libredxx
+          curl -fsSL --retry 5 "$gh/pybind/pybind11/$(tag pybind11 bindings/python/CMakeLists.txt)/LICENSE" -o LICENSE.pybind11
+          cp third-party/fatfs/LICENSE.txt LICENSE.fatfs
+          cp include/icsneo/third-party/concurrentqueue/LICENSE.md LICENSE.concurrentqueue
+          cp include/icsneo/third-party/readerwriterqueue/LICENSE.md LICENSE.readerwriterqueue
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # ci/bootstrap-cibuildwheel.sh is this yum line plus Intrepid's internal CA, which only their private icspb mirror needs.
+          CIBW_BEFORE_ALL: yum install -y flex && sh ci/bootstrap-libpcap.sh
+          CIBW_ENVIRONMENT: PCAP_ROOT=/project/libpcap/install
+          SKBUILD_CMAKE_DEFINE: ICSPB_BOOTSTRAP_DIR=/project/icspb
+          CIBW_TEST_COMMAND: >-
+            python -c "import icsneopy; print(icsneopy.get_version());
+            assert icsneopy.get_supported_devices()"
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import os, sys, zipfile
+          whl = sys.argv[1]
+          assert os.path.basename(whl).startswith(f"icsneopy-{os.environ['ICSNEOPY_VERSION']}-"), whl
+          names = zipfile.ZipFile(whl).namelist()
+          exts = [n for n in names if n.endswith(".so")]
+          assert len(exts) == 1 and exts[0].endswith("-riscv64-linux-gnu.so"), exts
+          assert "icsneopy/icsneopy.pyi" in names, names
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          assert licences == {"LICENSE", "LICENSE.abseil-cpp", "LICENSE.concurrentqueue",
+                              "LICENSE.fatfs", "LICENSE.libpcap", "LICENSE.libredxx",
+                              "LICENSE.protobuf", "LICENSE.pybind11",
+                              "LICENSE.readerwriterqueue", "LICENSE.utf8_range"}, licences
+          EOF
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: icsneopy-${{ env.ICSNEOPY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish icsneopy ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: icsneopy-${{ matrix.version }}-*-manylinux_riscv64
