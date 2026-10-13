@@ -1,0 +1,201 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# PyPI's scikit-learn-intelex wheel is Apache-2.0 and links only against the daal
+# (oneDAL) shared libraries at runtime (Requires-Dist: daal==<same version>) - no dpctl, no
+# direct SYCL/MKL linkage (readelf -d on the real wheel's _onedal_py_host/_daal4py .so files
+# shows no libsycl/libmkl NEEDED entries). setup.py's own arch_dir fallback
+# (`plt_dict.get(machine, machine)`) and optional dpcpp/no_dist switches (NO_DPC/NO_DIST) are
+# already CPU-generic; upstream's own docs (doc/building-from-source.rst) state it can be
+# "built from source to provide accelerated routines for other platforms such as ARM and
+# RISCV". This builds oneDAL from source once per version (same recipe as build-daal.yml)
+# and reuses it across the interpreter matrix to compile the daal4py/_onedal_py_host
+# extensions, instead of waiting on Intel's x86_64-only wheel.
+# Based on: https://github.com/uxlfoundation/scikit-learn-intelex (no upstream CI builds
+# this wheel; ci.yml's sklearn_lnx job runs an equivalent `python setup.py install` for tests
+# only, against an oneDAL nightly build artifact).
+name: Build scikit-learn-intelex wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/scikit-learn-intelex.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-scikit-learn-intelex.yml'
+      - 'docs/packages/scikit-learn-intelex.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-scikit-learn-intelex.yml'
+      - 'docs/packages/scikit-learn-intelex.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  OPENBLAS_VERSION: v0.3.29
+  TBB_VERSION: v2023.0.0
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: scikit-learn-intelex
+      version: ${{ inputs.version }}
+
+  # oneDAL (daal4py/sklearnex's required backend) is built once per version here and
+  # reused across the interpreter matrix below, instead of recompiling it per-interpreter.
+  # Same "ref" backend recipe as build-daal.yml, but keeping the full release tree
+  # (headers + libs) daal4py's CMake/codegen needs, not just the libs the daal wheel ships.
+  build_onedal:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build oneDAL ${{ matrix.version }} (riscv64)
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 300
+
+    env:
+      SKLEX_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout oneDAL ${{ env.SKLEX_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: uxlfoundation/oneDAL
+          ref: ${{ env.SKLEX_VERSION }}
+          persist-credentials: false
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
+
+      - name: Build OpenBLAS, oneTBB, then daal+onedal_c
+        run: |
+          docker run --rm -v "$(pwd):/work" -w /work -e OPENBLAS_VERSION -e TBB_VERSION "${MANYLINUX_RISCV64_IMAGE}" bash -c '
+            set -euxo pipefail
+            dnf -y --enablerepo=crb install clang
+
+            git clone --depth 1 --branch "${OPENBLAS_VERSION}" https://github.com/OpenMathLib/OpenBLAS /work/openblas-src
+            make -C /work/openblas-src -j"$(nproc)" NO_FORTRAN=1 USE_OPENMP=0 USE_THREAD=0 USE_LOCKING=1 BINARY=64 INTERFACE64=1
+            make -C /work/openblas-src install PREFIX=/work/openblas-install
+
+            git clone --depth 1 --branch "${TBB_VERSION}" https://github.com/uxlfoundation/oneTBB /work/tbb-src
+            cmake -S /work/tbb-src -B /work/tbb-build -DCMAKE_BUILD_TYPE=Release -DTBB_TEST=OFF -DTBB_STRICT_PROTOTYPES=OFF -DCMAKE_INSTALL_PREFIX=/work/tbb-install
+            cmake --build /work/tbb-build -j"$(nproc)"
+            cmake --install /work/tbb-build
+
+            export CC=clang CXX=clang++
+            .ci/scripts/build.sh --compiler clang --optimizations rv64 --target daal --backend-config ref --plat lnxriscv64 --blas-dir /work/openblas-install --tbb-dir /work/tbb-install --jobs "$(nproc)"
+            .ci/scripts/build.sh --compiler clang --optimizations rv64 --target onedal_c --backend-config ref --plat lnxriscv64 --blas-dir /work/openblas-install --tbb-dir /work/tbb-install --jobs "$(nproc)"
+            ls -la __release_lnx_clang/daal/latest/lib/riscv64
+          '
+
+      - name: Archive the oneDAL release tree
+        run: tar -C __release_lnx_clang/daal -chf onedal-release.tar latest
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: scikit-learn-intelex-${{ env.SKLEX_VERSION }}-onedal-riscv64
+          path: onedal-release.tar
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_onedal]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Per-interpreter (not abi3): daal4py/_onedal_py_host link the version-specific
+        # ABI. Matches upstream's own release matrix (no cp314t: daal4py manipulates
+        # PyObject refcounts directly, same free-threading exclusion as other ports).
+        python:
+          - "cp310"
+          - "cp311"
+          - "cp312"
+          - "cp313"
+          - "cp314"
+
+    name: Build scikit-learn-intelex ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+
+    env:
+      SKLEX_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout scikit-learn-intelex ${{ env.SKLEX_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: uxlfoundation/scikit-learn-intelex
+          ref: ${{ env.SKLEX_VERSION }}
+          persist-credentials: false
+
+      - name: Download the oneDAL release tree
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: scikit-learn-intelex-${{ env.SKLEX_VERSION }}-onedal-riscv64
+
+      - run: tar xf onedal-release.tar
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # clang-tools-extra for clang-format (generator/gen_daal4py.py shells out to it to
+          # reformat the headers it parses); the clang-format PyPI package ships no riscv64
+          # binary, unlike the other build deps below.
+          CIBW_BEFORE_ALL_LINUX: dnf -y --enablerepo=crb install clang clang-tools-extra
+          CIBW_BEFORE_BUILD: pip install -q numpy "cython==3.2.5" "jinja2==3.1.6" "pybind11==3.0.4" "setuptools<=79"
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          CIBW_ENVIRONMENT_LINUX: >-
+            DALROOT={project}/latest
+            NO_DIST=1
+            NO_DPC=1
+            CC=clang
+            CXX=clang++
+            SKLEARNEX_VERSION=${{ env.SKLEX_VERSION }}
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_COMMAND: "python -c \"import daal4py, onedal, sklearnex; sklearnex.patch_sklearn()\""
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: scikit-learn-intelex-${{ env.SKLEX_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish scikit-learn-intelex ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: scikit-learn-intelex-${{ matrix.version }}-*-manylinux_riscv64
