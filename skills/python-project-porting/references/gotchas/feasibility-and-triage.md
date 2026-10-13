@@ -5443,3 +5443,55 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       step harder than the sibling's. Revisit only if Huawei ships CANN + AscendC for riscv64
       and memfabric-hybrid is unparked first. No worktree/branch/workflow/docs entry/patch/PR;
       scratch under `.git/pw-scratch/memfabric-zbal/` removed.
+
+648. **A plausible-sounding SIMD hard-requirement can be the wrong blocker — check the actual
+    `#ifdef`/attribute macros before parking on it — while a `tf_configure`-style repository
+    rule that reads an *installed* `tensorflow` pip package's headers/`.so` is a real,
+    transitive block wherever `tensorflow` itself is already parked (the scann case).**
+    `scann` 1.4.2's PyPI long description says "the x86 wheels require AVX and FMA ... the ARM
+    wheels require NEON", which reads like an unconditional SIMD gate the way gotcha 41/438's
+    family is. It is not: `scann/utils/intrinsics/attributes.h` defines `SCANN_AVX1/AVX2/
+    AVX512/AMX` as real `__attribute((target(...)))` strings only `#ifdef __x86_64__`, and as
+    *empty* macros on every other architecture; `flags.h` mirrors this — `RuntimeSupportsAvx2/
+    Avx512/Amx()` are hardcoded `false` off x86_64, with no path that requires them. There is a
+    genuine portable implementation two files over: `fallback.h`'s `fallback::Simd<T, N>` is a
+    plain per-element loop (`kFallbackForNonX86 = 99`), `RuntimeSupportsSimd()` always `true`,
+    plus a `highway.h` wrapper around `@com_google_highway` (bzlmod-pinned 1.3.0, which ships
+    an RVV target) for `kHighway = 98`. So riscv64 would take the same non-x86 branch ARM
+    already does — AVX is not the wall.
+    - **The real wall is one layer up, in the Bazel *configure* step, and it is categorically
+      different from the mediapipe/ai-edge-litert "vendor `org_tensorflow` as source" trick
+      (gotcha 431/442).** `scann`'s `configure.py` does `import tensorflow.compat.v2 as tf`
+      and, only if that succeeds, writes `TF_HEADER_DIR`/`TF_SHARED_LIBRARY_DIR`/
+      `TF_SHARED_LIBRARY_NAME`/`TF_CXX11_ABI_FLAG` as bazelrc `action_env`s read by
+      `MODULE.bazel`'s `tf_configure(name = "local_config_tf")`. `build_deps/tf_dependency/
+      tf_configure.bzl`'s `repository_rule` does `repository_ctx.os.environ[_TF_HEADER_DIR]`
+      with no fallback — it `fail()`s outright without those three env vars. In other words,
+      scann does not build TensorFlow, or even a subset of it from source the way mediapipe
+      compiles `org_tensorflow`'s framework/TFLite slice in-tree (gotcha 431's "no MLIR/LLVM
+      linked in" shape); it links its custom op against a *pre-built, already-installed*
+      `tensorflow` wheel's compiled headers and `libtensorflow_framework.so.2`. `tensorflow`
+      is itself parked in this repo (gotcha 426: disproportionate Bazel/XLA/MLIR scope, zero
+      riscv64 CC toolchain in upstream's `WORKSPACE`, no `//conditions:default` in the wheel's
+      `platform_tag` select) and `tensorflow-cpu` is parked alongside it (same gotcha, wrong
+      distribution name besides). Since no riscv64 `tensorflow`/`tensorflow-cpu` wheel exists
+      anywhere — on PyPI or on this registry — `scann`'s own `configure.py` cannot even reach
+      the point of invoking Bazel on riscv64, regardless of how portable its SIMD layer is.
+    - **This is gotcha 523's `[build-system] requires` vs `[project] dependencies` distinction
+      in a new shape.** `scann`'s `pyproject.toml` lists `tensorflow` only under
+      `[project.optional-dependencies] tf` (for the *runtime* `scann.scann_ops` TF-op API,
+      gated behind an extra) — nowhere in `[build-system] requires` or the base
+      `[project] dependencies`. Standard metadata inspection alone would miss that it is a
+      hard *build-time* requirement anyway, because the requirement is enforced by
+      `configure.py`/a custom `repository_rule`, not by pip's dependency resolver. Read the
+      configure script, not just the metadata, for any TF-custom-op-shaped package
+      (`tensorflow-io`, `tensorflow-text`, `tensorflow-addons`, `tensorflow-decision-forests`,
+      …) before assuming the sibling-TF requirement is optional.
+    - Verdict: `parked`. Not a SIMD/AVX2 block (there is a real, exercised fallback for every
+      non-x86_64 architecture) — it is a transitive block on the already-parked `tensorflow`/
+      `tensorflow-cpu` (gotcha 426). Revisit only once one of those is unparked for riscv64;
+      at that point the SIMD layer needs no further work, since the fallback/Highway path
+      already covers it. No worktree/branch/workflow/docs entry/patch/PR opened; the call was
+      resolved read-only against the real 1.4.2 source tree (sparse git clone of
+      `google-research/google-research`'s `scann/` subdirectory) and this repo's own
+      tensorflow/tensorflow-cpu/mediapipe/ai-edge-litert queue entries.

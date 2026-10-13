@@ -486,6 +486,12 @@ The porting gotchas (556 of them) live in [`references/gotchas/`](gotchas/), spl
   chip-family selectors (no CPU/generic switch), and `libraries` link a real AscendC-compiled
   kernel archive, not a dlopen string — plus a build-time `FetchContent` of another CANN-only
   repo and a runtime dependency on the already-parked sibling (the memfabric-zbal case).
+- **648** — A plausible SIMD hard-requirement can be the wrong blocker: scann's x86-AVX/ARM-NEON
+  split has a real, exercised non-x86_64 fallback (plain scalar + a Highway/RVV path), so the
+  actual wall is one layer up — `configure.py`'s `tf_configure` repository rule requires an
+  *installed* `tensorflow` package's headers/`.so`, which is a transitive block on the
+  already-parked `tensorflow`/`tensorflow-cpu` (gotcha 426), not a from-source vendor build
+  like mediapipe/ai-edge-litert's (gotcha 431/442) (the scann case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
