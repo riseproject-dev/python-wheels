@@ -1,0 +1,271 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the linux `build` job of
+# https://github.com/amacneil/dbmate/blob/v2.36.0/.github/workflows/ci.yml
+# (the release binaries) and on https://github.com/justin-yan/pybin's
+# PyPIReleaseTarget/WheelPacker (the dbmate-bin wheel those binaries are
+# repackaged into). amacneil/dbmate publishes no linux-riscv64 binary, so it is
+# built from source here and handed to pybin's own packer.
+name: Build dbmate-bin wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/dbmate-bin.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-dbmate-bin.yml'
+      - 'docs/packages/dbmate-bin.yaml'
+      - 'patches/dbmate-bin/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-dbmate-bin.yml'
+      - 'docs/packages/dbmate-bin.yaml'
+      - 'patches/dbmate-bin/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: dbmate-bin
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build dbmate-bin ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+
+    env:
+      DBMATE_BIN_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout dbmate v${{ env.DBMATE_BIN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: amacneil/dbmate
+          ref: v${{ env.DBMATE_BIN_VERSION }}
+          path: dbmate
+          persist-credentials: false
+
+      # pybin publishes no tags; this is the commit that released dbmate-bin 2.36.0.
+      - name: Checkout pybin
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: justin-yan/pybin
+          ref: 57dc33ccb888ebb781530cf740d08adf761f1733
+          path: pybin
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pybin
+        working-directory: pybin
+        run: git apply ../python-wheels/patches/dbmate-bin/${{ env.DBMATE_BIN_VERSION }}/*.patch
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: dbmate/go.mod
+          cache-dependency-path: dbmate/go.sum
+
+      - name: Install the C toolchain for cgo (sqlite)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends gcc libc6-dev
+
+      - run: go mod download
+        working-directory: dbmate
+
+      # Upstream's Makefile links linux binaries with -extldflags "-static";
+      # the trailing -ldflags overrides that so glibc stays a shared (LGPL)
+      # dependency instead of being copied into the wheel.
+      - name: Build the dbmate binary
+        working-directory: dbmate
+        run: make build ls OUTPUT=dbmate-linux-riscv64 FLAGS="-ldflags=-s"
+
+      - run: dbmate/dist/dbmate-linux-riscv64 --help
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install pybin
+        run: |
+          uv pip install --no-deps ./pybin
+          uv pip install wheel
+
+      - name: Build wheel
+        run: |
+          python - <<'EOF'
+          import os
+          from pathlib import Path
+
+          from pybin.registry.pypi import PyPIReleaseTarget
+          from pybin.types import Architecture, Binary, Platform, Release
+
+          binary = Binary(
+              content=Path("dbmate/dist/dbmate-linux-riscv64").read_bytes(),
+              architecture=Architecture.RISCV64,
+              platform=Platform.LINUX,
+          )
+          PyPIReleaseTarget().build(
+              Release(
+                  name="dbmate",
+                  version=os.environ["DBMATE_BIN_VERSION"],
+                  license="MIT",
+                  upstream_url="https://github.com/amacneil/dbmate",
+                  binaries=[binary],
+              )
+          )
+          EOF
+
+      # pybin's WheelPacker writes no license file; ship dbmate's MIT notice.
+      - name: Add dbmate's LICENSE to the wheel
+        run: |
+          set -euo pipefail
+          wheel unpack -d unpacked dbmate-dist/*.whl
+          distinfo="unpacked/dbmate_bin-${DBMATE_BIN_VERSION}/dbmate_bin-${DBMATE_BIN_VERSION}.dist-info"
+          mkdir -p "${distinfo}/licenses"
+          cp dbmate/LICENSE "${distinfo}/licenses/LICENSE"
+          wheel pack -d dist "unpacked/dbmate_bin-${DBMATE_BIN_VERSION}"
+
+      - name: Check the wheel ships the riscv64 dbmate binary
+        run: |
+          python3 - dist/*.whl <<'EOF'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as zf:
+              names = zf.namelist()
+              assert sys.argv[1].endswith("-py3-none-manylinux_2_39_riscv64.whl"), sys.argv[1]
+              script = next(n for n in names if n.endswith(".data/scripts/dbmate"))
+              licenses = sorted(n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n)
+              assert licenses == ["LICENSE"], licenses
+              header = zf.read(script)[:20]
+              assert header[:4] == b"\x7fELF", header
+              assert header[18] == 0xF3, header  # e_machine EM_RISCV
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dbmate-bin-${{ env.DBMATE_BIN_VERSION }}-py3-none-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test dbmate-bin ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 15
+    env:
+      DBMATE_BIN_VERSION: ${{ matrix.version }}
+      # Without this uv would reuse the runner image's system CPython for 3.12
+      # and download a standalone build for the others.
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: dbmate-bin-${{ env.DBMATE_BIN_VERSION }}-py3-none-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . dbmate-bin
+
+      # dbmate shells out to the sqlite3 CLI to dump db/schema.sql after `up`.
+      - name: Install sqlite3
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends sqlite3
+
+      # Mirrors the README's sqlite walkthrough (new -> up -> status ->
+      # rollback), which exercises the cgo-linked sqlite driver end to end.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          [ "$(dbmate --version)" = "dbmate version ${DBMATE_BIN_VERSION}" ]
+          dbmate --help >/dev/null
+
+          work=$(mktemp -d)
+          cd "$work"
+          export DATABASE_URL="sqlite:db/test.sqlite3"
+          dbmate new create_users
+          migration=$(ls db/migrations/*_create_users.sql)
+          cat > "$migration" <<'SQL'
+          -- migrate:up
+          create table users (id integer primary key, name text not null);
+          insert into users (name) values ('riscv64');
+
+          -- migrate:down
+          drop table users;
+          SQL
+
+          dbmate up
+          test -f db/schema.sql
+          grep -qi 'create table users' db/schema.sql
+          status=$(dbmate status)
+          echo "$status"
+          echo "$status" | grep -q '^\[X\] .*_create_users.sql$'
+          [ "$(sqlite3 db/test.sqlite3 'select name from users')" = "riscv64" ]
+
+          dbmate rollback
+          status=$(dbmate status)
+          echo "$status"
+          echo "$status" | grep -q '^\[ \] .*_create_users.sql$'
+          [ "$(sqlite3 db/test.sqlite3 "select count(*) from sqlite_master where name = 'users'")" = "0" ]
+
+          dbmate drop
+          test ! -f db/test.sqlite3
+
+  publish:
+    name: Publish dbmate-bin ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: dbmate-bin-${{ matrix.version }}-py3-none-manylinux_riscv64
