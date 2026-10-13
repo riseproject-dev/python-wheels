@@ -1,0 +1,219 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `prepare-sqlite`/`build-wheels` jobs of
+# https://github.com/laggykiller/sqlcipher3/blob/v0.5.7/.github/workflows/pythonpackage.yml
+name: Build sqlcipher3-wheels wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/sqlcipher3-wheels.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sqlcipher3-wheels.yml'
+      - 'docs/packages/sqlcipher3-wheels.yaml'
+      - 'patches/sqlcipher3-wheels/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sqlcipher3-wheels.yml'
+      - 'docs/packages/sqlcipher3-wheels.yaml'
+      - 'patches/sqlcipher3-wheels/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: sqlcipher3-wheels
+      version: ${{ inputs.version }}
+
+  # The amalgamation upstream's own prepare-sqlite job produces is architecture-independent
+  # (it is generated C source, not a compiled artifact), so build it once on a standard
+  # runner instead of the riscv runner (CLAUDE.md gotcha 4), exactly like upstream shares it
+  # across its own cross-arch matrix.
+  prepare_sqlite:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build sqlcipher3-wheels ${{ matrix.version }} sqlite amalgamation
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      SQLCIPHER3_WHEELS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout sqlcipher3-wheels v${{ env.SQLCIPHER3_WHEELS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: laggykiller/sqlcipher3
+          ref: v${{ env.SQLCIPHER3_WHEELS_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Build sqlite3.c amalgamation
+        run: |
+          cd sqlcipher
+          LIBS="-lm" ./configure --disable-tcl --with-tempstore=yes
+          make sqlite3.c
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sqlcipher3-wheels-${{ env.SQLCIPHER3_WHEELS_VERSION }}-sqlite-amalgamation
+          path: |
+            sqlcipher/sqlite3.c
+            sqlcipher/sqlite3.h
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, prepare_sqlite]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build sqlcipher3-wheels ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Mirrors upstream's own build-wheels matrix (CIBW_BUILD: "cp*"), narrowed to the
+        # ABIs the riscv64 images ship (cp39-cp315; no cp38).
+        python: ["cp39", "cp310", "cp311", "cp312", "cp313", "cp314"]
+        libc: [manylinux, musllinux]
+
+    env:
+      SQLCIPHER3_WHEELS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout sqlcipher3-wheels v${{ env.SQLCIPHER3_WHEELS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: laggykiller/sqlcipher3
+          ref: v${{ env.SQLCIPHER3_WHEELS_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch sqlcipher3-wheels source
+        run: git apply python-wheels/patches/sqlcipher3-wheels/${{ env.SQLCIPHER3_WHEELS_VERSION }}/*.patch
+
+      - name: Download sqlite3.c amalgamation
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: sqlcipher3-wheels-${{ env.SQLCIPHER3_WHEELS_VERSION }}-sqlite-amalgamation
+          path: ./src/sqlcipher
+
+      # Upstream's suite never sets a key, so check the statically linked OpenSSL and the
+      # licences of what the wheel bundles (same smoke test as the sibling sqlcipher3
+      # package: same conan-built OpenSSL 3.6.0, same SQLCipher 4.12.0 release).
+      - name: Write encryption smoke test
+        run: |
+          cat > smoke_test.py <<'EOF'
+          import importlib.metadata
+          import os
+          import tempfile
+
+          from sqlcipher3 import dbapi2 as sqlite
+
+          licenses = sorted(
+              p.name for p in importlib.metadata.files("sqlcipher3-wheels") if ".dist-info/licenses/" in str(p)
+          )
+          assert licenses == ["LICENSE", "LICENSE.openssl", "LICENSE.sqlcipher"], licenses
+
+          with tempfile.TemporaryDirectory() as tmp:
+              path = os.path.join(tmp, "enc.db")
+              conn = sqlite.connect(path)
+              conn.execute("PRAGMA key = 'riscv64'")
+              provider = conn.execute("PRAGMA cipher_provider_version").fetchone()[0]
+              assert provider.startswith("OpenSSL 3."), provider
+              conn.execute("CREATE TABLE t (v TEXT)")
+              conn.execute("INSERT INTO t VALUES ('plaintext-marker')")
+              conn.commit()
+              conn.close()
+              with open(path, "rb") as fh:
+                  assert b"plaintext-marker" not in fh.read()
+
+              conn = sqlite.connect(path)
+              conn.execute("PRAGMA key = 'riscv64'")
+              assert conn.execute("PRAGMA cipher_integrity_check").fetchall() == []
+              assert conn.execute("SELECT v FROM t").fetchall() == [("plaintext-marker",)]
+              conn.close()
+
+              conn = sqlite.connect(path)
+              conn.execute("PRAGMA key = 'wrong'")
+              try:
+                  conn.execute("SELECT v FROM t").fetchall()
+              except sqlite.DatabaseError:
+                  pass
+              else:
+                  raise AssertionError("wrong key decrypted the database")
+              print(provider, "ok")
+          EOF
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_BUILD_FRONTEND: build
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # Conan's openssl recipe has no riscv64 entry and falls back to linux-generic32;
+          # linux64-riscv64's AES asm `jal`s a global symbol, which overflows R_RISCV_JAL here
+          # (same fix as the sibling sqlcipher3 package). setup.py's CONAN_ARCHS dict has no
+          # riscv64 entry either, but SQLCIPHER3_COMPILE_TARGET overrides its native-arch
+          # detection directly.
+          CIBW_ENVIRONMENT: >-
+            SQLCIPHER3_COMPILE_TARGET=riscv64
+            CONAN_OPENSSL_CONFIGURATION=linux-generic64
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_BEFORE_ALL_LINUX: command -v yum >/dev/null && yum -y install perl-core || command -v apk >/dev/null && apk add perl || true
+          # -P keeps the build's {project}/sqlcipher3.egg-info from shadowing the installed metadata.
+          CIBW_TEST_COMMAND: >
+            mv {project}/sqlcipher3 {project}/sqlcipher3_ &&
+            python {project}/tests/ &&
+            python -P {project}/smoke_test.py &&
+            mv {project}/sqlcipher3_ {project}/sqlcipher3
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sqlcipher3-wheels-${{ env.SQLCIPHER3_WHEELS_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish sqlcipher3-wheels ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: sqlcipher3-wheels-${{ matrix.version }}-*riscv64
