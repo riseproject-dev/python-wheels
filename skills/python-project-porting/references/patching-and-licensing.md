@@ -13,8 +13,13 @@ possible rather than patching failures away. A patch is justified when the failu
 Mechanics: put the patch under `patches/<pkg>/<version_tag>/`, add a `git apply` step before
 the build/test step, document the change on the package's docs entry, and give every patch an
 `Upstream-Status:` tag — `ci_scripts/check_patch.py` enforces its presence on PRs. Extra
-detail in the commit message beyond the tag pays for itself at maintenance time. The five
-valid types:
+detail in the commit message beyond the tag pays for itself at maintenance time. **Keep the
+tag and its bracketed reason/url on one line.** `check_patch.py`'s regex only reads up to the
+first newline after `Upstream-Status:`, so wrapping a long `Inappropriate`/`To upstream`
+reason across multiple lines makes it see an unterminated `[...]` and fail `check_patches`
+even though the content is otherwise fine — hit twice in the same session (xtgeo, extractcode-7z).
+If the fix needs a long explanation, put the tag+short reason on one line and the detail in the
+patch's commit message/description instead. The five valid types:
 
 | Type | Use when | Must include |
 |---|---|---|
