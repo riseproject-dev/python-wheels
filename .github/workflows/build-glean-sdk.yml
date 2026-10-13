@@ -1,0 +1,111 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on upstream's own `make build-python-wheel` (a plain
+# `maturin build`, see Makefile) as driven by the `pypi-linux-release`/
+# `pypi-linux-additional-releases` jobs of:
+#   https://github.com/mozilla/glean/blob/v70.0.0/.circleci/config.yml
+name: Build glean-sdk wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/glean-sdk.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-glean-sdk.yml'
+      - 'docs/packages/glean-sdk.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-glean-sdk.yml'
+      - 'docs/packages/glean-sdk.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: glean-sdk
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build glean-sdk ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+
+    env:
+      GLEAN_SDK_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout glean v${{ env.GLEAN_SDK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: mozilla/glean
+          ref: v${{ env.GLEAN_SDK_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # bindings = "uniffi" generates ctypes bindings around a plain
+          # cdylib, so the wheel is py3-none (no CPython ABI); one build
+          # serves every interpreter.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # glean-sdk ships no [tool.cibuildwheel], so the Rust toolchain
+          # its maturin backend needs is installed in-container.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_TEST_REQUIRES: pytest pytest-localserver semver jsonschema MarkupSafe
+          CIBW_TEST_SOURCES: glean-core/python/tests glean.1.schema.json
+          CIBW_TEST_COMMAND: >-
+            python -c "import glean._uniffi as m, os;
+            so = os.path.join(os.path.dirname(m.__file__), 'libglean_ffi.so');
+            assert os.path.isfile(so), so" &&
+            python -m pytest -v glean-core/python/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: glean-sdk-${{ env.GLEAN_SDK_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish glean-sdk ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: glean-sdk-${{ matrix.version }}-*-manylinux_riscv64
