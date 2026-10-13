@@ -10238,9 +10238,44 @@ packages:
   version: 3.2.0
   home: https://gitcode.com/Ascend/triton-ascend/
   repo: https://gitcode.com/Ascend/triton-ascend/
-  status: queued
+  status: parked
   pr: null
-  notes: '6 Linux wheels upstream (abi: cp310,cp311,cp39); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Parked: gotcha 651 (feasibility-and-triage.md), a new, softer sub-shape of the parked
+    Huawei Ascend NPU family (gotcha 480 memfabric-hybrid, 516 torch-npu, 531 memcache-hybrid,
+    647 memfabric-zbal), whose torch-npu entry had guessed by inspection that triton-ascend
+    would repeat gotcha 516''s hard-import shape -- it does not, and this entry corrects that.
+    Verified against the real tag v3.2.0 source (gitcode.com clones fine through the agent
+    proxy) and the real released cp311 manylinux_2_27/2_28_x86_64 wheel, not inferred from the
+    org name or the sibling family. setup.py and every CMakeLists.txt in the tree are clean of
+    ASCEND_HOME/CANN -- the actual build is third_party/ascendnpu-ir (Huawei''s MLIR dialect)
+    plus a pinned third_party/triton (upstream triton-lang/triton) submodule, an LLVM/MLIR
+    build like upstream Triton''s own, needing nothing but a standard clang/lld toolchain.
+    readelf -d on the two shipped .so (libtriton.so, libentry_ascend.so) shows only
+    libstdc++/libm/libc/libdl/libpthread -- no libascendcl.so string anywhere, unlike gotcha
+    480''s dlopen tell. Installed the released wheel into a clean venv with no torch_npu and
+    no ASCEND_HOME_PATH set: `import triton` succeeds (triton.backends.backends populates to
+    {''ascend'': Backend(...)}) -- the one module that hard-imports torch_npu at top level
+    (triton/runtime/libentry.py) is never imported by triton/__init__.py or anything else
+    shipped, so it is dead weight, not a load path. The park is earned anyway, one layer past
+    the usual "compiles clean" check (gotcha 41): triton/backends/__init__.py''s
+    _discover_backends() loads only each backend''s driver.py, never cpu_driver.py, so the
+    ascend backend''s CPUDriver class -- marked "# TODO: temporarily fake" throughout, and not
+    even a DriverBase subclass -- is never wired into backend selection; the one driver the
+    loader finds, NPUDriver, has is_active() shell out to Huawei''s bisheng compiler
+    (`-print-targets`, checking for "hiipu64") and return False on any exception. So on a host
+    with no CANN toolkit the package imports fine and then has zero active compute backend --
+    every real kernel compile/launch fails. This is the "importable but non-functional for its
+    entire purpose" shape already used to park playwright (gotcha 35/183), not gotcha 480''s
+    import-time crash: the wheel would sit on the registry doing nothing a user could use it
+    for, on riscv64 or any arch lacking real Ascend hardware + CANN. Upstream''s own install
+    docs state the axis outright (CANN 8.3.RC1, host arch "x86/ARM" only, Atlas 800T/I A2 NPU
+    hardware required) and grep -ri riscv over the whole tree returns zero hits. No sdist on
+    PyPI for any of its 4 releases (3.2.0, 3.2.0rc2-4), consistent with a package whose real
+    build artifact needs nothing from the vendor SDK yet still has nothing to run without it.
+    Revisit only if Huawei ships CANN + the bisheng/AscendC toolchain for riscv64, or upstream
+    wires a genuinely functional CPU/interpreter backend into _discover_backends() (today''s
+    cpu_driver.py is not that). No worktree/branch/workflow/docs entry/patch/PR created;
+    scratch under .git/pw-scratch/triton-ascend/ removed.'
 - pkg: spidev
   version: '3.8'
   home: http://github.com/doceme/py-spidev
