@@ -1,0 +1,139 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the Linux leg of upstream's own
+# .github/workflows/reusable_buildtest.yml (build_and_test_linux).
+name: Build pymgclient wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pymgclient.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pymgclient.yml'
+      - 'docs/packages/pymgclient.yaml'
+      - 'patches/pymgclient/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pymgclient.yml'
+      - 'docs/packages/pymgclient.yaml'
+      - 'patches/pymgclient/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pymgclient
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pymgclient ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      PYMGCLIENT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pymgclient v${{ env.PYMGCLIENT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: memgraph/pymgclient
+          ref: v${{ env.PYMGCLIENT_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pymgclient source
+        run: git apply python-wheels/patches/pymgclient/${{ env.PYMGCLIENT_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream always ships --static-ssl, linked against a hand-built OpenSSL
+          # baked into their own manylinux_2_34 image (tools/build-openssl.sh). The
+          # riscv64 image carries no such static archives, so link the image's own
+          # OpenSSL dynamically instead (PYMGCLIENT_STATIC_OPENSSL=0, setup.py's own
+          # escape for this) and let auditwheel vendor it, same as build-ssh2-python.yml.
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf -y install openssl-devel &&
+            cp /usr/share/licenses/openssl-libs/LICENSE.txt {project}/LICENSE.openssl
+          CIBW_ENVIRONMENT: >-
+            PYMGCLIENT_STATIC_OPENSSL=0
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest pyopenssl networkx tzdata
+          # The rest of test/ needs a live Memgraph server (upstream runs it as a
+          # Docker sidecar); these three don't, and still exercise the real
+          # extension: arg validation, a refused-connection TransientError, and the
+          # exception hierarchy.
+          CIBW_TEST_SOURCES: test
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m; f = sorted(p.name for p in m.files('pymgclient') if '.dist-info/licenses/' in str(p)); assert f == ['LICENSE', 'LICENSE.openssl'], f"
+            && python -m pytest test/test_connection.py::test_connect_args_validation test/test_connection.py::test_connection_refused_is_transient test/test_connection.py::test_transient_error_hierarchy
+
+      - name: Check the extension and OpenSSL made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("mgclient/_mgclient.") and n.endswith(".so") for n in names), whl
+              assert any(n.startswith("pymgclient.libs/libssl") for n in names), whl
+              assert any(n.startswith("pymgclient.libs/libcrypto") for n in names), whl
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pymgclient-${{ env.PYMGCLIENT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pymgclient ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pymgclient-${{ matrix.version }}-*-manylinux_riscv64
