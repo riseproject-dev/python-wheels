@@ -1,0 +1,197 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# ai-ml-sdk-vgf-library has no upstream CI of its own (no .github/workflows/ in
+# the repo; Arm builds it via git-repo/scripts/build.py as part of the ML SDK
+# for Vulkan superproject). This workflow drives that same scripts/build.py
+# directly, https://github.com/arm/ai-ml-sdk-vgf-library/blob/v0.10.0/scripts/build.py
+
+name: Build ai-ml-sdk-vgf-library wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ai-ml-sdk-vgf-library.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ai-ml-sdk-vgf-library.yml'
+      - 'docs/packages/ai-ml-sdk-vgf-library.yaml'
+      - 'patches/ai-ml-sdk-vgf-library/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ai-ml-sdk-vgf-library.yml'
+      - 'docs/packages/ai-ml-sdk-vgf-library.yaml'
+      - 'patches/ai-ml-sdk-vgf-library/**'
+
+run-name: build-ai-ml-sdk-vgf-library ${{ inputs.version && format('- {0}', inputs.version) || '' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Pinned to the "vgf-lib" group of https://github.com/arm/ai-ml-sdk-manifest's
+  # default.xml, which is how upstream's own git-repo checkout resolves them;
+  # none are vendored in the vgf-library repo itself.
+  ARGPARSE_REF: v3.2
+  JSON_REF: v3.12.0
+  FLATBUFFERS_REF: v25.2.10
+  PYBIND11_REF: v3.1.0
+  GOOGLETEST_REF: v1.17.0
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: ai-ml-sdk-vgf-library
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build ai-ml-sdk-vgf-library ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      VGF_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout ai-ml-sdk-vgf-library v${{ env.VGF_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: arm/ai-ml-sdk-vgf-library
+          ref: v${{ env.VGF_VERSION }}
+          path: vgf-library
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        working-directory: vgf-library
+        run: git apply -v ../python-wheels/patches/ai-ml-sdk-vgf-library/${{ env.VGF_VERSION }}/*.patch
+
+      - name: Build wheel
+        env:
+          PYTHON_TAG: ${{ matrix.python }}
+        run: |
+          mkdir -p vgf-library/wheelhouse_repaired
+          set -o pipefail
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work/vgf-library \
+            -e PYTHON_TAG \
+            -e VGF_VERSION \
+            -e ARGPARSE_REF -e JSON_REF -e FLATBUFFERS_REF -e PYBIND11_REF -e GOOGLETEST_REF \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            -e PIP_ONLY_BINARY=numpy \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT' 2>&1 | tee build.log
+          set -eux
+
+          case "${PYTHON_TAG}" in
+            *t) python_dir="/opt/python/${PYTHON_TAG%t}-${PYTHON_TAG}/bin" ;;
+            *) python_dir="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin" ;;
+          esac
+          export PATH="${python_dir}:${PATH}"
+          python_exe="${python_dir}/python"
+
+          "${python_exe}" -m pip install -q -U pip setuptools wheel build pybind11 ninja auditwheel \
+            numpy pytest pytest-xdist
+
+          mkdir -p /tmp/deps
+          git clone --depth 1 --branch "${ARGPARSE_REF}" https://github.com/p-ranav/argparse /tmp/deps/argparse
+          git clone --depth 1 --branch "${JSON_REF}" https://github.com/nlohmann/json /tmp/deps/json
+          git clone --depth 1 --branch "${FLATBUFFERS_REF}" https://github.com/google/flatbuffers /tmp/deps/flatbuffers
+          git clone --depth 1 --branch "${PYBIND11_REF}" https://github.com/pybind/pybind11 /tmp/deps/pybind11
+          git clone --depth 1 --branch "${GOOGLETEST_REF}" https://github.com/google/googletest /tmp/deps/googletest
+
+          # pip_package/pyproject.toml (unlike the current main branch) declares no
+          # license-files glob; stage one at the root for setuptools' default
+          # LICENSE* auto-detection to pick up.
+          cp LICENSES/Apache-2.0.txt pip_package/LICENSE.txt
+
+          "${python_exe}" scripts/build.py -j"$(nproc)" --test --package-type pip \
+            --package-version "${VGF_VERSION}" \
+            --argparse-path /tmp/deps/argparse \
+            --json-path /tmp/deps/json \
+            --gtest-path /tmp/deps/googletest \
+            --flatbuffers-path /tmp/deps/flatbuffers \
+            --pybind11-path /tmp/deps/pybind11
+
+          "${python_exe}" -m auditwheel repair --plat manylinux_2_39_riscv64 \
+            -w wheelhouse_repaired pip_package/dist/*.whl
+          SCRIPT
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ai-ml-sdk-vgf-library-${{ env.VGF_VERSION }}-${{ matrix.python }}-build-log
+          path: vgf-library/build.log
+
+      - name: Test wheel
+        env:
+          PYTHON_TAG: ${{ matrix.python }}
+        run: |
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -e PYTHON_TAG \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          case "${PYTHON_TAG}" in
+            *t) python_dir="/opt/python/${PYTHON_TAG%t}-${PYTHON_TAG}/bin" ;;
+            *) python_dir="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin" ;;
+          esac
+          export PATH="${python_dir}:${PATH}"
+          python_exe="${python_dir}/python"
+
+          "${python_exe}" -m pip install -q /work/vgf-library/wheelhouse_repaired/*.whl
+
+          cd /tmp
+          "${python_exe}" -c "import vgfpy; import vgf_lib; print(vgfpy.__file__)"
+          vgf_dump --help
+          SCRIPT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ai-ml-sdk-vgf-library-${{ env.VGF_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: vgf-library/wheelhouse_repaired/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish ai-ml-sdk-vgf-library ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: ai-ml-sdk-vgf-library-${{ matrix.version }}-*-manylinux_riscv64
