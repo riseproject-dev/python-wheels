@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 ---
 # This workflow builds directly from a checkout, mirroring upstream's own `wheels` job in
-# https://github.com/tox-dev/pipdeptree/blob/4.2.2/.github/workflows/dist.yaml, narrowed to
+# https://github.com/tox-dev/pipdeptree/blob/4.2.7/.github/workflows/dist.yaml, narrowed to
 # riscv64. Cargo.lock is committed, so no separate sdist step is needed (gotcha 10 doesn't
 # apply here).
 name: Build pipdeptree wheels (riscv64)
@@ -52,11 +52,11 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        # cp310 picks up pyproject.toml's own cp310-* cibuildwheel override, which turns on
-        # the limited API, so this one wheel is reused+tested on every GIL cp3.10+ interpreter.
+        # cp315 picks up pyproject.toml's own cp315-* cibuildwheel override, which turns on
+        # the limited API, so this one abi3 wheel serves every GIL cp3.11+ interpreter.
         # cp314t/cp315t can't use the limited API, so each takes a wheel of its own; the image
         # has no cp313t (gotcha 11), but upstream doesn't publish a cp313t wheel either.
-        python: ["cp310", "cp314t", "cp315t"]
+        python: ["cp315", "cp314t", "cp315t"]
 
     env:
       PIPDEPTREE_VERSION: ${{ matrix.version }}
@@ -98,6 +98,17 @@ jobs:
             python -c "import pipdeptree._rust as m; assert m.__file__.endswith('.so'), m.__file__" &&
             pipdeptree --version &&
             python -m pytest tests --ignore=tests/test_build_version.py -v
+
+      - name: Set the stable ABI minimum
+        if: matrix.python == 'cp315'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install -q "wheel>=0.42"
+          # meson-python tags abi3 wheels with the build interpreter rather than the PyO3 ABI floor.
+          python3 -m wheel tags --python-tag cp311 --remove wheelhouse/*-abi3-*.whl
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
