@@ -1,0 +1,126 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Upstream ships no CI of its own (just appveyor.yml for Windows DLLs); the Linux/macOS/Windows
+# wheels on PyPI are built and uploaded by hand from python/setup.py, a plain setuptools.Extension
+# over a pre-generated SWIG wrapper (sxtwl_wrap.cxx). Upstream also pushes no git tag for 2.0.7;
+# commit 98b731a ("fix long_description") is the one byte-identical to the released sdist
+# (CLAUDE.md gotcha 103) -- update SXTWL_REF alongside SXTWL_VERSION.
+name: Build sxtwl wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/sxtwl.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sxtwl.yml'
+      - 'docs/packages/sxtwl.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sxtwl.yml'
+      - 'docs/packages/sxtwl.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  SXTWL_REF: 98b731a66bfdb1b98de2209b01fc6609351e6a4d
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: sxtwl
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build sxtwl ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Per-interpreter (no abi3 opt-in in setup.py). Matches the released 2.0.7
+        # wheels' modern-CPython coverage; cp27/cp35-cp39 dropped as EOL.
+        python:
+          - "cp310"
+          - "cp311"
+          - "cp312"
+          - "cp313"
+          - "cp313t"
+
+    env:
+      SXTWL_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout sxtwl_cpp ${{ env.SXTWL_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: yuangu/sxtwl_cpp
+          ref: ${{ env.SXTWL_REF }}
+          persist-credentials: false
+
+      # Upstream's released wheel carries no LICENSE at all (python/ has none, and
+      # MANIFEST.in never references the repo-root one); setuptools auto-discovers
+      # it once copied in and stages it under dist-info/licenses/.
+      - name: Stage the sxtwl licence
+        run: cp LICENSE python/LICENSE
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # No formal test suite ships (example/main.py is a demo script, not pytest).
+          # Smoke-test against the Spring Festival of the Year of the Dragon, a fixed,
+          # independently verifiable fact: 2024-02-10 is lunar 1-1 of a jiachen (甲辰)
+          # year, and the solar<->lunar conversion round-trips.
+          CIBW_TEST_COMMAND: >-
+            python -c "
+            import sxtwl;
+            d = sxtwl.fromSolar(2024, 2, 10);
+            assert (d.getLunarMonth(), d.getLunarDay(), d.isLunarLeap()) == (1, 1, False);
+            gz = d.getYearGZ();
+            assert (gz.tg, gz.dz) == (0, 4);
+            d2 = sxtwl.fromLunar(2024, 1, 1);
+            assert (d2.getSolarYear(), d2.getSolarMonth(), d2.getSolarDay()) == (2024, 2, 10)"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sxtwl-${{ env.SXTWL_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish sxtwl ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: sxtwl-${{ matrix.version }}-*-manylinux_riscv64
