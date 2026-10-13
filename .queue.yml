@@ -9207,9 +9207,47 @@ packages:
   version: 2026.1.0
   home: https://github.com/uxlfoundation/oneDAL
   repo: https://github.com/uxlfoundation/oneDAL
-  status: queued
-  pr: null
-  notes: '1 Linux wheels upstream (abi: py2.py3); no riscv64 on PyPI or pypi.riseproject.dev.'
+  status: ci-running
+  pr: https://github.com/riseproject-dev/python-wheels/pull/2971
+  notes: 'PR #2971 open, first CI run in flight. NOT the closed onemkl-sycl-*/mkl/intel-cmplr-*
+    shape (gotchas 506/528): verified on the real daal-2026.1.0-py2.py3-none-manylinux_2_28_x86_64.whl
+    (31.99 MB, Root-Is-Purelib, hand-set py2/py3-none-manylinux_2_28_x86_64 tags, zero
+    top_level.txt, only daal-2026.1.0.data/data/lib/{libonedal.so.4,libonedal_core.so.4,libonedal_parameters.so.4,libonedal_thread.so.4}),
+    confirming it IS the same closed-binary-redistribution shape as the parked oneMKL
+    family: License: Intel Simplified Software License ("provided in binary form only
+    ... without modification"), 45/45 releases back to 2018 are manylinux_2_28_x86_64 +
+    win_amd64 only, zero sdists ever. libonedal_core.so.4 is unstripped ELF x86-64,
+    .comment "Intel(R) oneAPI DPC++/C++ Compiler 2026.0.0" (closed toolchain), and `nm -C`
+    lists real statically-linked closed-oneMKL kernels compiled in
+    (mkl_sparse_s_csr_mv_def_ker_i8_avx512 and ~30 other mkl_sparse_* symbols, plus
+    check_avx512_features()/check_avx2_features() dispatch) -- the PyPI wheel itself is
+    exactly as closed as mkl/onemkl-sycl-sparse. BUT the upstream oneDAL *project* (not
+    this wheel) is a different situation entirely, matching this ticket''s hypothesis:
+    oneDAL is Apache-2.0 on GitHub and has a real, exercised non-x86 "ref" backend with no
+    SIMD/MKL dependency -- confirmed directly in the uxlfoundation/oneDAL source at tag
+    2026.1.0 (not main-only): a RISCV64 entry in the CPU-dispatch enum
+    (cpp/daal/AGENTS.md: "elif defined(TARGET_RISCV64) rv64 = 0"), dedicated
+    dev/make/function_definitions/{riscv64,lnxriscv64}.mk +
+    compiler_definitions/clang.ref.riscv64.mk (clang-only; no gnu.ref.riscv64.mk exists),
+    a riscv64 cross-compile CMake toolchain file (.ci/env/riscv64-clang-crosscompile-toolchain.cmake),
+    and -- most tellingly -- an exercised upstream CI job
+    (`LinuxMakeLLVM_OpenBLAS_rv64` in .ci/pipeline/ci.yml, pool ubuntu-24.04) that
+    cross-compiles with clang, builds OpenBLAS (NO_FORTRAN=1, since oneDAL never calls
+    OpenBLAS''s Fortran/LAPACK layer -- no libgfortran dependency) and oneTBB from source,
+    runs `.ci/scripts/build.sh --target daal --backend-config ref --cross-compile --plat
+    lnxriscv64` (the literal command this port''s workflow adapts to a native riscv64
+    runner, dropping cross-compile/sysroot/QEMU since this fleet already has real riscv64
+    hardware), then QEMU-tests the C++ examples. dev/make/deps.ref.mk confirms OpenBLAS is
+    statically copied into libonedal_core (matches daal''s own wheel shape) while TBB
+    links dynamically (dev/make/function_definitions/lnxriscv64.mk), matching the real
+    wheel''s Requires-Dist: tbb==2023.* exactly -- satisfied at install time by this
+    registry''s existing tbb==2023.1.0 port, no need to bundle it. Workflow mirrors that
+    CI job natively: dnf clang, build OpenBLAS v0.3.29 + oneTBB v2023.0.0 (oneDAL''s own
+    pin) from source inside manylinux_2_39_riscv64, `.ci/scripts/build.sh --target daal`
+    then `--target onedal_c`, glob libonedal*.so* into the wheel. Not validated locally:
+    the riscv64 "ref" dispatch path cannot be exercised on this x86_64 host (compiling the
+    x86 "mkl" backend instead would prove nothing about the actual riscv64 code path), so
+    CI is the first real build, same as the intel_pti/umf precedent.'
 - pkg: gsw
   version: 3.6.23
   home: https://www.teos-10.org/
@@ -9242,9 +9280,54 @@ packages:
   version: 2026.1.0
   home: https://github.com/intel/scikit-learn-intelex
   repo: https://github.com/uxlfoundation/scikit-learn-intelex
-  status: queued
-  pr: null
-  notes: '5 Linux wheels upstream (abi: py310,py311,py312,py313,py314); no riscv64 on PyPI or pypi.riseproject.dev.'
+  status: ci-running
+  pr: https://github.com/riseproject-dev/python-wheels/pull/2973
+  notes: 'PR #2973 open, first CI run in flight. NOT transitively blocked by daal/dpctl
+    the way this ticket assumed by default (the scann/tensorflow-citing pattern) --
+    verified on the real wheel and the daal finding above changes the picture. PyPI
+    metadata: License: Apache v2.0, Requires-Dist: daal (==2026.1.0), numpy (>=1.23.5),
+    scikit-learn (>=1.0) -- no dpctl anywhere in requires_dist across any of the 10
+    releases checked. Downloaded and extracted the real
+    scikit_learn_intelex-2026.1.0-py312-none-manylinux_2_28_x86_64.whl: exactly 3 compiled
+    extensions (onedal/_onedal_py_host.cpython-312-x86_64-linux-gnu.so,
+    daal4py/_daal4py.cpython-312-x86_64-linux-gnu.so,
+    daal4py/mpi_transceiver.cpython-312-x86_64-linux-gnu.so). `readelf -d` on all three:
+    NEEDED is only libonedal{,_core,_thread,_parameters}.so.4 (+ libmpi.so.12 for the MPI
+    transceiver) plus the usual libstdc++/libc/libm -- zero libsycl/libmkl/libze NEEDED
+    anywhere, so this wheel itself carries no SYCL/MKL/GPU linkage at all; the 89 files
+    that mention dpctl/sycl/xpu are optional, runtime-feature-detected Python-level GPU
+    paths, not a build or link requirement. Cloned uxlfoundation/scikit-learn-intelex at
+    tag 2026.1.0 and read setup.py/scripts/build_backend.py directly: arch_dir falls back
+    to the literal `platform.machine()` string when not in
+    {x86_64:intel64, AMD64:intel64, aarch64:arm} (i.e. "riscv64" verbatim, matching
+    oneDAL''s own ARCH_DIR_ONEDAL=riscv64), dpcpp is auto-detected
+    (`shutil.which("icpx")` + presence of onedal_dpc libs, both absent on riscv64 --- no
+    flag needed to turn it off) and distributed-mode MPI is opt-in (`no_dist` raises only
+    if MPIROOT is unset AND NO_DIST isn''t passed, so NO_DIST=1 is a supported, documented
+    CPU-only build path). doc/sources/about.rst states outright: "can be built from source
+    to provide accelerated routines for other platforms such as ARM and RISCV - see
+    :doc:`building-from-source`"; building-from-source.rst''s own recipe is exactly
+    DALROOT (pointing at a full oneDAL build''s headers+libs, which the `daal` PyPI wheel
+    alone does not ship -- it has no include/) + NO_DIST + NO_DPC + a C++ compiler + CMake
+    + pybind11/Cython/Jinja2 + clang-format. No sdist is ever published (same as daal), so
+    this builds from the matching uxlfoundation/scikit-learn-intelex git tag per gotcha
+    1/2/3. Workflow: a build_onedal job builds oneDAL 2026.1.0 from source once per
+    version (identical recipe to the daal port''s workflow, kept as the full release tree
+    with headers rather than just the libs the daal wheel ships) and hands it to the
+    cp310-cp314 interpreter matrix (upstream''s own matrix; no cp314t, same
+    direct-refcount-manipulation exclusion as other ports) via
+    upload/download-artifact, which then builds daal4py + onedal/_onedal_py_host through
+    setup.py''s own custom build command (`python setup.py build` -> CMake for the pybind11
+    onedal module, then cythonize for daal4py._daal4py) under cibuildwheel with
+    --no-build-isolation. clang-format is a required build tool
+    (generator/gen_daal4py.py shells out to it via shutil.which, hard-raising if absent)
+    but the `clang-format` PyPI package ships no riscv64 wheel (checked: only
+    macos/manylinux_x86_64/i686/aarch64/ppc64le/s390x/win), so it comes from
+    clang-tools-extra via dnf instead. Depends on the daal port (#2971, same commit)
+    landing and publishing first for the shipped wheel''s Requires-Dist: daal==2026.1.0
+    to resolve at install time; the build itself does not wait on that, since oneDAL is
+    compiled from source in this workflow too. Not validated locally for the same reason
+    as daal (riscv64-specific code path); CI is the first real build.'
 - pkg: extensionclass
   version: '6.4'
   home: https://github.com/zopefoundation/ExtensionClass
