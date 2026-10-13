@@ -1,0 +1,179 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# PyPI's tbb-devel wheel is Intel's own prebuilt x86_64-only binary under a closed
+# redistribution licence with no sdist; like build-tbb.yml, this builds the Apache-2.0 oneTBB
+# source instead, and lays the wheel out the same way: headers, debug libraries, and the
+# TBBConfig/pkg-config files oneTBB's own cmake_gen_github_configs.cmake generates.
+# Based on: https://github.com/uxlfoundation/oneTBB (no upstream CI builds this wheel)
+name: Build tbb-devel wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/tbb-devel.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tbb-devel.yml'
+      - 'docs/packages/tbb-devel.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tbb-devel.yml'
+      - 'docs/packages/tbb-devel.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: tbb-devel
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build tbb-devel ${{ matrix.version }} py2.py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+
+    env:
+      TBB_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout oneTBB v${{ env.TBB_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: uxlfoundation/oneTBB
+          ref: v${{ env.TBB_VERSION }}
+          persist-credentials: false
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
+
+      # Same configuration as build-tbb.yml (no tbbbind, no tests/examples, no -Werror), in
+      # Debug: the release libraries ship in the tbb wheel this one requires.
+      - name: Build the TBB debug libraries and the wheel
+        run: |
+          docker run --rm -v "$(pwd):/work" -w /work -e TBB_VERSION "${MANYLINUX_RISCV64_IMAGE}" bash -c '
+            set -euxo pipefail
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DTBB_TEST=OFF -DTBB_EXAMPLES=OFF -DTBB_STRICT=OFF -DCMAKE_INSTALL_LIBDIR=lib
+            cmake --build build -j"$(nproc)"
+            cmake --install build --prefix /work/install
+            cmake -DINSTALL_DIR=/work/config -P cmake/scripts/cmake_gen_github_configs.cmake
+            mkdir -p dist_libs
+            cp -L install/lib/libtbb_debug.so* install/lib/libtbbmalloc_debug.so* install/lib/libtbbmalloc_proxy_debug.so* dist_libs/
+            strip dist_libs/*.so*
+            file dist_libs/*.so*
+            cat > setup.py <<PYEOF
+          import glob
+          import os
+          from setuptools import setup
+          headers = {}
+          for path in sorted(glob.glob("install/include/**/*", recursive=True)):
+              if os.path.isfile(path):
+                  headers.setdefault(os.path.dirname(os.path.relpath(path, "install")), []).append(path)
+          setup(
+              name="tbb-devel",
+              version=os.environ["TBB_VERSION"],
+              description="Intel(R) oneAPI Threading Building Blocks (oneTBB)",
+              long_description="oneAPI Threading Building Blocks (oneTBB) header files and riscv64 debug dynamic libraries for Linux, built from the Apache-2.0 licensed oneTBB source.",
+              url="https://github.com/uxlfoundation/oneTBB",
+              license="Apache-2.0",
+              license_files=["LICENSE.txt"],
+              classifiers=[
+                  "Operating System :: POSIX :: Linux",
+                  "Topic :: Software Development :: Libraries",
+              ],
+              packages=[],
+              install_requires=["tbb==" + os.environ["TBB_VERSION"]],
+              data_files=[
+                  ("lib", sorted(glob.glob("dist_libs/*.so*"))),
+                  ("lib/cmake/tbb", ["config/linux/TBBConfig.cmake", "config/linux/TBBConfigVersion.cmake"]),
+                  ("lib/pkgconfig", ["config/linux/tbb.pc"]),
+              ] + sorted(headers.items()),
+          )
+          PYEOF
+            pybin=/opt/python/cp312-cp312/bin
+            "$pybin/pip" install -q -U setuptools wheel
+            "$pybin/python3" setup.py bdist_wheel --python-tag py2.py3 --plat-name manylinux_2_39_riscv64
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ "$pybin/pip" install -q dist/*.whl
+            prefix=$("$pybin/python3" -c "import sysconfig; print(sysconfig.get_path(\"data\"))")
+            mkdir -p /tmp/consumer
+            cat > /tmp/consumer/CMakeLists.txt <<CMEOF
+          cmake_minimum_required(VERSION 3.5)
+          project(consumer CXX)
+          find_package(TBB REQUIRED COMPONENTS tbb tbbmalloc)
+          add_executable(consumer main.cpp)
+          target_link_libraries(consumer TBB::tbb TBB::tbbmalloc)
+          CMEOF
+            cat > /tmp/consumer/main.cpp <<CPPEOF
+          #include <oneapi/tbb/parallel_reduce.h>
+          #include <oneapi/tbb/blocked_range.h>
+          #include <oneapi/tbb/scalable_allocator.h>
+          #include <oneapi/tbb/version.h>
+          #include <cstdio>
+          int main() {
+              long n = 1000000;
+              long sum = oneapi::tbb::parallel_reduce(
+                  oneapi::tbb::blocked_range<long>(0, n), 0L,
+                  [](const oneapi::tbb::blocked_range<long>& r, long acc) {
+                      for (long i = r.begin(); i != r.end(); ++i) acc += i;
+                      return acc;
+                  },
+                  [](long a, long b) { return a + b; });
+              void* p = scalable_malloc(64);
+              scalable_free(p);
+              std::printf("%s sum=%ld runtime=%d\n", TBB_runtime_version(), sum, TBB_runtime_interface_version());
+              return sum == n * (n - 1) / 2 && p && TBB_runtime_interface_version() == TBB_INTERFACE_VERSION ? 0 : 1;
+          }
+          CPPEOF
+            for config in Debug Release; do
+              cmake -S /tmp/consumer -B /tmp/consumer/build-$config -DCMAKE_BUILD_TYPE=$config -DTBB_DIR="$prefix/lib/cmake/tbb"
+              cmake --build /tmp/consumer/build-$config
+              ldd /tmp/consumer/build-$config/consumer | grep -E "libtbb"
+              /tmp/consumer/build-$config/consumer
+            done
+            ldd /tmp/consumer/build-Debug/consumer | grep -q "libtbb_debug.so.12 => .*/lib/libtbb_debug.so.12"
+            ldd /tmp/consumer/build-Release/consumer | grep -q "libtbb.so.12 => .*/lib/libtbb.so.12"
+          '
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tbb-devel-${{ env.TBB_VERSION }}-py2.py3-none-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish tbb-devel ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: tbb-devel-${{ matrix.version }}-*-manylinux_riscv64
