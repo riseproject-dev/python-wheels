@@ -1,0 +1,126 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/T-Dynamos/materialyoucolor-python/blob/v3.0.4/.github/workflows/cibuildwheel.yml
+name: Build materialyoucolor wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/materialyoucolor.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-materialyoucolor.yml'
+      - 'docs/packages/materialyoucolor.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-materialyoucolor.yml'
+      - 'docs/packages/materialyoucolor.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: materialyoucolor
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build materialyoucolor ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      MATERIALYOUCOLOR_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout materialyoucolor-python v${{ env.MATERIALYOUCOLOR_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: T-Dynamos/materialyoucolor-python
+          ref: v${{ env.MATERIALYOUCOLOR_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      # The quantizer is Google's material-color-utilities C++ (Apache-2.0) plus
+      # stb_image.h (MIT or public domain); upstream's wheel ships only its own
+      # LICENSE. Stage both at the root for setuptools' default license_files glob.
+      - name: Stage the vendored dependencies' licences
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/material-foundation/material-color-utilities/5b3618b16fdc3825e21d5679bafd144662088ea1/LICENSE" -o LICENSE.material-color-utilities
+          sed -n '/^This software is available under 2 licenses/,$p' materialyoucolor/quantize/stb_image.h > LICENSE.stb
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_BEFORE_TEST: >
+            pip install -r {project}/requirements.txt -r {project}/requirements-dev.txt
+          CIBW_TEST_COMMAND: >
+            python -c "from PIL import Image; Image.new('RGB', (128, 128), (70, 120, 180)).save('test_image.jpg')" &&
+            python {project}/tests/test_all.py --image test_image.jpg --quality 1 --method pillow --tonal-spot &&
+            python {project}/tests/test_all.py --image test_image.jpg --quality 1 --method cpp --tonal-spot
+          CIBW_BEFORE_BUILD: >
+            pip install setuptools wheel pybind11
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          path = sys.argv[1]
+          names = zipfile.ZipFile(path).namelist()
+          assert any(n.startswith("materialyoucolor/quantize/celebi.") and n.endswith(".so") for n in names), names
+          licences = {n.rsplit("/", 1)[-1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          assert licences == {"LICENSE", "LICENSE.material-color-utilities", "LICENSE.stb"}, licences
+          print(path, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: materialyoucolor-${{ env.MATERIALYOUCOLOR_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish materialyoucolor ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: materialyoucolor-${{ matrix.version }}-*-manylinux_riscv64
