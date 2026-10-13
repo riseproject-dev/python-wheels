@@ -1,0 +1,127 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/trilogy-data/pytrilogy/blob/main/.github/workflows/pythonpublish.yml
+name: Build pytrilogy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pytrilogy.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pytrilogy.yml'
+      - 'docs/packages/pytrilogy.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pytrilogy.yml'
+      - 'docs/packages/pytrilogy.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pytrilogy
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pytrilogy ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # pyo3 is optional/non-abi3 (features = ["python", "pyo3/extension-module"]),
+        # so every interpreter needs its own build, same as upstream's own
+        # PYTHON_VERSIONS. Upstream ships no cp314 Linux wheel either (3.14 is
+        # wasm/Pyodide-only, see wasm-wheel.yml), so cp314/cp314t are dropped.
+        python: ['cp311', 'cp312', 'cp313']
+
+    env:
+      PYTRILOGY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pytrilogy ${{ env.PYTRILOGY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: trilogy-data/pytrilogy
+          # Upstream pushes a version-bump commit straight to main and never tags
+          # a release (gotcha 103); this is the commit that bumped to 0.3.339.
+          ref: 51c435926ff532c7d8465d9bc33224216cf87445
+          persist-credentials: false
+
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+
+      - name: Sync version to Cargo.toml
+        run: python3 .scripts/sync_version.py
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release -i ${{ steps.interp.outputs.value }} --out dist
+          manylinux: '2_39'
+
+      - name: Patch wheels with dependencies
+        run: python3 .scripts/patch_wheels.py dist
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ steps.interp.outputs.value }}
+          activate-environment: true
+          enable-cache: false
+
+      # Mirrors upstream's own "Validate patched wheels" step (pythonpublish.yml).
+      - name: Validate patched wheel
+        env:
+          UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+          UV_INDEX_STRATEGY: unsafe-best-match
+        run: |
+          uv pip install dist/*.whl
+          trilogy --help
+          trilogy run "SELECT 1 + 1->test;" duckdb
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pytrilogy-${{ env.PYTRILOGY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pytrilogy ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pytrilogy-${{ matrix.version }}-*-manylinux_riscv64
