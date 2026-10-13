@@ -1,0 +1,164 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/nmslib/nmslib/blob/master/.github/workflows/build_only.yml (linux job)
+name: Build nmslib wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/nmslib.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-nmslib.yml'
+      - 'docs/packages/nmslib.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-nmslib.yml'
+      - 'docs/packages/nmslib.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # nmslib has no v2.1.2 tag (CLAUDE.md gotcha 103): __version__ was bumped to
+  # 2.1.2 in this commit in 2022 and the PyPI sdist uploaded in 2025 doesn't
+  # byte-match any commit's setup.py (its macOS arch-detection code is an
+  # older, simpler shape than what git has carried since this commit) - but
+  # that divergence is confined to the darwin-only branch of setup.py's
+  # BuildExt, so it has no effect on this Linux build. This is also current
+  # master: everything after it is one unrelated test-tolerance tweak.
+  NMSLIB_REF: 799c8c0b5fd36fa40542ab0972038f19b2488641
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: nmslib
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build nmslib ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    env:
+      NMSLIB_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout nmslib ${{ env.NMSLIB_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: nmslib/nmslib
+          ref: ${{ env.NMSLIB_REF }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python_bindings
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # setup.py appends -march=native unless CFLAGS already names an
+          # arch flag (the same override upstream's own build_linux_wheels/
+          # deploy.sh passes per target arch: -march=armv8-a for aarch64,
+          # -msse2 for x86_64) - rv64gc is this repo's portable riscv64
+          # baseline. numpy and scipy have no riscv64 wheels on public PyPI.
+          CIBW_ENVIRONMENT: >-
+            CFLAGS=-march=rv64gc
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy
+          CIBW_TEST_REQUIRES: pytest psutil
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: python -m pytest -q -ra tests
+
+      - name: Check the wheel is a compiled extension module
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("nmslib") and n.endswith(".so") for n in names), (whl, names)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: nmslib-${{ env.NMSLIB_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources for nmslib ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      NMSLIB_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # setup.py's BuildExt always adds -fopenmp/-pthread on non-darwin unix,
+      # so auditwheel vendors the image's libgomp into the wheel.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: nmslib-${{ env.NMSLIB_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish nmslib ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: nmslib-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: nmslib-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
