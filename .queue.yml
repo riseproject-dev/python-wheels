@@ -1,4 +1,18 @@
 packages:
+- pkg: fckitlib
+  version: 0.14.2.19
+  home: https://confluence.ecmwf.int/display/FCKIT
+  repo: https://github.com/ecmwf/fckit
+  status: ci-running
+  pr: https://github.com/riseproject-dev/python-wheels/pull/3040
+  notes: 'PR #3040 open. ECMWF''s fckit: Fortran/C++ toolkit (ecbuild/CMake, Fortran+C++17) wrapping eckit for Fortran callers (logging/MPI/configuration); no Python bindings, just a compiled library + headers + Fortran .mod files distributed as a wheel, same pattern as our already-published eckitlib/eccodeslib. Upstream publishes no sdist, only prebuilt wheels built by ECMWF''s private wheelmaker tool; this replays its python/fckitlib/buildconfig CMAKE_PARAMS directly (-Deckit_ROOT=<eckitlib install>). gfortran is present in the manylinux_riscv64 image (build-scikit-misc.yml already compiles real Fortran there). Builds against our own published eckitlib (2.3.0.30) rather than upstream''s exact eckitlib==2.0.7.19 pin, which our registry does not carry; bundles libgfortran/libquadmath (not on the manylinux baseline) and repoints the RPATH at a sibling eckitlib package, since upstream''s own published wheel carries an absolute build-container RPATH that cannot resolve for installers. No local build check: no docker daemon available in this sandbox, and host disk was at ~7.2GB free with other concurrent agents active.'
+- pkg: polars-ds
+  version: 0.12.1
+  home: https://pypi.org/project/polars-ds/
+  repo: https://github.com/abstractqqq/polars_ds_extension
+  status: ci-running
+  pr: https://github.com/riseproject-dev/python-wheels/pull/3041
+  notes: 'PR #3041 open. polars_ds_extension: PyO3/maturin Rust plugin adding stats/ML/feature-engineering expressions to Polars (already published here as polars-runtime/polars-lts-cpu). Verified real upstream (github.com/abstractqqq/polars_ds_extension, MIT). Cargo.toml: pyo3 abi3-py39 (single cp39-abi3 wheel); heavier dependency tree than a typical pure-Rust plugin -- faer (codeberg.org git dependency, pinned rev) and argmin/argmin-math (github.com/abstractqqq/argmin, branch "main" but pinned by the committed Cargo.lock) for linear algebra/optimization, plus zstd-sys/lz4-sys (vendored C sources built via the `cc` crate, the same codepath polars-runtime itself already proves on riscv64). rust-toolchain.toml pins a nightly channel (faer''s "nightly" feature); maturin-action already does this successfully on these runners for build-daft.yml. faer/pulp are pure Rust with no BLAS/LAPACK and already resolve cleanly on riscv64gc per build-nutpie.yml''s own note. No exotic or closed-source native deps found. Local build check skipped: no docker daemon in this sandbox and host disk was at ~7.2GB free with other concurrent agents active, the same bracket sibling ports (renkin, argus-redact) skipped at.'
 - pkg: renkin
   version: 1.0.0
   home: https://github.com/kent-tokyo/renkin
@@ -10391,16 +10405,54 @@ packages:
   version: 0.9.5
   home: http://github.com/olokelo/jxlpy
   repo: http://github.com/olokelo/jxlpy
-  status: queued
-  pr: null
-  notes: '42 Linux wheels upstream (abi: cp310,cp311,cp312,cp36,cp37,cp38,cp39); no riscv64 on PyPI or pypi.riseproject.dev.'
+  status: ci-running
+  pr: 3039
+  notes: 'PR #3039 open, CI running (cp310-cp314). Cython/C++ extension linking a
+    system libjxl, which the manylinux_riscv64 image does not ship; mirrors
+    upstream''s own packaging.yml by building libjxl v0.10.1 from source via CMake
+    in CIBW_BEFORE_ALL (same disabled TESTING/BENCHMARK/TOOLS/DEVTOOLS flags upstream
+    uses), installing to /usr/local, and letting cibuildwheel''s default auditwheel
+    repair bundle the resulting libjxl/libjxl_threads/brotli shared libraries. No
+    -march/SIMD flag is passed anywhere in the build, so vendored highway collapses
+    to its portable EMU128/SCALAR baseline on riscv64 rather than requiring RVV
+    hardware (same reasoning as pillow-jxl-plugin, gotchas 139/272/279/448). Not
+    built locally (disk space tight under concurrent agents); CI''s pull_request
+    run does the real riscv64 build.'
 - pkg: clarifai-protocol
   version: 0.0.62
   home: https://clarifai.com
   repo: https://github.com/Clarifai/clarifai-protocol
-  status: queued
+  status: parked
   pr: null
-  notes: '20 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp39); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Not feasible: closed-source, no public source repository and zero sdist
+    ever published (gotcha 372, feasibility-and-triage.md). repo points to
+    https://github.com/Clarifai/clarifai-protocol, but it does not resolve
+    publicly -- raw.githubusercontent.com 404s on every branch/tag tried (master,
+    main, 0.0.62, v0.0.62, clarifai-protocol-0.0.62, release-0.0.62), unlike
+    Clarifai''s own public clarifai-python SDK repo (which resolves fine on
+    master), so it is private, not merely renamed or moved. Checked the PyPI JSON
+    index across all 62 releases ever published (0.0.7 through 0.0.62, incl.
+    rc''s): zero sdist at any version, only platform+interpreter wheels
+    (cp39-cp313 x macosx_11_0_universal2 / manylinux2014+musllinux_1_2
+    x86_64+aarch64 / win_amd64). Downloaded the real 0.0.62 cp312 manylinux wheel
+    and inspected it directly: the payload is a single
+    clarifai_protocol.cpython-312-*.so built by Nuitka 2.5.8
+    (dist-info/WHEEL: "Generator: Nuitka (2.5.8)"), i.e. the whole package is
+    ahead-of-time-compiled CPython->C->native, not a C/C++/Rust extension bound to
+    a separate native library -- pure Python with per-interpreter+per-platform
+    wheel tags exactly as suspected, but compiled to withhold the source rather
+    than for performance. The in-wheel README (METADATA long description) states
+    outright "This is a proprietary protocol used by our runners to communicate
+    with our API", confirming intent despite the PyPI classifier reading
+    "License :: OSI Approved :: Apache Software License" and dist-info/licenses/LICENSE
+    being the stock Apache-2.0 text (classifier likely inherited from a packaging
+    template rather than describing the actual grant -- gotcha 518''s caution
+    against trusting a classifier alone applies, but it is moot here since the
+    blocker is the missing source, not the licence). No sdist and no public repo
+    means there is no gotcha-77 "build it yourself" escape hatch and nothing to
+    compile for riscv64 at any layer. No worktree/branch/PR created -- diagnosed
+    read-only against the real PyPI JSON index and the real 0.0.62 wheel
+    contents.'
 - pkg: passagemath-plot
   version: 10.8.10.post1
   home: https://passagemath.org/docs/latest
