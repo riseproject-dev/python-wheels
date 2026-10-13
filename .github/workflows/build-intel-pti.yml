@@ -1,0 +1,134 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# PyPI's intel-pti wheel is Intel's x86_64 build of the MIT PTI SDK (intel/pti-gpu sdk/, no
+# Python code, libraries installed under <wheel>.data/data/); this builds the same tag with
+# the sdk's own scikit-build-core pyproject, using its linux-gxx-release compiler instead of icpx.
+# Based on: https://github.com/intel/pti-gpu/blob/master/.github/workflows/sdk_build_and_test.yml
+name: Build intel-pti wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/intel-pti.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-intel-pti.yml'
+      - 'docs/packages/intel-pti.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-intel-pti.yml'
+      - 'docs/packages/intel-pti.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: intel-pti
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build intel-pti ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+
+    env:
+      PTI_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pti-gpu pti-${{ env.PTI_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: intel/pti-gpu
+          ref: pti-${{ env.PTI_VERSION }}
+          persist-credentials: false
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
+
+      - name: Write GCC toolchain file
+        run: |
+          cat > gcc-toolchain.cmake <<'EOF'
+          set(CMAKE_C_COMPILER gcc)
+          set(CMAKE_CXX_COMPILER g++)
+          set(CMAKE_INSTALL_LIBDIR     "${SKBUILD_DATA_DIR}/lib"     CACHE PATH "")
+          set(CMAKE_INSTALL_INCLUDEDIR "${SKBUILD_DATA_DIR}/include" CACHE PATH "")
+          set(CMAKE_INSTALL_BINDIR     "${SKBUILD_DATA_DIR}/bin"     CACHE PATH "")
+          set(CMAKE_INSTALL_DOCDIR     "${SKBUILD_DATA_DIR}/share"   CACHE PATH "")
+          set(CMAKE_INSTALL_RPATH      "$ORIGIN"                     CACHE STRING "")
+          EOF
+
+      # libze_loader.so.1 is left to the environment, as in Intel's x86_64 wheel.
+      # Only the unit/libload tests run: every other label needs an Intel GPU.
+      - name: Build, test and repair the wheel
+        run: |
+          docker run --rm -v "$(pwd):/work" -w /work -e PTI_VERSION \
+            -e PTI_RELEASE_WHL=1 \
+            -e SKBUILD_WHEEL_LICENSE_FILES="LICENSE;third-party-programs.txt" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            "${MANYLINUX_RISCV64_IMAGE}" bash -c '
+            set -euxo pipefail
+            pybin=/opt/python/cp312-cp312/bin
+            git config --global --add safe.directory /work
+            cp LICENSE third-party-programs.txt sdk/
+            "$pybin/pip" wheel ./sdk --no-deps -w dist-raw -C build-dir=build -C cmake.define.CMAKE_TOOLCHAIN_FILE=/work/gcc-toolchain.cmake
+            ctest --test-dir build --output-on-failure -L "unit|libload" -LE "performance|quarantine"
+            auditwheel repair --exclude libze_loader.so.1 -w dist dist-raw/*.whl
+            "$pybin/pip" install dist/*.whl
+            "$pybin/python3" - <<PYEOF
+          import ctypes, importlib.metadata, os, sysconfig
+          libdir = os.path.join(sysconfig.get_path("data"), "lib")
+          pti = ctypes.CDLL(os.path.join(libdir, "libpti_view.so.1"))
+          pti.ptiVersionString.restype = ctypes.c_char_p
+          version = pti.ptiVersionString().decode()
+          assert version == os.environ["PTI_VERSION"], version
+          assert os.path.exists(os.path.join(libdir, "pti", "libpti.so"))
+          licenses = {p.name for p in importlib.metadata.files("intel-pti") if "licenses" in p.parts}
+          assert {"LICENSE", "third-party-programs.txt"} <= licenses, licenses
+          print("smoke test OK: ptiVersionString() =", version)
+          PYEOF
+          '
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: intel-pti-${{ env.PTI_VERSION }}-py3-none-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish intel-pti ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: intel-pti-${{ matrix.version }}-*-manylinux_riscv64
