@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux_*_manylinux_*` jobs of
+# https://github.com/questdb/py-questdb-client/blob/v5.0.0/ci/cibuildwheel.yaml
+name: Build questdb wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/questdb.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-questdb.yml'
+      - 'docs/packages/questdb.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-questdb.yml'
+      - 'docs/packages/questdb.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: questdb
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build questdb ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      QUESTDB_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout py-questdb-client v${{ env.QUESTDB_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: questdb/py-questdb-client
+          ref: v${{ env.QUESTDB_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Replaces upstream's [tool.cibuildwheel.linux.environment], so its two keys are repeated.
+          CIBW_ENVIRONMENT: >-
+            SETUP_DO_GIT_SUBMODULE_INIT=1
+            CARGO_TARGET_DIR=/tmp/qdb-cargo-target
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+          # The registry has no cp314t pandas, which ci/pip_install_deps.py asserts. test.py
+          # self-skips without pandas and pyarrow, but not with pyarrow alone.
+          CIBW_BEFORE_TEST: >-
+            ${{ matrix.python == 'cp314t'
+            && 'python -m pip install --only-binary :all: psutil'
+            || 'python {project}/ci/pip_install_deps.py' }}
+
+      - name: Check the extension made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              exts = {n.split("/")[-1].split(".")[0] for n in names if n.endswith(".so")}
+              assert exts == {"_client"}, (whl, exts)
+              assert any(n.endswith("dist-info/licenses/LICENSE.txt") for n in names), names
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: questdb-${{ env.QUESTDB_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish questdb ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: questdb-${{ matrix.version }}-*-manylinux_riscv64
