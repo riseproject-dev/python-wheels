@@ -1,0 +1,193 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/ankitects/anki/blob/26.08.1/.github/workflows/release.yml
+name: Build anki wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/anki.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-anki.yml'
+      - 'docs/packages/anki.yaml'
+      - 'patches/anki/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-anki.yml'
+      - 'docs/packages/anki.yaml'
+      - 'patches/anki/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: anki
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build anki ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    container:
+      image: quay.io/pypa/manylinux_2_39_riscv64
+    defaults:
+      run:
+        shell: bash
+    env:
+      ANKI_VERSION: ${{ matrix.version }}
+      RELEASE: 2
+
+    steps:
+      - name: Resolve the anki tag
+        id: tag
+        run: |
+          IFS=. read -r year month patch <<< "$ANKI_VERSION"
+          echo "tag=${year}.$(printf %02d "$month")${patch:+.$patch}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout anki ${{ steps.tag.outputs.tag }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ankitects/anki
+          ref: ${{ steps.tag.outputs.tag }}
+          submodules: true
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch anki source
+        run: git apply python-wheels/patches/anki/${{ env.ANKI_VERSION }}/00*.patch
+
+      - name: Setup build environment
+        run: |
+          git config --global --add safe.directory '*'
+          dnf -y install protobuf-compiler
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain none --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" toolchain install
+          PATH="$HOME/.cargo/bin:$PATH" tools/install-n2
+
+      # Upstream's pyenv is a `uv sync --extra qt` of the whole workspace, which
+      # needs PyQt6/WebEngine; OFFLINE_BUILD is upstream's documented way to
+      # supply the venv instead, and pylib only needs protoc-gen-mypy from it.
+      - name: Create the Python environment
+        run: |
+          /opt/python/cp313-cp313/bin/python -m venv out/pyenv
+          out/pyenv/bin/pip install mypy-protobuf==3.6.0 uv==0.11.8
+
+      # pylib/ has no LICENSE of its own, so hatchling's licence glob finds nothing
+      # and upstream's wheels ship none.
+      - name: Stage licence
+        run: cp LICENSE pylib/
+
+      - name: Build wheel
+        env:
+          OFFLINE_BUILD: '1'
+          PROTOC_BINARY: /usr/bin/protoc
+          UV_BINARY: ${{ github.workspace }}/out/pyenv/bin/uv
+          UV_PYTHON: ${{ github.workspace }}/out/pyenv/bin/python
+        run: ./ninja wheels:anki
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: anki-${{ env.ANKI_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: out/wheels/anki-*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314"]
+    name: Test anki ${{ matrix.version }} ${{ matrix.python }}
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    container:
+      image: quay.io/pypa/manylinux_2_39_riscv64
+    defaults:
+      run:
+        shell: bash
+    env:
+      ANKI_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Resolve the anki tag
+        id: tag
+        run: |
+          IFS=. read -r year month patch <<< "$ANKI_VERSION"
+          echo "tag=${year}.$(printf %02d "$month")${patch:+.$patch}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout anki ${{ steps.tag.outputs.tag }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ankitects/anki
+          ref: ${{ steps.tag.outputs.tag }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: anki-${{ env.ANKI_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: dist
+
+      - name: Install wheel
+        env:
+          PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+          PIP_ONLY_BINARY: orjson,protobuf
+        run: |
+          /opt/python/${{ matrix.python }}-${{ matrix.python }}/bin/python -m venv /venv
+          /venv/bin/pip install dist/anki-*.whl pytest==8.4.1
+          /venv/bin/python -c "import anki._rsbridge as m; assert m.__file__.endswith('.so'), m.__file__"
+
+      # Upstream's check:pytest:pylib. Staged out of the checkout so pylib/anki does
+      # not shadow the wheel; test_create_open expects '/' to be unwritable, and the
+      # container runs as root.
+      - name: Run pylib tests
+        run: |
+          mkdir /stage
+          cp -a pylib/tests /stage/
+          cd /stage
+          ANKI_TEST_MODE=1 /venv/bin/python -m pytest -p no:cacheprovider tests \
+            --deselect tests/test_collection.py::test_create_open
+
+  publish:
+    name: Publish anki ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: anki-${{ matrix.version }}-*-manylinux_riscv64
