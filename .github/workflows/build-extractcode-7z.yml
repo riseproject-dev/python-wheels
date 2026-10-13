@@ -1,0 +1,230 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow builds p7zip 16.02 (https://p7zip.sourceforge.io/) from its own
+# upstream source, the same binary that aboutcode-org/scancode-plugins's
+# etc/scripts/homebrew.py p7zip/x86_64_linux preset fetches as a prebuilt
+# Homebrew bottle for every other Linux arch it ships (no riscv64 bottle exists).
+name: Build extractcode-7z wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/extractcode-7z.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-extractcode-7z.yml'
+      - 'docs/packages/extractcode-7z.yaml'
+      - 'patches/extractcode-7z/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-extractcode-7z.yml'
+      - 'docs/packages/extractcode-7z.yaml'
+      - 'patches/extractcode-7z/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  P7ZIP_VERSION: 16.02
+  P7ZIP_SHA256: 5eb20ac0e2944f6cb9c2d51dd6c4518941c185347d4089ea89087ffdd6e2341f
+  P7ZIP_DEBIAN_PATCH_URL: https://deb.debian.org/debian/pool/main/p/p7zip/p7zip_16.02+dfsg-8.debian.tar.xz
+  P7ZIP_DEBIAN_PATCH_SHA256: 01217dca1667af0de48935a51dc46aad442e6ebcac799d714101b7edf9651eb5
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: extractcode-7z
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build extractcode-7z ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+
+    env:
+      EXTRACTCODE_7Z_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout extractcode_7z-linux packaging
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: aboutcode-org/scancode-plugins
+          ref: 34389978fb5e119881921fde9e17c641cd8b34a4
+          sparse-checkout: builtins/extractcode_7z-linux
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
+
+      # makefile.linux_any_cpu_gcc_4.X (vanilla p7zip's own generic-Linux
+      # makefile.machine) is pure portable C/C++, no x86 asm; LOCAL_FLAGS is
+      # deliberately left for p7zip's own makefile.list to set (it already
+      # carries -DEXTERNAL_CODECS -DUNICODE -D_UNICODE -DUNIX_USE_WIN_FILE,
+      # the same flags every bundled 7-Zip build system - CMake/qmake/Android.mk -
+      # uses), so only -fPIC (needed for the bin/7z.so codec module) and the
+      # GCC 14 implicit-pointer/implicit-int demotions (gotcha 226) are added here.
+      - name: Fetch and patch p7zip source
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/p7zip-src.tar.bz2 "https://downloads.sourceforge.net/project/p7zip/p7zip/${P7ZIP_VERSION}/p7zip_${P7ZIP_VERSION}_src_all.tar.bz2"
+          echo "${P7ZIP_SHA256}  /tmp/p7zip-src.tar.bz2" | sha256sum -c
+          curl -fsSL -o /tmp/p7zip-debian.tar.xz "${P7ZIP_DEBIAN_PATCH_URL}"
+          echo "${P7ZIP_DEBIAN_PATCH_SHA256}  /tmp/p7zip-debian.tar.xz" | sha256sum -c
+          mkdir -p /tmp/p7zip-debian
+          tar xf /tmp/p7zip-debian.tar.xz -C /tmp/p7zip-debian
+          tar xjf /tmp/p7zip-src.tar.bz2 -C "${GITHUB_WORKSPACE}"
+          cd "${GITHUB_WORKSPACE}/p7zip_${P7ZIP_VERSION}"
+          for p in 01-makefile 12-CVE-2016-9296 13-CVE-2017-17969 14-Fix-g++-warning 15-Fix-FTBFS-gcc10; do
+            patch -p1 < "/tmp/p7zip-debian/debian/patches/${p}.patch"
+          done
+          patch -p1 < "${GITHUB_WORKSPACE}/python-wheels/patches/extractcode-7z/${EXTRACTCODE_7Z_VERSION}"/*.patch
+          cat > makefile.machine <<'MACHINE'
+          OPTFLAGS=-O -s -fPIC -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types
+
+          ALLFLAGS=${OPTFLAGS} -pipe \
+              	-D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE \
+          	-DNDEBUG -D_REENTRANT -DENV_UNIX \
+          	-D_7ZIP_LARGE_PAGES \
+          	$(LOCAL_FLAGS)
+
+          CXX=g++
+          CC=gcc
+          CC_SHARED=-fPIC
+          LINK_SHARED=-fPIC -shared
+
+          LOCAL_LIBS=-lpthread
+          LOCAL_LIBS_DLL=$(LOCAL_LIBS) -ldl
+
+          OBJ_CRC32=$(OBJ_CRC32_C)
+          OBJ_AES=
+          MACHINE
+
+      - name: Build p7zip and the wheel
+        run: |
+          docker run --rm -v "${GITHUB_WORKSPACE}:/work" -w /work "${MANYLINUX_RISCV64_IMAGE}" bash -c '
+            set -euxo pipefail
+            cd p7zip_16.02
+            make 7z
+            cd /work
+            cp p7zip_16.02/bin/7z p7zip_16.02/bin/7z.so builtins/extractcode_7z-linux/src/extractcode_7z/bin/
+            cd builtins/extractcode_7z-linux
+            pybin=/opt/python/cp312-cp312/bin
+            "$pybin/pip" install -q -U pip setuptools wheel
+            "$pybin/python3" setup.py bdist_wheel --plat-name manylinux_2_39_riscv64 --python-tag py3
+          '
+
+      - name: Check the wheel ships riscv64 7z and 7z.so
+        run: |
+          python3 - builtins/extractcode_7z-linux/dist/*.whl <<'EOF'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as zf:
+              names = zf.namelist()
+              assert sys.argv[1].endswith("-py3-none-manylinux_2_39_riscv64.whl"), sys.argv[1]
+              for member in ("extractcode_7z/bin/7z", "extractcode_7z/bin/7z.so"):
+                  assert member in names, names
+                  header = zf.read(member)[:20]
+                  assert header[:4] == b"\x7fELF", (member, header)
+                  assert header[18] == 0xF3, (member, header)  # e_machine EM_RISCV
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: extractcode-7z-${{ env.EXTRACTCODE_7Z_VERSION }}-py3-none-manylinux_riscv64
+          path: builtins/extractcode_7z-linux/dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test extractcode-7z ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 15
+    env:
+      EXTRACTCODE_7Z_VERSION: ${{ matrix.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: extractcode-7z-${{ env.EXTRACTCODE_7Z_VERSION }}-py3-none-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . extractcode_7z
+
+      # Mirrors how scancode-toolkit's extractcode actually drives this plugin:
+      # SevenzipPaths.get_locations() resolves 'extractcode.sevenzip.exe' to the
+      # bundled binary, which extractcode then shells out to for list/extract.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          site_packages=$(python3 -c "import extractcode_7z, os; print(os.path.dirname(extractcode_7z.__file__))")
+          sevenzip="$site_packages/bin/7z"
+          test -x "$sevenzip"
+
+          work=$(mktemp -d)
+          cd "$work"
+          mkdir -p sub
+          printf 'hello riscv64 world\n' > a.txt
+          printf 'nested file\n' > sub/b.txt
+
+          "$sevenzip" a -t7z test.7z a.txt sub
+          "$sevenzip" l test.7z | grep -q 'a.txt'
+          mkdir out
+          cd out
+          "$sevenzip" x ../test.7z
+          [ "$(cat a.txt)" = "hello riscv64 world" ]
+          [ "$(cat sub/b.txt)" = "nested file" ]
+
+  publish:
+    name: Publish extractcode-7z ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: extractcode-7z-${{ matrix.version }}-py3-none-manylinux_riscv64
