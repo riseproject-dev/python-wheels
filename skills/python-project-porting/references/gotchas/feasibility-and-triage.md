@@ -310,6 +310,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **635** — A release pipeline that repacks *prebuilt* binaries into wheels does not make the
   package a binary fetcher: read `setup.py` before the release workflow, because a setuptools-rust
   `RustBin` (or maturin `bin`) project still builds from source (the sentry-cli case).
+- **646** — A trivially portable project with **no licence grant at all** (no LICENSE file, no
+  `license` in `Cargo.toml`/`pyproject.toml`/PyPI metadata, README "License: TBD") is not
+  redistributable: park it on the licence, not the build (the oboros case).
 
 ---
 
@@ -5366,3 +5369,27 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       fixture and compare against a checked-in expected tree (`sourcemaps inject` +
       `_expected_outputs/`, deterministic content-hashed debug IDs) become a `diff -r` against
       the installed binary — a stronger test than `--version` (gotcha 187).
+
+646. **A project that grants no licence at all cannot be rehosted, however trivial the build
+    (the oboros case).** `oboros` 0.8.3 looks like the easiest possible port: PyPI metadata has
+    no `Home-page`/`Project-URL` and no sdist, but the wheel's
+    `dist-info/sboms/ouroboros-cli.cyclonedx.json` names the crate `ouroboros-cli` and its
+    `bom-ref` path `/home/runner/work/ouroboros/ouroboros/crates/ouroboros-cli`, and a GitHub
+    code search for `"ouroboros-cli" "oboros" filename:Cargo.toml` finds exactly one repo
+    (`njgrisafi/ouroboros`, tag `0.8.3`). It is a maturin `bindings = "bin"` Cargo workspace
+    (gotcha 145's shape), ~110 pure-Rust crates, released by a plain `PyO3/maturin-action` —
+    a one-job workflow on the riscv64 runner. It is still not portable, because nothing grants
+    anyone the right to redistribute it: no `LICENSE`/`COPYING` file anywhere in the tree, no
+    `license` key in either `Cargo.toml` or `pyproject.toml`, no `License`/`License-Expression`
+    in the PyPI `METADATA`, and the README's `## License` section literally reads `TBD`.
+    - **Absence of a licence is not a permissive licence.** Default copyright applies; PyPI's
+      own terms let PyPI serve what the author uploaded, they give no third party a right to
+      rebuild and rehost it. RISE distributes these wheels (licence compliance is ours — see
+      `patching-and-licensing.md`), so there is nothing to ship in `dist-info/licenses/` and no
+      grant to rely on. Gotcha 372 (hdbcli) is the explicit-prohibition version of this; here
+      the lock is the missing grant, and unlike hdbcli it lifts the moment upstream adds one.
+    - **Check the licence before writing YAML for a "trivial" port** — the three reads are
+      the SBOM/`METADATA` in the published wheel, the manifests' `license` keys, and
+      `git ls-files | grep -iE 'licen|copying'` at the release tag.
+    - `parked` in `.queue.yml` with the unblock condition spelled out (upstream adds a licence →
+      re-queue; the build itself needs nothing special). No worktree/branch/PR.

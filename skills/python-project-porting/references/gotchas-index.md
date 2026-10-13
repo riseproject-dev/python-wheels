@@ -478,6 +478,8 @@ The porting gotchas (556 of them) live in [`references/gotchas/`](gotchas/), spl
   `scripts/wheels`) hides a from-source build: `setup.py` is a setuptools-rust `RustBin` and the
   sdist ships the Rust sources, so no upstream riscv64 binary is needed — gotcha 145's shape, not
   35's (the sentry-cli case).
+- **646** — A trivially portable project that grants no licence at all (no LICENSE, no manifest
+  `license`, README "License: TBD") cannot be rehosted: park on the licence (the oboros case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
