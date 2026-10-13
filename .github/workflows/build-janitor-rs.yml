@@ -1,0 +1,180 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/pyjanitor-devs/janitor-rs/blob/v0.6.3/.github/workflows/release.yml
+# and the `test` job of
+# https://github.com/pyjanitor-devs/janitor-rs/blob/v0.6.3/.github/workflows/ci.yml
+name: Build janitor-rs wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/janitor-rs.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-janitor-rs.yml'
+      - 'docs/packages/janitor-rs.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-janitor-rs.yml'
+      - 'docs/packages/janitor-rs.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_ONLY_BINARY: ':all:'
+  UV_PYTHON_PREFERENCE: only-managed
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: janitor-rs
+      version: ${{ inputs.version }}
+
+  test_kernels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Test janitor-rs ${{ matrix.version }} kernels
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    env:
+      JANITOR_RS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout janitor-rs v${{ env.JANITOR_RS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pyjanitor-devs/janitor-rs
+          ref: v${{ env.JANITOR_RS_VERSION }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # master
+        with:
+          toolchain: stable
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: false
+
+      - name: cargo test (kernel unit tests)
+        run: ./scripts/test-rust.sh
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build janitor-rs ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ['cp312', 'cp313', 'cp314', 'cp314t']
+    env:
+      JANITOR_RS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout janitor-rs v${{ env.JANITOR_RS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pyjanitor-devs/janitor-rs
+          ref: v${{ env.JANITOR_RS_VERSION }}
+          persist-credentials: false
+
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+
+      # musllinux is dropped: the registry has no musllinux numpy to test the wheel against.
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --out dist -i ${{ steps.interp.outputs.value }}
+          manylinux: '2_39'
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ steps.interp.outputs.value }}
+          activate-environment: true
+          enable-cache: false
+
+      # Upstream ships no Python test suite; check the kernels against a brute-force join.
+      - name: Test wheel
+        run: |
+          uv pip install dist/*.whl numpy
+          cd "$RUNNER_TEMP"
+          python <<'EOF'
+          import operator
+
+          import numpy as np
+
+          import janitor_rs
+
+          for name in [
+              "equi_join_indices",
+              "not_equals_aggregate_int64",
+              "range_join_indices",
+              "single_range_predicate_indices_int64",
+              "region_indices",
+          ]:
+              assert callable(getattr(janitor_rs, name)), name
+
+          rng = np.random.default_rng(0)
+          left = rng.integers(0, 50, 200, dtype=np.int64)
+          right = np.sort(rng.integers(0, 50, 150, dtype=np.int64))
+          li = np.arange(left.size, dtype=np.int64)
+          ri = np.arange(right.size, dtype=np.int64)
+          ops = {"<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operator.ge}
+          for sym, op in ops.items():
+              out = janitor_rs.single_range_predicate_indices_int64(li, left, ri, right, True, sym, "all", False)
+              got = sorted(zip(out["left_index"].tolist(), out["right_index"].tolist()))
+              want = sorted((i, j) for i in range(left.size) for j in range(right.size) if op(left[i], right[j]))
+              assert got == want, sym
+              print(sym, len(got), "pairs OK")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: janitor-rs-${{ env.JANITOR_RS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish janitor-rs ${{ matrix.version }}
+    needs: [setup, test_kernels, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: janitor-rs-${{ matrix.version }}-*-manylinux_riscv64
