@@ -1,0 +1,139 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/pytorch/rl/blob/main/.github/workflows/build-wheels-aarch64-linux.yml
+name: Build torchrl wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/torchrl.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-torchrl.yml'
+      - 'docs/packages/torchrl.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-torchrl.yml'
+      - 'docs/packages/torchrl.yaml'
+
+run-name: build-torchrl ${{ inputs.version && format('- {0}', inputs.version) || '' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: torchrl
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build torchrl ${{ matrix.version }} cp${{ matrix.python-version }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Match torch's and tensordict's own riscv64 matrix on the registry.
+        # torchrl's extension links libtorch_python (version-specific), so -
+        # despite not declaring py_limited_api - each CPython needs its own
+        # build; there is no single abi3 wheel.
+        # See https://pypi.riseproject.dev/python-wheels/development.html#target-python-versions
+        python-version: [312, 313, 314, 314t]
+
+    env:
+      TORCHRL_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout torchrl v${{ env.TORCHRL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pytorch/rl
+          ref: v${{ env.TORCHRL_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_BUILD: "cp${{ matrix.python-version }}-manylinux_riscv64"
+          # torchrl's setup.py does `import torch` at module top and gates its
+          # own C++ extension build on pybind11 being importable, so build
+          # isolation can't resolve those from the declared [build-system]
+          # table anyway. Preinstall torch, pybind11 and the setuptools/ninja
+          # build tools and disable isolation.
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          # --only-binary=:all: torch/tensordict: never let pip fall back to
+          # building either from an sdist inside the container (public PyPI
+          # has no riscv64 wheel for either; our registry does, and neither
+          # one ships an sdist at all).
+          CIBW_BEFORE_BUILD: >-
+            pip install --only-binary=:all:
+            torch>=2.1.0 "pybind11[global]" setuptools wheel ninja numpy
+          # USE_CUDA is read indirectly: setup.py's _should_build_cuda() only
+          # builds the CUDA extension when CUDA_HOME is set and FORCE_CUDA=1
+          # or torch itself was built with CUDA, both false here, so the
+          # plain CppExtension (CPU-only) path is taken with no flag needed.
+          # BUILD_VERSION pins a clean wheel version; without it setup.py
+          # appends +g<gitsha> to version.txt. The tag maps 1:1 to the
+          # package version (v0.14.1 -> 0.14.1), so no translation is needed.
+          # PIP_EXTRA_INDEX_URL lets torch/tensordict (and the before-build
+          # torch itself) resolve from our registry inside the container.
+          CIBW_ENVIRONMENT: >-
+            BUILD_VERSION=${{ env.TORCHRL_VERSION }}
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # torchrl's extension links libtorch/libc10/libgomp etc., which are
+          # provided by the torch wheel at runtime (torch is imported before
+          # torchrl and loads them RTLD_GLOBAL). Exclude them from the repair
+          # so auditwheel does not vendor ~130MB of libtorch into our wheel -
+          # this mirrors how upstream torchrl/torchaudio wheels are built.
+          CIBW_REPAIR_WHEEL_COMMAND: >-
+            auditwheel repair -w {dest_dir} {wheel}
+            --exclude libtorch.so
+            --exclude libtorch_cpu.so
+            --exclude libtorch_python.so
+            --exclude libtorch_global_deps.so
+            --exclude libc10.so
+            --exclude libgomp.so.1
+            --exclude libgfortran.so.5
+            --exclude libopenblas.so.0
+          # Run torchrl's own smoke test (imports the compiled extension and
+          # a core data structure) against the freshly built wheel. torch and
+          # tensordict are pulled from our registry.
+          CIBW_TEST_REQUIRES: torch>=2.1.0 "tensordict>=0.14.3,<0.15.0"
+          CIBW_TEST_COMMAND: python {project}/test/smoke_test.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: torchrl-${{ env.TORCHRL_VERSION }}-cp${{ matrix.python-version }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish torchrl ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: torchrl-${{ matrix.version }}-*-manylinux_riscv64
