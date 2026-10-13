@@ -1,0 +1,147 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's wheel builder (the project has since been renamed docling-nlp, but the
+# PyPI distribution this tracks is still published as deepsearch-glm):
+#   https://github.com/docling-project/docling-nlp/blob/v1.0.0/.github/workflows/wheels.yml
+name: Build deepsearch-glm wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/deepsearch-glm.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-deepsearch-glm.yml'
+      - 'docs/packages/deepsearch-glm.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-deepsearch-glm.yml'
+      - 'docs/packages/deepsearch-glm.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: deepsearch-glm
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build deepsearch-glm ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Mirrors upstream's own python-version matrix (3.9..3.13); upstream never
+        # built or tested against 3.14+ at this release.
+        python: ["cp39", "cp310", "cp311", "cp312", "cp313"]
+
+    env:
+      DEEPSEARCH_GLM_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout deepsearch-glm v${{ env.DEEPSEARCH_GLM_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: docling-project/docling-nlp
+          ref: v${{ env.DEEPSEARCH_GLM_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # The C++ dependencies (fmt, json, loguru, cxxopts, pcre2, fasttext, utfcpp,
+          # sentencepiece) are fetched by CMake's ExternalProject_Add and statically
+          # linked by the build; upstream ships none of their licences.
+          CIBW_BEFORE_BUILD: |
+            curl -fsSL -o {project}/LICENSE.fmt https://raw.githubusercontent.com/fmtlib/fmt/10.2.1/LICENSE
+            curl -fsSL -o {project}/LICENSE.json https://raw.githubusercontent.com/nlohmann/json/v3.11.3/LICENSE.MIT
+            curl -fsSL -o {project}/LICENSE.loguru https://raw.githubusercontent.com/emilk/loguru/4adaa185883e3c04da25913579c451d3c32cfac1/LICENSE
+            curl -fsSL -o {project}/LICENSE.cxxopts https://raw.githubusercontent.com/jarro2783/cxxopts/v3.2.0/LICENSE
+            curl -fsSL -o {project}/LICENSE.pcre2 https://raw.githubusercontent.com/PCRE2Project/pcre2/pcre2-10.44/LICENCE
+            curl -fsSL -o {project}/LICENSE.fasttext https://raw.githubusercontent.com/PeterStaar-IBM/fastText/9d5b2a2b364f49ed2707ff3be48a0f1ba6d86022/LICENSE
+            curl -fsSL -o {project}/LICENSE.utfcpp https://raw.githubusercontent.com/nemtrif/utfcpp/v4.0.5/LICENSE
+            curl -fsSL -o {project}/LICENSE.sentencepiece https://raw.githubusercontent.com/google/sentencepiece/v0.2.0/LICENSE
+          CIBW_ENVIRONMENT: >-
+            BUILD_THREADS=4
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Upstream's own CI never runs its data-driven test suite (tests/test_*.py) on
+          # Linux wheels at all - those tests download pretrained NLP models and reference
+          # data over the network. Mirror upstream's one Linux-safe check instead (the
+          # "Quick test wheel" step it does run on Windows/macOS): the three pybind11
+          # extensions import cleanly.
+          CIBW_TEST_COMMAND: >-
+            python -c "from deepsearch_glm import andromeda_structs, andromeda_nlp, andromeda_glm"
+
+      - name: Check wheel contents
+        run: |
+          python3 - ./wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          for mod in ("andromeda_structs", "andromeda_nlp", "andromeda_glm"):
+              assert any(
+                  n.startswith(f"deepsearch_glm/{mod}") and n.endswith(".so") for n in names
+              ), (mod, names)
+
+          licences = {
+              n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n
+          } - {""}
+          expected = {
+              "LICENSE",
+              "LICENSE.cxxopts",
+              "LICENSE.fasttext",
+              "LICENSE.fmt",
+              "LICENSE.json",
+              "LICENSE.loguru",
+              "LICENSE.pcre2",
+              "LICENSE.sentencepiece",
+              "LICENSE.utfcpp",
+          }
+          assert licences == expected, sorted(licences)
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: deepsearch-glm-${{ env.DEEPSEARCH_GLM_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish deepsearch-glm ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: deepsearch-glm-${{ matrix.version }}-*-manylinux_riscv64
