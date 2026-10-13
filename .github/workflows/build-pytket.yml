@@ -1,0 +1,218 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on upstream's own .github/workflows/release.yml
+# (build_Linux_wheels job) and .github/workflows/linuxbuildwheel, narrowed to
+# riscv64. tket/eigen/nlohmann_json/boost/symengine/gmp/nanobind have no
+# riscv64 binaries on Quantinuum's private Conan remote (jfrog), so every
+# dependency builds from source once (gotcha 15) instead of per interpreter.
+name: Build pytket wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pytket.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pytket.yml'
+      - 'docs/packages/pytket.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pytket.yml'
+      - 'docs/packages/pytket.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  TKET_LIBS_REMOTE: https://quantinuumsw.jfrog.io/artifactory/api/conan/tket1-libs
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pytket
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pytket ${{ matrix.version }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      PYTKET_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout quantinuum/tket v${{ env.PYTKET_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: quantinuum/tket
+          ref: v${{ env.PYTKET_VERSION }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # tket's boost/eigen-heavy translation units peak well above what the
+      # runner has, same as rdkit (build-rdkit.yml).
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 10
+
+      - name: Build wheels
+        run: |
+          set -o pipefail
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e TKET_LIBS_REMOTE \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT' 2>&1 | tee build.log
+          set -eux
+
+          dnf install -y --disablerepo=extras --setopt=install_weak_deps=False pkgconf-pkg-config
+          git config --global --add safe.directory '*'
+
+          SETUP_PY=/opt/python/cp312-cp312/bin/python
+          "${SETUP_PY}" -m venv /tmp/setup-env
+          . /tmp/setup-env/bin/activate
+          pip install -U pip conan
+          conan profile detect
+          conan remote add tket-libs "${TKET_LIBS_REMOTE}" --index 0
+
+          # Build the small tket utility libs once (mirrors build_libs.yml).
+          for lib in tkassert tkrng tktokenswap tkwsm; do
+            conan create "libs/${lib}" --user=tket --channel=stable \
+              -o boost/*:header_only=True --build=missing
+          done
+          conan create libs/tklog --user=tket --channel=stable \
+            -o boost/*:header_only=True --build=missing
+          conan create libs/tklog --user=tket --channel=stable \
+            -o boost/*:header_only=True -o tklog/*:shared=True --build=missing
+
+          # Build tket itself once (mirrors linuxbuildwheel's "Build tket" step).
+          conan create tket --user=tket --channel=stable --build=missing \
+            -o boost/*:header_only=True -o tklog/*:shared=True -o tket/*:shared=True \
+            -tf "" --format=json > /tmp/tket-graph.json
+
+          # Build nanobind (and its tsl-robin-map dependency) once; pytket's own
+          # conanfile.py requires it directly and would otherwise rebuild it
+          # on every interpreter in the loop below.
+          nanobind_ref=$(grep -oE 'nanobind/[^"]+@tket/stable' pytket/conanfile.py | head -1)
+          conan install --requires="${nanobind_ref}" --build=missing \
+            --format=json > /tmp/nanobind-graph.json
+
+          # Stage third-party licences for the statically-linked dependencies
+          # at the project root, where setuptools' default license_files glob
+          # picks them up (same mechanism as build-rdkit.yml's collect-licenses.sh).
+          python3 - /tmp/tket-graph.json /tmp/nanobind-graph.json <<'LICENSES'
+          import json, pathlib, shutil, sys
+
+          wanted = {
+              "boost", "eigen", "nlohmann_json", "symengine", "gmp",
+              "fast_float", "nanobind", "tsl-robin-map",
+          }
+          dest = pathlib.Path("pytket")
+          for graph_file in sys.argv[1:]:
+              graph = json.load(open(graph_file))
+              for node in graph["graph"]["nodes"].values():
+                  ref = node.get("ref", "")
+                  name = ref.split("/", 1)[0]
+                  if name not in wanted:
+                      continue
+                  folder = node.get("package_folder")
+                  if not folder:
+                      continue
+                  licenses_dir = pathlib.Path(folder) / "licenses"
+                  if not licenses_dir.is_dir():
+                      continue
+                  for f in licenses_dir.rglob("*"):
+                      if f.is_file():
+                          shutil.copy(f, dest / f"LICENSE.{name}.{f.name}")
+          LICENSES
+          ls -1 pytket/LICENSE.*
+          deactivate
+
+          mkdir -p /work/wheelhouse
+          for PY_TAG in cp310-cp310 cp311-cp311 cp312-cp312; do
+            PYBIN="/opt/python/${PY_TAG}/bin"
+            "${PYBIN}/python" -m venv "/tmp/env-${PY_TAG}"
+            . "/tmp/env-${PY_TAG}/bin/activate"
+            pip install -U pip build conan auditwheel
+
+            # The pytket Conan package carries no setting that captures which
+            # CPython it was built against, so a stale cache entry from the
+            # previous interpreter would otherwise be reused as-is.
+            conan remove 'pytket/*' -c || true
+
+            (
+              cd pytket
+              TKET_VERSION=$(cat ../TKET_VERSION) python -m build
+              LD_LIBRARY_PATH=./pytket/_tket auditwheel repair \
+                "dist/pytket-"*".whl" -w /work/wheelhouse/
+            )
+            deactivate
+          done
+          SCRIPT
+
+      - name: Check the wheels ship the extensions and the bundled licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          expected_licenses = [
+              "LICENSE.boost",
+              "LICENSE.eigen",
+              "LICENSE.nlohmann_json",
+              "LICENSE.symengine",
+              "LICENSE.gmp",
+              "LICENSE.fast_float",
+              "LICENSE.nanobind",
+              "LICENSE.tsl-robin-map",
+          ]
+          for path in sys.argv[1:]:
+              names = zipfile.ZipFile(path).namelist()
+              assert any(n.endswith(".so") for n in names), (path, names)
+              for prefix in expected_licenses:
+                  assert any(
+                      f".dist-info/{prefix}" in n for n in names
+                  ), (path, prefix, [n for n in names if ".dist-info/" in n])
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pytket-${{ env.PYTKET_VERSION }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pytket ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pytket-${{ matrix.version }}-*-manylinux_riscv64
