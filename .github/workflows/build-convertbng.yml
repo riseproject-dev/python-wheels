@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 The RISE Project
 # SPDX-License-Identifier: MIT
 ---
-# This workflow is based on: https://github.com/urschrei/convertbng/blob/v1.0.0/.github/workflows/wheels.yml
+# This workflow is based on: https://github.com/urschrei/convertbng/blob/v2.0.0/.github/workflows/wheels.yml
 name: Build convertbng wheels (riscv64)
 
 on:
@@ -31,10 +31,6 @@ permissions:
 
 env:
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
-  # The urschrei/lonlat_bng tag that was latest when convertbng 1.0.0 shipped.
-  # Upstream's own CI fetches whatever tag is latest at release time; it has no
-  # riscv64 release asset, so this is built from source instead (gotcha 77).
-  LONLAT_BNG_TAG: v0.9.0
 
 jobs:
   setup:
@@ -53,15 +49,17 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        tag: [cp312-abi3, cp314t]
         include:
-          # wheel.py-api = "cp311" collapses cp312/cp313/cp314 into one abi3
-          # build; the newer interpreters re-test that wheel via find_compatible_wheel.
+          # pyo3's abi3-py311 feature (Cargo.toml) collapses cp312/cp313/cp314
+          # into one abi3 build; the newer interpreters re-test that wheel via
+          # find_compatible_wheel.
           - tag: cp312-abi3
             build: >-
               cp312-manylinux_riscv64 cp313-manylinux_riscv64
               cp314-manylinux_riscv64
-          # Free-threaded builds fall outside the Limited API (CMakeLists.txt's
-          # SKBUILD_SABI_VERSION is empty under Py_GIL_DISABLED).
+          # Free-threaded builds fall outside the Limited API, so pyo3 builds a
+          # version-specific cp314t wheel.
           - tag: cp314t
             build: cp314t-manylinux_riscv64
 
@@ -84,22 +82,16 @@ jobs:
           CIBW_ARCHS: riscv64
           CIBW_BUILD: ${{ matrix.build }}
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
-          # Upstream downloads a prebuilt liblonlat_bng.so from urschrei/lonlat_bng's
-          # releases; there is no riscv64 asset, so build it from source instead
-          # (gotcha 77) and stage it where CMakeLists.txt's find_library expects it.
-          CIBW_BEFORE_ALL_LINUX: >-
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
-            git clone --depth 1 --branch ${{ env.LONLAT_BNG_TAG }}
-            https://github.com/urschrei/lonlat_bng /tmp/lonlat_bng &&
-            cd /tmp/lonlat_bng &&
-            $HOME/.cargo/bin/cargo build --release --features headers &&
-            cp target/release/liblonlat_bng.so include/header.h {project}/src/convertbng/
           # cibuildwheel's build[uv] frontend (upstream's pyproject.toml default)
           # crashes the audit step: it asserts a host `uv`, which the self-hosted
           # riscv64 runner doesn't have (gotcha 13).
           CIBW_BUILD_FRONTEND: build
-          # numpy/cython have riscv64 wheels only on our registry.
-          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Replaces pyproject.toml's [tool.cibuildwheel.linux] environment, so
+          # its PATH entry for the rustup toolchain from before-all is repeated;
+          # numpy has riscv64 wheels only on our registry.
+          CIBW_ENVIRONMENT: >-
+            PATH="$HOME/.cargo/bin:$PATH"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
           CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
