@@ -1,0 +1,124 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build_wheels` job of
+# https://github.com/OpenMined/TenSEAL/blob/v0.3.18/.github/workflows/publish_wheels.yml
+# and the `Build` job of
+# https://github.com/OpenMined/TenSEAL/blob/v0.3.18/.github/workflows/tests.yml
+name: Build tenseal wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/tenseal.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tenseal.yml'
+      - 'docs/packages/tenseal.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tenseal.yml'
+      - 'docs/packages/tenseal.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: tenseal
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build tenseal ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # pybind11 2.12 has no free-threaded support; upstream builds no cp3XXt either.
+        python: ["cp312", "cp313", "cp314"]
+    env:
+      TENSEAL_VERSION: ${{ matrix.version }}
+      CPP_TESTS: >-
+        && sh -c "cd {project} && CMAKE_POLICY_VERSION_MINIMUM=3.5 cmake . -D BUILD_TEST=TRUE
+        && make -j4 && CTEST_OUTPUT_ON_FAILURE=1 make test"
+
+    steps:
+      - name: Checkout tenseal v${{ env.TENSEAL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: OpenMined/TenSEAL
+          ref: v${{ env.TENSEAL_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch tenseal source
+        run: |
+          git apply python-wheels/patches/tenseal/${{ env.TENSEAL_VERSION }}/00*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # MAKEFLAGS bounds setup.py's otherwise unbounded `make -j` to the runner's cores.
+          CIBW_ENVIRONMENT: >-
+            CMAKE_POLICY_VERSION_MINIMUM=3.5
+            MAKEFLAGS=-j$(nproc)
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: numpy pytest scikit-image
+          # Staged so `import tenseal` resolves to the installed wheel, not the checkout.
+          CIBW_TEST_SOURCES: tests pytest.ini
+          # Upstream runs the C++ suite on one interpreter only.
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m; l = sorted(str(p).split('licenses/', 1)[1] for p in m.files('tenseal') if 'licenses/' in str(p)); assert l == ['LICENSE', 'LICENSE.gsl', 'LICENSE.nlohmann-json', 'LICENSE.protobuf', 'LICENSE.pybind11', 'LICENSE.seal', 'LICENSE.xsimd', 'LICENSE.xtensor', 'LICENSE.xtl', 'LICENSE.zlib', 'LICENSE.zstd'], l"
+            && pytest -m "not slow" -v tests/python/tenseal
+            && pytest -v tests/python/sealapi
+            ${{ matrix.python == 'cp314' && env.CPP_TESTS || '' }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tenseal-${{ env.TENSEAL_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish tenseal ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: tenseal-${{ matrix.version }}-*-manylinux_riscv64
