@@ -1,0 +1,124 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/tower/tower-cli/blob/v0.3.72/.github/workflows/build-binaries.yml
+name: Build tower wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/tower.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tower.yml'
+      - 'docs/packages/tower.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tower.yml'
+      - 'docs/packages/tower.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: tower
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build tower ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream requires-python is >=3.12 and its pyo3 extension-module feature
+        # declares no abi3/gil_used, so it ships (and we build) per-interpreter
+        # cp312/cp313/cp314 only, no cp314t.
+        python: ['cp312', 'cp313', 'cp314']
+
+    env:
+      TOWER_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+
+    steps:
+      - name: Checkout tower-cli v${{ env.TOWER_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: tower/tower-cli
+          ref: v${{ env.TOWER_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --locked --out dist -i ${{ steps.interp.outputs.value }}
+          manylinux: '2_39'
+          before-script-linux: |
+            if command -v yum &> /dev/null; then
+                yum update -y && yum install -y perl-core openssl openssl-devel pkgconfig libatomic
+            else
+                sudo apt update -y
+                sudo apt-get install -y libssl-dev openssl pkg-config
+            fi
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ steps.interp.outputs.value }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Test wheel
+        run: |
+          set -ex
+          uv pip install tower --no-index --find-links dist --force-reinstall
+          tower --help
+          python -m tower --help
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tower-${{ env.TOWER_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish tower ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: tower-${{ matrix.version }}-*-manylinux_riscv64
