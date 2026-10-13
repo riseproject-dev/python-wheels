@@ -1,0 +1,171 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# PyPI's daal wheel is Intel's own prebuilt x86_64/win_amd64-only binary (Intel Simplified
+# Software License, no sdist) that statically bakes in closed oneMKL kernels
+# (mkl_sparse_*_avx512 symbols in libonedal_core.so.4, built with the closed Intel oneAPI
+# DPC++/C++ Compiler). Unlike the parked onemkl-sycl-*/mkl family, oneDAL itself is
+# Apache-2.0 and has a real non-x86 "ref" backend with no SIMD/MKL dependency: a RISCV64
+# CpuType in its CPU-dispatch layer (cpp/daal/AGENTS.md), dedicated
+# dev/make/function_definitions/{riscv64,lnxriscv64}.mk and
+# compiler_definitions/clang.ref.riscv64.mk files, and an exercised upstream Azure Pipelines
+# job (LinuxMakeLLVM_OpenBLAS_rv64 in .ci/pipeline/ci.yml) that cross-compiles+QEMU-tests
+# `make daal` and `make onedal_c` with BACKEND_CONFIG=ref against OpenBLAS+oneTBB. This
+# workflow runs that same recipe natively (we have real riscv64 runners, so no
+# cross-compile/sysroot/QEMU) instead of redistributing Intel's x86_64 binary.
+# Based on: https://github.com/uxlfoundation/oneDAL (no upstream CI builds this *wheel*, but
+# .ci/pipeline/ci.yml's rv64 job builds this same `daal`+`onedal_c` library pair).
+name: Build daal wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/daal.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-daal.yml'
+      - 'docs/packages/daal.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-daal.yml'
+      - 'docs/packages/daal.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  OPENBLAS_VERSION: v0.3.29
+  TBB_VERSION: v2023.0.0
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: daal
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build daal ${{ matrix.version }} py2.py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 300
+
+    env:
+      DAAL_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout oneDAL ${{ env.DAAL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: uxlfoundation/oneDAL
+          ref: ${{ env.DAAL_VERSION }}
+          persist-credentials: false
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
+
+      # The `ref` backend statically copies OpenBLAS's symbols into libonedal_core
+      # (dev/make/deps.ref.mk) and needs a static libopenblas.a with the ILP64 interface;
+      # NO_FORTRAN=1 matches oneDAL's own .ci/env/openblas.sh (oneDAL never calls into
+      # OpenBLAS's Fortran/LAPACK layer, so this drops the libgfortran dependency entirely).
+      # TBB is linked dynamically (dev/make/function_definitions/lnxriscv64.mk) and is not
+      # bundled: the wheel declares Requires-Dist tbb==2023.* like Intel's own, satisfied by
+      # this registry's existing tbb port.
+      - name: Build OpenBLAS, oneTBB, then daal+onedal_c, and package the wheel
+        run: |
+          docker run --rm -v "$(pwd):/work" -w /work -e DAAL_VERSION -e OPENBLAS_VERSION -e TBB_VERSION "${MANYLINUX_RISCV64_IMAGE}" bash -c '
+            set -euxo pipefail
+            dnf -y --enablerepo=crb install clang
+
+            git clone --depth 1 --branch "${OPENBLAS_VERSION}" https://github.com/OpenMathLib/OpenBLAS /work/openblas-src
+            make -C /work/openblas-src -j"$(nproc)" NO_FORTRAN=1 USE_OPENMP=0 USE_THREAD=0 USE_LOCKING=1 BINARY=64 INTERFACE64=1
+            make -C /work/openblas-src install PREFIX=/work/openblas-install
+            cp /work/openblas-src/LICENSE /work/LICENSE-openblas.txt
+
+            git clone --depth 1 --branch "${TBB_VERSION}" https://github.com/uxlfoundation/oneTBB /work/tbb-src
+            cmake -S /work/tbb-src -B /work/tbb-build -DCMAKE_BUILD_TYPE=Release -DTBB_TEST=OFF -DTBB_STRICT_PROTOTYPES=OFF -DCMAKE_INSTALL_PREFIX=/work/tbb-install
+            cmake --build /work/tbb-build -j"$(nproc)"
+            cmake --install /work/tbb-build
+
+            export CC=clang CXX=clang++
+            .ci/scripts/build.sh --compiler clang --optimizations rv64 --target daal --backend-config ref --plat lnxriscv64 --blas-dir /work/openblas-install --tbb-dir /work/tbb-install --jobs "$(nproc)"
+            .ci/scripts/build.sh --compiler clang --optimizations rv64 --target onedal_c --backend-config ref --plat lnxriscv64 --blas-dir /work/openblas-install --tbb-dir /work/tbb-install --jobs "$(nproc)"
+
+            RELEASE_LIB_DIR=__release_lnx_clang/daal/latest/lib/riscv64
+            ls -la "${RELEASE_LIB_DIR}"
+            mkdir -p dist_libs
+            cp -L "${RELEASE_LIB_DIR}"/libonedal*.so* dist_libs/
+            strip dist_libs/*.so*
+            file dist_libs/*.so*
+            export LD_LIBRARY_PATH=/work/tbb-install/lib:/work/tbb-install/lib64
+            for f in dist_libs/*.so*; do ldd "$f"; done
+            cat > setup.py <<PYEOF
+          import glob
+          import os
+          from setuptools import setup
+          setup(
+              name="daal",
+              version=os.environ["DAAL_VERSION"],
+              description="Intel(R) oneAPI Data Analytics Library",
+              long_description="oneDAL riscv64 dynamic libraries for Linux, built from the Apache-2.0 licensed oneDAL source using its ref/OpenBLAS backend (dev/make/function_definitions/lnxriscv64.mk), not Intel'"'"'s closed-MKL x86_64 binary.",
+              url="https://github.com/uxlfoundation/oneDAL",
+              license="Apache-2.0",
+              license_files=["LICENSE", "third-party-programs.txt", "LICENSE-openblas.txt"],
+              classifiers=[
+                  "Operating System :: POSIX :: Linux",
+                  "Topic :: Software Development :: Libraries",
+              ],
+              install_requires=["tbb==2023.*"],
+              data_files=[("lib", sorted(glob.glob("dist_libs/*.so*")))],
+          )
+          PYEOF
+            pybin=/opt/python/cp312-cp312/bin
+            "$pybin/pip" install -q -U setuptools wheel
+            "$pybin/python3" setup.py bdist_wheel --python-tag py2.py3 --plat-name manylinux_2_39_riscv64
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=tbb "$pybin/pip" install -q dist/*.whl
+            "$pybin/python3" - <<PYEOF
+          import ctypes, os, sysconfig
+          libdir = os.path.join(sysconfig.get_path("data"), "lib")
+          for name in ("libonedal_core.so.4", "libonedal_thread.so.4", "libonedal.so.4", "libonedal_parameters.so.4"):
+              ctypes.CDLL(os.path.join(libdir, name))
+              print("loaded", name)
+          PYEOF
+          '
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: daal-${{ env.DAAL_VERSION }}-py2.py3-none-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish daal ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: daal-${{ matrix.version }}-*-manylinux_riscv64
