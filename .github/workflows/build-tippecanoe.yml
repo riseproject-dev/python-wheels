@@ -1,0 +1,128 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build at this tag:
+#   https://github.com/nightlark/tippecanoe-pypi/blob/2.72.0/.github/workflows/build.yml
+name: Build tippecanoe wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/tippecanoe.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tippecanoe.yml'
+      - 'docs/packages/tippecanoe.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tippecanoe.yml'
+      - 'docs/packages/tippecanoe.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: tippecanoe
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build tippecanoe ${{ matrix.version }} py2.py3-none-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        libc: [manylinux, musllinux]
+
+    env:
+      TIPPECANOE_VERSION: ${{ matrix.version }}
+
+    steps:
+      # This repo (not felt/tippecanoe, which has no Python packaging) is upstream for
+      # the `tippecanoe` PyPI distribution; its CMakeLists.txt downloads and `make`s the
+      # felt/tippecanoe CLI (source, not pre-built) at this same tag during the build.
+      - name: Checkout tippecanoe-pypi ${{ env.TIPPECANOE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: nightlark/tippecanoe-pypi
+          ref: ${{ env.TIPPECANOE_VERSION }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # wheel.py-api = "py2.py3", so one build serves every interpreter.
+          only: cp312-${{ matrix.libc }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # felt/tippecanoe's Makefile links sqlite3 and zlib; the image carries zlib
+          # already, so only sqlite needs installing. felt/tippecanoe's own LICENSE.md
+          # covers the CLI this wheel bundles; upstream's own wheels ship only this
+          # repo's LICENSE/NOTICE and never add it, so pull it in ourselves (gotcha 44:
+          # a LICEN[CS]E*-named file at the root needs no packaging change to be
+          # picked up).
+          CIBW_BEFORE_ALL_LINUX: |
+            if command -v dnf > /dev/null; then
+              dnf install -y sqlite sqlite-devel
+            elif command -v apk > /dev/null; then
+              apk add sqlite-dev
+            fi
+            curl -sL https://raw.githubusercontent.com/felt/tippecanoe/${{ env.TIPPECANOE_VERSION }}/LICENSE.md -o {project}/LICENSE.felt-tippecanoe
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m; f = sorted(p.name for p in m.files('tippecanoe') if '.dist-info/licenses/' in str(p)); assert f == ['LICENSE', 'LICENSE.felt-tippecanoe', 'NOTICE'], f"
+            && tippecanoe --version
+
+      - name: Check the wheel carries the binaries and both licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              for bin in ("tippecanoe", "tile-join", "tippecanoe-decode", "tippecanoe-enumerate", "tippecanoe-json-tool", "tippecanoe-overzoom"):
+                  assert f"tippecanoe/bin/{bin}" in names, (whl, bin)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tippecanoe-${{ env.TIPPECANOE_VERSION }}-py2.py3-none-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish tippecanoe ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: tippecanoe-${{ matrix.version }}-*riscv64
