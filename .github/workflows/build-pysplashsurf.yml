@@ -1,0 +1,200 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux_wheels` and `tests` jobs of
+# https://github.com/InteractiveComputerGraphics/splashsurf/blob/v0.14.1/.github/workflows/pysplashsurf_CI.yml
+name: Build pysplashsurf wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pysplashsurf.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pysplashsurf.yml'
+      - 'docs/packages/pysplashsurf.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pysplashsurf.yml'
+      - 'docs/packages/pysplashsurf.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pysplashsurf
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pysplashsurf ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    env:
+      PYSPLASHSURF_VERSION: ${{ matrix.version }}
+      # Overrides upstream's .cargo/config.toml `target-cpu=native`, which on a
+      # native riscv64 build would tie the wheel to the runner's own ISA extensions.
+      RUSTFLAGS: -C target-cpu=generic-rv64
+
+    steps:
+      # The wheel version appends a fourth component to the crate's git tag (0.14.1.0 <- v0.14.1).
+      - name: Resolve git tag
+        id: tag
+        run: echo "tag=v$(echo "${PYSPLASHSURF_VERSION}" | cut -d. -f1-3)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout splashsurf ${{ steps.tag.outputs.tag }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: InteractiveComputerGraphics/splashsurf
+          ref: ${{ steps.tag.outputs.tag }}
+          persist-credentials: false
+
+      - name: Install Rust
+        run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+
+      # The `splashsurf` CLI is only a reference for test_calling.py, so skip the
+      # release profile's fat LTO/codegen-units=1, which only slows the riscv64 build.
+      - name: Install splashsurf CLI
+        env:
+          CARGO_PROFILE_RELEASE_LTO: 'false'
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+        run: |
+          "$HOME/.cargo/bin/cargo" install splashsurf --path ./splashsurf \
+            --root "$RUNNER_TEMP/splashsurf-cli" --target-dir "$RUNNER_TEMP/splashsurf-cli-target"
+
+      # maturin only globs licence files next to pyproject.toml; LICENSE lives at the repo root.
+      - name: Stage LICENSE for the wheel
+        run: cp LICENSE pysplashsurf/LICENSE
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --out wheelhouse --auditwheel repair -m pysplashsurf/Cargo.toml -i python3.12
+          manylinux: '2_39'
+
+      - name: Verify the wheel ships the compiled extension
+        run: |
+          set -euo pipefail
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert "-cp310-abi3-manylinux_" in sys.argv[1] and sys.argv[1].endswith("_riscv64.whl"), sys.argv[1]
+          sos = [n for n in names if n.endswith(".so")]
+          assert "pysplashsurf/pysplashsurf.abi3.so" in sos, sos
+          licenses = sorted(n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n)
+          assert [n for n in licenses if n] == ["LICENSE"], licenses
+          print(sys.argv[1], "->", sos)
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pysplashsurf-${{ env.PYSPLASHSURF_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: splashsurf-cli-${{ env.PYSPLASHSURF_VERSION }}
+          path: ${{ runner.temp }}/splashsurf-cli/bin/splashsurf
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test pysplashsurf ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    env:
+      PYSPLASHSURF_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+      UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_ONLY_BINARY: ':all:'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # cp310-abi3 is the only wheel upstream builds, and abi3 cannot load on free-threaded 3.14t.
+        python-version: ['3.12', '3.13', '3.14']
+
+    steps:
+      - name: Resolve git tag
+        id: tag
+        run: echo "tag=v$(echo "${PYSPLASHSURF_VERSION}" | cut -d. -f1-3)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout splashsurf ${{ steps.tag.outputs.tag }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: InteractiveComputerGraphics/splashsurf
+          ref: ${{ steps.tag.outputs.tag }}
+          persist-credentials: false
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: pysplashsurf-${{ env.PYSPLASHSURF_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: dist
+
+      - name: Download splashsurf CLI
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: splashsurf-cli-${{ env.PYSPLASHSURF_VERSION }}
+          path: ${{ runner.temp }}/splashsurf-cli
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: |
+          uv pip install dist/*.whl
+          uv pip install pytest meshio trimesh rtree scipy
+
+      - name: Run pytest
+        run: |
+          set -euo pipefail
+          chmod +x "$RUNNER_TEMP/splashsurf-cli/splashsurf"
+          export PATH="$RUNNER_TEMP/splashsurf-cli:$PATH"
+          mkdir wheel-test
+          cp -r pysplashsurf/tests wheel-test/
+          cd wheel-test
+          python -m pytest -v tests
+
+  publish:
+    name: Publish pysplashsurf ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pysplashsurf-${{ matrix.version }}-cp310-abi3-manylinux_riscv64
