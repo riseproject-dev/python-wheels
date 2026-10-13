@@ -1,0 +1,169 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/BrorH/pycauset/blob/v0.6.1/.github/workflows/publish.yml
+# and its test step on: https://github.com/BrorH/pycauset/blob/v0.6.1/.github/workflows/ci.yml
+name: Build pycauset wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pycauset.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pycauset.yml'
+      - 'docs/packages/pycauset.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pycauset.yml'
+      - 'docs/packages/pycauset.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pycauset
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pycauset ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      PYCAUSET_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pycauset v${{ env.PYCAUSET_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: BrorH/pycauset
+          ref: v${{ env.PYCAUSET_VERSION }}
+          fetch-depth: 0  # setuptools_scm derives the version from git tag history
+          persist-credentials: false
+
+      - name: Write the licence collector
+        # auditwheel vendors OpenBLAS and LAPACK(E) into pycauset.libs/, and the
+        # extension compiles in Eigen and pybind11 headers; scikit-build-core's
+        # default LICEN[CS]E* glob ships whatever is staged at the project root.
+        run: |
+          cat > collect-licenses.sh <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          project="${1:?usage: collect-licenses.sh <project-dir>}"
+          cp /usr/share/licenses/openblas/LICENSE "${project}/LICENSE.openblas"
+          cp /usr/share/licenses/lapack/LICENSE "${project}/LICENSE.lapack"
+          curl -fsSL --retry 3 https://gitlab.com/libeigen/eigen/-/raw/3.4.0/COPYING.MPL2 -o "${project}/LICENSE.eigen"
+          curl -fsSL --retry 3 https://raw.githubusercontent.com/pybind/pybind11/v2.12.0/LICENSE -o "${project}/LICENSE.pybind11"
+          EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream's before-all minus gcc-toolset-12 and ccache: the image's default GCC already has full C++20.
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf -y install libatomic openblas-devel lapack-devel &&
+            bash {project}/collect-licenses.sh {project}
+          CIBW_ENVIRONMENT_LINUX: >-
+            CMAKE_ARGS='-DPython_FIND_STRATEGY=LOCATION'
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+          CIBW_TEST_EXTRAS: test
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: python -m pytest tests/python -q
+
+      - name: Check the wheel ships the extension and all licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("pycauset/_pycauset.") and n.endswith(".so") for n in names), whl
+              print("\n".join(n for n in names if n.startswith("pycauset.libs/")))
+              licences = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+              assert licences == {"LICENSE", "LICENSE.openblas", "LICENSE.lapack", "LICENSE.eigen", "LICENSE.pybind11"}, (whl, licences)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pycauset-${{ env.PYCAUSET_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      PYCAUSET_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # auditwheel vendors the image's libgomp (OpenMP) and OpenBLAS' libgfortran.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pycauset-${{ env.PYCAUSET_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish pycauset ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pycauset-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: pycauset-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
