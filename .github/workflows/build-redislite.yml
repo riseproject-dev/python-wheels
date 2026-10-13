@@ -1,0 +1,138 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on upstream's Screwdriver pipeline (pkg_ml2014 and
+# validate_test jobs) at
+# https://github.com/yahoo/redislite/blob/802f8a09fa23470942f8358dee1aa32dc975ea7a/screwdriver.yaml
+# with its tox.ini test command.
+name: Build redislite wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/redislite.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-redislite.yml'
+      - 'docs/packages/redislite.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-redislite.yml'
+      - 'docs/packages/redislite.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # Upstream pushes no tag for its releases: 6.2.912183 is commit 802f8a0, whose tree is
+  # byte-identical to the PyPI sdist apart from the version. Update it alongside REDISLITE_VERSION.
+  REDISLITE_REF: 802f8a09fa23470942f8358dee1aa32dc975ea7a
+  REDIS_VERSION: '6.2.14'
+  REDIS_SHA256: 34e74856cbd66fdb3a684fb349d93961d8c7aa668b06f81fd93ff267d09bc277
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: redislite
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+    name: Build redislite ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    env:
+      REDISLITE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout redislite ${{ env.REDISLITE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: yahoo/redislite
+          ref: ${{ env.REDISLITE_REF }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply --verbose python-wheels/patches/redislite/${{ env.REDISLITE_VERSION }}/*.patch
+
+      # build_scripts/update_redis_server.py, with curl: download.redis.io answers 403 to Python-urllib.
+      - name: Download the Redis ${{ env.REDIS_VERSION }} sources into redis.submodule
+        run: |
+          set -eux
+          curl -sSfL -o redis.tar.gz "https://download.redis.io/releases/redis-${REDIS_VERSION}.tar.gz"
+          echo "${REDIS_SHA256}  redis.tar.gz" | sha256sum -c -
+          mkdir redis.submodule
+          tar xzf redis.tar.gz --strip-components=1 -C redis.submodule
+          rm redis.tar.gz
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          only: ${{ matrix.python }}-manylinux_riscv64
+          output-dir: wheelhouse/
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests pytest.ini
+          CIBW_TEST_COMMAND: pytest tests
+
+      - name: Check the Redis binaries and licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import os, sys, zipfile
+          whl = sys.argv[1]
+          assert os.path.basename(whl).startswith(f"redislite-{os.environ['REDISLITE_VERSION']}-"), whl
+          names = zipfile.ZipFile(whl).namelist()
+          for want in ("redislite/bin/redis-server", "redislite/bin/redis-cli"):
+              assert want in names, (whl, want)
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+          assert {"LICENSE.txt", "redis.submodule/COPYING", "redis.submodule/deps/lua/COPYRIGHT"} <= licences, licences
+          print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: redislite-${{ env.REDISLITE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish redislite ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: redislite-${{ matrix.version }}-*-manylinux_riscv64
