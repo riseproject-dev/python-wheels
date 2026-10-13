@@ -111,6 +111,23 @@ jobs:
           rm lance-linalg.tar.gz
           patch -p1 -d lance-linalg-7.0.0-riscv64 < python-wheels/patches/lance-context/${{ env.LANCE_CONTEXT_VERSION }}/0004-lance-linalg-riscv64-simd-fallback.patch
 
+          # From 0.6.6 on, crates/lance-context-core depends on `lance = "9.0.0"`
+          # directly while `lancedb = "0.30.0"` still pulls in the 7.0.0 line,
+          # so both lines get compiled and both need a riscv64-fixed copy; the
+          # 9.0.0 pair's patches (0005/0006) exist only in those versions' dirs.
+          PATCHES=python-wheels/patches/lance-context/${{ env.LANCE_CONTEXT_VERSION }}
+          if [ -f "$PATCHES/0005-lance-core-9.0.0-riscv64-simd-fallback.patch" ]; then
+            for crate in lance-core:0005 lance-linalg:0006; do
+              name=${crate%%:*}
+              num=${crate##*:}
+              curl -fsSL -A "python-wheels (https://github.com/riseproject-dev/python-wheels)" -o "$name.tar.gz" "https://crates.io/api/v1/crates/$name/9.0.0/download"
+              mkdir "$name-9.0.0-riscv64"
+              tar xzf "$name.tar.gz" -C "$name-9.0.0-riscv64" --strip-components=1
+              rm "$name.tar.gz"
+              patch -p1 -d "$name-9.0.0-riscv64" < "$PATCHES/$num-$name-9.0.0-riscv64-simd-fallback.patch"
+            done
+          fi
+
           git apply python-wheels/patches/lance-context/${{ env.LANCE_CONTEXT_VERSION }}/0003-cargo-patch-lance-crates-for-riscv64.patch
 
       - name: Free disk space
@@ -172,10 +189,13 @@ jobs:
           # `pytest -v` from python/, no extra flags). test_rollout_remote.py
           # skips itself when target/debug/lance-context-server hasn't been
           # built, which it isn't here (that crate is a workspace member
-          # neither the Python wheel nor its tests otherwise need).
+          # neither the Python wheel nor its tests otherwise need). From 0.6.6
+          # on that check lives in tests/conftest.py's `server` fixture and
+          # turns into a hard failure whenever `CI` is set, so `CI` is unset
+          # for pytest to keep the same skip.
           CIBW_TEST_COMMAND: >-
             cd python &&
-            python -m pytest tests -v
+            env -u CI python -m pytest tests -v
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:

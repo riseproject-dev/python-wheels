@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Tue, 13 Oct 2026 00:00:00 +0000
+Subject: [PATCH] lance-core: add a portable riscv64 SIMD-tier fallback (9.0.0)
+
+lance-core's SIMD_SUPPORT static (src/utils/cpu.rs) picks a SIMD tier
+via a `cfg`-gated closure with arms for aarch64, x86_64 and loongarch64
+only; none of them match riscv64, so the closure's block has no
+trailing expression there and the crate fails to compile with "expected
+`SimdSupport`, found `()`". Add a `None`-tier fallback arm beside the
+existing ones for every architecture without a dedicated tier.
+
+Same change as 0002/0004-lance-{core,linalg}-riscv64-simd-fallback.patch
+(which target this crate's 7.0.0 release), rebased onto the 9.0.0
+crates.io release that crates/lance-context-core's `lance = "9.0.0"`
+pulls in; the fallback arms themselves are unchanged. Applied (via
+0003-cargo-patch-lance-crates-for-riscv64.patch) to a local copy of
+lance-core 9.0.0 materialized by the workflow, since it is a transitive
+crates.io dependency and cannot be patched in place (CLAUDE.md gotcha
+300).
+
+Upstream-Status: To upstream [not yet submitted to lance-format/lance]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/src/utils/cpu.rs b/src/utils/cpu.rs
+index c4d5a97..8aefaee 100644
+--- a/src/utils/cpu.rs
++++ b/src/utils/cpu.rs
+@@ -210,6 +210,17 @@ pub static SIMD_SUPPORT: LazyLock<SimdSupport> = LazyLock::new(|| {
+             SimdSupport::None
+         }
+     }
++    // riscv64 (and any other architecture without a dedicated tier above) has
++    // no SIMD kernels in lance yet; upstream's cfg arms have no catch-all, so
++    // this closure otherwise evaluates to `()` here instead of `SimdSupport`.
++    #[cfg(not(any(
++        target_arch = "aarch64",
++        target_arch = "x86_64",
++        target_arch = "loongarch64"
++    )))]
++    {
++        SimdSupport::None
++    }
+ });
+ 
+ #[cfg(target_arch = "x86_64")]
+-- 
+2.43.0
