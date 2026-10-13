@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Tue, 13 Oct 2026 12:00:00 +0000
+Subject: [PATCH] build.rs: accept locally built PostgreSQL and pgvector
+ bundles
+
+build.rs only knows how to download the PostgreSQL bundle from
+theseus-rs/postgresql-binaries and the pgvector bundle from
+nicoloboschi/pgvector_compiled, and maps the Rust target to one of the
+handful of platforms those two projects publish. Neither publishes a
+riscv64 build (postgresql-18.1.0-riscv64gc-unknown-linux-gnu.tar.gz and
+pgvector-riscv64gc-unknown-linux-gnu-pg18.tar.gz are both 404), so on
+riscv64gc-unknown-linux-gnu both fall through to the "unknown target"
+branch and embed an empty bundle, and every `pg0 start` then fails with
+"PostgreSQL bundle is empty".
+
+PostgreSQL and pgvector themselves build fine on riscv64 from source.
+Add two opt-in environment variables, PG0_POSTGRESQL_BUNDLE and
+PG0_PGVECTOR_BUNDLE, naming archives with the same layout as the
+downloaded ones; when set they are embedded instead of downloading
+anything. Nothing changes when they are unset, so the supported targets
+keep building exactly as before.
+
+Upstream-Status: To upstream [not submitted from this automated port run; needs a pull request against vectorize-io/pg0]
+---
+ build.rs | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/build.rs b/build.rs
+index b676a8e..f2408ea 100644
+--- a/build.rs
++++ b/build.rs
+@@ -47,7 +47,28 @@ fn main() {
+     bundle_runtime_libs(&versions, &out_dir);
+ }
+ 
++/// Return the path of a locally built bundle named by `var`, if set.
++///
++/// theseus-rs and pgvector_compiled only publish a fixed set of targets.
++/// Setting PG0_POSTGRESQL_BUNDLE / PG0_PGVECTOR_BUNDLE to an archive with the
++/// same layout lets pg0 be built for any other target from bundles compiled
++/// from source, instead of being shipped without them.
++fn local_bundle(var: &str) -> Option<PathBuf> {
++    println!("cargo:rerun-if-env-changed={}", var);
++    let raw = PathBuf::from(env::var_os(var)?);
++    // include_bytes! resolves relative paths against src/, so pin it down.
++    let path =
++        fs::canonicalize(&raw).unwrap_or_else(|e| panic!("{} ({}): {}", var, raw.display(), e));
++    println!("cargo:rerun-if-changed={}", path.display());
++    Some(path)
++}
++
+ fn bundle_postgresql(pg_version: &str, out_dir: &PathBuf) {
++    if let Some(path) = local_bundle("PG0_POSTGRESQL_BUNDLE") {
++        println!("cargo:rustc-env=POSTGRESQL_BUNDLE_PATH={}", path.display());
++        return;
++    }
++
+     let target = env::var("TARGET").unwrap();
+ 
+     // Map Rust target to theseus-rs binary name
+@@ -107,6 +128,11 @@ fn bundle_postgresql(pg_version: &str, out_dir: &PathBuf) {
+ }
+ 
+ fn bundle_pgvector(pg_version: &str, pgvector_tag: &str, pgvector_repo: &str, out_dir: &PathBuf) {
++    if let Some(path) = local_bundle("PG0_PGVECTOR_BUNDLE") {
++        println!("cargo:rustc-env=PGVECTOR_BUNDLE_PATH={}", path.display());
++        return;
++    }
++
+     let target = env::var("TARGET").unwrap();
+ 
+     // Map Rust target to pgvector platform name
+-- 
+2.43.0
+

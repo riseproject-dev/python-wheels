@@ -1,0 +1,230 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-wheels` job of
+# https://github.com/vectorize-io/pg0/blob/v0.15.1/.github/workflows/build-python-wheels.yml
+name: Build pg0-embedded wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pg0-embedded.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pg0-embedded.yml'
+      - 'docs/packages/pg0-embedded.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pg0-embedded.yml'
+      - 'docs/packages/pg0-embedded.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  RUST_TARGET: riscv64gc-unknown-linux-gnu
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pg0-embedded
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pg0-embedded ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+
+    env:
+      PG0_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pg0 v${{ env.PG0_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: vectorize-io/pg0
+          ref: v${{ env.PG0_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pg0 source
+        run: git apply python-wheels/patches/pg0-embedded/${{ env.PG0_VERSION }}/00*.patch
+
+      - name: Install PostgreSQL build dependencies
+        run: sudo apt-get update && sudo apt-get install -y -qq --no-install-recommends bison flex zlib1g-dev
+
+      # theseus-rs/postgresql-binaries and nicoloboschi/pgvector_compiled publish no riscv64 build, so compile both at versions.env's pins.
+      - name: Build PostgreSQL and pgvector bundles
+        run: |
+          PG_VERSION=$(sed -n 's/^PG_VERSION=//p' versions.env)
+          PGVECTOR_VERSION=$(sed -n 's/^PGVECTOR_VERSION=//p' versions.env)
+          bundles="$RUNNER_TEMP/bundles"
+          prefix="$bundles/postgresql-$PG_VERSION-$RUST_TARGET"
+          mkdir -p "$bundles"
+
+          curl -fsSL "https://ftp.postgresql.org/pub/source/v${PG_VERSION%.0}/postgresql-${PG_VERSION%.0}.tar.bz2" | tar -xj -C "$RUNNER_TEMP"
+          pushd "$RUNNER_TEMP/postgresql-${PG_VERSION%.0}"
+          ./configure --prefix="$prefix" --disable-rpath --without-icu --without-readline
+          make -j"$(nproc)" world-bin
+          make install-world-bin
+          cp COPYRIGHT "$prefix/"
+          cp COPYRIGHT "$GITHUB_WORKSPACE/sdk/python/LICENSE.postgresql"
+          popd
+          tar -czf "$bundles/postgresql-$PG_VERSION-$RUST_TARGET.tar.gz" -C "$bundles" "postgresql-$PG_VERSION-$RUST_TARGET"
+
+          git clone --depth 1 --branch "v$PGVECTOR_VERSION" https://github.com/pgvector/pgvector "$RUNNER_TEMP/pgvector"
+          make -C "$RUNNER_TEMP/pgvector" -j"$(nproc)" PG_CONFIG="$prefix/bin/pg_config"
+          make -C "$RUNNER_TEMP/pgvector" install PG_CONFIG="$prefix/bin/pg_config" DESTDIR="$RUNNER_TEMP/pgvector-install"
+          cp "$RUNNER_TEMP/pgvector/LICENSE" "$GITHUB_WORKSPACE/sdk/python/LICENSE.pgvector"
+          tar -czf "$bundles/pgvector-$RUST_TARGET-pg${PG_VERSION%%.*}.tar.gz" -C "$RUNNER_TEMP/pgvector-install$prefix" lib share
+
+          echo "PG0_POSTGRESQL_BUNDLE=$bundles/postgresql-$PG_VERSION-$RUST_TARGET.tar.gz" >> "$GITHUB_ENV"
+          echo "PG0_PGVECTOR_BUNDLE=$bundles/pgvector-$RUST_TARGET-pg${PG_VERSION%%.*}.tar.gz" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # master
+        with:
+          toolchain: stable
+          targets: ${{ env.RUST_TARGET }}
+
+      - name: Build pg0 CLI
+        env:
+          BUNDLE_POSTGRESQL: "true"
+        run: |
+          cargo build --release --target "$RUST_TARGET"
+          ls -la "target/$RUST_TARGET/release/pg0"
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.11'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build wheel
+        working-directory: sdk/python
+        env:
+          PG0_BINARY_PATH: ${{ github.workspace }}/target/${{ env.RUST_TARGET }}/release/pg0
+        run: uv build --wheel
+
+      - name: Tag wheel as platform-specific
+        working-directory: sdk/python/dist
+        run: |
+          uv pip install wheel
+          python -m wheel tags --platform-tag manylinux_2_39_riscv64 --remove ./*-py3-none-any.whl
+          ls -la
+
+      - name: Verify the wheel ships pg0 and the PostgreSQL and pgvector licences
+        run: |
+          python - sdk/python/dist/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert "pg0/bin/pg0" in names, names
+          lic = {n.split("/")[-1] for n in names if ".dist-info/licenses/" in n and not n.endswith("/")}
+          assert {"LICENSE.postgresql", "LICENSE.pgvector"} <= lic, lic
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pg0-embedded-${{ env.PG0_VERSION }}-py3-none-manylinux_riscv64
+          path: sdk/python/dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test pg0-embedded ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    env:
+      PG0_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+
+    steps:
+      - name: Checkout pg0 v${{ env.PG0_VERSION }} (tests)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: vectorize-io/pg0
+          ref: v${{ env.PG0_VERSION }}
+          persist-credentials: false
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: pg0-embedded-${{ env.PG0_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install the wheel and test dependencies
+        run: |
+          uv pip install --no-index --find-links wheelhouse pg0-embedded
+          uv pip install pytest==9.0.3
+
+      - name: Test wheel
+        run: |
+          python -c "
+          from pg0 import _get_bundled_binary, Pg0
+          bundled = _get_bundled_binary()
+          assert bundled is not None, 'Bundled binary not found!'
+          assert bundled.exists(), f'Bundled binary does not exist: {bundled}'
+          print(f'Bundled binary found: {bundled}')
+
+          pg = Pg0(name='wheel-test')
+          info = pg.start()
+          print(f'Started PostgreSQL: {info.uri}')
+          pg.stop()
+          pg.drop()
+          print('Wheel test passed!')
+          "
+
+      # tests/__init__.py would otherwise put sdk/python, and its binary-less pg0 package, first on sys.path.
+      - name: Run upstream's SDK tests
+        run: python -m pytest --import-mode=importlib sdk/python/tests -v
+
+  publish:
+    name: Publish pg0-embedded ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pg0-embedded-${{ matrix.version }}-py3-none-manylinux_riscv64
