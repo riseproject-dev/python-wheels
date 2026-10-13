@@ -1,0 +1,133 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# This workflow is based on the PyPi_Linux_x86_64 job of upstream's own
+# pypi/azure-pipelines-pypi.yml, which drives pypi/build.sh inside a manylinux
+# container. No cp314t leg: pypi/build.sh resolves an interpreter at
+# /opt/python/${py}-${py} (patched below to match exactly instead of globbing,
+# see the patch), and the riscv64 image has no such directory for a
+# free-threaded build (it lives at cp314-cp314t).
+name: Build pyboolector wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyboolector.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyboolector.yml'
+      - 'docs/packages/pyboolector.yaml'
+      - 'patches/pyboolector/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyboolector.yml'
+      - 'docs/packages/pyboolector.yaml'
+      - 'patches/pyboolector/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyboolector
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyboolector ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+
+    env:
+      PYBOOLECTOR_VERSION: ${{ matrix.version }}
+
+    steps:
+      - id: ref
+        run: |
+          echo "tag=${PYBOOLECTOR_VERSION%.*}" >> "$GITHUB_OUTPUT"
+          echo "build_num=${PYBOOLECTOR_VERSION##*.}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout boolector ${{ steps.ref.outputs.tag }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: boolector/boolector
+          ref: ${{ steps.ref.outputs.tag }}
+          path: boolector
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch boolector source
+        working-directory: boolector
+        run: git apply ../python-wheels/patches/pyboolector/${{ env.PYBOOLECTOR_VERSION }}/*.patch
+
+      - name: Build wheel
+        run: |
+          docker run --rm \
+            -e BUILD_NUM="${{ steps.ref.outputs.build_num }}" \
+            -e PYTHON_VERSIONS="${{ matrix.python }}" \
+            -v "$(pwd)/boolector":/boolector \
+            "${{ env.MANYLINUX_RISCV64_IMAGE }}" \
+            /boolector/pypi/build.sh
+
+      - name: Test wheel
+        run: |
+          docker run --rm \
+            -v "$(pwd)/boolector":/boolector \
+            "${{ env.MANYLINUX_RISCV64_IMAGE }}" \
+            bash -c '
+              set -e
+              python=/opt/python/${{ matrix.python }}-${{ matrix.python }}/bin/python
+              "$python" -m pip install /boolector/result/dist/*.whl
+              "$python" /boolector/examples/api/python/quickstart.py
+            '
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyboolector-${{ env.PYBOOLECTOR_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: boolector/result/dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyboolector ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyboolector-${{ matrix.version }}-*-manylinux_riscv64
