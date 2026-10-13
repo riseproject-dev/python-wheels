@@ -1,0 +1,159 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build` job of upstream's own release workflow:
+#   https://github.com/BauplanLabs/bauplan/blob/v0.3.4/.github/workflows/publish.yaml
+name: Build bauplan wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/bauplan.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-bauplan.yml'
+      - 'docs/packages/bauplan.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-bauplan.yml'
+      - 'docs/packages/bauplan.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: bauplan
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build bauplan ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+
+    env:
+      BAUPLAN_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout bauplan v${{ env.BAUPLAN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: BauplanLabs/bauplan
+          ref: v${{ env.BAUPLAN_VERSION }}
+          persist-credentials: false
+
+      # Upstream builds the CLI on the runner and downloads a protoc release,
+      # which ships no riscv64 binary; both happen in the manylinux container
+      # here, with protoc from Rocky 10's CRB repo.
+      - name: Build wheels
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: >-
+            --release --out dist
+            -i python3.12 python3.13 python3.14
+          manylinux: '2_39'
+          before-script-linux: |
+            set -euo pipefail
+            git config --global --add safe.directory "*"
+            yum install -y protobuf-compiler protobuf-devel
+            cargo build --release --bin bauplan
+            rm -f python/data/scripts/.gitkeep python/data/scripts/.gitignore
+            cp target/release/bauplan python/data/scripts/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bauplan-${{ env.BAUPLAN_VERSION }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheels:
+    name: Test bauplan ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14']
+
+    env:
+      BAUPLAN_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+      UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_ONLY_BINARY: pyarrow
+
+    steps:
+      - name: Checkout bauplan v${{ env.BAUPLAN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: BauplanLabs/bauplan
+          ref: v${{ env.BAUPLAN_VERSION }}
+          persist-credentials: false
+
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: bauplan-${{ env.BAUPLAN_VERSION }}-manylinux_riscv64
+          path: dist
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      # pyarrow is pinned to the newest riscv64 build the registry index serves.
+      - name: Install wheel
+        run: uv pip install --find-links dist "bauplan==${BAUPLAN_VERSION}" pyarrow==25.0.1 pytest griffe
+
+      # Upstream's suite otherwise runs against the hosted Bauplan API with a
+      # secret key; only the tests that need no account run here.
+      - name: Test wheel
+        run: |
+          set -euxo pipefail
+          bauplan version | grep -F "bauplan ${BAUPLAN_VERSION} "
+          bauplan --help >/dev/null
+          python -c "import bauplan, bauplan._internal as m; assert m.__file__.endswith('.so'), m.__file__; print(bauplan.__version__)"
+          pytest -v \
+            python/tests/test_standard_expectations.py \
+            python/tests/test_stubs.py \
+            python/tests/test_syntax_stubs.py
+
+  publish:
+    name: Publish bauplan ${{ matrix.version }}
+    needs: [setup, build_wheels, test_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: bauplan-${{ matrix.version }}-manylinux_riscv64
