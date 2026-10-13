@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Tue, 13 Oct 2026 00:00:00 +0000
+Subject: [PATCH] python: skip instructionset on riscv64
+
+bindings/python/CMakeLists.txt only builds the `instructionset` nanobind
+module (and the AVX2/AVX512 `proxsuite_pywrap_avx2`/`_avx512` variants it
+gates) when `CMAKE_SYSTEM_PROCESSOR MATCHES "(x86)|(X86)|(amd64)|(AMD64)"`,
+so none of the three exist in a riscv64 build. But
+bindings/python/proxsuite/__init__.py's `_load_main_module()` decides
+whether to `from . import instructionset` off an architecture-name
+denylist (`arm`, `aarch64`, `power`, `ppc64`, `s390x`, `sparc`) that
+predates riscv64 and does not include it, so `platform.machine() ==
+"riscv64"` leaves `has_vectorization_instructions` true and the bare
+`from . import instructionset` (not inside the `load_module()` try/except
+that every other submodule import goes through) raises an unhandled
+`ModuleNotFoundError` on `import proxsuite` -- the wheel installs but is
+unusable. Add "riscv" to the same denylist the CMake side already keys
+off of, so `proxsuite` falls straight through to loading the plain
+`proxsuite_pywrap` module, exactly as it does on arm/aarch64 today.
+
+Upstream-Status: To upstream [not yet submitted; the identical gap exists in Simple-Robotics/proxsuite's own __init__.py (confirmed against its v0.7.3 tag), so this should go to the original project rather than the cmake-wheel packaging fork, once a riscv64 wheel is public to point at as evidence]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ bindings/python/proxsuite/__init__.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/bindings/python/proxsuite/__init__.py b/bindings/python/proxsuite/__init__.py
+index 22e5359..8601aac 100644
+--- a/bindings/python/proxsuite/__init__.py
++++ b/bindings/python/proxsuite/__init__.py
+@@ -15,7 +15,7 @@ def _load_main_module():
+
+     machine = platform.machine()
+     has_vectorization_instructions = not machine.startswith(
+-        ("arm", "aarch64", "power", "ppc64", "s390x", "sparc")
++        ("arm", "aarch64", "power", "ppc64", "s390x", "sparc", "riscv")
+     )
+
+     def load_module(main_module_name):
+--
+2.43.0
