@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-wheels` job of
+# https://github.com/eginhard/monotonic_alignment_search/blob/v0.2.1/.github/workflows/pypi-release.yml
+name: Build monotonic-alignment-search wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/monotonic-alignment-search.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-monotonic-alignment-search.yml'
+      - 'docs/packages/monotonic-alignment-search.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-monotonic-alignment-search.yml'
+      - 'docs/packages/monotonic-alignment-search.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: monotonic-alignment-search
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build monotonic-alignment-search ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      MONOTONIC_ALIGNMENT_SEARCH_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout monotonic_alignment_search v${{ env.MONOTONIC_ALIGNMENT_SEARCH_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: eginhard/monotonic_alignment_search
+          ref: v${{ env.MONOTONIC_ALIGNMENT_SEARCH_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_ENVIRONMENT_LINUX: PIP_ONLY_BINARY=numpy
+          # torch (the test-only `cpu` extra) has no riscv64 musllinux wheel on
+          # our registry, so musllinux is dropped too.
+          CIBW_TEST_REQUIRES: pytest numpy torch
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,torch
+          CIBW_TEST_COMMAND: python -m pytest {project}/tests -v
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: monotonic-alignment-search-${{ env.MONOTONIC_ALIGNMENT_SEARCH_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish monotonic-alignment-search ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: monotonic-alignment-search-${{ matrix.version }}-*-manylinux_riscv64
