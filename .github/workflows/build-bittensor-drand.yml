@@ -1,0 +1,130 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/opentensor/bittensor-drand/blob/v2.0.0/.github/workflows/release.yml
+# and the `build-and-test` job of
+# https://github.com/opentensor/bittensor-drand/blob/v2.0.0/.github/workflows/test-and-lint.yml
+name: Build bittensor-drand wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/bittensor-drand.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-bittensor-drand.yml'
+      - 'docs/packages/bittensor-drand.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-bittensor-drand.yml'
+      - 'docs/packages/bittensor-drand.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: bittensor-drand
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build bittensor-drand ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream ships no free-threaded wheel and its #[pymodule] does not
+        # declare gil_used = false.
+        python: ['cp312', 'cp313', 'cp314']
+
+    env:
+      BITTENSOR_DRAND_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout bittensor-drand ${{ env.BITTENSOR_DRAND_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: opentensor/bittensor-drand
+          ref: v${{ env.BITTENSOR_DRAND_VERSION }}
+          persist-credentials: false
+
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --out dist --interpreter ${{ steps.interp.outputs.value }}
+          manylinux: '2_39'
+
+      - name: Check the wheel ships the extension
+        run: |
+          set -euo pipefail
+          python3 - dist/*.whl <<'EOF'
+          import os, sys, zipfile
+          whl = sys.argv[1]
+          assert os.path.basename(whl).startswith(f"bittensor_drand-{os.environ['BITTENSOR_DRAND_VERSION']}-"), whl
+          sos = [n for n in zipfile.ZipFile(whl).namelist() if n.endswith(".so")]
+          assert any(n.startswith("bittensor_drand/bittensor_drand.") for n in sos), sos
+          print(whl, "->", sos)
+          EOF
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ steps.interp.outputs.value }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Run tests
+        env:
+          UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+          UV_INDEX_STRATEGY: unsafe-best-match
+          UV_ONLY_BINARY: ':all:'
+        run: |
+          uv pip install dist/*.whl 'pytest-asyncio==0.23.7'
+          pytest tests/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bittensor-drand-${{ env.BITTENSOR_DRAND_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish bittensor-drand ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: bittensor-drand-${{ matrix.version }}-*-manylinux_riscv64
