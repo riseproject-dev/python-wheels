@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the Linux leg of upstream's own
+# `.github/workflows/publish-python.yml` (build-language-bindings +
+# build-linux-wheels jobs).
+name: Build breez-sdk-spark wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/breez-sdk-spark.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-breez-sdk-spark.yml'
+      - 'docs/packages/breez-sdk-spark.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-breez-sdk-spark.yml'
+      - 'docs/packages/breez-sdk-spark.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: breez-sdk-spark
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build breez-sdk-spark ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # No abi3 on the uniffi cdylib, so upstream ships one wheel per
+        # interpreter (matches PyPI's cp3xx-cp3xx tags).
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      BREEZ_SDK_SPARK_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout spark-sdk ${{ env.BREEZ_SDK_SPARK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: breez/spark-sdk
+          ref: ${{ env.BREEZ_SDK_SPARK_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: crates/breez-sdk/bindings/langs/python
+          output-dir: wheelhouse/
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # The sdist carries no prebuilt cdylib; build it once (shared by
+          # every interpreter in this job, same as upstream's single
+          # build-language-bindings + build-linux-wheels{matrix:python} split)
+          # and run its own uniffi-bindgen to generate the Python glue,
+          # exactly as upstream's CI does.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
+            export PATH="$PATH:$HOME/.cargo/bin" &&
+            cd {project} &&
+            cargo build --release --manifest-path crates/breez-sdk/bindings/Cargo.toml --features uniffi-cli &&
+            cargo run --manifest-path crates/breez-sdk/bindings/Cargo.toml --features uniffi-cli --bin uniffi-bindgen -- generate --library target/release/libbreez_sdk_spark_bindings.so --no-format --language python -o crates/breez-sdk/bindings/langs/python/src/breez_sdk_spark &&
+            cp target/release/libbreez_sdk_spark_bindings.so crates/breez-sdk/bindings/langs/python/src/breez_sdk_spark/ &&
+            sed -i -e 's/    version=".*",/    version="${{ env.BREEZ_SDK_SPARK_VERSION }}",/' crates/breez-sdk/bindings/langs/python/setup.py
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_TEST_COMMAND: >-
+            python -c "import breez_sdk_spark, os;
+            so = os.path.join(os.path.dirname(breez_sdk_spark.__file__), 'libbreez_sdk_spark_bindings.so');
+            assert os.path.isfile(so), so"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: breez-sdk-spark-${{ env.BREEZ_SDK_SPARK_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish breez-sdk-spark ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: breez-sdk-spark-${{ matrix.version }}-*-manylinux_riscv64
