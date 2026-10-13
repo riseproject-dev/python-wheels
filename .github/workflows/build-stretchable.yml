@@ -1,0 +1,111 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build` job of
+# https://github.com/mortencombat/stretchable/blob/v1.1.8/.github/workflows/build-publish.yml
+name: Build stretchable wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/stretchable.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-stretchable.yml'
+      - 'docs/packages/stretchable.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-stretchable.yml'
+      - 'docs/packages/stretchable.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: stretchable
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build stretchable ${{ matrix.version }} cp312-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      STRETCHABLE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout stretchable v${{ env.STRETCHABLE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: mortencombat/stretchable
+          ref: v${{ env.STRETCHABLE_VERSION }}
+          persist-credentials: false
+
+      # Upstream's own release job rewrites this from the tag at build time
+      # (a PowerShell step in build-publish.yml); the checked-out Cargo.toml
+      # otherwise carries whatever version was last bumped for development.
+      - name: Set Cargo.toml version from tag
+        run: sed -i "s/^version = \".*\"/version = \"${STRETCHABLE_VERSION}\"/" Cargo.toml
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          # pyo3's abi3-py38 feature is on unconditionally (Cargo.toml), so one
+          # abi3 wheel serves every interpreter; cp314t is dropped outright
+          # because pyo3 0.22.6 predates free-threading support entirely.
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests
+          # test_fixtures.py drives a real Chrome/ChromeDriver to render its
+          # HTML fixtures and compare against taffy's computed layout; no
+          # riscv64 Chrome build exists, so it is dropped, not just skipped.
+          CIBW_TEST_COMMAND: python -m pytest {project}/tests --ignore={project}/tests/test_fixtures.py -v
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: stretchable-${{ env.STRETCHABLE_VERSION }}-cp312-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish stretchable ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: stretchable-${{ matrix.version }}-*-manylinux_riscv64
