@@ -1,0 +1,175 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux-python` job of
+# https://github.com/Geode-solutions/actions/blob/master/.github/workflows/cpp-deploy-linux-python.yml
+# (called by OpenGeode's deploy.yml) and the Python ctest step of
+# https://github.com/Geode-solutions/actions/blob/master/.github/workflows/cpp-test-linux-python.yml
+name: Build opengeode-core wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/opengeode-core.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-opengeode-core.yml'
+      - 'docs/packages/opengeode-core.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-opengeode-core.yml'
+      - 'docs/packages/opengeode-core.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: opengeode-core
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build opengeode-core ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    container:
+      image: quay.io/pypa/manylinux_2_39_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ['3.12', '3.13', '3.14']
+
+    env:
+      OPENGEODE_CORE_VERSION: ${{ matrix.version }}
+      # The image's CMake 4 refuses the old cmake_minimum_required of several superbuild deps.
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+
+    steps:
+      - name: Get info
+        id: info
+        run: |
+          echo "tag=cp${{ matrix.python }}-cp${{ matrix.python }}" | sed 's/\.//g' >> $GITHUB_OUTPUT
+
+      - name: Checkout OpenGeode v${{ env.OPENGEODE_CORE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Geode-solutions/OpenGeode
+          ref: v${{ env.OPENGEODE_CORE_VERSION }}
+          persist-credentials: false
+
+      - name: Libraries
+        run: |
+          echo "PATH=/opt/python/${{ steps.info.outputs.tag }}/bin:$PATH" >> $GITHUB_ENV
+          /opt/python/${{ steps.info.outputs.tag }}/bin/python -m pip install ninja
+          git config --global --add safe.directory "*"
+
+      - name: "pip-compile"
+        run: |
+          file=bindings/python/requirements.in
+          if [ ! -f "$file" ]; then
+            exit 0
+          fi
+          pip install pip-tools typing_extensions
+          pip-compile -v --upgrade $file
+          sed -i -E 's/==(.+)\.(.+)\.(.+)/==\1\.*,>=\1\.\2\.\3/' bindings/python/requirements.txt
+
+      - name: Compile
+        run: |
+          mkdir -p build
+          cd build
+          cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DOPENGEODE_WITH_PYTHON:BOOL=ON -DPYTHON_VERSION:STRING=${{ matrix.python }} -DWHEEL_VERSION:STRING=${OPENGEODE_CORE_VERSION} -DOPENGEODE_WITH_TESTS:BOOL=OFF ..
+          cmake --build . -j 2
+
+      - name: Compile wheel
+        run: |
+          cd build/opengeode
+          cmake --build . --target wheel --config Release
+
+      # Upstream's wheel ships no licence text, neither OpenGeode's own nor that of the superbuild libraries it bundles.
+      - name: Add licences to the wheel
+        run: |
+          set -euo pipefail
+          pip install wheel
+          whl=$(ls build/opengeode/wheel/dist/*.whl)
+          python -m wheel unpack -d unpacked "$whl"
+          lic=$(ls -d unpacked/*/*.dist-info)/licenses
+          mkdir -p "$lic"
+          cp LICENSE COPYLEFT "$lic/"
+          for src in build/third_party/*/src; do
+            dep=$(basename "$(dirname "$src")")
+            find "$src" -maxdepth 4 -type f \
+              \( -iname 'LICEN[CS]E*' -o -iname 'COPYING*' -o -iname 'COPYRIGHT*' \) \
+              -not -path '*/.git/*' -not -path '*/autotest/*' -not -path '*/doc/*' -not -path '*/docs/*' \
+              -not -path '*/test/*' -not -path '*/tests/*' -not -path '*/fuzzers/*' |
+            while read -r f; do
+              rel=${f#"$src"/}
+              cp "$f" "$lic/$dep-${rel//\//_}"
+            done
+          done
+          ls "$lic"
+          mkdir -p repacked
+          python -m wheel pack -d repacked unpacked/*
+
+      - name: Repair wheel
+        run: auditwheel repair -w wheelhouse repacked/*.whl
+
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install wheelhouse/*.whl
+          cd /tmp
+          /tmp/venv/bin/python -c "import opengeode"
+          lib64=$(/tmp/venv/bin/python -c "import opengeode, os; print(os.path.join(os.path.dirname(opengeode.__file__), 'lib64'))")
+          /tmp/venv/bin/python -c "import importlib.metadata as md; files = [str(p) for p in md.files('opengeode-core')]; assert any(p.endswith('licenses/LICENSE') for p in files), files"
+          mkdir -p /tmp/pytests
+          cd /tmp/pytests
+          failed=0
+          for t in "$GITHUB_WORKSPACE"/bindings/python/tests/*/test-py-*.py; do
+            echo "::group::$(basename "$t")"
+            if PYTHONPATH="$lib64" /tmp/venv/bin/python "$t"; then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              echo "::error::$(basename "$t") failed"
+              failed=1
+            fi
+          done
+          exit $failed
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: opengeode-core-${{ env.OPENGEODE_CORE_VERSION }}-${{ steps.info.outputs.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish opengeode-core ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: opengeode-core-${{ matrix.version }}-*-manylinux_riscv64
