@@ -1,0 +1,185 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel builder:
+#   https://github.com/sqlfluff/sqlfluff/blob/4.3.0/.github/workflows/publish-sqlfluffrs-release-to-pypi.yaml
+# and the `-rust` test jobs of:
+#   https://github.com/sqlfluff/sqlfluff/blob/4.3.0/.github/workflows/ci-tests.yml
+name: Build sqlfluffrs wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/sqlfluffrs.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sqlfluffrs.yml'
+      - 'docs/packages/sqlfluffrs.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sqlfluffrs.yml'
+      - 'docs/packages/sqlfluffrs.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: sqlfluffrs
+      version: ${{ inputs.version }}
+
+  generate_rust_dialects:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Generate sqlfluffrs ${{ matrix.version }} Rust dialects
+    runs-on: ubuntu-latest
+    env:
+      SQLFLUFFRS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout sqlfluff ${{ env.SQLFLUFFRS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: sqlfluff/sqlfluff
+          ref: ${{ env.SQLFLUFFRS_VERSION }}
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.14'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Generate Rust dialects
+        run: |
+          uv pip install -e .
+          python utils/rustify.py build
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sqlfluffrs-${{ env.SQLFLUFFRS_VERSION }}-generated-rust-dialects
+          path: sqlfluffrs/sqlfluffrs_dialects/src/
+          if-no-files-found: error
+
+  build_wheel:
+    needs: [setup, generate_rust_dialects]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build sqlfluffrs ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    env:
+      SQLFLUFFRS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout sqlfluff ${{ env.SQLFLUFFRS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: sqlfluff/sqlfluff
+          ref: ${{ env.SQLFLUFFRS_VERSION }}
+          persist-credentials: false
+
+      - name: Download generated Rust dialects
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: sqlfluffrs-${{ env.SQLFLUFFRS_VERSION }}-generated-rust-dialects
+          path: sqlfluffrs/sqlfluffrs_dialects/src/
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release -i python3.10 --out dist --manifest-path sqlfluffrs/Cargo.toml
+          manylinux: '2_39'
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sqlfluffrs-${{ env.SQLFLUFFRS_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14']
+    name: Test sqlfluffrs ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    env:
+      SQLFLUFFRS_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+      UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+      UV_INDEX_STRATEGY: unsafe-best-match
+
+    steps:
+      - name: Checkout sqlfluff ${{ env.SQLFLUFFRS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: sqlfluff/sqlfluff
+          ref: ${{ env.SQLFLUFFRS_VERSION }}
+          persist-credentials: false
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: sqlfluffrs-${{ env.SQLFLUFFRS_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: dist/
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      # The tox `py3XX-rust` environment, minus requirements_dev.txt's linting,
+      # typing and docs tools.
+      - name: Install sqlfluff and the wheel
+        run: |
+          uv pip install . ./plugins/sqlfluff-plugin-example hypothesis pytest pytest-xdist
+          uv pip install --reinstall --no-deps --no-index --find-links dist/ sqlfluffrs
+          python -c "import sqlfluffrs.sqlfluffrs as m; assert m.__file__.endswith('.so'), m.__file__; print(m.__file__)"
+
+      - name: Run tests
+        run: python -m pytest -rsfE -n auto test -m "not integration" --durations=16 --verbosity=0
+
+  publish:
+    name: Publish sqlfluffrs ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: sqlfluffrs-${{ matrix.version }}-*-manylinux_riscv64
