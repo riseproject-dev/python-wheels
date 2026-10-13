@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on upstream's own Linux leg of
+# https://github.com/bllshttng/footnote/blob/v0.3.1/.github/workflows/release-wheels.yml,
+# narrowed to riscv64. The wheel bundles three standalone `fno-agents` Rust
+# binaries (not a CPython extension), built natively for the container's own
+# riscv64 glibc rather than cross-compiled to musl like upstream's x86_64/arm64
+# legs, mirroring build-pagefind-bin.yml's riscv64 approach for the same shape.
+name: Build fno wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/fno.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fno.yml'
+      - 'docs/packages/fno.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fno.yml'
+      - 'docs/packages/fno.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: fno
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build fno ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      FNO_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout footnote v${{ env.FNO_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: bllshttng/footnote
+          ref: v${{ env.FNO_VERSION }}
+          persist-credentials: false
+
+      # Written to $RUNNER_TEMP and bind-mounted rather than checked in (gotcha
+      # 7 / CLAUDE.md): installs rustup inside the container (gotcha 10), builds
+      # the three fno-agents binaries natively for the container's own riscv64
+      # glibc, stages them exactly where cli/hatch_build.py expects them, then
+      # builds the wheel the same way release-wheels.yml's own "Build wheel"
+      # step does.
+      - name: Write build script
+        run: |
+          cat > "$RUNNER_TEMP/build.sh" <<'SCRIPT'
+          set -euxo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source "$HOME/.cargo/env"
+          rustup target add riscv64gc-unknown-linux-gnu
+          (cd crates/fno-agents && cargo build --release --target riscv64gc-unknown-linux-gnu --bins)
+          mkdir -p cli/src/fno/_bin
+          for b in fno-agents fno-agents-daemon fno-agents-worker; do
+            cp "crates/fno-agents/target/riscv64gc-unknown-linux-gnu/release/${b}" "cli/src/fno/_bin/${b}"
+          done
+          pybin=/opt/python/cp312-cp312/bin
+          "$pybin/pip" install -q build
+          cd cli
+          FNO_AGENTS_WHEEL_PLATFORM=manylinux_2_39_riscv64 "$pybin/python3" -m build --wheel
+          SCRIPT
+
+      - name: Build wheel
+        run: |
+          docker run --rm \
+            -v "$(pwd)":/workspace \
+            -v "$RUNNER_TEMP/build.sh":/build.sh \
+            -w /workspace \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /build.sh
+
+      # Same clean-machine smoke release-wheels.yml runs on every platform leg
+      # (cli/tests/smoke/clean_machine_smoke.sh), checked out above. pydantic
+      # pulls in pydantic-core (a compiled Rust extension); only our registry
+      # has it for riscv64.
+      - name: Clean-machine smoke
+        run: |
+          docker run --rm \
+            -v "$(pwd)":/workspace \
+            -w /workspace \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash -c 'export PATH=/opt/python/cp312-cp312/bin:$PATH; bash cli/tests/smoke/clean_machine_smoke.sh cli/dist/*.whl'
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fno-${{ env.FNO_VERSION }}-manylinux_riscv64
+          path: cli/dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish fno ${{ matrix.version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: fno-${{ matrix.version }}-manylinux_riscv64
