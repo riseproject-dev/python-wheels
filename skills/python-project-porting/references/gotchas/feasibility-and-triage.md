@@ -316,6 +316,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **646** — A trivially portable project with **no licence grant at all** (no LICENSE file, no
   `license` in `Cargo.toml`/`pyproject.toml`/PyPI metadata, README "License: TBD") is not
   redistributable: park it on the licence, not the build (the oboros case).
+- **651** — An accelerator-vendor package can build and `import` clean with no CANN/SDK
+  present (no dlopen wall, no hard `import`) and still be a park, when its only *wired*
+  backend driver needs the vendor compiler to activate and the package's nominal CPU driver
+  is dead code the loader never touches (the triton-ascend case).
 
 ---
 
@@ -5572,3 +5576,42 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     - Verdict: `parked`, no worktree/branch/PR opened — the Rust build itself is routine; there
       is simply nothing upstream has licensed this repo to redistribute. Re-triage only if
       kolo ever ships an explicit open-source LICENSE.
+
+651. **An accelerator-vendor package can build and `import` clean with no CANN/SDK present at
+    all — gotcha 480's dlopen wall and gotcha 516's hard `import` are not the only shape this
+    family takes — and still be a park, because its *only* working backend has nothing to
+    drive on riscv64 (triton-ascend 3.2.0, siblings of gotcha 480/516/531/647).** Checked
+    against the real tag `v3.2.0` source and the real released wheel, not inferred from the
+    name or from the sibling family's pattern (the queue's own torch-npu entry had guessed
+    "by inspection triton-ascend" would repeat gotcha 516's shape — it does not). `setup.py`
+    imports nothing Ascend-specific and no `CMakeLists.txt` in the tree references
+    `ASCEND_HOME`/CANN at all — the heavy lift is `third_party/ascendnpu-ir` (Huawei's MLIR
+    dialect, an LLVM/MLIR build like upstream Triton's own) plus `third_party/triton` (a
+    pinned `triton-lang/triton` submodule), neither of which touches the vendor SDK, so the
+    wheel *builds* with nothing but a standard clang/lld toolchain. The two shipped `.so`
+    (`libtriton.so`, `libentry_ascend.so`) `readelf -d` to libstdc++/libm/libc/libdl/libpthread
+    only — no `libascendcl.so` string anywhere, unlike gotcha 480's dlopen tell. Installed and
+    `import triton` in a clean venv with no `torch_npu` and no `ASCEND_HOME_PATH` set: it
+    succeeds (`triton.backends.backends` populates to `{'ascend': Backend(...)}`) — the one
+    module that does `import torch_npu` at top level (`triton/runtime/libentry.py`) is never
+    imported by `triton/__init__.py` or anything else in the wheel, so it is dead weight, not
+    a load path. **The park is earned anyway, by gotcha 41's test ("compiling clean doesn't
+    make it portable") applied one layer further than usual — there is no SECOND backend to
+    fall back to.** `triton/backends/__init__.py`'s `_discover_backends()` loads only each
+    backend directory's `driver.py` (never `cpu_driver.py`), so the ascend backend's
+    `cpu_driver.py` — a `CPUDriver` class marked `# TODO: temporarily fake` throughout, that
+    doesn't even subclass `DriverBase` — is not wired into backend selection at all; the one
+    driver the loader finds, `NPUDriver`, has `is_active()` shell out to Huawei's `bisheng`
+    compiler (`-print-targets`, checking for `hiipu64`) and return `False` on any exception,
+    so on a host with no CANN toolkit the package imports fine and then has zero active
+    compute backend — every real kernel compile/launch call fails. This is gotcha 183's
+    "importable but non-functional for its entire purpose" shape (the playwright case), not
+    gotcha 480's import-time crash: the wheel would sit on the registry doing nothing a user
+    could use it for, on riscv64 or any arch lacking real Ascend hardware + CANN. Upstream's
+    own install docs state the axis outright (CANN 8.3.RC1, host arch "aarch64/x86_64" only,
+    NPU chip required) and `grep -ri riscv` over the tree returns zero hits.
+    - Verdict: `parked`, same accelerator-vendor family as gotcha 480/516/531/647. Revisit only
+      if Huawei ships CANN + the `bisheng`/AscendC toolchain for riscv64, or upstream wires a
+      genuinely functional CPU/interpreter backend into `_discover_backends()` (today's
+      `cpu_driver.py` is not that). No worktree/branch/workflow/docs entry/patch/PR; scratch
+      under `.git/pw-scratch/triton-ascend/` removed.

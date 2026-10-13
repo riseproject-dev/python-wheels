@@ -500,6 +500,10 @@ The porting gotchas (557 of them) live in [`references/gotchas/`](gotchas/), spl
   commercial product shipping no LICENSE file anywhere and only a copyright notice is already
   "all rights reserved" by default, the same lock, even on an otherwise trivial PyO3/maturin
   build with no exotic deps or ISA gates (the kolo case).
+- **651** — An accelerator-vendor package can build and `import` clean with no CANN/SDK
+  present (no dlopen wall, no hard `import`) and still be a park, when its only *wired*
+  backend driver needs the vendor compiler to activate and the package's nominal CPU driver
+  is dead code the loader never touches (the triton-ascend case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
