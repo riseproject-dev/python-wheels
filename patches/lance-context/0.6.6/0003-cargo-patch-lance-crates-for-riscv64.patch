@@ -1,0 +1,101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Tue, 13 Oct 2026 00:00:00 +0000
+Subject: [PATCH] cargo: redirect lance-core/lance-linalg to riscv64-patched
+ checkouts
+
+lance-core's SIMD_SUPPORT static (src/utils/cpu.rs) and lance-linalg's
+f32x8/f32x16/i32x8/f64x4/f64x8 SIMD types (src/simd/{f32,i32,f64}.rs)
+are compiled for x86_64/aarch64/loongarch64 only, with no fallback arm
+for any other architecture (CLAUDE.md gotcha 300): the SIMD_SUPPORT
+closure has no trailing expression on riscv64 ("expected SimdSupport,
+found ()"), and the SIMD type structs are defined only under those
+three `#[cfg(target_arch = ...)]` attributes while every method
+implementing them is unconditional, so riscv64 hits "cannot find type
+`f32x8` in this scope" as soon as lance-linalg is built.
+
+Two semver-incompatible lines of both crates are compiled here: 9.0.0,
+via crates/lance-context-core's direct `lance = "9.0.0"`, and 7.0.0,
+which `lancedb = "0.30.0"` (and lance-namespace-impls 7.0.0 under it)
+still pulls in. (lance-graph's own, unused `1.x` copy is dropped
+entirely by 0001-remove-unused-lance-graph-dependency.patch instead.)
+Redirect all four to the riscv64-patched copies the workflow
+materializes at build time from the pinned crates.io releases (see
+0002/0004-lance-{core,linalg}-riscv64-simd-fallback.patch for 7.0.0
+and 0005/0006-lance-{core,linalg}-9.0.0-riscv64-simd-fallback.patch
+for 9.0.0). The 7.0.0 pair is listed under renamed keys with
+`package = ...`, which is how Cargo's [patch] table accepts more than
+one semver-incompatible version of the same crate. Each copy is at the
+same version Cargo.lock already pins -- only the `source`/`checksum`
+lines of those four entries change there, so every other dependency
+stays pinned exactly as upstream released it.
+
+Upstream-Status: Inappropriate [redirects pinned dependencies to local checkouts materialized at build time; the fix itself belongs in lance-format/lance]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/Cargo.lock b/Cargo.lock
+index ac263f7..d87b7b3 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -6491,8 +6491,6 @@ dependencies = [
+ [[package]]
+ name = "lance-core"
+ version = "7.0.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "13f84020da5a484e2f07dd1796e09785ed7cd889857ebc4cb77e32ef214ee594"
+ dependencies = [
+  "arrow-array 58.3.0",
+  "arrow-buffer 58.3.0",
+@@ -6528,8 +6526,6 @@ dependencies = [
+ [[package]]
+ name = "lance-core"
+ version = "9.0.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "238c8a58308e7718d6bd96b53494eb7953fa299778bc4911cc571c3576e9446d"
+ dependencies = [
+  "arrow-array 58.3.0",
+  "arrow-buffer 58.3.0",
+@@ -7387,8 +7383,6 @@ dependencies = [
+ [[package]]
+ name = "lance-linalg"
+ version = "7.0.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "6b4c51cad0ac780b02dc4da48528479e7693c03e8d05390510bbc69ca2a9a1f1"
+ dependencies = [
+  "arrow-array 58.3.0",
+  "arrow-buffer 58.3.0",
+@@ -7405,8 +7399,6 @@ dependencies = [
+ [[package]]
+ name = "lance-linalg"
+ version = "9.0.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "0e5a9b99bd1f49bc2fe5afb81323141abc506c818f589de95dbab4f6143d9a88"
+ dependencies = [
+  "arrow-array 58.3.0",
+  "arrow-buffer 58.3.0",
+diff --git a/Cargo.toml b/Cargo.toml
+index 2efab19..e85f652 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -17,3 +17,18 @@ license = "Apache-2.0"
+ 
+ [workspace.metadata]
+ # reserved for future use
++
++# lance-core's SIMD_SUPPORT static and lance-linalg's f32x8/f32x16/i32x8/
++# f64x4/f64x8 SIMD types compile only for x86_64/aarch64/loongarch64
++# upstream (CLAUDE.md gotcha 300); the riscv64-patched copies below are
++# materialized from the pinned crates.io releases by the workflow at
++# build time. Both the 9.0.0 line (crates/lance-context-core's direct
++# `lance = "9.0.0"`) and the 7.0.0 line (still pulled in by
++# `lancedb = "0.30.0"`) are compiled, so each is redirected; the second
++# pair uses renamed `package =` keys, which is how Cargo's [patch] table
++# takes more than one semver-incompatible version of the same crate.
++[patch.crates-io]
++lance-core = { path = "lance-core-9.0.0-riscv64" }
++lance-linalg = { path = "lance-linalg-9.0.0-riscv64" }
++lance-core-7 = { package = "lance-core", path = "lance-core-7.0.0-riscv64" }
++lance-linalg-7 = { package = "lance-linalg", path = "lance-linalg-7.0.0-riscv64" }
+-- 
+2.43.0

@@ -1,0 +1,1435 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 06 Oct 2026 00:00:00 +0000
+Subject: [PATCH] lance-linalg: add a portable riscv64 SIMD fallback
+
+lance-linalg's f32x8/f32x16/i32x8/f64x4/f64x8 SIMD types
+(src/simd/{f32,f64,i32}.rs) are defined, and every trait impl for them
+written, only under `#[cfg(target_arch = "x86_64"/"aarch64"/
+"loongarch64")]` -- unlike u8x16/u8x32 (src/simd/u8.rs), which already
+carry a portable fallback. riscv64 hits "cannot find type `f32x8` in
+this scope" as soon as lance-linalg (a dependency of lance, which
+crates/lance-context-core depends on directly) is built. Add the same
+shape of fallback for the three missing types: an array-backed struct
+plus a scalar implementation of every method the SIMD/FloatSimd traits
+require, gated `#[cfg(not(any(target_arch = "x86_64", target_arch =
+"aarch64", target_arch = "loongarch64")))]` beside the existing
+per-architecture arms, which are otherwise untouched. Add/Sub/Mul on
+i32x8 use wrapping arithmetic to match the silent-wraparound semantics
+of the SIMD instructions they replace.
+
+Applied (via patches/lance-context/0.6.5/0003-cargo-patch-lance-crates-for-riscv64.patch)
+to a local copy of this crate's 7.0.0 crates.io release, which
+crates/lance-context-core's `lance = "7.0.0"` pulls in transitively
+and cannot be patched in place (CLAUDE.md gotcha 300).
+
+Upstream-Status: To upstream [not yet submitted to lance-format/lance]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/src/simd/f32.rs b/src/simd/f32.rs
+index 7804299..e219e0e 100644
+--- a/src/simd/f32.rs
++++ b/src/simd/f32.rs
+@@ -35,6 +35,17 @@ pub struct f32x8(float32x4x2_t);
+ #[derive(Clone, Copy)]
+ pub struct f32x8(v8f32);
+ 
++/// 8 of 32-bit `f32` values. Portable scalar fallback for architectures with
++/// no dedicated SIMD tier above (riscv64 included) -- CLAUDE.md gotcha 300.
++#[allow(non_camel_case_types)]
++#[cfg(not(any(
++    target_arch = "x86_64",
++    target_arch = "aarch64",
++    target_arch = "loongarch64"
++)))]
++#[derive(Clone, Copy)]
++pub struct f32x8([f32; 8]);
++
+ impl std::fmt::Debug for f32x8 {
+     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+         let mut arr = [0.0_f32; 8];
+@@ -91,6 +102,27 @@ impl f32x8 {
+             ];
+             Self::load_unaligned(values.as_ptr())
+         }
++
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        unsafe {
++            let ptr = slice.as_ptr();
++
++            let values = [
++                *ptr.add(indices[0] as usize),
++                *ptr.add(indices[1] as usize),
++                *ptr.add(indices[2] as usize),
++                *ptr.add(indices[3] as usize),
++                *ptr.add(indices[4] as usize),
++                *ptr.add(indices[5] as usize),
++                *ptr.add(indices[6] as usize),
++                *ptr.add(indices[7] as usize),
++            ];
++            Self::load_unaligned(values.as_ptr())
++        }
+     }
+ }
+ 
+@@ -120,6 +152,14 @@ impl SIMD<f32, 8> for f32x8 {
+         unsafe {
+             Self(transmute(lasx_xvreplgr2vr_w(transmute(val))))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            Self([val; 8])
++        }
+     }
+ 
+     fn zeros() -> Self {
+@@ -135,6 +175,14 @@ impl SIMD<f32, 8> for f32x8 {
+         {
+             Self::splat(0.0)
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            Self([0.0; 8])
++        }
+     }
+ 
+     #[inline]
+@@ -151,6 +199,14 @@ impl SIMD<f32, 8> for f32x8 {
+         {
+             Self(transmute(lasx_xvld::<0>(transmute(ptr))))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            Self::load_unaligned(ptr)
++        }
+     }
+ 
+     #[inline]
+@@ -167,6 +223,18 @@ impl SIMD<f32, 8> for f32x8 {
+         {
+             Self(transmute(lasx_xvld::<0>(transmute(ptr))))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0.0f32; 8];
++            for (i, r) in result.iter_mut().enumerate() {
++                *r = unsafe { *ptr.add(i) };
++            }
++            Self(result)
++        }
+     }
+ 
+     unsafe fn store(&self, ptr: *mut f32) {
+@@ -182,6 +250,14 @@ impl SIMD<f32, 8> for f32x8 {
+         unsafe {
+             lasx_xvst::<0>(transmute(self.0), transmute(ptr));
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        unsafe {
++            self.store_unaligned(ptr);
++        }
+     }
+ 
+     unsafe fn store_unaligned(&self, ptr: *mut f32) {
+@@ -197,6 +273,16 @@ impl SIMD<f32, 8> for f32x8 {
+         unsafe {
+             lasx_xvst::<0>(transmute(self.0), transmute(ptr));
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        unsafe {
++            for (i, v) in self.0.iter().enumerate() {
++                *ptr.add(i) = *v;
++            }
++        }
+     }
+ 
+     #[inline]
+@@ -225,6 +311,14 @@ impl SIMD<f32, 8> for f32x8 {
+         {
+             self.as_array().iter().sum()
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            self.0.iter().sum()
++        }
+     }
+ 
+     fn reduce_min(&self) -> f32 {
+@@ -259,6 +353,14 @@ impl SIMD<f32, 8> for f32x8 {
+             let m2 = lasx_xvfmin_s(transmute(m1), transmute(m2));
+             transmute(lasx_xvpickve2gr_w::<0>(transmute(m2)))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            self.0.iter().copied().fold(f32::INFINITY, f32::min)
++        }
+     }
+ 
+     fn min(&self, rhs: &Self) -> Self {
+@@ -277,6 +379,18 @@ impl SIMD<f32, 8> for f32x8 {
+         unsafe {
+             Self(lasx_xvfmin_s(self.0, rhs.0))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0.0f32; 8];
++            for i in 0..8 {
++                result[i] = self.0[i].min(rhs.0[i]);
++            }
++            Self(result)
++        }
+     }
+ 
+     fn find(&self, val: f32) -> Option<i32> {
+@@ -310,6 +424,18 @@ impl SIMD<f32, 8> for f32x8 {
+                 }
+             }
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            for i in 0..8 {
++                if self.0[i] == val {
++                    return Some(i as i32);
++                }
++            }
++        }
+         None
+     }
+ }
+@@ -329,6 +455,16 @@ impl FloatSimd<f32, 8> for f32x8 {
+         unsafe {
+             self.0 = lasx_xvfmadd_s(a.0, b.0, self.0);
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            for i in 0..8 {
++                self.0[i] += a.0[i] * b.0[i];
++            }
++        }
+     }
+ }
+ 
+@@ -352,6 +488,18 @@ impl Add for f32x8 {
+         unsafe {
+             Self(lasx_xvfadd_s(self.0, rhs.0))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0.0f32; 8];
++            for i in 0..8 {
++                result[i] = self.0[i] + rhs.0[i];
++            }
++            Self(result)
++        }
+     }
+ }
+ 
+@@ -371,6 +519,16 @@ impl AddAssign for f32x8 {
+         unsafe {
+             self.0 = lasx_xvfadd_s(self.0, rhs.0);
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            for i in 0..8 {
++                self.0[i] += rhs.0[i];
++            }
++        }
+     }
+ }
+ 
+@@ -394,6 +552,18 @@ impl Sub for f32x8 {
+         unsafe {
+             Self(lasx_xvfsub_s(self.0, rhs.0))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0.0f32; 8];
++            for i in 0..8 {
++                result[i] = self.0[i] - rhs.0[i];
++            }
++            Self(result)
++        }
+     }
+ }
+ 
+@@ -413,6 +583,16 @@ impl SubAssign for f32x8 {
+         unsafe {
+             self.0 = lasx_xvfsub_s(self.0, rhs.0);
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            for i in 0..8 {
++                self.0[i] -= rhs.0[i];
++            }
++        }
+     }
+ }
+ 
+@@ -436,6 +616,18 @@ impl Mul for f32x8 {
+         unsafe {
+             Self(lasx_xvfmul_s(self.0, rhs.0))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0.0f32; 8];
++            for i in 0..8 {
++                result[i] = self.0[i] * rhs.0[i];
++            }
++            Self(result)
++        }
+     }
+ }
+ 
+@@ -461,6 +653,16 @@ pub struct f32x16(float32x4x4_t);
+ #[derive(Clone, Copy)]
+ pub struct f32x16(v8f32, v8f32);
+ 
++/// 16 of 32-bit `f32` values. Portable scalar fallback -- CLAUDE.md gotcha 300.
++#[allow(non_camel_case_types)]
++#[cfg(not(any(
++    target_arch = "x86_64",
++    target_arch = "aarch64",
++    target_arch = "loongarch64"
++)))]
++#[derive(Clone, Copy)]
++pub struct f32x16([f32; 16]);
++
+ impl std::fmt::Debug for f32x16 {
+     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+         let mut arr = [0.0_f32; 16];
+@@ -510,6 +712,14 @@ impl SIMD<f32, 16> for f32x16 {
+                 transmute(lasx_xvreplgr2vr_w(transmute(val))),
+             )
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            Self([val; 16])
++        }
+     }
+ 
+     #[inline]
+@@ -530,6 +740,14 @@ impl SIMD<f32, 16> for f32x16 {
+         {
+             Self::splat(0.0)
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            Self([0.0; 16])
++        }
+     }
+ 
+     #[inline]
+@@ -553,6 +771,14 @@ impl SIMD<f32, 16> for f32x16 {
+                 transmute(lasx_xvld::<32>(transmute(ptr))),
+             )
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            Self::load_unaligned(ptr)
++        }
+     }
+ 
+     #[inline]
+@@ -576,6 +802,18 @@ impl SIMD<f32, 16> for f32x16 {
+                 transmute(lasx_xvld::<32>(transmute(ptr))),
+             )
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0.0f32; 16];
++            for (i, r) in result.iter_mut().enumerate() {
++                *r = unsafe { *ptr.add(i) };
++            }
++            Self(result)
++        }
+     }
+ 
+     #[inline]
+@@ -598,6 +836,14 @@ impl SIMD<f32, 16> for f32x16 {
+             lasx_xvst::<0>(transmute(self.0), transmute(ptr));
+             lasx_xvst::<32>(transmute(self.1), transmute(ptr));
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        unsafe {
++            self.store_unaligned(ptr);
++        }
+     }
+ 
+     #[inline]
+@@ -620,6 +866,16 @@ impl SIMD<f32, 16> for f32x16 {
+             lasx_xvst::<0>(transmute(self.0), transmute(ptr));
+             lasx_xvst::<32>(transmute(self.1), transmute(ptr));
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        unsafe {
++            for (i, v) in self.0.iter().enumerate() {
++                *ptr.add(i) = *v;
++            }
++        }
+     }
+ 
+     fn reduce_sum(&self) -> f32 {
+@@ -653,6 +909,14 @@ impl SIMD<f32, 16> for f32x16 {
+         {
+             self.as_array().iter().sum()
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            self.0.iter().sum()
++        }
+     }
+ 
+     #[inline]
+@@ -691,6 +955,14 @@ impl SIMD<f32, 16> for f32x16 {
+             let m1 = lasx_xvfmin_s(transmute(m1), transmute(m2));
+             transmute(lasx_xvpickve2gr_w::<0>(transmute(m1)))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            self.0.iter().copied().fold(f32::INFINITY, f32::min)
++        }
+     }
+ 
+     #[inline]
+@@ -716,6 +988,18 @@ impl SIMD<f32, 16> for f32x16 {
+         unsafe {
+             Self(lasx_xvfmin_s(self.0, rhs.0), lasx_xvfmin_s(self.1, rhs.1))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0.0f32; 16];
++            for i in 0..16 {
++                result[i] = self.0[i].min(rhs.0[i]);
++            }
++            Self(result)
++        }
+     }
+ 
+     fn find(&self, val: f32) -> Option<i32> {
+@@ -768,6 +1052,19 @@ impl SIMD<f32, 16> for f32x16 {
+             }
+             None
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            for i in 0..16 {
++                if self.0[i] == val {
++                    return Some(i as i32);
++                }
++            }
++            None
++        }
+     }
+ }
+ 
+@@ -795,6 +1092,16 @@ impl FloatSimd<f32, 16> for f32x16 {
+             self.0 = lasx_xvfmadd_s(a.0, b.0, self.0);
+             self.1 = lasx_xvfmadd_s(a.1, b.1, self.1);
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            for i in 0..16 {
++                self.0[i] += a.0[i] * b.0[i];
++            }
++        }
+     }
+ }
+ 
+@@ -824,6 +1131,18 @@ impl Add for f32x16 {
+         unsafe {
+             Self(lasx_xvfadd_s(self.0, rhs.0), lasx_xvfadd_s(self.1, rhs.1))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0.0f32; 16];
++            for i in 0..16 {
++                result[i] = self.0[i] + rhs.0[i];
++            }
++            Self(result)
++        }
+     }
+ }
+ 
+@@ -851,6 +1170,16 @@ impl AddAssign for f32x16 {
+             self.0 = lasx_xvfadd_s(self.0, rhs.0);
+             self.1 = lasx_xvfadd_s(self.1, rhs.1);
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            for i in 0..16 {
++                self.0[i] += rhs.0[i];
++            }
++        }
+     }
+ }
+ 
+@@ -880,6 +1209,18 @@ impl Mul for f32x16 {
+         unsafe {
+             Self(lasx_xvfmul_s(self.0, rhs.0), lasx_xvfmul_s(self.1, rhs.1))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0.0f32; 16];
++            for i in 0..16 {
++                result[i] = self.0[i] * rhs.0[i];
++            }
++            Self(result)
++        }
+     }
+ }
+ 
+@@ -909,6 +1250,18 @@ impl Sub for f32x16 {
+         unsafe {
+             Self(lasx_xvfsub_s(self.0, rhs.0), lasx_xvfsub_s(self.1, rhs.1))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0.0f32; 16];
++            for i in 0..16 {
++                result[i] = self.0[i] - rhs.0[i];
++            }
++            Self(result)
++        }
+     }
+ }
+ 
+@@ -936,6 +1289,16 @@ impl SubAssign for f32x16 {
+             self.0 = lasx_xvfsub_s(self.0, rhs.0);
+             self.1 = lasx_xvfsub_s(self.1, rhs.1);
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            for i in 0..16 {
++                self.0[i] -= rhs.0[i];
++            }
++        }
+     }
+ }
+ 
+diff --git a/src/simd/f64.rs b/src/simd/f64.rs
+index 32c0d38..a057bf7 100644
+--- a/src/simd/f64.rs
++++ b/src/simd/f64.rs
+@@ -33,6 +33,17 @@ pub struct f64x4(float64x2x2_t);
+ #[derive(Clone, Copy)]
+ pub struct f64x4(v4f64);
+ 
++/// Portable scalar fallback for architectures with no dedicated SIMD tier
++/// above (riscv64 included) -- CLAUDE.md gotcha 300.
++#[allow(non_camel_case_types)]
++#[cfg(not(any(
++    target_arch = "x86_64",
++    target_arch = "aarch64",
++    target_arch = "loongarch64"
++)))]
++#[derive(Clone, Copy)]
++pub struct f64x4([f64; 4]);
++
+ impl std::fmt::Debug for f64x4 {
+     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+         let mut arr = [0.0_f64; 4];
+@@ -69,6 +80,14 @@ impl SIMD<f64, 4> for f64x4 {
+         unsafe {
+             Self(transmute(lasx_xvreplgr2vr_d(transmute(val))))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            Self([val; 4])
++        }
+     }
+ 
+     fn zeros() -> Self {
+@@ -84,6 +103,14 @@ impl SIMD<f64, 4> for f64x4 {
+         {
+             Self::splat(0.0)
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            Self([0.0; 4])
++        }
+     }
+ 
+     #[inline]
+@@ -100,6 +127,14 @@ impl SIMD<f64, 4> for f64x4 {
+         {
+             Self(transmute(lasx_xvld::<0>(transmute(ptr))))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            Self::load_unaligned(ptr)
++        }
+     }
+ 
+     #[inline]
+@@ -116,6 +151,18 @@ impl SIMD<f64, 4> for f64x4 {
+         {
+             Self(transmute(lasx_xvld::<0>(transmute(ptr))))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0.0f64; 4];
++            for (i, r) in result.iter_mut().enumerate() {
++                *r = unsafe { *ptr.add(i) };
++            }
++            Self(result)
++        }
+     }
+ 
+     unsafe fn store(&self, ptr: *mut f64) {
+@@ -131,6 +178,14 @@ impl SIMD<f64, 4> for f64x4 {
+         unsafe {
+             lasx_xvst::<0>(transmute(self.0), transmute(ptr));
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        unsafe {
++            self.store_unaligned(ptr);
++        }
+     }
+ 
+     unsafe fn store_unaligned(&self, ptr: *mut f64) {
+@@ -146,6 +201,16 @@ impl SIMD<f64, 4> for f64x4 {
+         unsafe {
+             lasx_xvst::<0>(transmute(self.0), transmute(ptr));
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        unsafe {
++            for (i, v) in self.0.iter().enumerate() {
++                *ptr.add(i) = *v;
++            }
++        }
+     }
+ 
+     #[inline]
+@@ -169,6 +234,14 @@ impl SIMD<f64, 4> for f64x4 {
+         {
+             self.as_array().iter().sum()
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            self.0.iter().sum()
++        }
+     }
+ 
+     fn reduce_min(&self) -> f64 {
+@@ -194,6 +267,14 @@ impl SIMD<f64, 4> for f64x4 {
+                 .copied()
+                 .fold(f64::INFINITY, f64::min)
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            self.0.iter().copied().fold(f64::INFINITY, f64::min)
++        }
+     }
+ 
+     fn min(&self, rhs: &Self) -> Self {
+@@ -212,6 +293,18 @@ impl SIMD<f64, 4> for f64x4 {
+         unsafe {
+             Self(lasx_xvfmin_d(self.0, rhs.0))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0.0f64; 4];
++            for i in 0..4 {
++                result[i] = self.0[i].min(rhs.0[i]);
++            }
++            Self(result)
++        }
+     }
+ 
+     fn find(&self, val: f64) -> Option<i32> {
+@@ -241,6 +334,16 @@ impl FloatSimd<f64, 4> for f64x4 {
+         unsafe {
+             self.0 = lasx_xvfmadd_d(a.0, b.0, self.0);
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            for i in 0..4 {
++                self.0[i] += a.0[i] * b.0[i];
++            }
++        }
+     }
+ }
+ 
+@@ -264,6 +367,18 @@ impl Add for f64x4 {
+         unsafe {
+             Self(lasx_xvfadd_d(self.0, rhs.0))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0.0f64; 4];
++            for i in 0..4 {
++                result[i] = self.0[i] + rhs.0[i];
++            }
++            Self(result)
++        }
+     }
+ }
+ 
+@@ -283,6 +398,16 @@ impl AddAssign for f64x4 {
+         unsafe {
+             self.0 = lasx_xvfadd_d(self.0, rhs.0);
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            for i in 0..4 {
++                self.0[i] += rhs.0[i];
++            }
++        }
+     }
+ }
+ 
+@@ -306,6 +431,18 @@ impl Sub for f64x4 {
+         unsafe {
+             Self(lasx_xvfsub_d(self.0, rhs.0))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0.0f64; 4];
++            for i in 0..4 {
++                result[i] = self.0[i] - rhs.0[i];
++            }
++            Self(result)
++        }
+     }
+ }
+ 
+@@ -325,6 +462,16 @@ impl SubAssign for f64x4 {
+         unsafe {
+             self.0 = lasx_xvfsub_d(self.0, rhs.0);
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            for i in 0..4 {
++                self.0[i] -= rhs.0[i];
++            }
++        }
+     }
+ }
+ 
+@@ -348,6 +495,18 @@ impl Mul for f64x4 {
+         unsafe {
+             Self(lasx_xvfmul_d(self.0, rhs.0))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0.0f64; 4];
++            for i in 0..4 {
++                result[i] = self.0[i] * rhs.0[i];
++            }
++            Self(result)
++        }
+     }
+ }
+ 
+@@ -376,6 +535,16 @@ pub struct f64x8(float64x2x2_t, float64x2x2_t);
+ #[derive(Clone, Copy)]
+ pub struct f64x8(v4f64, v4f64);
+ 
++/// Portable scalar fallback -- CLAUDE.md gotcha 300.
++#[allow(non_camel_case_types)]
++#[cfg(not(any(
++    target_arch = "x86_64",
++    target_arch = "aarch64",
++    target_arch = "loongarch64"
++)))]
++#[derive(Clone, Copy)]
++pub struct f64x8([f64; 8]);
++
+ impl std::fmt::Debug for f64x8 {
+     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+         let mut arr = [0.0_f64; 8];
+@@ -419,6 +588,14 @@ impl SIMD<f64, 8> for f64x8 {
+             let v = transmute(lasx_xvreplgr2vr_d(transmute(val)));
+             Self(v, v)
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            Self([val; 8])
++        }
+     }
+ 
+     #[inline]
+@@ -439,6 +616,14 @@ impl SIMD<f64, 8> for f64x8 {
+         {
+             Self::splat(0.0)
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            Self([0.0; 8])
++        }
+     }
+ 
+     #[inline]
+@@ -462,6 +647,14 @@ impl SIMD<f64, 8> for f64x8 {
+                 transmute(lasx_xvld::<32>(transmute(ptr))),
+             )
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            Self::load_unaligned(ptr)
++        }
+     }
+ 
+     #[inline]
+@@ -485,6 +678,18 @@ impl SIMD<f64, 8> for f64x8 {
+                 transmute(lasx_xvld::<32>(transmute(ptr))),
+             )
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0.0f64; 8];
++            for (i, r) in result.iter_mut().enumerate() {
++                *r = unsafe { *ptr.add(i) };
++            }
++            Self(result)
++        }
+     }
+ 
+     #[inline]
+@@ -508,6 +713,14 @@ impl SIMD<f64, 8> for f64x8 {
+             lasx_xvst::<0>(transmute(self.0), transmute(ptr));
+             lasx_xvst::<32>(transmute(self.1), transmute(ptr));
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        unsafe {
++            self.store_unaligned(ptr);
++        }
+     }
+ 
+     #[inline]
+@@ -531,6 +744,16 @@ impl SIMD<f64, 8> for f64x8 {
+             lasx_xvst::<0>(transmute(self.0), transmute(ptr));
+             lasx_xvst::<32>(transmute(self.1), transmute(ptr));
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        unsafe {
++            for (i, v) in self.0.iter().enumerate() {
++                *ptr.add(i) = *v;
++            }
++        }
+     }
+ 
+     fn reduce_sum(&self) -> f64 {
+@@ -557,6 +780,14 @@ impl SIMD<f64, 8> for f64x8 {
+         {
+             self.as_array().iter().sum()
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            self.0.iter().sum()
++        }
+     }
+ 
+     #[inline]
+@@ -588,6 +819,14 @@ impl SIMD<f64, 8> for f64x8 {
+                 .copied()
+                 .fold(f64::INFINITY, f64::min)
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            self.0.iter().copied().fold(f64::INFINITY, f64::min)
++        }
+     }
+ 
+     #[inline]
+@@ -611,6 +850,18 @@ impl SIMD<f64, 8> for f64x8 {
+         unsafe {
+             Self(lasx_xvfmin_d(self.0, rhs.0), lasx_xvfmin_d(self.1, rhs.1))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0.0f64; 8];
++            for i in 0..8 {
++                result[i] = self.0[i].min(rhs.0[i]);
++            }
++            Self(result)
++        }
+     }
+ 
+     fn find(&self, val: f64) -> Option<i32> {
+@@ -649,6 +900,16 @@ impl FloatSimd<f64, 8> for f64x8 {
+             self.0 = lasx_xvfmadd_d(a.0, b.0, self.0);
+             self.1 = lasx_xvfmadd_d(a.1, b.1, self.1);
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            for i in 0..8 {
++                self.0[i] += a.0[i] * b.0[i];
++            }
++        }
+     }
+ }
+ 
+@@ -676,6 +937,18 @@ impl Add for f64x8 {
+         unsafe {
+             Self(lasx_xvfadd_d(self.0, rhs.0), lasx_xvfadd_d(self.1, rhs.1))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0.0f64; 8];
++            for i in 0..8 {
++                result[i] = self.0[i] + rhs.0[i];
++            }
++            Self(result)
++        }
+     }
+ }
+ 
+@@ -703,6 +976,16 @@ impl AddAssign for f64x8 {
+             self.0 = lasx_xvfadd_d(self.0, rhs.0);
+             self.1 = lasx_xvfadd_d(self.1, rhs.1);
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            for i in 0..8 {
++                self.0[i] += rhs.0[i];
++            }
++        }
+     }
+ }
+ 
+@@ -730,6 +1013,18 @@ impl Mul for f64x8 {
+         unsafe {
+             Self(lasx_xvfmul_d(self.0, rhs.0), lasx_xvfmul_d(self.1, rhs.1))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0.0f64; 8];
++            for i in 0..8 {
++                result[i] = self.0[i] * rhs.0[i];
++            }
++            Self(result)
++        }
+     }
+ }
+ 
+@@ -757,6 +1052,18 @@ impl Sub for f64x8 {
+         unsafe {
+             Self(lasx_xvfsub_d(self.0, rhs.0), lasx_xvfsub_d(self.1, rhs.1))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0.0f64; 8];
++            for i in 0..8 {
++                result[i] = self.0[i] - rhs.0[i];
++            }
++            Self(result)
++        }
+     }
+ }
+ 
+@@ -784,6 +1091,16 @@ impl SubAssign for f64x8 {
+             self.0 = lasx_xvfsub_d(self.0, rhs.0);
+             self.1 = lasx_xvfsub_d(self.1, rhs.1);
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            for i in 0..8 {
++                self.0[i] -= rhs.0[i];
++            }
++        }
+     }
+ }
+ 
+diff --git a/src/simd/i32.rs b/src/simd/i32.rs
+index fa8cdaf..60e5202 100644
+--- a/src/simd/i32.rs
++++ b/src/simd/i32.rs
+@@ -30,6 +30,17 @@ pub struct i32x8(int32x4x2_t);
+ #[derive(Clone, Copy)]
+ pub struct i32x8(v8i32);
+ 
++/// Portable scalar fallback for architectures with no dedicated SIMD tier
++/// above (riscv64 included) -- CLAUDE.md gotcha 300.
++#[allow(non_camel_case_types)]
++#[cfg(not(any(
++    target_arch = "x86_64",
++    target_arch = "aarch64",
++    target_arch = "loongarch64"
++)))]
++#[derive(Clone, Copy)]
++pub struct i32x8(pub(crate) [i32; 8]);
++
+ impl std::fmt::Debug for i32x8 {
+     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+         let mut arr = [0; 8];
+@@ -67,6 +78,14 @@ impl SIMD<i32, 8> for i32x8 {
+         unsafe {
+             Self(lasx_xvreplgr2vr_w(val))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            Self([val; 8])
++        }
+     }
+ 
+     #[inline]
+@@ -83,6 +102,14 @@ impl SIMD<i32, 8> for i32x8 {
+         {
+             Self::splat(0)
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            Self([0; 8])
++        }
+     }
+ 
+     #[inline]
+@@ -99,6 +126,14 @@ impl SIMD<i32, 8> for i32x8 {
+         {
+             Self(transmute(lasx_xvld::<0>(transmute(ptr))))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            Self::load_unaligned(ptr)
++        }
+     }
+ 
+     #[inline]
+@@ -115,6 +150,18 @@ impl SIMD<i32, 8> for i32x8 {
+         {
+             Self(transmute(lasx_xvld::<0>(transmute(ptr))))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0i32; 8];
++            for (i, r) in result.iter_mut().enumerate() {
++                *r = unsafe { *ptr.add(i) };
++            }
++            Self(result)
++        }
+     }
+ 
+     #[inline]
+@@ -135,6 +182,16 @@ impl SIMD<i32, 8> for i32x8 {
+         unsafe {
+             lasx_xvst::<0>(transmute(self.0), transmute(ptr))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        unsafe {
++            for (i, v) in self.0.iter().enumerate() {
++                *ptr.add(i) = *v;
++            }
++        }
+     }
+ 
+     fn reduce_sum(&self) -> i32 {
+@@ -151,6 +208,14 @@ impl SIMD<i32, 8> for i32x8 {
+         {
+             self.as_array().iter().sum()
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            self.0.iter().sum()
++        }
+     }
+ 
+     fn reduce_min(&self) -> i32 {
+@@ -173,6 +238,18 @@ impl SIMD<i32, 8> for i32x8 {
+         unsafe {
+             Self(lasx_xvmin_w(self.0, rhs.0))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0i32; 8];
++            for i in 0..8 {
++                result[i] = self.0[i].min(rhs.0[i]);
++            }
++            Self(result)
++        }
+     }
+ 
+     fn find(&self, val: i32) -> Option<i32> {
+@@ -206,6 +283,18 @@ impl SIMD<i32, 8> for i32x8 {
+                 }
+             }
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            for i in 0..8 {
++                if self.0[i] == val {
++                    return Some(i as i32);
++                }
++            }
++        }
+         None
+     }
+ }
+@@ -230,6 +319,18 @@ impl Add for i32x8 {
+         unsafe {
+             Self(lasx_xvadd_w(self.0, rhs.0))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0i32; 8];
++            for i in 0..8 {
++                result[i] = self.0[i].wrapping_add(rhs.0[i]);
++            }
++            Self(result)
++        }
+     }
+ }
+ 
+@@ -249,6 +350,16 @@ impl AddAssign for i32x8 {
+         unsafe {
+             self.0 = lasx_xvadd_w(self.0, rhs.0);
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            for i in 0..8 {
++                self.0[i] = self.0[i].wrapping_add(rhs.0[i]);
++            }
++        }
+     }
+ }
+ 
+@@ -272,6 +383,18 @@ impl Sub for i32x8 {
+         unsafe {
+             Self(lasx_xvsub_w(self.0, rhs.0))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0i32; 8];
++            for i in 0..8 {
++                result[i] = self.0[i].wrapping_sub(rhs.0[i]);
++            }
++            Self(result)
++        }
+     }
+ }
+ 
+@@ -291,6 +414,16 @@ impl SubAssign for i32x8 {
+         unsafe {
+             self.0 = lasx_xvsub_w(self.0, rhs.0);
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            for i in 0..8 {
++                self.0[i] = self.0[i].wrapping_sub(rhs.0[i]);
++            }
++        }
+     }
+ }
+ 
+@@ -314,6 +447,18 @@ impl Mul for i32x8 {
+         unsafe {
+             Self(lasx_xvmul_w(self.0, rhs.0))
+         }
++        #[cfg(not(any(
++            target_arch = "x86_64",
++            target_arch = "aarch64",
++            target_arch = "loongarch64"
++        )))]
++        {
++            let mut result = [0i32; 8];
++            for i in 0..8 {
++                result[i] = self.0[i].wrapping_mul(rhs.0[i]);
++            }
++            Self(result)
++        }
+     }
+ }
+ 
+-- 
+2.43.0
