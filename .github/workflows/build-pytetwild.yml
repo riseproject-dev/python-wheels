@@ -1,0 +1,250 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` and `test_wheels` jobs of
+# https://github.com/pyvista/pytetwild/blob/v0.4.2/.github/workflows/build-and-deploy.yml
+name: Build pytetwild wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pytetwild.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pytetwild.yml'
+      - 'docs/packages/pytetwild.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pytetwild.yml'
+      - 'docs/packages/pytetwild.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pytetwild
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pytetwild ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # wheel.py-api = "cp312" (nanobind STABLE_ABI) makes the cp312 build an
+        # abi3 wheel for 3.12+; upstream builds no free-threaded wheel.
+        python: [cp312]
+
+    env:
+      PYTETWILD_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pytetwild v${{ env.PYTETWILD_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pyvista/pytetwild
+          ref: v${{ env.PYTETWILD_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      # Upstream's before-build does this for aarch64 only: geogram's default
+      # Linux64-gcc platform adds -m64, which riscv64 GCC rejects too.
+      - name: Select geogram's non-x86 platform
+        run: sed -i 's|GEO_PLATFORM "Linux64-gcc"|GEO_PLATFORM "Linux64-gcc-aarch64"|' src/fTetWild/cmake/FloatTetwildDependencies.cmake
+
+      # fTetWild FetchContent-pulls libigl/Eigen/libigl-predicates/geogram (with
+      # its compiled-in third_party code)/oneTBB/fmt/spdlog/json, and nanobind
+      # (with robin-map) comes from the build requirements; all are linked
+      # statically, while upstream's wheel ships only its own LICENSE. Stage
+      # each at the root for scikit-build-core's default license-files glob.
+      - name: Stage the vendored dependencies' licences
+        run: |
+          set -euo pipefail
+          cp src/fTetWild/LICENSE.MPL2 LICENSE.ftetwild
+          sed -n '1,6p' src/fTetWild/src/external/getRSS.c > LICENSE.getrss
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/libigl/libigl/v2.6.0/LICENSE.MPL2" -o LICENSE.libigl
+          {
+            curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/3.4.0/COPYING.README"
+            curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/3.4.0/COPYING.MPL2"
+            curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/3.4.0/COPYING.BSD"
+            curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/3.4.0/COPYING.LGPL"
+          } > LICENSE.eigen
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/libigl/libigl-predicates/decb7bc1260e689cbe008109e3cc5d3a5a433aea/predicates.c" | sed -n '1,16p' > LICENSE.predicates
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/BrunoLevy/geogram/v1.9.6/LICENSE" -o LICENSE.geogram
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/BrunoLevy/geogram/v1.9.6/src/lib/geogram/third_party/zlib/LICENSE" -o LICENSE.geogram-zlib
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/BrunoLevy/geogram/v1.9.6/src/lib/geogram/third_party/PoissonRecon/LICENSE.txt" -o LICENSE.poissonrecon
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/BrunoLevy/geogram/v1.9.6/src/lib/geogram/third_party/xatlas/xatlas.h" | sed -n '1,30p' > LICENSE.xatlas
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/LoicMarechal/libMeshb/952a157c9d516b28cc6c69cd1550c3e48d4792f9/LICENSE.txt" -o LICENSE.libmeshb
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/diegonehab/rply/4296cc91b5c8c26d4e7d7aac0cee2b194ffc5800/LICENSE" -o LICENSE.rply
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/ddemidov/amgcl/ab57038d68ee372ed5df280631051b91f17ed2d1/LICENSE.md" -o LICENSE.amgcl
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/oneapi-src/oneTBB/v2022.2.0/LICENSE.txt" -o LICENSE.onetbb
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/fmtlib/fmt/11.2.0/LICENSE" -o LICENSE.fmt
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/gabime/spdlog/v1.15.3/LICENSE" -o LICENSE.spdlog
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/jdumas/json/0901d33bf6e7dfe6f70fd9d142c8f5c6695c6c5b/LICENSE.MIT" -o LICENSE.json
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/wjakob/nanobind/v3.1.0/LICENSE" -o LICENSE.nanobind
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/Tessil/robin-map/v1.4.0/LICENSE" -o LICENSE.robin-map
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            yum install -y gmp-devel &&
+            cat /usr/share/licenses/gmp/COPYING.LESSERv3 /usr/share/licenses/gmp/COPYINGv3 > /project/LICENSE.gmp
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=cmake
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PYTETWILD=${{ env.PYTETWILD_VERSION }}
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          path = sys.argv[1]
+          names = zipfile.ZipFile(path).namelist()
+          assert "pytetwild/PyfTetWildWrapper.abi3.so" in names, names
+          assert any(n.startswith("pytetwild.libs/libgmp") for n in names), names
+          licences = {n.rsplit("/", 1)[-1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          expected = {"LICENSE", "LICENSE.ftetwild", "LICENSE.getrss", "LICENSE.libigl",
+                      "LICENSE.eigen", "LICENSE.predicates", "LICENSE.geogram",
+                      "LICENSE.geogram-zlib", "LICENSE.poissonrecon", "LICENSE.xatlas",
+                      "LICENSE.libmeshb", "LICENSE.rply", "LICENSE.amgcl", "LICENSE.onetbb",
+                      "LICENSE.fmt", "LICENSE.spdlog", "LICENSE.json", "LICENSE.nanobind",
+                      "LICENSE.robin-map", "LICENSE.gmp"}
+          assert licences == expected, licences
+          print(path, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pytetwild-${{ env.PYTETWILD_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  test_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    name: Test pytetwild ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # The tests pin scipy<1.17.0, which has no cp314 riscv64 wheel.
+        python-version: ["3.12", "3.13"]
+
+    env:
+      PYTETWILD_VERSION: ${{ matrix.version }}
+      UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+      UV_INDEX_STRATEGY: unsafe-best-match
+
+    steps:
+      - name: Checkout pytetwild v${{ env.PYTETWILD_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pyvista/pytetwild
+          ref: v${{ env.PYTETWILD_VERSION }}
+          persist-credentials: false
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: pytetwild-${{ env.PYTETWILD_VERSION }}-cp312-manylinux_riscv64
+          path: wheels
+
+      # uv has no env var for --only-binary; without it the newest scipy/pillow
+      # that lack a riscv64 wheel get source-built instead.
+      - name: Install test dependencies
+        run: |
+          uv pip install tomli
+          python tools/extract-deps.py
+          uv pip install --only-binary numpy,scipy,vtk,matplotlib,contourpy,kiwisolver,pillow -r requirements-tests.txt
+
+      - name: Install wheel
+        run: uv pip install --no-index --find-links wheels/ pytetwild
+
+      - name: Run tests
+        env:
+          PYTHONFAULTHANDLER: '1'
+          PYTHONUNBUFFERED: '1'
+        run: pytest -v -s
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources (gcc, gmp) for pytetwild ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      PYTETWILD_VERSION: ${{ matrix.version }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc gmp
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pytetwild-${{ env.PYTETWILD_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish pytetwild ${{ matrix.version }}
+    needs: [setup, build_wheels, test_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pytetwild-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: pytetwild-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc, gmp
