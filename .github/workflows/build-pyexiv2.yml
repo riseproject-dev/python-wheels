@@ -1,0 +1,293 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel builder:
+#   https://github.com/LeoHsiao1/pyexiv2/blob/v2.16.0/.github/workflows/build.yml (on_linux)
+#   https://github.com/LeoHsiao1/pyexiv2/blob/v2.16.0/.github/workflows/release.yml
+# Upstream links the Exiv2 project's own release build, which has no riscv64 asset;
+# build_exiv2 reproduces it from the Exiv2 `Build Linux Release` job instead:
+#   https://github.com/Exiv2/exiv2/blob/v0.28.8/.github/workflows/release.yml
+name: Build pyexiv2 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyexiv2.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyexiv2.yml'
+      - 'docs/packages/pyexiv2.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyexiv2.yml'
+      - 'docs/packages/pyexiv2.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  EXIV2_VERSION: 0.28.8
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyexiv2
+      version: ${{ inputs.version }}
+
+  build_exiv2:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build Exiv2 for pyexiv2 ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    env:
+      PYEXIV2_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout Exiv2 v${{ env.EXIV2_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Exiv2/exiv2
+          ref: v${{ env.EXIV2_VERSION }}
+          path: exiv2
+          persist-credentials: false
+
+      # The versions Exiv2's own conanfile.py pins; its release links them statically.
+      - name: Checkout zlib 1.3.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: madler/zlib
+          ref: v1.3.1
+          path: deps/zlib
+          persist-credentials: false
+
+      - name: Checkout brotli 1.1.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: google/brotli
+          ref: v1.1.0
+          path: deps/brotli
+          persist-credentials: false
+
+      - name: Checkout inih r58
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: benhoyt/inih
+          ref: r58
+          path: deps/inih
+          persist-credentials: false
+
+      - name: Checkout expat 2.6.3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: libexpat/libexpat
+          ref: R_2_6_3
+          path: deps/libexpat
+          persist-credentials: false
+
+      - name: Write build script
+        run: |
+          cat > build-exiv2.sh <<'BUILD_SCRIPT'
+          set -euxo pipefail
+          dnf install -y cmake ninja-build gettext
+
+          deps="$PWD/deps-prefix"
+          prefix="$PWD/exiv2-${EXIV2_VERSION}-Linux-riscv64"
+
+          export CFLAGS="-O2 -fPIC" CXXFLAGS="-O2 -fPIC"
+          (cd deps/zlib && ./configure --static --prefix="$deps" && make -j"$(nproc)" install)
+          cmake -G Ninja -S deps/brotli -B build/brotli -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$deps" -DBUILD_SHARED_LIBS=OFF -DBROTLI_DISABLE_TESTS=ON
+          cmake --build build/brotli --target install
+          cmake -G Ninja -S deps/libexpat/expat -B build/expat -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$deps" -DEXPAT_SHARED_LIBS=OFF -DEXPAT_BUILD_TOOLS=OFF \
+            -DEXPAT_BUILD_EXAMPLES=OFF -DEXPAT_BUILD_TESTS=OFF -DEXPAT_BUILD_DOCS=OFF
+          cmake --build build/expat --target install
+          mkdir -p build/inih "$deps/include" "$deps/lib"
+          gcc $CFLAGS -c deps/inih/ini.c -o build/inih/ini.o
+          g++ $CXXFLAGS -c deps/inih/cpp/INIReader.cpp -o build/inih/INIReader.o
+          ar rcs "$deps/lib/libinih.a" build/inih/ini.o
+          ar rcs "$deps/lib/libINIReader.a" build/inih/INIReader.o
+          cp deps/inih/ini.h deps/inih/cpp/INIReader.h "$deps/include/"
+          unset CFLAGS CXXFLAGS
+
+          cmake -G Ninja -S exiv2 -B build/exiv2 -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_PREFIX_PATH="$deps" \
+            -DZLIB_LIBRARY="$deps/lib/libz.a" -DZLIB_INCLUDE_DIR="$deps/include" \
+            -DEXPAT_LIBRARY="$deps/lib/libexpat.a" -DEXPAT_INCLUDE_DIR="$deps/include" \
+            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON -DEXIV2_ENABLE_NLS=ON \
+            -DEXIV2_ENABLE_VIDEO=OFF -DEXIV2_ENABLE_WEBREADY=OFF -DEXIV2_ENABLE_CURL=OFF \
+            -DEXIV2_BUILD_SAMPLES=OFF
+          cmake --build build/exiv2 --target install
+          readelf -d "$prefix/lib/libexiv2.so.${EXIV2_VERSION}"
+
+          mkdir -p "$prefix/licenses"
+          cp exiv2/COPYING "$prefix/licenses/LICENSE.exiv2"
+          cp deps/zlib/LICENSE "$prefix/licenses/LICENSE.zlib"
+          cp deps/brotli/LICENSE "$prefix/licenses/LICENSE.brotli"
+          cp deps/inih/LICENSE.txt "$prefix/licenses/LICENSE.inih"
+          cp deps/libexpat/expat/COPYING "$prefix/licenses/LICENSE.expat"
+          tar -czf "exiv2-${EXIV2_VERSION}-Linux-riscv64.tar.gz" "$(basename "$prefix")"
+          BUILD_SCRIPT
+
+      - name: Build Exiv2
+        run: |
+          docker run --rm \
+            -v "$(pwd)":/workspace \
+            --workdir /workspace \
+            -e EXIV2_VERSION \
+            "${{ env.MANYLINUX_RISCV64_IMAGE }}" \
+            bash build-exiv2.sh
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyexiv2-${{ env.PYEXIV2_VERSION }}-exiv2-${{ env.EXIV2_VERSION }}
+          path: exiv2-${{ env.EXIV2_VERSION }}-Linux-riscv64.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_exiv2]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyexiv2 ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream tags wheels cpXY-none, so a free-threaded build would collide
+        # with the cp314 one; upstream ships none either.
+        python: ["cp312", "cp313", "cp314"]
+    env:
+      PYEXIV2_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyexiv2 v${{ env.PYEXIV2_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: LeoHsiao1/pyexiv2
+          ref: v${{ env.PYEXIV2_VERSION }}
+          persist-credentials: false
+
+      - name: Download Exiv2 build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: pyexiv2-${{ env.PYEXIV2_VERSION }}-exiv2-${{ env.EXIV2_VERSION }}
+
+      - name: Write build script
+        run: |
+          cat > build-wheel.sh <<'BUILD_SCRIPT'
+          set -euxo pipefail
+          python="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin/python"
+          exiv2_dir="$PWD/exiv2-${EXIV2_VERSION}-Linux-riscv64"
+          lib_dir="$PWD/pyexiv2/lib"
+
+          tar -xzf "exiv2-${EXIV2_VERSION}-Linux-riscv64.tar.gz"
+          cp -f "$exiv2_dir/lib/libexiv2.so.${EXIV2_VERSION}" "$lib_dir/libexiv2.so"
+
+          "$python" -m pip install pybind11 pytest psutil setuptools wheel
+
+          (cd "$lib_dir" && rm -f exiv2api.so && g++ exiv2api.cpp -o exiv2api.so \
+            -O3 -Wall -std=c++11 -shared -fPIC \
+            $("$python" -m pybind11 --includes) \
+            -I "$exiv2_dir/include" \
+            -L "$exiv2_dir/lib" \
+            -l exiv2)
+
+          "$python" -m pytest -sv
+
+          rm -rf build pyexiv2.egg-info pyexiv2/tests .pytest_cache
+          find pyexiv2 -name __pycache__ -prune -exec rm -rf {} +
+          cp "$exiv2_dir"/licenses/LICENSE.* .
+          "$python" setup.py bdist_wheel --python-tag "$PYTHON_TAG" --plat-name manylinux_2_39_riscv64
+
+          "$python" -m pip install dist/*.whl
+          cd / && "$python" -c "import pyexiv2; print(pyexiv2.__file__, pyexiv2.__exiv2_version__)"
+          BUILD_SCRIPT
+
+      - name: Build and test the wheel
+        run: |
+          docker run --rm \
+            -v "$(pwd)":/workspace \
+            --workdir /workspace \
+            -e EXIV2_VERSION \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            "${{ env.MANYLINUX_RISCV64_IMAGE }}" \
+            bash build-wheel.sh
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyexiv2-${{ env.PYEXIV2_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources (pyexiv2, Exiv2) for pyexiv2 ${{ matrix.version }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout pyexiv2 v${{ matrix.version }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: LeoHsiao1/pyexiv2
+          ref: v${{ matrix.version }}
+          path: pyexiv2
+          persist-credentials: false
+
+      - name: Checkout Exiv2 v${{ env.EXIV2_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Exiv2/exiv2
+          ref: v${{ env.EXIV2_VERSION }}
+          path: exiv2
+          persist-credentials: false
+
+      - name: Archive the GPL sources
+        run: tar --exclude=.git -cf gpl-sources.tar pyexiv2 exiv2
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyexiv2-${{ matrix.version }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyexiv2 ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyexiv2-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: pyexiv2-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: pyexiv2 and Exiv2 (both compiled from source)
