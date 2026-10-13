@@ -1,0 +1,256 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on:
+#   https://github.com/aboutcode-org/scancode-plugins/blob/v21.5.31/builtins/extractcode_libarchive-linux/setup.py
+name: Build extractcode-libarchive wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/extractcode-libarchive.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-extractcode-libarchive.yml'
+      - 'docs/packages/extractcode-libarchive.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-extractcode-libarchive.yml'
+      - 'docs/packages/extractcode-libarchive.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: extractcode-libarchive
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build extractcode-libarchive ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+
+    steps:
+      # scancode-plugins is a monorepo with no per-package release tags; its
+      # date-based repo tags don't derive from the PyPI version algorithmically,
+      # so the mapping is a small explicit table instead (see build-typecode-libmagic.yml).
+      - name: Resolve the scancode-plugins tag for ${{ matrix.version }}
+        run: |
+          case "${{ matrix.version }}" in
+            3.5.1.210531) echo "SCANCODE_PLUGINS_TAG=v21.5.31" >> "$GITHUB_ENV" ;;
+            *) echo "::error::no scancode-plugins tag known for extractcode-libarchive ${{ matrix.version }}"; exit 1 ;;
+          esac
+
+      - name: Checkout scancode-plugins ${{ env.SCANCODE_PLUGINS_TAG }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: aboutcode-org/scancode-plugins
+          ref: ${{ env.SCANCODE_PLUGINS_TAG }}
+          persist-credentials: false
+
+      # Upstream bundles a prebuilt x86_64 libarchive.so (and renamed copies of its
+      # bzip2/lz4/liblzma/libz/libzstd/libb2 deps) fetched from a Homebrew linuxbrew-core
+      # bottle (etc/scripts/homebrew.py) - no riscv64 Homebrew bottle exists. We instead
+      # build libarchive 3.5.1 itself from the exact upstream release tarball and replace
+      # the bundled x86_64 binaries with riscv64 ones, patched the same way
+      # etc/scripts/homebrew.py's PRESETS['libarchive','x86_64_linux']['fixes'] does
+      # (rename each dependency .so, retarget libarchive.so's DT_NEEDED entries to match,
+      # $ORIGIN rpath on every one). `readelf -d` on upstream's own x86_64 libarchive.so
+      # shows no libexpat/libxml2/libssl NEEDED entry despite the bundled libexpat file,
+      # so --without-xml2/--without-expat/--without-openssl/--disable-acl reproduce its
+      # real dependency set exactly. libb2 (optional BLAKE2 support) has no riscv64 Rocky
+      # 10 package; libarchive falls back to its own bundled blake2 implementation when
+      # it is absent, so it is dropped (--without-libb2) rather than built from source
+      # and bundled.
+      - name: Build libarchive and package the wheel
+        run: |
+          docker run --rm \
+            -v "$(pwd)":/workspace \
+            --workdir /workspace/builtins/extractcode_libarchive-linux \
+            "${{ env.MANYLINUX_RISCV64_IMAGE }}" \
+            bash -c '
+              set -euxo pipefail
+              PY=/opt/python/cp312-cp312/bin/python
+              PATCHELF=/opt/python/cp312-cp312/bin/patchelf
+              dnf install -y -q bzip2-devel xz-devel lz4-devel libzstd-devel
+              "$PY" -m pip install -q wheel setuptools patchelf
+
+              curl -fsSL --retry 5 -o /tmp/libarchive-3.5.1.tar.gz https://libarchive.org/downloads/libarchive-3.5.1.tar.gz
+              echo "9015d109ec00bb9ae1a384b172bf2fc1dff41e2c66e5a9eeddf933af9db37f5a  /tmp/libarchive-3.5.1.tar.gz" | sha256sum -c -
+              tar xzf /tmp/libarchive-3.5.1.tar.gz -C /tmp
+              cd /tmp/libarchive-3.5.1
+              ./configure --prefix=/tmp/la-install --disable-static \
+                --without-xml2 --without-expat --without-openssl --without-libb2 \
+                --disable-acl
+              make -j"$(nproc)"
+              make install
+
+              cd /workspace/builtins/extractcode_libarchive-linux
+              libdir=src/extractcode_libarchive/lib
+              rm -f "$libdir"/libb2-la3511.so.1 "$libdir"/libexpat-la3511.so.1
+              rm -rf src/extractcode_libarchive/licenses/libb2 src/extractcode_libarchive/licenses/expat
+
+              cp "$(readlink -f /tmp/la-install/lib/libarchive.so)" "$libdir/libarchive.so"
+              for pair in libbz2.so.1.0:libbz2-la3511.so.1.0 \
+                          liblz4.so.1:liblz4-la3511.so.1 liblzma.so.5:liblzma-la3511.so.5 \
+                          libz.so.1:libz-la3511.so.1 libzstd.so.1:libzstd-la3511.so.1; do
+                soname="${pair%%:*}"
+                target="${pair##*:}"
+                line="$(ldd "$libdir/libarchive.so" | grep -F " $soname => ")"
+                test -n "$line"
+                src="${line#*=> }"
+                src="${src% (*}"
+                cp "$(readlink -f "$src")" "$libdir/$target"
+                "$PATCHELF" --set-soname "$target" "$libdir/$target"
+                "$PATCHELF" --set-rpath "\$ORIGIN/." "$libdir/$target"
+                "$PATCHELF" --replace-needed "$soname" "$target" "$libdir/libarchive.so"
+              done
+              "$PATCHELF" --set-soname libarchive.so "$libdir/libarchive.so"
+              "$PATCHELF" --set-rpath "\$ORIGIN/." "$libdir/libarchive.so"
+
+              "$PY" setup.py bdist_wheel --plat-name manylinux_2_39_riscv64
+            '
+
+      - name: Verify the wheel ships the riscv64 libarchive.so and its deps
+        run: |
+          python3 - builtins/extractcode_libarchive-linux/dist/*.whl <<'EOF'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as zf:
+              names = zf.namelist()
+              so_name = next(n for n in names if n.endswith("extractcode_libarchive/lib/libarchive.so"))
+              header = zf.read(so_name)[:20]
+              assert header[:4] == b"\x7fELF", header
+              assert header[18] == 0xF3, header  # e_machine == EM_RISCV
+              for dep in ("libbz2-la3511.so.1.0", "liblz4-la3511.so.1",
+                          "liblzma-la3511.so.5", "libz-la3511.so.1", "libzstd-la3511.so.1"):
+                  dep_name = next(n for n in names if n.endswith(f"lib/{dep}"))
+                  assert zf.read(dep_name)[18] == 0xF3, dep
+              assert not any(n.endswith("lib/libb2-la3511.so.1") for n in names), names
+              assert not any(n.endswith("lib/libexpat-la3511.so.1") for n in names), names
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: extractcode-libarchive-${{ matrix.version }}-py3-none-manylinux_riscv64
+          path: builtins/extractcode_libarchive-linux/dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test extractcode-libarchive ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13', '3.14']
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: extractcode-libarchive-${{ matrix.version }}-py3-none-manylinux_riscv64
+          path: wheelhouse
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install the wheel
+        run: uv pip install --reinstall --no-index --find-links wheelhouse extractcode-libarchive
+
+      - name: Load libarchive and extract a real archive
+        run: |
+          python -c "
+          import ctypes, importlib.util, os, tarfile, tempfile
+
+          spec = importlib.util.find_spec('extractcode_libarchive')
+          base = os.path.dirname(spec.origin)
+          dll = os.path.join(base, 'lib', 'libarchive.so')
+
+          lib = ctypes.CDLL(dll)
+          lib.archive_version_string.restype = ctypes.c_char_p
+          version = lib.archive_version_string()
+          print('archive_version_string:', version)
+          assert version is not None and version.startswith(b'libarchive 3.5.1'), version
+
+          lib.archive_read_new.restype = ctypes.c_void_p
+          lib.archive_read_open_filename.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t]
+          lib.archive_read_next_header.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+          lib.archive_entry_pathname.restype = ctypes.c_char_p
+          lib.archive_entry_pathname.argtypes = [ctypes.c_void_p]
+          lib.archive_read_data.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+
+          tmp = tempfile.mkdtemp()
+          archive_path = os.path.join(tmp, 'sample.tar.gz')
+          payload_path = os.path.join(tmp, 'hello.txt')
+          with open(payload_path, 'wb') as f:
+              f.write(b'hello riscv64 from libarchive\n')
+          with tarfile.open(archive_path, 'w:gz') as tf:
+              tf.add(payload_path, arcname='hello.txt')
+
+          a = lib.archive_read_new()
+          assert a
+          assert lib.archive_read_support_filter_all(a) == 0
+          assert lib.archive_read_support_format_all(a) == 0
+          assert lib.archive_read_open_filename(a, archive_path.encode(), 10240) == 0
+
+          entry = ctypes.c_void_p()
+          assert lib.archive_read_next_header(a, ctypes.byref(entry)) == 0
+          name = lib.archive_entry_pathname(entry)
+          print('entry:', name)
+          assert name == b'hello.txt', name
+
+          buf = ctypes.create_string_buffer(4096)
+          n = lib.archive_read_data(a, buf, 4096)
+          assert n > 0, n
+          data = buf.raw[:n]
+          print('data:', data)
+          assert data == b'hello riscv64 from libarchive\n', data
+
+          lib.archive_read_free(a)
+          print('OK')
+          "
+
+  publish:
+    name: Publish extractcode-libarchive ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: extractcode-libarchive-${{ matrix.version }}-py3-none-manylinux_riscv64
