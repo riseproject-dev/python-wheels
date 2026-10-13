@@ -1,0 +1,129 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/matplotlib/basemap/blob/v2.0.0/.github/workflows/build.yml
+name: Build basemap wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/basemap.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-basemap.yml'
+      - 'docs/packages/basemap.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-basemap.yml'
+      - 'docs/packages/basemap.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  GEOS_VERSION: '3.6.5'
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: basemap
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build basemap ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # setup.py caps python_requires at <3.14, so cp314/cp314t are out of range.
+        python: ["cp312", "cp313"]
+
+    env:
+      BASEMAP_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout basemap v${{ env.BASEMAP_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: matplotlib/basemap
+          ref: v${{ env.BASEMAP_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # The `cmake` PyPI package has no riscv64 wheel; use the image's own cmake
+          # (gotcha: same fix as build-freetype-py.yml) to build GEOS via run_before_all.py,
+          # the same helper upstream's own release workflow uses.
+          CIBW_BEFORE_ALL: >-
+            dnf install -y cmake &&
+            python {project}/.github/workflows/run_before_all.py
+          CIBW_BEFORE_BUILD: pip install cython "numpy>=2.0,<2.4"
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          CIBW_ENVIRONMENT: >-
+            GEOS_VERSION=${{ env.GEOS_VERSION }}
+            GEOS_DIR=/project/extern
+            GEOS_NJOBS=4
+            LD_LIBRARY_PATH=/project/extern/lib
+            PIP_PREFER_BINARY=1
+            PYTHONUNBUFFERED=1
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_EXTRAS: test
+          # basemap_data_hires (~90MB) is only needed for the "h"/"f" resolutions, which
+          # no test in test/ exercises; skip it to save download time on every job.
+          CIBW_BEFORE_TEST: pip install basemap_data
+          CIBW_TEST_ENVIRONMENT: 'PIP_ONLY_BINARY=matplotlib,pyproj'
+          CIBW_TEST_COMMAND: python -m pytest {project}/test
+
+      - name: Check the GEOS licence and the compiled extension made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith("licenses/LICENSE.geos") for n in names), whl
+              assert any(n.endswith(".so") for n in names), whl
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: basemap-${{ env.BASEMAP_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish basemap ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: basemap-${{ matrix.version }}-*-manylinux_riscv64
