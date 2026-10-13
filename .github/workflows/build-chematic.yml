@@ -70,6 +70,13 @@ jobs:
           v="${v#cp}"
           echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
 
+      # maturin only globs licence files next to crates/chematic-py/pyproject.toml, so upstream's wheels ship none.
+      - name: Stage licence files
+        run: |
+          cp LICENSE-MIT LICENSE-APACHE NOTICE crates/chematic-py/
+          cp THIRD_PARTY_NOTICES.md crates/chematic-py/NOTICE.third-party.md
+          cp crates/chematic-inchi/vendor/inchi-src/LICENSE crates/chematic-py/LICENSE.inchi
+
       - name: Build wheel
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
         with:
@@ -92,6 +99,15 @@ jobs:
         run: |
           uv pip install dist/chematic-*.whl 'pytest<9' 'pytest-asyncio>=0.23,<1' numpy
           python -m pytest crates/chematic-py/tests/ -q
+
+      - name: Check wheel contents
+        run: |
+          python3 - dist/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          licences = {n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n and not n.endswith("/")}
+          assert licences == {"LICENSE-APACHE", "LICENSE-MIT", "LICENSE.inchi", "NOTICE", "NOTICE.third-party.md"}, licences
+          EOF
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
