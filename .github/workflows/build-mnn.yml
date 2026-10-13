@@ -1,0 +1,209 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/alibaba/MNN/blob/3.6.1/.github/workflows/pymnn_linux.yml
+# (build_deps.py + pymnn/pip_package/build_wheel.py + pymnn/test/unit_test.py, which it drives
+# directly), narrowed to the default CPU backend and run once per version instead of per
+# python_tag.
+# LLM support (upstream's own `build_deps.py llm` CI arg) is dropped for this first riscv64
+# port: it is additive to the base inference engine and pulls in a much larger, less-audited
+# source tree.
+name: Build mnn wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/mnn.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mnn.yml'
+      - 'docs/packages/mnn.yaml'
+      - 'patches/mnn/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mnn.yml'
+      - 'docs/packages/mnn.yaml'
+      - 'patches/mnn/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # Pinned explicitly so the gpl_sources job pulls the same image the wheels'
+  # vendored libgomp came from.
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: mnn
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build mnn ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440  # 24h
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      MNN_VERSION: ${{ matrix.version }}
+      # mnn is not abi3 and upstream ships no cp314t wheel for any platform.
+      PYTHON_TAGS: cp312 cp313 cp314
+
+    steps:
+      - name: Checkout MNN ${{ env.MNN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: alibaba/MNN
+          ref: ${{ env.MNN_VERSION }}
+          persist-credentials: false
+          path: mnn
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch MNN source
+        working-directory: mnn
+        run: git apply -v ../python-wheels/patches/mnn/${{ env.MNN_VERSION }}/*.patch
+
+      - name: Write container script
+        run: |
+          mkdir -p wheelhouse
+          cat > mnn/riscv64-build-and-test.sh <<'EOF'
+          #!/bin/bash
+          set -e -x
+
+          case "$1" in
+            build|test) ;;
+            *) echo "usage: $0 <build|test>" >&2; exit 1 ;;
+          esac
+
+          cd /mnn/pymnn/pip_package
+
+          if [ "$1" = build ]; then
+            PATH="/opt/python/cp312-cp312/bin:${PATH}" python3 build_deps.py
+          fi
+
+          for python_tag in ${PYTHON_TAGS}; do
+            python_dir="/opt/python/${python_tag}-${python_tag}/bin"
+
+            if [ "$1" = build ]; then
+              export PATH="${python_dir}:${PATH}"
+              rm -rf dist
+              "${python_dir}/python3" build_wheel.py --version "${MNN_VERSION}"
+              auditwheel repair -w /wheelhouse dist/*.whl
+            else
+              wheel=(/wheelhouse/mnn-"${MNN_VERSION}"-"${python_tag}"-"${python_tag}"-*.whl)
+              # Upstream pins opencv-python<5; the registry only carries 5.0.0.93 for riscv64.
+              "${python_dir}/pip" install "${wheel[0]}" "numpy<2.5" opencv-python torch
+
+              "${python_dir}/python3" -c "
+          import _mnncengine as m
+          assert m.__file__.endswith('.so'), m.__file__"
+
+              cd /mnn/pymnn/test
+              "${python_dir}/python3" unit_test.py
+              cd /mnn/pymnn/pip_package
+            fi
+          done
+          EOF
+
+      - name: Build wheels
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "${PWD}/mnn":/mnn \
+            -v "${PWD}/wheelhouse":/wheelhouse \
+            --workdir /mnn \
+            -e PYTHON_TAGS="${PYTHON_TAGS}" \
+            -e MNN_VERSION="${MNN_VERSION}" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            --pull=newer \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /mnn/riscv64-build-and-test.sh build
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mnn-${{ env.MNN_VERSION }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+      - name: Test wheels
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "${PWD}/mnn":/mnn \
+            -v "${PWD}/wheelhouse":/wheelhouse \
+            --workdir /mnn \
+            -e PYTHON_TAGS="${PYTHON_TAGS}" \
+            -e MNN_VERSION="${MNN_VERSION}" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /mnn/riscv64-build-and-test.sh test
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources (gcc) for mnn ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+    env:
+      MNN_VERSION: ${{ matrix.version }}
+
+    steps:
+      # pymnn/pip_package/setup.py links _mnncengine/_tools with -fopenmp on Linux
+      # unconditionally, and auditwheel vendors the image's libgomp.so.1 into the wheel.
+      - name: Collect gcc source RPM from manylinux_riscv64
+        uses: riseproject-dev/python-wheels/actions/collect-gpl-sources@main
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mnn-${{ env.MNN_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish mnn ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: mnn-${{ matrix.version }}-manylinux_riscv64
+      gpl-sources-artifact: mnn-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
