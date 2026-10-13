@@ -3080,6 +3080,34 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       read, and it also tells you which sibling distributions on the queue *are* ordinary
       pure-Python ports.
 
+652. **A real sdist and a real build system do not make a package portable when the
+    build's *dependency* is gated behind a private, authenticated package registry — read
+    the lockfile/recipe before trusting the presence of `setup.py`/`CMakeLists.txt` (the
+    aimmspy case).** aimmspy breaks the usual "zero sdist ever" tell (gotchas 372/431/453):
+    exactly one of its 31 PyPI releases (`1.0.1.post33`) ships a real 24 MB sdist with a
+    full pybind11/CMake C++ source tree (`aimms-api-wrapper/`, `aimms_api_py/`), so gotcha
+    77's "build it yourself" escape hatch looks open at first glance. It is not: the
+    checkout's own `conanfile.py` declares `license = "AIMMS"` (proprietary, distinct from
+    the wrapper's PyPI-metadata `License: MIT`, gotcha 376's inversion) and requires
+    `aimmsifc/0.2.0-11@aimms/master` — the actual AIMMS modeling/solver engine the wrapper
+    links against — from a Conan channel that only resolves through AIMMS's own private
+    Artifactory; `.gitlab-ci.yml`'s first build step is literally `buildCmake.py --login`,
+    and the `.gitmodules` submodule (`buildhelpers`) points at an internal
+    `../../other/buildhelpers.git` path on `gitlab.aimms.com`, a GitLab instance that is not
+    publicly reachable (`git ls-remote` on it, and on a guessed `github.com/aimms/aimmspy`,
+    both fail requesting a login rather than 404ing). Unzipping the real
+    `manylinux_2_27_x86_64` wheel confirms the shape: the entire bound engine is one 44 MB
+    `aimmspy.cpython-3xx-x86_64-linux-gnu.so`, statically linking whatever `aimmsifc` resolved
+    to at AIMMS's own build time — there is no separate dynamic engine library a riscv64
+    build could substitute, and no public source for it to recompile in the first place.
+    The wheel's own README removes any doubt a license workaround could matter: using the
+    library at all requires an already-installed, separately-licensed AIMMS application
+    (`aimms_path` pointing at its `Bin` folder) plus "the appropriate AIMMS license", and
+    README prose states "Currently only the windows platform is supported" even for the
+    *published* Linux wheels. Park on this evidence even though an sdist exists: a source
+    tarball is not "the source" when the one dependency that matters is unobtainable without
+    credentials nobody outside the vendor holds.
+
 459. **A CUDA-only PyPI wheel does not make the *project* CUDA-only — look for a
     device-selecting build env var before parking a GPU package (the vllm case).** Gotchas
     41 (triton), 284, and the `sglang`/`cuda-tile` parked entries all triage a GPU package

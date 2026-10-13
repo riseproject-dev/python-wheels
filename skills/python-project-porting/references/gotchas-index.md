@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (557 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (558 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -212,6 +212,13 @@ The porting gotchas (557 of them) live in [`references/gotchas/`](gotchas/), spl
   (there is none) — plus a vendor's package server and conda channel are the same two platform
   tables as an open project's, and a `.lic` key check in the payload kills gotcha 35's
   swap-in-another-build escape hatch (the gurobipy case).
+- **652** — A real sdist and a real CMake/pybind11 build tree do not make a package portable
+  when the build's own dependency is gated behind a private, authenticated package registry:
+  aimmspy's one sdist pulls `aimmsifc` from a Conan channel that only resolves through AIMMS's
+  internal Artifactory (`buildCmake.py --login`), the wheel's single 44 MB `.so` statically
+  links whatever that resolved to with no separate engine library to substitute, and even
+  using the published wheel needs an already-installed, separately-licensed AIMMS application
+  (the aimmspy case).
 - **459** — A CUDA-only PyPI wheel does not make the *project* CUDA-only: a device-selecting
   build env var can produce a genuinely portable CPU distribution from the same tree, and
   upstream may already carry riscv64 kernels for it (the vllm case).
