@@ -1,0 +1,253 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own non-CUDA wheel build:
+#   https://github.com/kvcache-ai/Mooncake/blob/v0.3.13.post1/.github/workflows/release-non-cuda.yaml
+#   https://github.com/kvcache-ai/Mooncake/blob/v0.3.13.post1/.github/workflows/_build-wheel.yaml
+name: Build mooncake-transfer-engine-non-cuda wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/mooncake-transfer-engine-non-cuda.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mooncake-transfer-engine-non-cuda.yml'
+      - 'docs/packages/mooncake-transfer-engine-non-cuda.yaml'
+      - 'patches/mooncake-transfer-engine-non-cuda/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mooncake-transfer-engine-non-cuda.yml'
+      - 'docs/packages/mooncake-transfer-engine-non-cuda.yaml'
+      - 'patches/mooncake-transfer-engine-non-cuda/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  GFLAGS_VERSION: 2.2.2
+  GLOG_VERSION: 0.6.0
+  YAML_CPP_VERSION: 0.8.0
+  XXHASH_VERSION: 0.8.3
+  MSGPACK_VERSION: 3.3.0
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: mooncake-transfer-engine-non-cuda
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build mooncake-transfer-engine-non-cuda ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    container:
+      image: quay.io/pypa/manylinux_2_39_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: [cp312, cp313, cp314, cp314t]
+    env:
+      MOONCAKE_VERSION: ${{ matrix.version }}
+      # Upstream's non-cuda:arm64 profile, minus sccache.
+      CMAKE_ARGS: -DBUILD_UNIT_TESTS=OFF -DUSE_HTTP=ON -DUSE_ETCD=ON -DUSE_CUDA=OFF -DWITH_EP=OFF -DSTORE_USE_ETCD=ON -DWITH_STORE_RUST=OFF -DCMAKE_BUILD_TYPE=Release
+      PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+      PIP_ONLY_BINARY: ":all:"
+
+    steps:
+      - name: Checkout kvcache-ai/Mooncake v${{ env.MOONCAKE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: kvcache-ai/Mooncake
+          ref: v${{ env.MOONCAKE_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory '*'
+
+      - name: Patch Mooncake source
+        run: git apply python-wheels/patches/mooncake-transfer-engine-non-cuda/${{ env.MOONCAKE_VERSION }}/*.patch
+
+      - name: Select Python ${{ matrix.python }} from manylinux image
+        run: |
+          abi=${{ matrix.python }}
+          PYBIN="/opt/python/${abi%t}-${abi}/bin"
+          echo "$PYBIN" >> "$GITHUB_PATH"
+          v=${abi#cp}
+          echo "PYTHON_VERSION=${v:0:1}.${v:1}" >> "$GITHUB_ENV"
+          "$PYBIN/pip" install --quiet "cmake<4" setuptools wheel
+
+      # dependencies.sh: its EL list needs EPEL (absent on riscv64) and its Go installer only knows x86_64/aarch64.
+      - name: Install dependencies
+        run: |
+          set -euxo pipefail
+          dnf install -y --enablerepo=crb ninja-build rdma-core-devel jsoncpp-devel numactl-devel \
+            boost-devel openssl-devel protobuf-devel libcurl-devel liburing-devel libzstd-devel \
+            pkgconf-pkg-config elfutils-libelf-devel
+          cd "$RUNNER_TEMP"
+          common=(-DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_SHARED_LIBS=ON -DBUILD_TESTING=OFF)
+          git clone --depth 1 --branch "v${GFLAGS_VERSION}" https://github.com/gflags/gflags
+          cmake -S gflags -B gflags/build "${common[@]}"
+          cmake --build gflags/build --target install --parallel "$(nproc)"
+          git clone --depth 1 --branch "v${GLOG_VERSION}" https://github.com/google/glog
+          cmake -S glog -B glog/build "${common[@]}" -DWITH_GTEST=OFF
+          cmake --build glog/build --target install --parallel "$(nproc)"
+          git clone --depth 1 --branch "${YAML_CPP_VERSION}" https://github.com/jbeder/yaml-cpp
+          cmake -S yaml-cpp -B yaml-cpp/build "${common[@]}" -DYAML_BUILD_SHARED_LIBS=ON -DYAML_CPP_BUILD_TESTS=OFF -DYAML_CPP_BUILD_TOOLS=OFF
+          cmake --build yaml-cpp/build --target install --parallel "$(nproc)"
+          git clone --depth 1 --branch "v${XXHASH_VERSION}" https://github.com/Cyan4973/xxHash
+          make -C xxHash -j"$(nproc)" install PREFIX=/usr/local
+          curl -fsSL "https://github.com/msgpack/msgpack-c/releases/download/cpp-${MSGPACK_VERSION}/msgpack-${MSGPACK_VERSION}.tar.gz" | tar xz
+          cp -r "msgpack-${MSGPACK_VERSION}/include/." /usr/local/include/
+          echo /usr/local/lib > /etc/ld.so.conf.d/usr-local.conf
+          ldconfig
+          GOVER=$(sed -n 's/^GOVER=//p' "$GITHUB_WORKSPACE/dependencies.sh")
+          curl -fsSL "https://go.dev/dl/go${GOVER}.linux-riscv64.tar.gz" | tar -C /usr/local -xz
+          echo "/usr/local/go/bin" >> "$GITHUB_PATH"
+
+      - name: Configure project
+        run: |
+          mkdir -p build && cd build
+          # shellcheck disable=SC2086
+          cmake .. $CMAKE_ARGS -DPython3_EXECUTABLE="$(command -v python3)"
+
+      # Upstream's wheels ship no licence text; add Mooncake's and those of every library the wheel bundles.
+      - name: Stage licence texts
+        run: |
+          set -euxo pipefail
+          cp LICENSE-APACHE mooncake-wheel/LICENSE
+          cp build/_deps/yalantinglibs-src/LICENSE mooncake-wheel/LICENSE.yalantinglibs
+          cp build/_deps/yalantinglibs-src/NOTICE mooncake-wheel/NOTICE.yalantinglibs
+          cp "$RUNNER_TEMP/gflags/COPYING.txt" mooncake-wheel/LICENSE.gflags
+          cp "$RUNNER_TEMP/glog/COPYING" mooncake-wheel/LICENSE.glog
+          cp "$RUNNER_TEMP/yaml-cpp/LICENSE" mooncake-wheel/LICENSE.yaml-cpp
+          cp "$RUNNER_TEMP/xxHash/LICENSE" mooncake-wheel/LICENSE.xxhash
+          cp "$RUNNER_TEMP/msgpack-${MSGPACK_VERSION}/LICENSE_1_0.txt" mooncake-wheel/LICENSE.msgpack
+          for pkg in jsoncpp libzstd liburing; do
+            rpm -q --licensefiles "$pkg" | grep '^/' | while read -r f; do
+              cp "$f" "mooncake-wheel/LICENSE.$pkg.$(basename "$f")"
+            done
+          done
+          ls mooncake-wheel/LICENSE* mooncake-wheel/NOTICE*
+
+      - name: Build project
+        run: |
+          # yaml-cpp 0.8 exports only yaml-cpp::yaml-cpp, so Mooncake's bare `yaml-cpp` link becomes -lyaml-cpp.
+          export LIBRARY_PATH="/usr/local/lib:${LIBRARY_PATH:-}"
+          cd build
+          cmake --build . -j"$(nproc)"
+          cmake --install .
+
+      - name: Build Python wheel
+        run: |
+          export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:/usr/local/lib"
+          NON_CUDA_BUILD=1 OUTPUT_DIR="dist-${{ matrix.python }}" ./scripts/build_wheel.sh
+
+      - name: Smoke test repaired wheel
+        shell: bash
+        run: |
+          set -euxo pipefail
+          smoke_venv=$(mktemp -d)
+          python -m venv "$smoke_venv"
+          "$smoke_venv/bin/python" -m pip install --no-deps mooncake-wheel/dist-${{ matrix.python }}/*.whl
+
+          site_packages=$("$smoke_venv/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+          cuda_dependency_found=false
+          for package_path in "$site_packages"/mooncake*; do
+            [ -e "$package_path" ] || continue
+            while IFS= read -r -d '' file; do
+              cuda_dependencies=$(readelf -d "$file" 2>/dev/null | grep -E \
+                'Shared library: \[(libcuda|libcudart|libcublas|libcufft|libcurand|libcusolver|libcusparse|libcufile|libcupti|libnvrtc|libnvJitLink|libnvToolsExt|libnvfatbin|libnvidia|libnccl)\.so' || true)
+              if [ -n "$cuda_dependencies" ]; then
+                echo "::error file=$file::Non-CUDA wheel artifact depends on CUDA"
+                echo "$cuda_dependencies"
+                cuda_dependency_found=true
+              fi
+            done < <(find "$package_path" -type f -print0)
+          done
+          [ "$cuda_dependency_found" = false ]
+          ls "$site_packages"/mooncake_transfer_engine_non_cuda-*.dist-info/licenses/
+
+          "$smoke_venv/bin/mooncake_master" --version
+
+          cp -r mooncake-wheel/tests "$smoke_venv/tests"
+          cd "$smoke_venv"
+          bin/python tests/test_import_structure.py
+          bin/python tests/test_mooncake_config.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mooncake-transfer-engine-non-cuda-${{ env.MOONCAKE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: mooncake-wheel/dist-${{ matrix.python }}/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Collect GPL sources for mooncake-transfer-engine-non-cuda ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      MOONCAKE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: libzstd
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mooncake-transfer-engine-non-cuda-${{ env.MOONCAKE_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish mooncake-transfer-engine-non-cuda ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: mooncake-transfer-engine-non-cuda-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: mooncake-transfer-engine-non-cuda-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: the copyleft libraries bundled in the wheel
