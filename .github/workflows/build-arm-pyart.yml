@@ -1,0 +1,131 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/ARM-DOE/pyart/blob/v2.2.5/.github/workflows/wheels.yml
+name: Build arm-pyart wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/arm-pyart.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-arm-pyart.yml'
+      - 'docs/packages/arm-pyart.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-arm-pyart.yml'
+      - 'docs/packages/arm-pyart.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: arm-pyart
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build arm-pyart ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Per-interpreter (not abi3): the Cython extensions link the version-specific
+        # ABI. Upstream's own pyproject.toml builds cp311-cp313 on Linux x86_64 only
+        # (skip = cp3*t for free-threading, cp314-* for cartopy) - narrowed to riscv64
+        # here. cp311 dropped: cartopy, netcdf4 and cftime (hard runtime deps) plus
+        # cython (a build dependency) have no riscv64 wheel on pypi.riseproject.dev
+        # for cp311, only cp312+.
+        python:
+          - "cp312"
+          - "cp313"
+
+    env:
+      ARM_PYART_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyart v${{ env.ARM_PYART_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ARM-DOE/pyart
+          ref: v${{ env.ARM_PYART_VERSION }}
+          fetch-depth: 0  # setuptools_scm derives the version from the tag history
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Repeats upstream's own PIP_ONLY_BINARY=:all: (pyproject.toml's
+          # [tool.cibuildwheel] table, which CIBW_ENVIRONMENT would otherwise drop)
+          # and adds our registry for numpy/cython (build) and cartopy/netcdf4/scipy/
+          # matplotlib/pandas/cftime (runtime/test) - PyPI ships none of these for
+          # riscv64. Everything else the test install needs (xarray, fsspec,
+          # mda-xdrlib, open-radar-data, pint, pooch, s3fs, xradar) is a pure-Python
+          # py3-none-any wheel on PyPI already.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=:all:
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          exts = {n.rsplit("/", 1)[-1].split(".")[0] for n in names if n.endswith(".so")}
+          expected = {
+              "_check_build", "_fast_edge_finder", "_unwrap_1d", "_unwrap_2d",
+              "_unwrap_3d", "_sigmetfile", "nexrad_interpolate", "ckdtree",
+              "_load_nn_field_data", "_gate_to_grid_map", "_kdp_proc",
+          }
+          assert exts == expected, exts
+          licences = {n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n} - {""}
+          assert licences == {"LICENSE.txt"}, licences
+          EOF
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: arm-pyart-${{ env.ARM_PYART_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish arm-pyart ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: arm-pyart-${{ matrix.version }}-*-manylinux_riscv64
