@@ -1,0 +1,125 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/adriangb/pgpq/blob/306cdf8cf2b8450a3162a9cd467422cb0849af5a/.github/workflows/python-package.yaml
+name: Build pgpq wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pgpq.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pgpq.yml'
+      - 'docs/packages/pgpq.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pgpq.yml'
+      - 'docs/packages/pgpq.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pgpq
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pgpq ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # py/Cargo.toml's pyo3 dependency carries abi3-py310 unconditionally,
+        # so one abi3 wheel serves every GIL-ful interpreter; pyo3 disables
+        # abi3 under Py_GIL_DISABLED, giving the free-threaded build its own
+        # wheel (gotcha 181; same shape as build-primp.yml).
+        tag: [cp310-abi3, cp314t]
+        include:
+          - tag: cp310-abi3
+            interp: python3.10
+          - tag: cp314t
+            interp: python3.14t
+
+    env:
+      PGPQ_VERSION: ${{ matrix.version }}
+      # pgpq has never pushed a git tag (gotcha 103); this is the commit its
+      # own "Release pgpq 0.12.0 and arrow-json 0.10.0" PR merged, timestamped
+      # minutes before PyPI's upload_time for 0.12.0. Move both together.
+      PGPQ_REF: 306cdf8cf2b8450a3162a9cd467422cb0849af5a
+      UV_PYTHON_PREFERENCE: only-managed
+
+    steps:
+      - name: Checkout pgpq ${{ env.PGPQ_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: adriangb/pgpq
+          ref: ${{ env.PGPQ_REF }}
+          persist-credentials: false
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --strip -i ${{ matrix.interp }} --manifest-path py/Cargo.toml --out dist
+          manylinux: '2_39'
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.interp }}
+          activate-environment: true
+          enable-cache: false
+
+      # py/test_pgpq's `postgres` fixture uses testing.postgresql, which
+      # spawns a real local cluster via pg_ctl/initdb found on PATH.
+      - name: Install postgres
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql
+
+      - name: Test wheel
+        run: |
+          uv pip install dist/*.whl
+          python -c "import pgpq._pgpq as m; assert m.__file__.endswith('.so'), m.__file__"
+          uv pip install 'pytest>=7.0.0' 'hypothesis>=6.168.1' 'testing.postgresql>=1.3.0' 'psycopg[binary]>=3.3.4' 'pyarrow>=22.0.0'
+          python -m pytest -v py/test_pgpq
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pgpq-${{ env.PGPQ_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pgpq ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pgpq-${{ matrix.version }}-*-manylinux_riscv64
