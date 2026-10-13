@@ -1,0 +1,178 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_indigo_libs_x86_64` and `build_indigo_wrappers` jobs of
+# https://github.com/epam/indigo/blob/indigo-1.46.0/.github/workflows/indigo-ci.yaml
+name: Build epam-indigo wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/epam-indigo.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-epam-indigo.yml'
+      - 'docs/packages/epam-indigo.yaml'
+      - 'patches/epam-indigo/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-epam-indigo.yml'
+      - 'docs/packages/epam-indigo.yaml'
+      - 'patches/epam-indigo/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: epam-indigo
+      version: ${{ inputs.version }}
+
+  # setup.py loads the four C++ libraries via ctypes (ctypes.CDLL), keyed off
+  # platform.machine(), not the CPython ABI, so one py3-none wheel serves every
+  # interpreter - matching upstream's own fixed --plat-name list (api/python/setup.py),
+  # which this patches to add riscv64.
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build epam-indigo ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    container:
+      image: quay.io/pypa/manylinux_2_39_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      EPAM_INDIGO_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout indigo indigo-${{ env.EPAM_INDIGO_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: epam/indigo
+          ref: indigo-${{ env.EPAM_INDIGO_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch indigo source
+        run: git apply python-wheels/patches/epam-indigo/${{ env.EPAM_INDIGO_VERSION }}/*.patch
+
+      - name: Use manylinux Python
+        run: echo "/opt/python/cp312-cp312/bin" >> "$GITHUB_PATH"
+
+      - name: Install cmake
+        run: dnf install -y -q cmake
+
+      # BUILD_STANDALONE (default ON) builds cairo/freetype/libpng/pixman/zlib/rapidjson/
+      # lunasvg/tinyxml2 from the vendored third_party/ sources instead of linking the
+      # image's own, so the wheel's only runtime dependency beyond glibc is itself. None of
+      # them ship a LICENSE file in third_party/ except freetype, libpng, tinyxml2, inchi,
+      # cppcodec and object_threadsafe (copied as-is below); the rest are fetched from their
+      # upstream release matching the vendored third_party/<lib> version.
+      - name: Stage bundled licences
+        run: |
+          cp LICENSE api/python/
+          for f in \
+            third_party/freetype/LICENSE.TXT \
+            third_party/libpng/LICENSE \
+            third_party/tinyxml2/LICENSE.txt \
+            third_party/cppcodec/LICENSE \
+            third_party/object_threadsafe/LICENSE \
+            third_party/inchi/LICENCE \
+            ; do
+            cp "$f" "api/python/LICENSE.$(basename "$(dirname "$f")")"
+          done
+          curl -fsSL -o api/python/LICENSE.cairo "https://gitlab.freedesktop.org/cairo/cairo/-/raw/1.18.4/COPYING"
+          curl -fsSL -o api/python/LICENSE.pixman "https://gitlab.freedesktop.org/pixman/pixman/-/raw/pixman-0.40.0/COPYING"
+          curl -fsSL -o api/python/LICENSE.zlib "https://raw.githubusercontent.com/madler/zlib/v1.3.1/LICENSE"
+          curl -fsSL -o api/python/LICENSE.rapidjson "https://raw.githubusercontent.com/Tencent/rapidjson/v1.1.0/license.txt"
+          curl -fsSL -o api/python/LICENSE.lunasvg "https://raw.githubusercontent.com/sammycage/lunasvg/v3.0.0/LICENSE"
+
+      - name: Build the native libraries
+        run: |
+          mkdir build && cd build
+          cmake .. -DBUILD_INDIGO=ON -DBUILD_INDIGO_WRAPPERS=OFF -DBUILD_INDIGO_UTILS=OFF -DBUILD_BINGO=OFF -DBUILD_BINGO_ELASTIC=OFF -DENABLE_TESTS=OFF
+          cmake --build . --config Release --target all -- -j"$(nproc)"
+
+      - name: Build the wheel
+        working-directory: api/python
+        run: |
+          pip install -q -U setuptools wheel
+          python3 setup.py bdist_wheel --python-tag py3 --plat-name manylinux_2_39_riscv64
+
+      - name: Check the wheel carries the native libraries and their licences
+        run: |
+          python3 - api/python/dist/*.whl <<'EOF'
+          import sys, zipfile
+
+          libs = {
+              "indigo/lib/linux-riscv64/libindigo.so",
+              "indigo/lib/linux-riscv64/libindigo-inchi.so",
+              "indigo/lib/linux-riscv64/libindigo-renderer.so",
+              "indigo/lib/linux-riscv64/libbingo-nosql.so",
+          }
+          licences = {
+              "LICENSE", "LICENSE.freetype", "LICENSE.libpng", "LICENSE.tinyxml2",
+              "LICENSE.cppcodec", "LICENSE.object_threadsafe", "LICENSE.inchi",
+              "LICENSE.cairo", "LICENSE.pixman", "LICENSE.zlib", "LICENSE.rapidjson",
+              "LICENSE.lunasvg",
+          }
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert libs <= set(names), (whl, libs - set(names))
+              found = {n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n}
+              assert found == licences, (whl, licences - found, found - licences)
+              print(whl, "ok")
+          EOF
+
+      - name: Smoke-test the wheel
+        run: |
+          pip install -q --extra-index-url https://pypi.riseproject.dev/simple/ \
+            api/python/dist/*.whl Pillow==10.3.0 "pytest==7.3.1"
+          cp -r api/python/tests /tmp/indigo-tests
+          cd /tmp/indigo-tests
+          python3 -m pytest -v
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: epam-indigo-${{ env.EPAM_INDIGO_VERSION }}-py3-none-manylinux_riscv64
+          path: api/python/dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish epam-indigo ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: epam-indigo-${{ matrix.version }}-*-manylinux_riscv64
