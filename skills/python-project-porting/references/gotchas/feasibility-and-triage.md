@@ -320,6 +320,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
   present (no dlopen wall, no hard `import`) and still be a park, when its only *wired*
   backend driver needs the vendor compiler to activate and the package's nominal CPU driver
   is dead code the loader never touches (the triton-ascend case).
+- **653** — Genuinely open, BSD-licensed Python bindings can still be build-time-blocked by a
+  closed native shim that is neither the vendor's full engine nor an optional runtime
+  accelerator — check what `Extension(libraries=[...])` actually links against (amplpy).
 
 ---
 
@@ -3107,6 +3110,44 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
     *published* Linux wheels. Park on this evidence even though an sdist exists: a source
     tarball is not "the source" when the one dependency that matters is unobtainable without
     credentials nobody outside the vendor holds.
+
+653. **Genuinely open, BSD-licensed Python bindings can still be build-time-blocked by a
+    closed native *shim* that is neither the vendor's full engine nor an optional runtime
+    accelerator — check what the `Extension(libraries=[...])` actually links against, not
+    just what import-time code does on failure (the amplpy case).** amplpy breaks cleanly
+    from the gurobipy/aimmspy mould at first glance: `License: BSD-3` in METADATA (not
+    "Proprietary"), a real 1.7 MB sdist on every release, `home`/`repo` pointing at a genuine
+    GitHub org (`github.com/ampl/amplpy`) rather than a marketing page, and the only runtime
+    dependency declared is `ampltools` (pure Python) — none of gotcha 372/376/431's tells
+    fire. `strings` on the wheel's native payload even confirms the "bindings-only" theory
+    looks right: `libampl.so` is a thin 830 KB shim whose symbols are literally
+    `AMPLProcessBase`/`fork`/`execlp`/`findExecutablePath` — it does not contain a solver or
+    interpreter at all, it forks and execs a separately-installed, separately-licensed `ampl`
+    binary found via `PATH`, and amplpy's own `modules` subsystem documents installing that
+    engine as a distinct step (`python -m amplpy.modules install highs cbc gurobi`). That
+    runtime-only read is the trap: `setup.py`'s `ext_modules` unconditionally builds
+    `Extension("amplpy.ampl", libraries=["ampl"], library_dirs=[".../cppinterface/lib/<ARCH>"],
+    sources=["amplpy/ampl.pyx"])` — the Cython extension that implements the *entire* AMPL
+    object model (sets, params, entities, dataframes), not just the fork/exec call, and it
+    links against that same `libampl.so` at **build** time, with no env var or build flag to
+    skip it (contrast gotcha-documented oneagent-sdk, whose `PostBuildExtCommand` degrades to
+    no native `.so` at all when its vendor path is unset — amplpy has no such branch). The
+    `.so` itself is a closed, prebuilt-only "AMPL API" binary: AMPL Optimization Inc. ships it
+    per-arch (`lib/amd64`, `lib/aarch64`, plus Windows/macOS) baked directly into the
+    project's own sdist (`setup.py`'s `package_content()` includes `LIBRARY_DIR` by design),
+    with no `.c`/`.cpp` source for it anywhere in the repo, no riscv64 entry in that ARCH
+    dispatch (an unmapped `platform.machine()` silently falls through to the `amd64` branch),
+    and AMPL's own API docs state only "Windows, Linux and macOS" are officially supported,
+    with other ports "easily obtained" **from AMPL**, not published anywhere public. Unlike
+    gotcha 453's gurobipy, there's no per-arch size blowup to point at (830 KB on both amd64
+    and aarch64) because this isn't the engine, just the IPC/object-model glue to it — but
+    the gate is the same shape: a closed native component with zero public source, baked into
+    the extension's link step, with no vendor-published riscv64 build and no way for us to
+    fabricate a working substitute (the shim implements real data marshalling, not just a
+    `fork()` wrapper we could stub). Verdict: `parked`. Distinguish this from gotcha 652
+    (aimmspy): there the *wrapper itself* was proprietary-metadata-mismatched and the registry
+    gating was an authentication wall; here the wrapper is honestly open-source and the gate
+    is pure binary/source unavailability for our arch.
 
 459. **A CUDA-only PyPI wheel does not make the *project* CUDA-only — look for a
     device-selecting build env var before parking a GPU package (the vllm case).** Gotchas

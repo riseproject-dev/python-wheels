@@ -219,6 +219,11 @@ The porting gotchas (558 of them) live in [`references/gotchas/`](gotchas/), spl
   links whatever that resolved to with no separate engine library to substitute, and even
   using the published wheel needs an already-installed, separately-licensed AIMMS application
   (the aimmspy case).
+- **653** — Genuinely open, BSD-licensed Python bindings can still be build-time-blocked by a
+  closed native shim that is neither the vendor's full engine nor an optional runtime
+  accelerator: amplpy's `setup.py` links its Cython extension against a closed, prebuilt-only
+  `libampl.so` with no riscv64 build and no public source, even though the bindings themselves
+  are open and the real AMPL solver is a separate, optional runtime dependency (the amplpy case).
 - **459** — A CUDA-only PyPI wheel does not make the *project* CUDA-only: a device-selecting
   build env var can produce a genuinely portable CPU distribution from the same tree, and
   upstream may already carry riscv64 kernels for it (the vllm case).
