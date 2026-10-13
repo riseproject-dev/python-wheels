@@ -38,6 +38,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **338** — A package whose real PyPI wheels are produced by a *packaging fork*, not its own
   source repo, can hard-depend at runtime on a sibling package from that same packaging
   ecosystem — and that sibling can itself be the actual blocker (the eigenpy/cmeel-boost case).
+- **649** — Gotcha 214's "count the vendored dependency tree" generalizes to a prebuilt-image
+  dependency with no riscv64 variant, and an already-parked sibling (Qt) can corroborate one
+  leg without re-deriving it (the pyopenms case).
 - **341** — A build-time transpiler binary from a *third* language ecosystem can block a port
   even when the extension itself is pure, portable C++ (the prophet/cmdstanpy/stanc3 case).
 - **340** — Gotcha 335 generalizes past deno_core/rusty_v8 to a second embedded-engine family:
@@ -5495,3 +5498,41 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       resolved read-only against the real 1.4.2 source tree (sparse git clone of
       `google-research/google-research`'s `scann/` subdirectory) and this repo's own
       tensorflow/tensorflow-cpu/mediapipe/ai-edge-litert queue entries.
+
+649. **Gotcha 214's "count the vendored dependency tree before committing" generalizes past
+    Bazel/FetchContent to a project whose own CI depends on a prebuilt dependency *image* that
+    simply has no riscv64 variant — and a sibling already-parked Qt port can corroborate one
+    leg of that tree without re-deriving it (the pyopenms case).** pyOpenMS 3.5.0's real CI
+    (`.github/workflows/pyopenms-wheels.yml`, not the nanobind/py-build-cmake
+    `pyopenms-wheels-cibuildwheel.yml` that only exists from the 3.6.0 rewrite onward) runs
+    `build-lnx`/`build-lnx-arm` inside `ghcr.io/openms/contrib_manylinux_2_34:latest-amd64`/
+    `-arm64` — images that already carry OpenMS's "contrib" submodule (github.com/OpenMS/
+    contrib) built. contrib's own `CMakeLists.txt` under the only mode CI/the Jenkinsfile ever
+    use (`BUILD_TYPE=ALL`) compiles ZLIB, BZIP2, BOOST, CURL, ARROW (`WITH_PARQUET=ON`, the
+    full Apache Arrow C++), LIBSVM, XERCESC, COINOR, EIGEN, HDF5 and LIBZIP from source — ten
+    independent large C++ projects, the same census gotcha 214 ran on ortools' FetchContent
+    tree, just via a submodule instead. No riscv64 build of that image exists anywhere, so a
+    riscv64 port would have to stand up contrib's entire from-source build itself before
+    OpenMS's own (large) core and Cython/autowrap bindings even start.
+    - **A second, independently-parked wall compounds the first rather than standing apart from
+      it.** `pyopenms/setup.py` hard-links `Qt5Core`/`Qt5Network` on Linux unconditionally
+      (`libraries = ["OpenMS", "OpenSwathAlgo", "Qt5Core", "Qt5Network"]`), not an optional GUI
+      extra. This repo already parked both `pyqt5-qt5` and `pyqt6-qt6` on a Qt-SDK-from-source
+      wall "an order of magnitude past build-libclang.yml", and `pyqt5-qt5`'s own note records
+      that Rocky 10 (this repo's `manylinux_2_39_riscv64` base) dropped Qt5 entirely with no
+      EPEL fallback on riscv64 — the identical base image a pyOpenMS build would run in. A
+      package that transitively needs a dependency this repo already parked for an
+      architectural reason doesn't need its own from-scratch Qt investigation to inherit that
+      verdict; citing the existing entry is enough corroboration.
+    - **Track record, not isolated difficulty, is still the right yardstick (gotcha 214's
+      closing point).** Unlike ortools' abseil/protobuf/HiGHS, none of contrib's ten libraries
+      nor Qt5 have riscv64 precedent anywhere in this repo's own history — eigenpy/
+      boost-histogram's Boost exposure is cmeel-boost or a vendored Boost.Python slice, not a
+      from-source full Boost+Arrow+contrib build — so every leg of this tree carries full
+      first-timer risk, and there are more legs than ortools had.
+    - Verdict: `parked`, no worktree/branch/PR opened. Disproportionate scope, not a hard
+      architectural blocker (gotcha 214's own framing) — stacking an unproven ten-library
+      contrib build, an already-parked-elsewhere Qt5 SDK bring-up, and OpenMS's own large C++
+      core is a multi-day effort for one wheel port. Re-triage if OpenMS ever publishes a
+      `contrib_manylinux`-equivalent riscv64 image, or if a standalone from-source Qt5/Boost/
+      Arrow build lands in this repo for some other port to share.

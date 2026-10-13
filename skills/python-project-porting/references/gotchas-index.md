@@ -492,6 +492,10 @@ The porting gotchas (556 of them) live in [`references/gotchas/`](gotchas/), spl
   *installed* `tensorflow` package's headers/`.so`, which is a transitive block on the
   already-parked `tensorflow`/`tensorflow-cpu` (gotcha 426), not a from-source vendor build
   like mediapipe/ai-edge-litert's (gotcha 431/442) (the scann case).
+- **649** — Gotcha 214's "count the vendored dependency tree" generalizes to a *prebuilt-image*
+  dependency with no riscv64 variant (pyOpenMS's `contrib_manylinux` image, which bakes in a
+  ten-library from-source contrib build) and compounds with an already-parked sibling (Qt5,
+  via pyqt5-qt5/pyqt6-qt6) rather than needing its own re-derivation (the pyopenms case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 
