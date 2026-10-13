@@ -480,6 +480,12 @@ The porting gotchas (556 of them) live in [`references/gotchas/`](gotchas/), spl
   35's (the sentry-cli case).
 - **646** — A trivially portable project that grants no licence at all (no LICENSE, no manifest
   `license`, README "License: TBD") cannot be rehosted: park on the licence (the oboros case).
+- **647** — In an accelerator-vendor family, the next sub-app can escalate from a runtime
+  `dlopen` wall (gotcha 480) to a compile-time one: `setup.py` hard-imports `torch_npu` and
+  calls `torch.npu.get_device_properties` before `setup()` runs, the only CMake options are
+  chip-family selectors (no CPU/generic switch), and `libraries` link a real AscendC-compiled
+  kernel archive, not a dlopen string — plus a build-time `FetchContent` of another CANN-only
+  repo and a runtime dependency on the already-parked sibling (the memfabric-zbal case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

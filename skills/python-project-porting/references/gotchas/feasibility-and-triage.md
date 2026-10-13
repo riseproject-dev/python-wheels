@@ -5393,3 +5393,53 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       `git ls-files | grep -iE 'licen|copying'` at the release tag.
     - `parked` in `.queue.yml` with the unblock condition spelled out (upstream adds a licence →
       re-queue; the build itself needs nothing special). No worktree/branch/PR.
+
+647. **In an accelerator-vendor family, the next sub-app can escalate from gotcha 480's
+    runtime `dlopen` wall to a *compile-time* one — check `setup.py`'s top-level imports and
+    the CMake option list before assuming the family's playbook repeats unchanged
+    (memfabric-zbal, the sibling under `memfabric_hybrid/app/zbal`).** `memfabric_zbal` 1.2.0
+    is not blocked the way gotcha 480 (memfabric-hybrid) was — there is no deferred `dlopen`
+    to disprove here, because the build never gets that far without the vendor stack present.
+    - **`setup.py` hard-imports the vendor runtime before `setup()` even runs.** Line 1 of
+      real work is `import torch_npu` (after `torch.utils.cpp_extension`), and
+      `_get_soc_version()` calls `torch.npu.get_device_properties(torch.device('npu'))` to
+      pick the AscendC `SOC_VERSION` — so the sdist cannot even be *evaluated* on a host
+      without `torch_npu` installed, let alone built, which is a harder gate than gotcha
+      516's link-time stub trick (torch_npu itself stubs CANN symbols at compile time; zbal
+      does not stub anything — it compiles against the real headers and links the real
+      kernel archive).
+    - **There is no backend-selector option to disprove, unlike gotcha 480's `XPU_TYPE=NONE`.**
+      The top `CMakeLists.txt` declares exactly two `option()`s
+      (`BUILD_ZBAL_MODULE_UT`, `BUILD_FUSED_DEEP_MOE`), neither a CPU/generic switch; the only
+      branch point is `ZBAL_ASCEND_NPU_A3` vs `_A5`, both Ascend chip families. `cmake/
+      config_ascendc.cmake` is included unconditionally unless `BUILD_ZBAL_MODULE_UT=ON`, and
+      even that UT mode only skips the *kernel* cmake while still requiring
+      `ASCEND_HOME_PATH` for CANN headers — it is a test-build shortcut, not a portable
+      configuration.
+    - **The AscendC kernel is a link-time dependency, not a dlopen string.** `setup.py`'s
+      `libraries` list is `["torch", "torch_npu", "c10", "torch_python", "opapi",
+      "zbal_core", "zbal_kernel"]` — `zbal_kernel` is produced by the AscendC compiler
+      (`cmake/config_ascendc.cmake`) from kernel sources under `src/csrc/operators/npu/`, and
+      the extension's `extra_compile_args` hardcode `-isystem {ascend_home}/include` and
+      `.../experiment/runtime/runtime/`. A riscv64 host with no CANN toolkit fails at
+      `cmake`/`make`, not at import time, so there is no "ships a dead stub" middle ground to
+      weigh as in gotcha 480.
+    - **The family's build-time `FetchContent` habit recurs, naming another CANN-only repo.**
+      When `ZBAL_ASCEND_NPU_A3 AND BUILD_FUSED_DEEP_MOE` (both defaults), the top
+      `CMakeLists.txt` `FetchContent_Declare`s `catlass` from `gitcode.com/cann/catlass` — a
+      second Huawei-only CANN template library, same host as this package's own repo.
+    - **The runtime dependency is the already-parked sibling, same shape as gotcha 531.**
+      The README pins `pip install memfabric_hybrid` (">= v1.1.0") as a prerequisite before
+      building zbal at all; `memfabric-hybrid` is gotcha 480's park, so even a hypothetical
+      CPU-buildable zbal would import a package this registry does not and cannot carry.
+    - **Confirmed against the real PyPI releases, not the org name.** `pypi.org/pypi/
+      memfabric-zbal/json` lists 1.2.0 as exactly two files, both `bdist_wheel`
+      (`cp311-cp311-manylinux_2_34_{aarch64,x86_64}`), no sdist for any of its 6 releases —
+      consistent with a package that cannot be built without the vendor SDK present, since
+      there is nothing-but-vendor-image CI could build it with.
+    - Verdict: `parked`, same family as gotcha 480/516/531. `gitcode.com` itself is reachable
+      from this environment (cloned fine through the agent proxy) and licensing is clean
+      (Mulan PSL v2, `LICENSE` present) — the block is purely the hardware/toolchain wall, one
+      step harder than the sibling's. Revisit only if Huawei ships CANN + AscendC for riscv64
+      and memfabric-hybrid is unparked first. No worktree/branch/workflow/docs entry/patch/PR;
+      scratch under `.git/pw-scratch/memfabric-zbal/` removed.
