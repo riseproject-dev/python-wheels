@@ -10930,11 +10930,32 @@ packages:
   notes: 'CONSISTENT with the rest of the passagemath-* family (passagemath-planarity, -rankwidth, -coxeter3, -cddlib, -glpk, -sirocco, -meataxe, -cliquer, -libecm): same build-time dependency every split package pins in `pyproject.toml.m4 [build-system] requires` - `passagemath-objects ~= 10.8.10.0` - which is not yet ported (status: queued, concrete bootstrap plan recorded in its own notes). The monorepo source IS reachable via a sparse blobless clone - that part is not the blocker, per passagemath-homfly''s navigation writeup. Set directly to `blocked-on-dependency`: waiting on passagemath-objects, not infeasible.'
 - pkg: aimrocks
   version: 0.5.2
-  home: https://pypi.org/project/aimrocks/
-  repo: https://pypi.org/project/aimrocks/
-  status: queued
-  pr: null
-  notes: '42 Linux wheels upstream (abi: cp310,cp311,cp312,cp36,cp37,cp38,cp39); no riscv64 on PyPI or pypi.riseproject.dev.'
+  home: https://github.com/aimhubio/aimrocks
+  repo: https://github.com/aimhubio/aimrocks
+  status: ci-running
+  pr: https://github.com/riseproject-dev/python-wheels/pull/3060
+  notes: 'PR #3060 open. Cython wrapper over RocksDB (github.com/aimhubio/aimrocks,
+    Apache-2.0); verified real upstream, not just the PyPI shell. setup.py links a
+    system `librocksdb` it expects pre-built under AIM_DEP_DIR; upstream''s own
+    Dockerfile builds RocksDB 6.29.fb from source (docker/build-rocksdb.sh) plus
+    zlib/bzip2/lz4/zstd/snappy (docker/build-{zlib,bzip2,lz4,zstd,snappy}.sh) with
+    PORTABLE=1, which this port reproduces verbatim in CIBW_BEFORE_ALL_LINUX.
+    Confirmed in rocksdb''s own build_detect_platform (checked out facebook/rocksdb
+    at tag 6.29.fb) that PORTABLE=1 skips every -march=native/-msse4.2 probe unless
+    USE_SSE is also set (it is not here), and util/crc32c.cc''s hardware CRC32 paths
+    are gated on HAVE_SSE42/HAVE_ARM64_CRC/HAVE_POWER8 - none defined on riscv64 -
+    so it falls back to the portable table-based implementation; upstream''s own CI
+    already builds this exact recipe successfully for linux_aarch64 (M1-hosted Docker
+    manylinux_aarch64 jobs in .github/workflows/python-package.yml), confirming the
+    non-x86 path is real, not theoretical. zlib/bzip2/lz4/zstd/snappy are all
+    permissive (zlib/BSD/BSD/BSD/BSD-3-Clause); upstream''s `rm -rf lib/lib*.so*`
+    before the rocksdb build (reproduced here) forces them to link statically into
+    the one librocksdb.so the wheel bundles, so auditwheel has nothing else to
+    vendor. No GPL anywhere (rocksdb itself is Apache-2.0/GPLv2 dual-licensed;
+    Apache-2.0 is used). License files added for all six vendored libs since
+      upstream''s own wheels carry none (same pattern as plyvel/epam-indigo).
+    rocksdict (PR #1224, published) is prior art for building this same RocksDB
+    family from source on this registry, via a different Rust/maturin binding.'
 - pkg: openbabel-wheel
   version: 3.1.1.23
   home: https://github.com/njzjz/openbabel-wheel
@@ -10946,16 +10967,77 @@ packages:
   version: 2.1.0
   home: https://github.com/mongodb/kingfisher
   repo: https://github.com/mongodb/kingfisher
-  status: queued
+  status: parked
   pr: null
-  notes: '2 Linux wheels upstream (abi: py3); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Triaged, not forced. 2 Linux wheels upstream (abi: py3); no riscv64 on PyPI
+    or pypi.riseproject.dev. Confirmed real upstream (Apache-2.0, github.com/mongodb/kingfisher):
+    kingfisher-bin IS a py3-none binary-wrapper wheel exactly like lefthook/bashkit/fno
+    (scripts/build-pypi-wheel.sh stages a prebuilt `kingfisher` binary into pypi/kingfisher/bin/
+    and tags the wheel py3-none-<plat-name>), but the Rust binary itself is not portable: the
+    workspace''s kingfisher-scanner crate (a non-optional dependency of the root kingfisher-bin
+    binary, not just the Python bindings) hard-depends on `kingfisher-vectorscan = "=0.1.1"`
+    (micksmix/kingfisher-vectorscan), whose -sys crate vendors a full copy of VectorCamp/vectorscan
+    (the Hyperscan successor) and drives its CMake directly. Checked vectorscan''s own
+    CMakeLists.txt/cmake/*.cmake: architecture dispatch is x86 (cflags-x86.cmake) / ARM
+    NEON+SVE (cflags-arm.cmake) / PPC64LE VSX only, with `else() message(FATAL_ERROR
+    "Unsupported platform")` for anything else - confirmed no riscv64 branch anywhere in the
+    vendored tree (grep for "riscv" across CMakeLists.txt and cmake/*.cmake: zero hits). The one
+    documented escape hatch, `-DBUILD_SIMDE_BACKEND=ON` (portable SIMDe emulation instead of
+    native SIMD), is not wired up by kingfisher-vectorscan-sys/build.rs at all (its arch branch
+    only covers target_arch x86_64/aarch64, falling through to BUILD_AVX2/SVE=OFF for anything
+    else with no SIMDE_BACKEND define), and even if forced on, vectorscan''s own
+    cmake/archdetect.cmake has a live bug on an unmatched arch under SIMDE_BACKEND: its
+    GNUCC_ARCH selection falls through to the x86 default (`-march=x86-64-v2`), which a riscv64
+    gcc rejects - so unblocking this needs a second patch against the vendored copy, several
+    dependency layers removed from the package actually being ported. No existing precedent
+    anywhere: Debian''s own buildd has no riscv64 entry for vectorscan at all (arch not attempted,
+    not merely failing), and upstream VectorCamp/vectorscan''s own issue #74 ("Add new
+    architecture support: RISC-V", closed 2026-02-12 wontfix/duplicate) states explicitly "due
+    to lack of funding we do not expect to be providing RVV 1.0 support directly soon" and "we
+    refuse to accept patches for RVV 1.0, even if someone else does the work" - the SIMDe
+    fallback is only offered there as a future, untested stopgap ("the next Debian package
+    would use it"), never shipped or CI-tested by upstream on any non-x86/ARM/PPC Linux target.
+    kingfisher-bin''s own PyPI/CI wheels cover only macOS x86_64/arm64, manylinux aarch64/x86_64
+    and Windows amd64/arm64 - every one of those already has a native (non-SIMDe) vectorscan
+    backend, so the all-scalar path this port would require has never been exercised by anyone.
+    Parked on cost + unvalidatability, not a disproven architectural impossibility: unlike this
+    repo''s other vendored-SIMD cases (gotcha 220 BLST, gotcha 231 c-blosc2) where a portable-C
+    fallback already exists and is proven in upstream''s own CI, here the fallback path is
+    unused-by-anyone, requires patching a sub-dependency''s vendored copy of a third-party C++
+    library two levels removed from kingfisher-bin itself, and the library''s own maintainers
+    are on record refusing riscv64 cooperation - the opposite of this repo''s goal 4 (give
+    upstream cheap evidence riscv64 support is easy to add). Revisit if VectorCamp/vectorscan
+    ships a tested, CI-exercised SIMDe or native riscv64 backend, or if kingfisher-scanner moves
+    off a hard vectorscan dependency (e.g. a regex-only build feature) upstream. No
+    worktree/branch/workflow/docs entry/patch/PR opened.'
 - pkg: pvxslibs
   version: 1.5.2
   home: https://epics-base.github.io/pvxs
   repo: https://epics-base.github.io/pvxs
-  status: queued
+  status: blocked-on-dependency
   pr: null
-  notes: '7 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp39); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: '7 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp39); no riscv64 on PyPI
+    or pypi.riseproject.dev. Triaged: real upstream is github.com/epics-base/pvxs (BSD), a C++
+    PVAccess network-protocol implementation for EPICS; the `pvxslibs` PyPI wheel is its
+    setuptools-dso build (setup.py: define_DSOS() builds pvxslibs.lib.event_core/event_pthread
+    from a bundled libevent source tree under bundle/libevent/ - no external libevent needed -
+    then pvxslibs.lib.pvxs from src/, and pvxslibs.lib.pvxsIoc from ioc/). No ISA-gated code
+    expected or found; the real blocker is a hard build-time link dependency, not architecture:
+    both pvxs and pvxsIoc list `epicscorelibs.lib.Com` (plus dbRecStd/dbCore for pvxsIoc) in
+    their `dsos=` list, and setup.py''s install_requires pins `epicscorelibs.version.abi_requires()`
+    - setuptools_dso resolves and links against the actual installed epicscorelibs wheel''s
+    compiled .so/.a libraries at build time, so a riscv64 pvxslibs build needs a riscv64
+    epicscorelibs wheel present in the build environment first. epicscorelibs is already in
+    this queue (entry above) but not yet published: PR #2966 ("epicscorelibs: Add version
+    7.0.10.99.0.1") is open/draft, CI still running, not merged - confirmed via GitHub. Blocked
+    on that PR merging and publishing a riscv64 epicscorelibs wheel to pypi.riseproject.dev.
+    setuptools_dso itself (the other declared build/runtime dependency) is pure Python
+    (py2.py3-none-any on PyPI) and needs no port. Revisit once PR #2966 merges and
+    epicscorelibs status flips to `published`; expect the pvxslibs build/workflow to then
+    closely mirror epicscorelibs'' own build-epicscorelibs.yml (same setuptools-dso toolchain,
+    same manylinux image), installing our own published epicscorelibs as the build-time
+    dependency per this repo''s established dep-wheel pattern. No worktree/branch/workflow/docs
+    entry/patch/PR opened for pvxslibs itself.'
 - pkg: minorminer
   version: 0.2.22
   home: https://github.com/dwavesystems/minorminer
