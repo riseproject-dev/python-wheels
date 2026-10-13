@@ -1,0 +1,297 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Upstream builds fckitlib via a private tool (ecmwf-actions/reusable-workflows'
+# python-wrapper-wheel.yml + the "wheelmaker" image), not a public workflow, so this
+# replays ecmwf/fckit's own python/fckitlib/buildconfig CMAKE_PARAMS directly. fckit
+# wraps eckit for Fortran (DEPENDENCIES=["eckitlib"] in that buildconfig), so this
+# builds against our own published eckitlib wheel instead of upstream's exact
+# eckitlib==2.0.7.19 pin, which our registry does not carry. Upstream's own
+# pre-compile.sh explicitly skips auditwheel to avoid it vendoring eckit's shared
+# libraries into this wheel; this keeps that choice but still bundles libgfortran/
+# libquadmath (not on the manylinux baseline, unlike libstdc++/libgcc_s/libm) and
+# repoints the RPATH at a sibling eckitlib package instead of the build container's
+# own absolute path, which is what upstream's published wheel carries verbatim.
+name: Build fckitlib wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/fckitlib.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fckitlib.yml'
+      - 'docs/packages/fckitlib.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fckitlib.yml'
+      - 'docs/packages/fckitlib.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  ECBUILD_VERSION: '3.14.2'
+  ECKITLIB_VERSION: '2.3.0.30'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: fckitlib
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build fckitlib ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    env:
+      PACKAGE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Derive the fckit git tag from the package version
+        run: echo "FCKIT_VERSION=$(echo "$PACKAGE_VERSION" | sed -E 's/\.[0-9]+$//')" >> "$GITHUB_ENV"
+
+      - name: Checkout fckit ${{ env.FCKIT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ecmwf/fckit
+          ref: ${{ env.FCKIT_VERSION }}
+          persist-credentials: false
+
+      - name: Record the resolved commit
+        run: echo "FCKIT_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Write the wheel packaging script
+        run: |
+          cat > build_wheel.py <<'PY'
+          import hashlib
+          import os
+          import sys
+          import zipfile
+          from base64 import urlsafe_b64encode
+
+          PKG = "fckitlib"
+          VERSION, PLATFORM_TAG, INSTALL_DIR, LICENSES_DIR, OUT_DIR = sys.argv[1:6]
+
+          WHEEL_TAG = f"py3-none-{PLATFORM_TAG}"
+          DIST_INFO = f"{PKG}-{VERSION}.dist-info"
+
+          METADATA = f"""Metadata-Version: 2.4
+          Name: {PKG}
+          Version: {VERSION}
+          Summary: Compiled fckit Fortran/C++ toolkit library (ECMWF), no Python bindings
+          Home-page: https://confluence.ecmwf.int/display/FCKIT
+          Project-URL: Source, https://github.com/ecmwf/fckit
+          License-Expression: Apache-2.0
+          Requires-Dist: eckitlib>=2.3.0.30
+          """
+
+          WHEEL = f"""Wheel-Version: 1.0
+          Generator: python-wheels-riscv64-port
+          Root-Is-Purelib: false
+          Tag: {WHEEL_TAG}
+          """
+
+          os.makedirs(OUT_DIR, exist_ok=True)
+          wheel_path = os.path.join(OUT_DIR, f"{PKG}-{VERSION}-{WHEEL_TAG}.whl")
+          records = []
+
+          def write_file(zf, arcname, path):
+              with open(path, "rb") as f:
+                  data = f.read()
+              info = zipfile.ZipInfo(arcname)
+              info.external_attr = (os.stat(path).st_mode & 0xFFFF) << 16
+              zf.writestr(info, data, zipfile.ZIP_DEFLATED)
+              digest = urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+              records.append(f"{arcname},sha256={digest},{len(data)}")
+
+          def write_bytes(zf, arcname, data):
+              zf.writestr(arcname, data)
+              digest = urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+              records.append(f"{arcname},sha256={digest},{len(data)}")
+
+          with zipfile.ZipFile(wheel_path, "w", zipfile.ZIP_DEFLATED) as zf:
+              for root, _dirs, files in os.walk(INSTALL_DIR):
+                  for name in sorted(files):
+                      path = os.path.join(root, name)
+                      rel = os.path.relpath(path, INSTALL_DIR)
+                      write_file(zf, f"{PKG}/{rel}", path)
+
+              for name in sorted(os.listdir(LICENSES_DIR)):
+                  write_file(zf, f"{DIST_INFO}/licenses/{name}", os.path.join(LICENSES_DIR, name))
+
+              write_bytes(zf, f"{DIST_INFO}/METADATA", METADATA.encode())
+              write_bytes(zf, f"{DIST_INFO}/WHEEL", WHEEL.encode())
+              write_bytes(zf, f"{DIST_INFO}/top_level.txt", f"{PKG}\n".encode())
+
+              record_name = f"{DIST_INFO}/RECORD"
+              zf.writestr(record_name, "\n".join(records + [f"{record_name},,"]) + "\n")
+
+          print(wheel_path)
+          PY
+
+      - name: Build fckit against our own published eckitlib, then package the wheel
+        run: |
+          docker run --rm \
+            -v "$(pwd)":/workspace \
+            --workdir /workspace \
+            -e PACKAGE_VERSION="$PACKAGE_VERSION" \
+            -e FCKIT_COMMIT="$FCKIT_COMMIT" \
+            -e ECBUILD_VERSION="$ECBUILD_VERSION" \
+            -e ECKITLIB_VERSION="$ECKITLIB_VERSION" \
+            "$MANYLINUX_RISCV64_IMAGE" \
+            bash -c '
+              set -euo pipefail
+              mkdir -p /tmp/ecbuild /tmp/deps /tmp/build /tmp/install/fckitlib /tmp/licenses
+
+              curl -fsSL "https://github.com/ecmwf/ecbuild/archive/refs/tags/$ECBUILD_VERSION.tar.gz" | tar xz -C /tmp/build
+              cmake -S "/tmp/build/ecbuild-$ECBUILD_VERSION" -B /tmp/build/ecbuild-build -D CMAKE_INSTALL_PREFIX=/tmp/ecbuild
+              cmake --build /tmp/build/ecbuild-build -j "$(nproc)"
+              cmake --install /tmp/build/ecbuild-build
+
+              /opt/python/cp312-cp312/bin/pip install -q --no-deps --target /tmp/deps \
+                --index-url https://pypi.riseproject.dev/simple/ "eckitlib==$ECKITLIB_VERSION"
+
+              cmake -S . -B /tmp/build/fckit-build \
+                -D CMAKE_BUILD_TYPE=MinSizeRel \
+                -D CMAKE_PREFIX_PATH=/tmp/ecbuild \
+                -D eckit_ROOT=/tmp/deps/eckitlib \
+                -D CMAKE_INSTALL_PREFIX=/tmp/install/fckitlib \
+                -D CMAKE_INSTALL_LIBDIR=lib64 \
+                -D ENABLE_TESTS=OFF
+              cmake --build /tmp/build/fckit-build -j "$(nproc)"
+              cmake --install /tmp/build/fckit-build
+
+              GFORTRAN_LIB=$(find /usr/lib64 /usr/lib -name "libgfortran.so.5" 2>/dev/null | head -1)
+              QUADMATH_LIB=$(find /usr/lib64 /usr/lib -name "libquadmath.so.0" 2>/dev/null | head -1)
+              cp -L "$GFORTRAN_LIB" "$QUADMATH_LIB" /tmp/install/fckitlib/lib64/
+
+              # Upstream ships this RPATH as the literal absolute path of its own
+              # build container (readelf -d on the published wheel shows
+              # "/tmp/fckit/prereqs/eckitlib/lib64"), which cannot resolve on an
+              # end-user system; point it at a sibling eckitlib package instead.
+              patchelf --set-rpath "\$ORIGIN:\$ORIGIN/../../eckitlib/lib64" /tmp/install/fckitlib/lib64/libfckit.so
+
+              GFORTRAN_PKG=$(rpm -qf "$GFORTRAN_LIB" --qf "%{NAME}\n")
+              QUADMATH_PKG=$(rpm -qf "$QUADMATH_LIB" --qf "%{NAME}\n")
+              for pkg in $GFORTRAN_PKG $QUADMATH_PKG; do
+                licence_file=$(rpm -ql "$pkg" | grep "^/usr/share/licenses/" | head -1)
+                if [ -n "$licence_file" ]; then
+                  cp "$(dirname "$licence_file")"/* /tmp/licenses/
+                fi
+              done
+
+              cp LICENSE /tmp/licenses/fckit.txt
+
+              printf "__version__ = \"%s\"\n__commit_hash__ = \"%s\"\nfindlibs_dependencies = [\"eckitlib\"]\n" \
+                "$PACKAGE_VERSION" "$FCKIT_COMMIT" > /tmp/install/fckitlib/__init__.py
+
+              python3 build_wheel.py "$PACKAGE_VERSION" manylinux_2_39_riscv64 /tmp/install/fckitlib /tmp/licenses wheelhouse
+            '
+
+      - name: Check the wheel ships the library, the CLI tool and the bundled licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          for lib in ("libfckit.so", "libgfortran.so.5", "libquadmath.so.0"):
+              assert any(n.endswith(f"lib64/{lib}") for n in names), (lib, names)
+          assert any(n.endswith("bin/fckit") for n in names), names
+          assert any(n.endswith(".dist-info/licenses/fckit.txt") for n in names), names
+          EOF
+
+      - name: Smoke-test the built library
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          # gotcha 234: stock Ubuntu 24.04 apt pip (24.0) has zero manylinux_*_riscv64
+          # tags, so it rejects the riscv64 wheel outright without upgrading first.
+          pip install -q --upgrade pip
+          pip install -q --index-url https://pypi.riseproject.dev/simple/ "eckitlib==${ECKITLIB_VERSION}"
+          pip install -q wheelhouse/*.whl
+          python3 -c "
+          import ctypes, glob, os
+          import eckitlib, fckitlib
+
+          ctypes.CDLL(glob.glob(os.path.join(os.path.dirname(eckitlib.__file__), 'lib64', 'libeckit.so*'))[0], mode=ctypes.RTLD_GLOBAL)
+          lib = ctypes.CDLL(glob.glob(os.path.join(os.path.dirname(fckitlib.__file__), 'lib64', 'libfckit.so*'))[0])
+          print('loaded libfckit.so, fckitlib', fckitlib.__version__, fckitlib.__commit_hash__)
+          "
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fckitlib-${{ matrix.version }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources (gcc) for fckitlib ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      PACKAGE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # fckit compiles real Fortran, so the wheel bundles the image's
+      # libgfortran/libquadmath runtime (not on the manylinux baseline list).
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fckitlib-${{ env.PACKAGE_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish fckitlib ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: fckitlib-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: fckitlib-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc (libgfortran/libquadmath runtime) bundled in the wheel
