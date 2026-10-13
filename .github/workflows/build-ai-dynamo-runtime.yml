@@ -1,0 +1,198 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the runtime_wheel_builder stage of
+# https://github.com/ai-dynamo/dynamo/blob/v1.5.1/container/templates/wheel_builder.Dockerfile
+# and the CPU pre-merge pytest selection of
+# https://github.com/ai-dynamo/dynamo/blob/v1.5.1/.github/workflows/pr.yaml
+name: Build ai-dynamo-runtime wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ai-dynamo-runtime.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ai-dynamo-runtime.yml'
+      - 'docs/packages/ai-dynamo-runtime.yaml'
+      - 'patches/ai-dynamo-runtime/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ai-dynamo-runtime.yml'
+      - 'docs/packages/ai-dynamo-runtime.yaml'
+      - 'patches/ai-dynamo-runtime/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: ai-dynamo-runtime
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build ai-dynamo-runtime ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    container:
+      image: quay.io/pypa/manylinux_2_39_riscv64
+    defaults:
+      run:
+        shell: bash
+    env:
+      AI_DYNAMO_RUNTIME_VERSION: ${{ matrix.version }}
+      PROTOC: /usr/bin/protoc
+      PROTOC_INCLUDE: /usr/include
+
+    steps:
+      - name: Checkout dynamo v${{ env.AI_DYNAMO_RUNTIME_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ai-dynamo/dynamo
+          ref: v${{ env.AI_DYNAMO_RUNTIME_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          sparse-checkout: patches/ai-dynamo-runtime
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply -v python-wheels/patches/ai-dynamo-runtime/${{ env.AI_DYNAMO_RUNTIME_VERSION }}/*.patch
+
+      # Upstream downloads a protoc release zip, which has no riscv64 build.
+      - name: Install system dependencies
+        run: |
+          dnf -y --enablerepo=crb install protobuf-compiler protobuf-devel clang-devel
+          protoc --version
+          echo "/opt/python/cp312-cp312/bin" >> "$GITHUB_PATH"
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain none --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          "$HOME/.cargo/bin/rustup" toolchain install "$channel" --profile minimal
+
+      - name: Build wheel
+        working-directory: lib/bindings/python
+        run: |
+          python -m pip install maturin
+          maturin build --release \
+            --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" \
+            --out dist
+
+      - name: Bundle third-party Rust licences
+        run: |
+          find "$HOME/.cargo/registry/src" -mindepth 2 -maxdepth 2 -type d | while IFS= read -r crate; do
+            dest="rust-licenses/$(basename "$crate")"
+            for lf in "$crate"/LICENSE* "$crate"/LICENCE* "$crate"/COPYING* "$crate"/NOTICE* "$crate"/UNLICENSE*; do
+              [ -e "$lf" ] || continue
+              mkdir -p "$dest" && cp "$lf" "$dest/" 2>/dev/null || true
+            done
+          done
+          python -m pip install pyyaml
+          for whl in lib/bindings/python/dist/*.whl; do
+            PYTHONPATH=container python -m compliance.bundle_wheel_notices --wheel "$whl" --licenses-dir rust-licenses -v
+            python -c 'import sys, zipfile; assert any(n.endswith(".dist-info/licenses/THIRD-PARTY-RUST-LICENSES.txt") for n in zipfile.ZipFile(sys.argv[1]).namelist())' "$whl"
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ai-dynamo-runtime-${{ env.AI_DYNAMO_RUNTIME_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: lib/bindings/python/dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["3.12", "3.13", "3.14"]
+    name: Test ai-dynamo-runtime ${{ matrix.version }} cp${{ matrix.python }}
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    env:
+      AI_DYNAMO_RUNTIME_VERSION: ${{ matrix.version }}
+      UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_ONLY_BINARY: pydantic-core,uvloop,numpy,aiohttp,frozenlist,multidict,propcache,yarl
+      UV_PYTHON_PREFERENCE: only-managed
+      # etcd 3.4 refuses to start on architectures it does not list as supported.
+      ETCD_UNSUPPORTED_ARCH: riscv64
+
+    steps:
+      - name: Checkout dynamo v${{ env.AI_DYNAMO_RUNTIME_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ai-dynamo/dynamo
+          ref: v${{ env.AI_DYNAMO_RUNTIME_VERSION }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ai-dynamo-runtime-${{ env.AI_DYNAMO_RUNTIME_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: dist
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python }}
+          activate-environment: true
+          enable-cache: false
+
+      # Upstream's test image provides nats-server and etcd for the bindings' autouse fixture.
+      - name: Install NATS and etcd
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends nats-server etcd-server
+
+      - name: Install wheel
+        run: |
+          uv pip install dist/*.whl
+          uv pip install pytest pytest-asyncio pytest-timeout pytest-forked pytest-benchmark aiohttp numpy
+
+      # test_kserve_grpc.py needs tritonclient[grpc], which upstream gets from its framework images.
+      - name: Test
+        run: |
+          python -m pytest lib/bindings/python/tests \
+            -m "pre_merge and gpu_0" \
+            --ignore=lib/bindings/python/tests/test_kserve_grpc.py
+
+  publish:
+    name: Publish ai-dynamo-runtime ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: ai-dynamo-runtime-${{ matrix.version }}-*-manylinux_riscv64
