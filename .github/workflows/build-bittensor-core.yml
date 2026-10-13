@@ -1,0 +1,167 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/RaoFoundation/subtensor/blob/v445/.github/workflows/build-core-wheels.yml
+name: Build bittensor-core wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/bittensor-core.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-bittensor-core.yml'
+      - 'docs/packages/bittensor-core.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-bittensor-core.yml'
+      - 'docs/packages/bittensor-core.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # subtensor is a monorepo with no per-release git tag matching the PyPI
+  # version: releases are cut by chain spec_version (CLAUDE.md gotcha 103).
+  # Tag v445 is the lightweight release tag whose sdk/bittensor-core-py/
+  # pyproject.toml pins version "0.1.3"; its tree (sdk/bittensor-core,
+  # sdk/bittensor-core-py, support/macros, vendor/w3f-bls, Cargo.lock) is
+  # byte-identical to the released 0.1.3 sdist. Pinned by commit, not the
+  # mutable tag ref, for immutability.
+  BITTENSOR_CORE_REF: d3f40e44bda9019c606aeb0c907bb52ba7fe386c
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: bittensor-core
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build bittensor-core ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      BITTENSOR_CORE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout subtensor @ ${{ env.BITTENSOR_CORE_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: RaoFoundation/subtensor
+          ref: ${{ env.BITTENSOR_CORE_REF }}
+          persist-credentials: false
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          working-directory: sdk/bittensor-core-py
+          command: build
+          # pyo3's abi3-py310 feature makes this one wheel; it is built on
+          # py3.10, the oldest interpreter its tag claims.
+          args: --release --out ../../dist --interpreter python3.10
+          target: riscv64gc-unknown-linux-gnu
+          manylinux: '2_39'
+          # libsodium-sys 0.2.7 passes the Rust triple as `configure --host`,
+          # and no config.sub accepts `riscv64gc`, so build its bundled
+          # libsodium the same way build-bittensor-wallet.yml does and hand it
+          # over through SODIUM_LIB_DIR. openssl-sys (vendored, for fernet)
+          # needs a perl with IPC::Cmd, which this manylinux image's minimal
+          # perl lacks.
+          before-script-linux: |
+            yum install -y perl-core openssl openssl-devel pkgconfig libatomic
+            cargo fetch --locked --manifest-path "$GITHUB_WORKSPACE/sdk/bittensor-core-py/Cargo.toml"
+            registry=$(echo "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*)
+            cp -a "$registry/libsodium-sys-0.2.7/libsodium" /tmp/libsodium
+            (cd /tmp/libsodium && ./configure --prefix=/opt/libsodium --enable-shared=no --with-pic && make -j"$(nproc)" check && make install)
+            export SODIUM_LIB_DIR=/opt/libsodium/lib
+            cp /tmp/libsodium/LICENSE "$GITHUB_WORKSPACE/sdk/bittensor-core-py/LICENSE.libsodium"
+            cp "$registry/secp256k1-sys-0.9.2/depend/secp256k1/COPYING" "$GITHUB_WORKSPACE/sdk/bittensor-core-py/LICENSE.secp256k1"
+            cp /usr/share/licenses/openssl-libs/LICENSE.txt "$GITHUB_WORKSPACE/sdk/bittensor-core-py/LICENSE.openssl"
+            cp "$GITHUB_WORKSPACE/LICENSE" "$GITHUB_WORKSPACE/sdk/bittensor-core-py/LICENSE"
+
+      - name: Check the wheel ships the extension and every licence
+        run: |
+          set -euo pipefail
+          python3 - dist/*.whl <<'EOF'
+          import os, sys, zipfile
+          whl = sys.argv[1]
+          assert os.path.basename(whl).startswith(f"bittensor_core-{os.environ['BITTENSOR_CORE_VERSION']}-"), whl
+          names = zipfile.ZipFile(whl).namelist()
+          sos = [n for n in names if n.endswith(".so")]
+          assert any(n.startswith("bittensor_core/bittensor_core.") for n in sos), sos
+          licences = {n.rsplit("/", 1)[1]
+                      for n in names if ".dist-info/licenses/" in n} - {""}
+          assert licences == {"LICENSE", "LICENSE.libsodium", "LICENSE.openssl", "LICENSE.secp256k1"}, (whl, licences)
+          print(whl, "->", sos)
+          EOF
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      # Upstream ships no standalone pytest suite for bittensor-core-py (it
+      # replaces py-sp-core and bittensor-drand; the full-repo Python tests
+      # live under sdk/python/ for the separate `bittensor` SDK package).
+      # Smoke-test the abi3 wheel against a well-known Substrate dev key.
+      - name: Run smoke test
+        env:
+          UV_ONLY_BINARY: ':all:'
+        run: |
+          uv pip install dist/*.whl
+          python3 - <<'EOF'
+          from bittensor_core import Keypair, verify
+
+          kp = Keypair.create_from_uri("//Alice")
+          assert kp.ss58_address == "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", kp.ss58_address
+          assert kp.crypto_type == 1
+
+          message = b"hello riscv64"
+          signature = kp.sign(message)
+          assert kp.verify(message, signature)
+          assert verify(message, signature, kp.ss58_address, kp.crypto_type)
+          print("ok:", kp.ss58_address)
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bittensor-core-${{ env.BITTENSOR_CORE_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish bittensor-core ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: bittensor-core-${{ matrix.version }}-*-manylinux_riscv64
