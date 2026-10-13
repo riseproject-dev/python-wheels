@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (556 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (557 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -496,6 +496,10 @@ The porting gotchas (556 of them) live in [`references/gotchas/`](gotchas/), spl
   dependency with no riscv64 variant (pyOpenMS's `contrib_manylinux` image, which bakes in a
   ten-library from-source contrib build) and compounds with an already-parked sibling (Qt5,
   via pyqt5-qt5/pyqt6-qt6) rather than needing its own re-derivation (the pyopenms case).
+- **650** — Gotcha 372's license wall doesn't need an explicit restrictive clause — a
+  commercial product shipping no LICENSE file anywhere and only a copyright notice is already
+  "all rights reserved" by default, the same lock, even on an otherwise trivial PyO3/maturin
+  build with no exotic deps or ISA gates (the kolo case).
 
 ### Sdist source & versioning — [`gotchas/sdist-source-and-versioning.md`](gotchas/sdist-source-and-versioning.md)
 

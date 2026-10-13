@@ -5536,3 +5536,39 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       core is a multi-day effort for one wheel port. Re-triage if OpenMS ever publishes a
       `contrib_manylinux`-equivalent riscv64 image, or if a standalone from-source Qt5/Boost/
       Arrow build lands in this repo for some other port to share.
+
+650. **Gotcha 372's license wall doesn't need an explicit restrictive clause to fire — a
+    commercial product that ships *no* LICENSE file anywhere and nothing but a copyright
+    notice is already "all rights reserved" by default, which is the same lock (the kolo
+    case).** kolo 3.3.0 is otherwise a clean, trivial PyO3/maturin port: `rust/Cargo.toml` is a
+    small, generic dependency set (bstr, crc32fast, hashbrown, libc, once_cell, pyo3 0.26,
+    rmp/rmpv, thread_local, ulid) built through a thin `_build_backend.py` that wraps maturin's
+    own PEP 517 hooks to inject a `.pth` auto-activation file; the only `cfg` gates in the
+    whole crate are `target_arch = "wasm32"`, `target_os = "windows"` and `target_has_atomic =
+    "64"`, all satisfied on `riscv64gc-unknown-linux-gnu` (tier 2, 64-bit atomics), so the only
+    matrix trim would have been dropping the `pp310`/`pp39` PyPy legs (this repo doesn't build
+    PyPy — pycrdt/libipld precedent). None of that matters: unlike hdbcli's SAP license, which
+    names an explicit prohibition to quote, kolo's `pyproject.toml` sets `license = { text =
+    "© Kolo" }` — a bare copyright notice, not a license grant — with no OSI classifier
+    anywhere in the PyPI metadata. The built wheel's `*.dist-info/` carries no LICENSE file at
+    all (checked the real `kolo-3.3.0-cp310-cp310-manylinux_2_34_x86_64.whl` directly: only
+    METADATA/WHEEL/entry_points.txt/RECORD/sboms — the one `*.LICENSE.txt` present is a
+    webpack-generated third-party-JS attribution for the bundled web dashboard, unrelated to
+    kolo's own code). The public repo named in `home`/`repo` (github.com/koloai/kolo) is a
+    near-empty stub — README.md plus an unrelated `skills/` directory, no LICENSE, no source,
+    no CI — because the real source lives in a private monorepo and reaches PyPI only as a
+    buildable sdist; and both kolo.app and docs.kolo.app carry the explicit footer "© Kolo. All
+    rights reserved." with no pricing/licensing/terms page anywhere.
+    - **"All rights reserved" with no accompanying license text is not a looser case than an
+      explicit restrictive clause — it's the legal default an explicit clause only makes
+      visible.** Copyright law grants no implied right to copy, rebuild or rehost someone
+      else's binary absent a license; a vendor who publishes wheels to public PyPI for `pip
+      install` has not thereby licensed anyone to republish a rebuilt copy on a different
+      index. Treat the absence of *any* LICENSE file on a commercial product's wheel — not just
+      the presence of a restrictive one — as the same double-lock gotcha 372 describes: check
+      for a LICENSE file in the wheel's `dist-info` *and* an OSI/permissive classifier before
+      concluding a port is clear to redistribute, even when (unlike hdbcli) the sdist exists,
+      builds cleanly, and the ISA/dependency story is a non-issue.
+    - Verdict: `parked`, no worktree/branch/PR opened — the Rust build itself is routine; there
+      is simply nothing upstream has licensed this repo to redistribute. Re-triage only if
+      kolo ever ships an explicit open-source LICENSE.
