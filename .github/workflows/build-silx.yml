@@ -1,0 +1,109 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build_wheels` job of upstream's own release workflow:
+#   https://github.com/silx-kit/silx/blob/v3.1.1/.github/workflows/release.yml
+name: Build silx wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/silx.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-silx.yml'
+      - 'docs/packages/silx.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-silx.yml'
+      - 'docs/packages/silx.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: silx
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build silx ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      SILX_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout silx v${{ env.SILX_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: silx-kit/silx
+          ref: v${{ env.SILX_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          WITH_QT_TEST: "False"
+          WITH_GL_TEST: "False"
+          SILX_OPENCL: "False"
+
+          CIBW_ENVIRONMENT_PASS_LINUX: WITH_QT_TEST WITH_GL_TEST SILX_OPENCL
+
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BUILD_FRONTEND: "build; args: -C setup-args=-Duse_openmp=disabled"
+          CIBW_ENVIRONMENT_LINUX: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+
+          # The `full,test` extras pull PySide6, pyopencl and bitshuffle, none of
+          # which has a riscv64 wheel; install the rest of both extras instead.
+          CIBW_TEST_ENVIRONMENT: 'PIP_ONLY_BINARY=:all:'
+          CIBW_TEST_REQUIRES: >-
+            matplotlib python-dateutil scipy pooch Pillow pint hdf5plugin
+            h5pyd imageio[tifffile] pytest pytest-mock pytest-httpserver
+          CIBW_TEST_COMMAND: pytest --verbosity=3 --pyargs silx
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: silx-${{ matrix.version }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish silx ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: silx-${{ matrix.version }}-*-manylinux_riscv64
