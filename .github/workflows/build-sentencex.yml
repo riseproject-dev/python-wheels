@@ -1,0 +1,126 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/wikimedia/sentencex/blob/v1.0.30/.github/workflows/python.yml
+name: Build sentencex wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/sentencex.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sentencex.yml'
+      - 'docs/packages/sentencex.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sentencex.yml'
+      - 'docs/packages/sentencex.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: sentencex
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build sentencex ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # The pyo3 module declares gil_used = false, and its Cargo.toml has
+        # no abi3 feature, so every interpreter including cp314t needs its
+        # own build. pp311 is dropped: PyPy has no riscv64 port.
+        python: ['cp312', 'cp313', 'cp314', 'cp314t']
+
+    env:
+      SENTENCEX_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout sentencex v${{ env.SENTENCEX_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: wikimedia/sentencex
+          ref: v${{ env.SENTENCEX_VERSION }}
+          persist-credentials: false
+
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --strip -i ${{ steps.interp.outputs.value }} --out dist
+          manylinux: '2_39'
+          working-directory: bindings/python
+
+      - name: Check the wheel ships the extension
+        run: |
+          set -euo pipefail
+          python3 - bindings/python/dist/*.whl <<'EOF'
+          import os, sys, zipfile
+          whl = sys.argv[1]
+          assert os.path.basename(whl).startswith(f"sentencex-{os.environ['SENTENCEX_VERSION']}-"), whl
+          sos = [n for n in zipfile.ZipFile(whl).namelist() if n.endswith(".so")]
+          assert any(n.startswith("sentencex/sentencex.") for n in sos), sos
+          print(whl, "->", sos)
+          EOF
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ steps.interp.outputs.value }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Run tests
+        run: |
+          uv pip install bindings/python/dist/*.whl pytest
+          pytest bindings/python/tests/ -v
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sentencex-${{ env.SENTENCEX_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: bindings/python/dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish sentencex ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: sentencex-${{ matrix.version }}-*-manylinux_riscv64
