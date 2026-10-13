@@ -1,0 +1,205 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on upstream's own build/test setup:
+#   https://github.com/marcelotduarte/freeze-core/blob/0.7.2/.github/workflows/build-sdist.yml
+#   https://github.com/marcelotduarte/freeze-core/blob/0.7.2/.github/workflows/build-wheel.yml
+#   https://github.com/marcelotduarte/freeze-core/blob/0.7.2/.github/workflows/ci.yml (tests job)
+name: Build freeze-core wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/freeze-core.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-freeze-core.yml'
+      - 'docs/packages/freeze-core.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-freeze-core.yml'
+      - 'docs/packages/freeze-core.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: freeze-core
+      version: ${{ inputs.version }}
+
+  build_sdist:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build freeze-core ${{ matrix.version }} sdist
+    runs-on: ubuntu-latest
+    env:
+      FREEZE_CORE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout freeze-core ${{ env.FREEZE_CORE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: marcelotduarte/freeze-core
+          ref: ${{ env.FREEZE_CORE_VERSION }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build sdist
+        run: uv build --sdist
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: freeze-core-${{ env.FREEZE_CORE_VERSION }}-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_sdist]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build freeze-core ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+        libc: [manylinux, musllinux]
+
+    env:
+      FREEZE_CORE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: freeze-core-${{ env.FREEZE_CORE_VERSION }}-sdist
+          path: dist
+
+      - id: sdist_path
+        run: echo "path=$(echo dist/*.tar.gz)" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: ${{ steps.sdist_path.outputs.path }}
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: freeze-core-${{ env.FREEZE_CORE_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  # Upstream's own tests job runs on bare ubuntu/windows/macos runners, not
+  # inside the manylinux container, installing the just-built wheel from a
+  # literal ./wheelhouse (tests/conftest.py's TempPackage hardcodes that
+  # relative path) before running pytest; mirrored here on the riscv64 runner
+  # for the manylinux leg only, since testing the musllinux wheel would need a
+  # musl/alpine riscv64 image this repo does not otherwise exercise.
+  test_wheels:
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    name: Test freeze-core ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        include:
+          - python: cp312
+            python-version: '3.12'
+          - python: cp313
+            python-version: '3.13'
+          - python: cp314
+            python-version: '3.14'
+          - python: cp314t
+            python-version: '3.14t'
+
+    env:
+      FREEZE_CORE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: freeze-core-${{ env.FREEZE_CORE_VERSION }}-sdist
+          path: dist
+
+      - name: Extract sdist
+        run: |
+          mkdir src
+          tar xzf dist/freeze_core-*.tar.gz --strip-components=1 -C src
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: freeze-core-${{ env.FREEZE_CORE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: src/wheelhouse
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      # cx_Freeze itself is not what's being ported here: it is a pure
+      # py3-none-any wheel on PyPI (its only non-noarch runtime dep, patchelf,
+      # is gated by a platform_machine marker that excludes riscv64), so pip
+      # installs it straight from the default index with no extra wiring.
+      - name: Install test dependencies and the built wheel
+        working-directory: src
+        run: |
+          uv pip install pytest setuptools cabarchive striprtf cx_Freeze
+          uv pip install freeze-core -f wheelhouse --no-deps --no-index --reinstall
+
+      - name: Run tests
+        working-directory: src
+        run: python -m pytest tests
+
+  publish:
+    name: Publish freeze-core ${{ matrix.version }}
+    needs: [setup, build_wheels, test_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: freeze-core-${{ matrix.version }}-*riscv64
