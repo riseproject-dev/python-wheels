@@ -1,0 +1,188 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# fbuild has no sdist: release-auto.yml builds the fbuild/fbuild-daemon
+# binaries and the PyO3 _native extension per target (template_native_build.yml),
+# then ci/publish.py assembles the wheels. This mirrors that pipeline for
+# riscv64, built natively in the manylinux image instead of cargo-zigbuild.
+name: Build fbuild wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/fbuild.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fbuild.yml'
+      - 'docs/packages/fbuild.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fbuild.yml'
+      - 'docs/packages/fbuild.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: fbuild
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build fbuild ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    env:
+      FBUILD_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout fbuild v${{ env.FBUILD_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: FastLED/fbuild
+          ref: v${{ env.FBUILD_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch fbuild source
+        run: git apply python-wheels/patches/fbuild/${{ env.FBUILD_VERSION }}/00*.patch
+
+      - name: Write in-container build script
+        run: |
+          cat > "$RUNNER_TEMP/build.sh" <<'SCRIPT'
+          set -euxo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+          source "$HOME/.cargo/env"
+          rustup toolchain install
+
+          cargo build --release -p fbuild-cli -p fbuild-daemon
+          PYO3_NO_PYTHON=1 cargo build --release \
+            --target-dir target/python-extension \
+            -p fbuild-python \
+            --features extension-module
+
+          staging=dist/linux-riscv64
+          mkdir -p "$staging"
+          cp target/release/fbuild target/release/fbuild-daemon "$staging/"
+          cp target/python-extension/release/lib_native.so "$staging/_native.abi3.so"
+          strip "$staging/fbuild" "$staging/fbuild-daemon" "$staging/_native.abi3.so"
+
+          /opt/python/cp312-cp312/bin/python - <<'PY'
+          import ci.publish as publish
+
+          publish.build_wheel(*publish.read_project_meta(), "linux-riscv64", ["manylinux_2_39_riscv64"])
+          PY
+          auditwheel show dist/wheels/*.whl
+          SCRIPT
+
+      - name: Build wheel
+        run: |
+          docker run --rm \
+            -v "$(pwd)":/workspace \
+            -v "$RUNNER_TEMP/build.sh":/build.sh \
+            -w /workspace \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /build.sh
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fbuild-${{ env.FBUILD_VERSION }}-manylinux_riscv64
+          path: dist/wheels/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test fbuild ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    env:
+      FBUILD_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # cp310-abi3 is not installable on free-threaded builds, so no 3.14t.
+        python-version: ['3.12', '3.13', '3.14']
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: fbuild-${{ env.FBUILD_VERSION }}-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . fbuild
+
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          version=$(fbuild --version)
+          echo "$version"
+          [ "$version" = "fbuild ${FBUILD_VERSION}" ]
+          fbuild-daemon --help >/dev/null
+          python - <<'PY'
+          import importlib.metadata
+          import os
+          import tempfile
+
+          import fbuild
+
+          assert fbuild.__version__ == os.environ["FBUILD_VERSION"], fbuild.__version__
+          with tempfile.TemporaryDirectory() as project:
+              assert fbuild.find_firmware(project, "uno") is None
+
+          dist_info = {p.name for p in importlib.metadata.files("fbuild") if ".dist-info/" in str(p)}
+          assert "LICENSE" in dist_info, dist_info
+          assert importlib.metadata.metadata("fbuild")["License-Expression"] == "AGPL-3.0-only"
+          PY
+
+  publish:
+    name: Publish fbuild ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: fbuild-${{ matrix.version }}-manylinux_riscv64
