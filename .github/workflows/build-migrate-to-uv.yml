@@ -1,0 +1,162 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/osprey-oss/migrate-to-uv/blob/v0.12.0/.github/workflows/release.yml
+name: Build migrate-to-uv wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/migrate-to-uv.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-migrate-to-uv.yml'
+      - 'docs/packages/migrate-to-uv.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-migrate-to-uv.yml'
+      - 'docs/packages/migrate-to-uv.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: migrate-to-uv
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build migrate-to-uv ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+
+    env:
+      MIGRATE_TO_UV_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout migrate-to-uv v${{ env.MIGRATE_TO_UV_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: osprey-oss/migrate-to-uv
+          ref: v${{ env.MIGRATE_TO_UV_VERSION }}
+          persist-credentials: false
+
+      # `[tool.maturin] bindings = "bin"`: the wheel is one compiled executable
+      # with no ABI tag, so a single native build covers every interpreter.
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --locked --out dist
+          manylinux: '2_39'
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: migrate-to-uv-${{ env.MIGRATE_TO_UV_VERSION }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test migrate-to-uv ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    env:
+      MIGRATE_TO_UV_VERSION: ${{ matrix.version }}
+      # Without this uv would reuse the runner image's system CPython for 3.12
+      # and download a standalone build for the others.
+      UV_PYTHON_PREFERENCE: only-managed
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # This repo's default interpreter matrix (gotcha in workflow-anatomy.md);
+        # the wheel is interpreter-agnostic (bindings = "bin"), so every
+        # interpreter -- including free-threaded -- exercises the same binary.
+        python-version: ['3.12', '3.13', '3.14', '3.14t']
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: migrate-to-uv-${{ env.MIGRATE_TO_UV_VERSION }}-manylinux_riscv64
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install --reinstall --no-index --find-links . migrate-to-uv
+
+      # No wheel-level test suite ships in the sdist (gotcha 187): upstream's own
+      # tests/*.rs (cargo test, against tests/fixtures/*) are Rust integration
+      # tests, never packaged. Drive a real migration against a minimal Poetry
+      # project instead of settling for a bare --version check.
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          migrate-to-uv --version
+          migrate-to-uv --help >/dev/null
+
+          work=$(mktemp -d)
+          cat > "$work/pyproject.toml" <<'TOML'
+          [tool.poetry]
+          name = "migrate-to-uv-smoke-test"
+          version = "0.1.0"
+          description = ""
+          authors = ["Someone <someone@example.com>"]
+
+          [tool.poetry.dependencies]
+          python = "^3.12"
+          requests = "^2.31.0"
+
+          [build-system]
+          requires = ["poetry-core"]
+          build-backend = "poetry.core.masonry.api"
+          TOML
+
+          migrate-to-uv --project-path "$work"
+          grep -q '^\[project\]' "$work/pyproject.toml"
+          grep -q 'requests' "$work/pyproject.toml"
+          ! grep -q '^\[tool.poetry.dependencies\]' "$work/pyproject.toml"
+
+  publish:
+    name: Publish migrate-to-uv ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: migrate-to-uv-${{ matrix.version }}-manylinux_riscv64
