@@ -224,6 +224,13 @@ The porting gotchas (558 of them) live in [`references/gotchas/`](gotchas/), spl
   accelerator: amplpy's `setup.py` links its Cython extension against a closed, prebuilt-only
   `libampl.so` with no riscv64 build and no public source, even though the bindings themselves
   are open and the real AMPL solver is a separate, optional runtime dependency (the amplpy case).
+- **654** — A rename-fork that adds one feature (hops-deltalake over delta-rs) is blocked by that
+  feature's prebuilt payload: a hard-wired `hdfs` cargo feature pulls `hopsfs-native-object-store`,
+  whose `build.rs` downloads an x86-only `libhdfs-golang` `.so` (built in a private EE repo) and
+  hardcodes the `linux-amd64` filter — no riscv64 payload, no from-source path (the hops-deltalake case).
+- **655** — A `uv tool install`-only "-cli" package whose GitHub org holds only skills/plugins is a
+  closed Cython core: all `.so` with no `.py` twins across 7 packages, zero sdist ever, and no licence
+  field/classifier/file anywhere — source and licence both absent (the browser-act-cli case).
 - **459** — A CUDA-only PyPI wheel does not make the *project* CUDA-only: a device-selecting
   build env var can produce a genuinely portable CPU distribution from the same tree, and
   upstream may already carry riscv64 kernels for it (the vllm case).

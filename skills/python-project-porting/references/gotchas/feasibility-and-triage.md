@@ -323,6 +323,12 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **653** — Genuinely open, BSD-licensed Python bindings can still be build-time-blocked by a
   closed native shim that is neither the vendor's full engine nor an optional runtime
   accelerator — check what `Extension(libraries=[...])` actually links against (amplpy).
+- **654** — A rename-fork that adds one feature can be blocked by that feature's prebuilt
+  native payload even when the base package is ported: a hard-wired cargo feature pulls a
+  crate whose `build.rs` downloads an x86-only `.so` built in a private repo (hops-deltalake).
+- **655** — A `uv tool install`-only "-cli" package whose GitHub org holds only skills/plugins
+  is a closed Cython core (all `.so`, no `.py` twins, zero sdist) with no licence —
+  double-locked, source and licence both absent (browser-act-cli).
 
 ---
 
@@ -5684,3 +5690,57 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
       genuinely functional CPU/interpreter backend into `_discover_backends()` (today's
       `cpu_driver.py` is not that). No worktree/branch/workflow/docs entry/patch/PR; scratch
       under `.git/pw-scratch/triton-ascend/` removed.
+
+654. **A fork that renames a package to add one feature can be blocked by exactly that
+     feature's native payload, even when the base package is already ported (the
+     hops-deltalake/delta-rs case).** `hops-deltalake` 1.4.0.post121 is logicalclocks' fork
+     of `delta-rs`, published from the fork's `dev` branch (Cargo `version = "1.4.0-post121"`,
+     commit 607ba098 "release 1.4.0-post121"; `main` is still `1.4.0`, so take the version
+     from the sdist/`git log -S`, not the newest branch). Everything that makes plain
+     `deltalake` portable here still holds — pyo3 `abi3-py310`, maturin, one `cp310-abi3`
+     wheel — but the fork exists to add HopsFS support, and the pyo3 crate's
+     `[dependencies.deltalake] features` list hard-wires `"hdfs"`. That pulls in
+     `deltalake-hdfs` → the crates.io crate `hopsfs-native-object-store` (1.2.1), whose
+     `build.rs` on Linux **downloads a prebuilt `libhdfs-golang` shared library** from
+     `https://repo.hops.works/master/libhdfs/libhdfs-golang-<HOPS_VERSION>.tar.gz`
+     (`HOPS_VERSION` = `3.4.3.1-EE-RC0`) and `create_symlinks()` hardcodes the filter
+     `"linux-amd64"` for the `.so` it links — there is no arch branch at all. The tarball
+     carries only `linux-amd64` (x86-64 ELF) and `darwin-11.0-arm64` payloads; a riscv64 (or
+     even linux-arm64) key 404s, so a riscv64 build either fails the link or bundles an x86-64
+     `.so` (the published `manylinux_2_28_x86_64` wheel does exactly the latter —
+     `deltalake.libs/libhdfs-*.so` is x86-64). The payload is built in a **private** repo
+     (`strings` the `.so`: `/__w/hops-enterprise/hops-enterprise/.../libhdfs-golang/*.go`,
+     Go `hopsworks.ai/libhdfs` importing `logicalclocks/hopsfs-go-client`); the only public
+     libhdfs-golang source (`hopshadoop/hops`, GPL-3) is an older, API-divergent version
+     (`3.2.0.16-SNAPSHOT`) that cannot be version-matched to the `-EE-RC0` payload the wheel
+     needs, so there is no from-source riscv64 path even ignoring the hardcoded `amd64`.
+     Dropping the `hdfs` feature would erase the only reason the fork exists (it would become
+     plain `deltalake`, already published) and is a refuse-shortcut anyway.
+     - Verdict: `parked`. Revisit only if HopsFS ships a riscv64 `libhdfs-golang` at
+       `repo.hops.works` and `hopsfs-native-object-store`'s `build.rs` grows a riscv64 arch
+       branch. No worktree/branch/workflow/docs entry/patch/PR; scratch under
+       `.git/pw-scratch/hops-deltalake/` removed.
+
+655. **A `uv tool install`-only "-cli" package whose GitHub org holds only skills/plugins is
+     a closed Cython core with no source — the org is the marketing surface, not the source
+     (the browser-act-cli case; same closed-Cython shape as gotchas 601/605/620, same
+     no-licence lock as 372/650).** `browser-act-cli` 1.4.2 (`requires-python ==3.12.*`,
+     one `cp312-cp312` wheel per Linux/macOS/Windows arch) looks like an ordinary CLI, but
+     the wheel is **385 compiled `.cpython-312-*.so` across 7 top-level packages**
+     (`browser_act_cli`, `browser_act_core`, `browser_act_kernel`, `browser_act_captcha_python_sdk`,
+     `cdpeng_rt`, …), **not one of which has a `.py` twin** — `strings` a `.so` shows
+     `_cython_3_2_9`/`cython_runtime`, so it is Cython-compiled, not a vendored foreign binary
+     (gotcha 530's honest-extension case does not apply). **Zero sdist across all 40 releases**
+     (`pip download --no-binary :all:` finds nothing). The upstream install path is
+     `uv tool install browser-act-cli` from PyPI; the `browser-act` GitHub org's repos
+     (`skills`, `claude-code-browser-act`, `browseract-*`) are agent Skill markdown and editor
+     plugins whose own `requirements.txt` is just `requests`/`python-dotenv` — none contains
+     the compiled package's source. Second, independent lock: the wheel ships **no licence at
+     all** (no `License`/`license_expression` field, no licence classifier, no
+     `dist-info/licenses/`), and it is a commercial stealth-browser + captcha-solving product
+     (`service@browseract.com`, `www.browseract.com`) — "all rights reserved" by default
+     (gotcha 650), so there is nothing redistributable even if the source existed.
+     - Verdict: `parked`. Revisit only if BrowserAct publishes the CLI's source and a licence
+       permitting redistribution, or ships a riscv64 wheel. No worktree/branch/PR; resolved
+       read-only via PyPI JSON, the published aarch64 wheel, and a GitHub org/repo search;
+       scratch under `.git/pw-scratch/browser-act-cli/` removed.
