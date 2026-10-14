@@ -1182,6 +1182,7 @@ The porting gotchas (558 of them) live in [`references/gotchas/`](gotchas/), spl
 - **398** — Reproducing a `py3-none-<platform>` wheel takes an explicit retag — setuptools'
 - **457** — On cp314t our registry can hand a package a *compiled* dependency wheel where
 - **510** — A cffi *ABI-mode* payload keeps its `py3-none` tag through `auditwheel repair` —
+- **660** — A setuptools SWIG extension built from an old tag can ship the `.so` without its
 
 ### Dependencies & the registry — [`gotchas/dependencies-and-registry.md`](gotchas/dependencies-and-registry.md)
 

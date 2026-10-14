@@ -24,6 +24,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
 - **398** — Reproducing a `py3-none-<platform>` wheel takes an explicit retag — setuptools'
 - **457** — On cp314t our registry can hand a package a *compiled* dependency wheel where
 - **510** — A cffi *ABI-mode* payload keeps its `py3-none` tag through `auditwheel repair` —
+- **660** — A setuptools SWIG extension built from an old tag can ship the `.so` without
+  its SWIG-generated `.py` proxy — `build_py` runs before `build_ext` writes it.
 
 ---
 
@@ -504,3 +506,20 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/compiled-vs-pure-detec
       needs no `gpl_sources` job. Assert `not any(n.startswith("<pkg>.libs/"))` in the
       workflow rather than trusting it — that assertion is what turns "no GPL is shipped"
       from a claim into a check, and it fires on the build that first drags in a libgomp.
+
+660. **A setuptools SWIG extension built from an old tag can ship the `.so` without its
+    SWIG-generated `.py` proxy, because `build_py` copies the package before `build_ext`
+    has run SWIG (the Box2D case; see `build-box2d.yml`).** `Extension(..., ['Foo.i', ...])`
+    with `swig_opts='-outdir library/Foo'` writes `Foo.py` into the source package during
+    `build_ext`, but `bdist_wheel` runs `build_py` first, so the wheel gets `_Foo.so` and an
+    `__init__.py` doing `from .Foo import *` — it builds clean, auditwheel is happy, and only
+    `import Foo` fails. Old projects relied on `python setup.py build` (Travis/conda) or on a
+    stale `Foo.py` lying in the tree. Check with one `pip wheel` on any host and
+    `unzip -l <whl> | grep '\.py$'`; the fix is the common `build_py` subclass that calls
+    `self.run_command('build_ext')` first, often already on upstream's default branch (pybox2d
+    12507e8) and carried as a `Backport`.
+    - **PyPI wheels uploaded years after the tag were not built from the tag.** Box2D 2.3.10's
+      tag is 2020; its cp310–cp313 wheels were uploaded in 2024-11 from master plus local edits
+      (their `Box2D.py` has a post-tag `.i` fix and their `tests/` drop `assertEquals`, gotcha
+      631). Compare `upload_time` on PyPI's JSON against the tag date, and diff the PyPI wheel's
+      `.py` files against the tag before assuming "upstream builds this tag as-is".
