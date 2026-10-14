@@ -1,0 +1,204 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `python-tests`/`linux-build` jobs of
+# https://github.com/blacklanternsecurity/blastdns/blob/8c3a607586cb1f20677a3923a5a316c0ec06ec5d/.github/workflows/python-tests.yml
+name: Build blastdns wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/blastdns.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-blastdns.yml'
+      - 'docs/packages/blastdns.yaml'
+      - 'patches/blastdns/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-blastdns.yml'
+      - 'docs/packages/blastdns.yaml'
+      - 'patches/blastdns/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # Upstream cuts releases without git tags (no tags exist on the repo at
+  # all), so pin the release commit: "fix aarch64 build" is byte-identical to
+  # the 1.9.1 PyPI sdist (apart from maturin's own injected `readme =` line).
+  # Update it alongside the matching version entry.
+  BLASTDNS_REF: 8c3a607586cb1f20677a3923a5a316c0ec06ec5d
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: blastdns
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build blastdns ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # blastdns' pyo3 dependency has a plain `pyo3/extension-module` feature
+        # (no abi3-pyNN), so every interpreter needs its own build, matching
+        # upstream's own per-interpreter PyPI wheel matrix. pp311 is dropped:
+        # PyPy has no riscv64 port.
+        # cp313t is dropped: the riscv64 manylinux image ships no cp313t
+        # interpreter at all (unrelated to blastdns; every other riscv64 port
+        # hits the same gap).
+        python: ['cp39', 'cp310', 'cp311', 'cp312', 'cp313', 'cp314', 'cp314t']
+        include:
+          # pydantic>=2.12.4 (a runtime dependency) needs pydantic-core==2.41.5,
+          # which this registry has only for cp310-cp314 (no cp39, and no
+          # free-threaded build exists anywhere upstream either). Those two
+          # legs still build and ship a wheel; they just can't exercise the
+          # real test suite here, so they get a wheel-content check instead.
+          - python: cp39
+            test: smoke
+          - python: cp310
+            test: full
+          - python: cp311
+            test: full
+          - python: cp312
+            test: full
+          - python: cp313
+            test: full
+          - python: cp314
+            test: full
+          - python: cp314t
+            test: smoke
+
+    env:
+      BLASTDNS_VERSION: ${{ matrix.version }}
+      # Without this uv would reuse the runner image's system CPython for 3.12
+      # and download a standalone build for the others.
+      UV_PYTHON_PREFERENCE: only-managed
+
+    steps:
+      - name: Checkout blastdns ${{ env.BLASTDNS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: blacklanternsecurity/blastdns
+          ref: ${{ env.BLASTDNS_REF }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply -v python-wheels/patches/blastdns/${{ env.BLASTDNS_VERSION }}/*.patch
+
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          # aws-lc-sys (pulled in by hickory-proto's dnssec-aws-lc-rs feature)
+          # ships prebuilt riscv64gc bindings, and cmake is already in the
+          # manylinux image.
+          args: --release --strip -i ${{ steps.interp.outputs.value }} --out dist
+          manylinux: '2_39'
+
+      - name: Check wheel contents
+        run: |
+          python3 - dist/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("blastdns/_native") and n.endswith(".so") for n in names), names
+              assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
+              print(whl, "ok")
+          EOF
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ steps.interp.outputs.value }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel
+        run: uv pip install blastdns --no-index --find-links dist --force-reinstall
+
+      - name: Smoke test
+        if: matrix.test == 'smoke'
+        working-directory: ${{ runner.temp }}
+        run: python3 -c "import blastdns._native as m; assert m.__file__.endswith('.so'), m.__file__"
+
+      - name: Install test dependencies
+        if: matrix.test == 'full'
+        env:
+          UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+          # PyPI lists pydantic-core/orjson by name (sdist only, no riscv64
+          # wheel); uv's default first-index strategy would stop there and
+          # source-build instead of reaching the registry's riscv64 wheel.
+          UV_INDEX_STRATEGY: unsafe-best-match
+        run: |
+          uv pip install 'pydantic>=2.12.4' 'orjson>=3.11.4' pytest pytest-asyncio
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends dnsmasq
+
+      # Mirrors upstream's own python-tests job, minus test_zone_transfer.py:
+      # that test needs the BIND9 AXFR container from scripts/start-test-axfr.sh,
+      # and internetsystemsconsortium/bind9 ships no riscv64 image. Tests are
+      # copied out of the checkout first: blastdns/__init__.py at the repo
+      # root would otherwise shadow the installed wheel (no _native.so in the
+      # source tree) with pytest's rootdir-prepend import.
+      - name: Run tests
+        if: matrix.test == 'full'
+        run: |
+          sudo ./scripts/start-test-dns.sh
+          mkdir "$RUNNER_TEMP/tests"
+          cp blastdns/tests/test_mock_client.py blastdns/tests/test_exceptions.py \
+            blastdns/tests/test_batching.py blastdns/tests/test_client.py "$RUNNER_TEMP/tests/"
+          python3 -m pytest "$RUNNER_TEMP/tests" -vv
+          sudo ./scripts/stop-test-dns.sh
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: blastdns-${{ env.BLASTDNS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish blastdns ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: blastdns-${{ matrix.version }}-*-manylinux_riscv64
