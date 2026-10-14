@@ -47,7 +47,7 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJSON(needs.setup.outputs.versions) }}
-    name: Build pymeshfix ${{ matrix.version }} cp312-abi3-manylinux_riscv64
+    name: Build pymeshfix ${{ matrix.version }} manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 120
     env:
@@ -66,9 +66,11 @@ jobs:
         with:
           output-dir: wheelhouse/
         env:
-          # wheel.py-api = "cp312": built once on cp312, reused and tested on
-          # cp313/cp314 like upstream's test_abi3 job. Upstream ships no cp314t.
-          CIBW_BUILD: "cp312-* cp313-* cp314-*"
+          # Matches upstream's own [tool.cibuildwheel] build matrix exactly:
+          # cp310/cp311 each get a real per-version extension, cp312+ collapse
+          # into one forward-compatible cp312-abi3 wheel (upstream ships no
+          # cp313/cp314 glob entries - abi3 covers those interpreters already).
+          CIBW_BUILD: "cp310-* cp311-* cp312-*"
           CIBW_ARCHS: riscv64
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
@@ -78,18 +80,16 @@ jobs:
         run: |
           python3 - wheelhouse/*.whl <<'EOF'
           import sys, zipfile
-          assert len(sys.argv) == 2, sys.argv[1:]
-          whl = sys.argv[1]
-          assert "-cp312-abi3-" in whl, whl
-          names = zipfile.ZipFile(whl).namelist()
-          assert "pymeshfix/_meshfix.abi3.so" in names, names
-          assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
-          print(whl, "ok")
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith(".so") and "_meshfix" in n for n in names), (whl, names)
+              assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), (whl, names)
+              print(whl, "ok")
           EOF
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: pymeshfix-${{ env.PYMESHFIX_VERSION }}-cp312-abi3-manylinux_riscv64
+          name: pymeshfix-${{ env.PYMESHFIX_VERSION }}-manylinux_riscv64
           path: wheelhouse/*.whl
           if-no-files-found: error
 
@@ -108,4 +108,4 @@ jobs:
     secrets:
       app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
     with:
-      artifact-pattern: pymeshfix-${{ matrix.version }}-*-manylinux_riscv64
+      artifact-pattern: pymeshfix-${{ matrix.version }}-manylinux_riscv64
