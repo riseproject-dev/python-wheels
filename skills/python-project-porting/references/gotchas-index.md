@@ -231,6 +231,14 @@ The porting gotchas (558 of them) live in [`references/gotchas/`](gotchas/), spl
 - **655** — A `uv tool install`-only "-cli" package whose GitHub org holds only skills/plugins is a
   closed Cython core: all `.so` with no `.py` twins across 7 packages, zero sdist ever, and no licence
   field/classifier/file anywhere — source and licence both absent (the browser-act-cli case).
+- **656** — An XLA-based package's riscv64 verdict depends on the XLA *and* LLVM-overlay
+  revision it pins (LLVM's Bazel `config.bzl` once defaulted unknown Linux arches to an X86
+  native target; XLA once had no `if_llvm_riscv_available`), and a bridge built inside a
+  sibling's source tree (`PYTORCH_LOCAL_DIR = "../"`) is pinned to that sibling's exact
+  version (the torch-xla case).
+- **657** — A GPU loader can pass gotcha 284's dlopen test (no CUDA at build time, `RTLD_NOLOAD`
+  reuse of torch's `libcudart`) and still be dead on riscv64 because its only public API
+  raises for any non-`cuda` device in pure Python (the instanttensor case).
 - **459** — A CUDA-only PyPI wheel does not make the *project* CUDA-only: a device-selecting
   build env var can produce a genuinely portable CPU distribution from the same tree, and
   upstream may already carry riscv64 kernels for it (the vllm case).

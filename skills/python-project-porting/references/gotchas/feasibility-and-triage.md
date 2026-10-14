@@ -329,6 +329,14 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
 - **655** — A `uv tool install`-only "-cli" package whose GitHub org holds only skills/plugins
   is a closed Cython core (all `.so`, no `.py` twins, zero sdist) with no licence —
   double-locked, source and licence both absent (browser-act-cli).
+- **656** — An XLA-based package's riscv64 verdict depends on the XLA *and* LLVM-overlay
+  revision it pins (LLVM's Bazel `config.bzl` once defaulted unknown Linux arches to an X86
+  native target; XLA once had no `if_llvm_riscv_available`), and a bridge built inside a
+  sibling's source tree (`PYTORCH_LOCAL_DIR = "../"`) is pinned to that sibling's exact
+  version (the torch-xla case).
+- **657** — A GPU loader can pass gotcha 284's dlopen test (no CUDA at build time, `RTLD_NOLOAD`
+  reuse of torch's `libcudart`) and still be dead on riscv64 because its only public API
+  raises for any non-`cuda` device in pure Python (the instanttensor case).
 
 ---
 
@@ -5744,3 +5752,56 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/feasibility-and-triage
        permitting redistribution, or ships a riscv64 wheel. No worktree/branch/PR; resolved
        read-only via PyPI JSON, the published aarch64 wheel, and a GitHub org/repo search;
        scratch under `.git/pw-scratch/browser-act-cli/` removed.
+
+656. **An XLA-based package's riscv64 verdict is set by the *revision* of XLA and of LLVM's Bazel
+     overlay it pins, not by "XLA" in general — and a bridge built *inside* a sibling's source
+     tree is pinned to that sibling's exact version (the torch-xla case).** torch-xla 2.9.0 is a
+     Bazel build of OpenXLA from source (`http_archive(name = "xla")` at `92f7b595`, 2025-08-15
+     — no prebuilt XLA/PJRT blob, no hermetic CC toolchain: `.bazelrc` sets
+     `--action_env=CC=gcc` and the WORKSPACE registers no `rules_ml_toolchain` toolchain), so
+     gotcha 343's prebuilt-library wall is absent. Three concrete walls replace it:
+     - **LLVM's Bazel overlay can default every unknown Linux arch to X86.** At the LLVM commit
+       XLA pins (`fc44a4fc`, `third_party/llvm/workspace.bzl`),
+       `utils/bazel/llvm-project-overlay/llvm/config.bzl` maps `linux_aarch64`/`ppc64le`/
+       `s390x` and sends `//conditions:default` to `native_arch_defines("X86",
+       "x86_64-unknown-linux-gnu")`. On a riscv64 host that makes `LLVM_NATIVE_TARGET`
+       `LLVMInitializeX86Target` and `LLVM_HOST_TRIPLE` x86_64, and XLA's CPU JIT
+       (`ir_compiler.cc` `InitializeNativeTarget()` + `EngineBuilder().selectTarget(Triple())`)
+       uses exactly those. LLVM `main` has since added `Label("//llvm:linux_riscv64")`, so the
+       fix is a backport hunk — but it must be checked per pinned LLVM commit.
+     - **XLA's per-arch CodeGen lists may have no RISC-V arm at all.** At `92f7b595`,
+       `xla/service/cpu/BUILD` and `xla/backends/cpu/codegen/BUILD` link
+       `AArch64/PowerPC/SystemZ/X86CodeGen` via `if_llvm_*_available`, and
+       `if_llvm_riscv_available`/`//xla/tsl:riscv64_or_cross` do not exist yet (`grep -ri
+       riscv` over BUILD/.bzl hits only `remote_platform_configure.bzl` and the LLVM target
+       list). The XLA that TF 2.21.0 vendors has them (gotcha 426's counterpoint), and jaxlib
+       0.11.1's later XLA had them but missed `embed_bitcode` (PR #526) — three revisions, three
+       different answers, so grep the pinned tree, never a neighbour's.
+     - **`PYTORCH_LOCAL_DIR = "../"` makes the sibling an in-tree build, not a wheel.**
+       `bazel/torch.BUILD` `cc_import`s `build/lib/libtorch*.so` and `torchgen` YAML from a
+       PyTorch *source checkout* one directory up, and upstream's own recipe
+       (`infra/ansible/roles/build_srcs`) builds PyTorch from `.torch_commit` first. The
+       product only loads against that exact torch (C++ ABI, no `torch` in `Requires-Dist`),
+       so with our registry carrying `torch` 2.13/2.14 only, a torch-xla 2.9.0 wheel would be
+       uninstallable in practice even if the build succeeded — `blocked-on-dependency` on a
+       riscv64 torch 2.9.x, not just "patch XLA". Hermetic pip is *not* a wall here: the
+       `requirements_lock_3_*.txt` set is pure-Python (expecttest, sympy, jinja2, …).
+
+657. **gotcha 284's dlopen test passing is only half the check for a GPU loader. Read the one
+     public entry point for a device gate before calling it portable (the instanttensor
+     case, the opposite of fastsafetensors).** instanttensor ("ultra-fast, distributed
+     Safetensors loader", `scitix/InstantTensor`, Apache-2.0) looks like a clean port: a
+     setuptools pybind11 extension with vendored libaio/liburing (liburing already has
+     `src/arch/riscv64/`), no CUDA headers at build time, `libraries=["dl"]` only. CUDA, HIP,
+     cuFile and NCCL are reached through `dl_binding/*.hpp`, and those bindings `dlopen` with
+     `RTLD_NOLOAD` the `libcudart`/`libamdhip64` torch has *already* mapped (found by scanning
+     `/proc/self/maps`), so the extension would compile and import on riscv64. The package is
+     still dead there. `safe_open.__init__` (`instanttensor/_impl.py`) raises
+     `ValueError("InstantTensor only supports CUDA devices for now")` whenever
+     `torch.device(device).type != "cuda"`, and `safe_open` is the package's only API. The
+     README roadmap lists "CPU loading" as future work, and the gate is the same at the queued
+     0.1.9 and at the newest tag, 0.2.2. Our riscv64 torch is CPU-only, so every call fails.
+     Upstream's own wheel test (`python -c "from instanttensor import safe_open"`) would pass
+     anyway, which is gotcha 419's dead-stub trap. fastsafetensors (published) is the
+     contrast: it has a real CPU device path. Verdict: `parked`. Revisit when a release drops
+     the CUDA-only check in `safe_open`.
