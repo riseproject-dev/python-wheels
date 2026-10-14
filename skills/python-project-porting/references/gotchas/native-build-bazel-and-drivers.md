@@ -85,6 +85,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
   `CMAKE_SYSTEM_NAME`), so Boost.Context falls back to x86_64 assembly and boost-context fails
   with `unrecognized opcode 'leaq ...'`. Pass `-DCMAKE_SYSTEM_PROCESSOR=riscv64` through the
   riscv64 triplet's `VCPKG_CMAKE_CONFIGURE_OPTIONS` (the depthai case).
+- **659** — Pigweed's bootstrap (`pw_env_setup`) maps *any* `platform.machine()` ending in
+  `64` to `amd64`, so a Pigweed-based project (Matter/connectedhomeip) fetches x86_64 CIPD tools
+  on riscv64 even though CIPD publishes `linux-riscv64` cipd/gn/ninja/cmake/clang.
 
 ---
 
@@ -1245,3 +1248,31 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-build-bazel-and
       depthai it is `remote-connection-support` → the overlay `websocketpp[recommended]` →
       `boost-asio` → `boost-context`, and the wheel ships (and tests) remote connection, so
       the dependency is real. `boost-coroutine` and `boost-fiber` pull it in too.
+
+659. **Pigweed's environment bootstrap misidentifies riscv64 as amd64, so a
+    Pigweed-based project downloads x86_64 tools on a riscv64 host — the CIPD registry
+    itself is not the wall (the home-assistant-chip-core / connectedhomeip triage).**
+    Matter's `scripts/bootstrap.sh` (and any project built on `pw_env_setup`) resolves its
+    CIPD platform via `pw_env_setup/py/pw_env_setup/cipd_setup/wrapper.py:arch_normalized()`,
+    which handles `arm*`/`aarch*`, then returns `amd64` for **any** machine string ending in
+    `64` — `riscv64`, `ppc64le`, `s390x` (`ends with 64`) included. Still true on pigweed
+    `main` as of 2026-10. The same file's `SUPPORTED_PLATFORMS` tuple omits riscv64 too, even
+    though its `.cipd_version.digests` carries a `linux-riscv64` line for the client.
+    - **What CIPD actually has** (gotcha 424's "audit from x86" applies — the registry is
+      arch-independent): `curl -s https://chrome-infra-packages.appspot.com/p/<pkg>/ | grep -oE '<pkg>/[a-z0-9_-]+'`
+      lists `linux-riscv64` for `infra/tools/cipd`, `gn/gn`, `infra/3pp/tools/ninja`,
+      `infra/3pp/tools/cmake` and `fuchsia/third_party/clang`, but not for
+      `fuchsia/third_party/3pp/zap` (Matter's ZAP codegen) or `infra/3pp/tools/cpython3`.
+    - **The package manifests are the second wall**: `pigweed.json`/`arm.json` entries carry
+      explicit `platforms:` lists (`linux-amd64`, `linux-arm64`, mac, windows), so even with
+      `arch_normalized()` fixed, nothing — not even gn/ninja — is selected for
+      `linux-riscv64`, and the bootstrap venv falls back to the system Python (arm.json's
+      CIPD CPython is amd64/arm64-only), which changes which pinned requirements resolve.
+    - **Read the packaging repo before the monorepo.** The PyPI wheel may be produced by a
+      third-party packaging repo (home-assistant-libs/chip-wheels pins connectedhomeip as a
+      submodule and carries patches), and that repo's workflow is what to mirror. Its split
+      of host-arch-only steps (ZAP pregeneration in an x86 job, tarball handed to the
+      per-arch build) is often the template for keeping the riscv64 job off the tools CIPD
+      lacks. Also check the upstream wheel's `readelf -d` NEEDED list before trusting its
+      manylinux tag — chip-core's `_ChipDeviceCtrl.so` needs glib/gio/gobject and libnl and
+      GLIBC_2.34 under a hand-set `manylinux_2_31` tag.

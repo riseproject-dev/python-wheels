@@ -27,6 +27,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
 - **367** — A `setup.py`'s own "distributor customization" import hook can go silently
 - **588** — setuptools-scm >= 10.2 breaks every cp39 build whose in-tree backend declares
 - **629** — A *test-only* dependency pinned upstream as an open range drifts out from
+- **658** — A Cython extension that `cimport numpy` and names a flag numpy 2 dropped from
+  `__init__.pxd` (`np.NPY_OWNDATA`) still *compiles* — Cython falls back to a Python attribute
+  lookup — and only raises `AttributeError` when that line runs (the xtcocotools case).
 
 ---
 
@@ -665,3 +668,26 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/build-tool-drift-and-p
       pin>` as a step *after* `pip install "<wheel>[test]"` leaves the shipped metadata
       alone and reproduces exactly what `install_usdex.py --install-test` gives upstream's
       own CI.
+
+658. **A Cython extension that `cimport numpy` and names a flag numpy 2 dropped from its
+    Cython declarations still compiles clean, and fails only at run time on the line that
+    uses it (the xtcocotools case; see `build-xtcocotools.yml`).** xtcocotools 1.14.3's
+    `_mask.pyx` (a cocoapi fork) calls `PyArray_ENABLEFLAGS(arr, np.NPY_OWNDATA)` after
+    `cimport numpy as np` *and* `import numpy as np`. numpy 2's `__init__.pxd` no longer
+    declares the deprecated `NPY_OWNDATA` alias, so Cython cannot resolve it at compile time
+    and quietly emits a module-attribute lookup on the Python-level `np` instead — no error,
+    no warning that stops the build. The wheel builds, imports, and passes upstream's only
+    runnable checks (keypoint `COCOeval` demos); then `mask.decode`/`area`/`iou`/`toBbox`
+    raise `AttributeError: module 'numpy' has no attribute 'NPY_OWNDATA'`. Every riscv64
+    build is a numpy-2 build (our registry carries no numpy 1.x for cp312+), so an
+    upstream whose x86 wheels were built against numpy 1.x hides this completely.
+    - **Grep before trusting a green smoke test:** `grep -n 'np\.NPY_[A-Z]*' *.pyx` and
+      check each name against the numpy 2 `__init__.pxd`; the classic offenders are the
+      un-prefixed flag aliases (`NPY_OWNDATA`, `NPY_C_CONTIGUOUS`, ...), whose
+      `NPY_ARRAY_*` spellings exist in numpy 1.7+ and 2.x alike, so the fix is a
+      one-word patch that is safe for both.
+    - **Exercise the compiled functions, not just the import** — when upstream has no test
+      suite, call each function the `.pyx` exports once in the test command. pycocotools
+      (ppwwyyxx/cocoapi) already carries the identical fix; forks of the same file rarely do.
+    - Reproduces on x86_64 in a minute — `pip wheel --no-build-isolation` against numpy 2
+      in a venv, then call `mask.decode(mask.encode(m))`.

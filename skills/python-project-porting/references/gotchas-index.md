@@ -940,6 +940,9 @@ The porting gotchas (558 of them) live in [`references/gotchas/`](gotchas/), spl
   `CMAKE_SYSTEM_NAME`), so Boost.Context falls back to x86_64 assembly and boost-context fails
   with `unrecognized opcode 'leaq ...'`. Pass `-DCMAKE_SYSTEM_PROCESSOR=riscv64` through the
   riscv64 triplet's `VCPKG_CMAKE_CONFIGURE_OPTIONS` (the depthai case).
+- **659** — Pigweed's bootstrap (`pw_env_setup`) maps *any* `platform.machine()` ending in
+  `64` to `amd64`, so a Pigweed-based project (Matter/connectedhomeip) fetches x86_64 CIPD tools
+  on riscv64 even though CIPD publishes `linux-riscv64` cipd/gn/ninja/cmake/clang.
 
 ### The manylinux image & toolchain — [`gotchas/manylinux-image-and-toolchain.md`](gotchas/manylinux-image-and-toolchain.md)
 
@@ -1274,6 +1277,9 @@ The porting gotchas (558 of them) live in [`references/gotchas/`](gotchas/), spl
 - **367** — A `setup.py`'s own "distributor customization" import hook can go silently
 - **588** — setuptools-scm >= 10.2 breaks every cp39 build whose in-tree backend declares
 - **629** — A *test-only* dependency pinned upstream as an open range drifts out from
+- **658** — A Cython extension that `cimport numpy` and names a flag numpy 2 dropped from
+  `__init__.pxd` (`np.NPY_OWNDATA`) still *compiles* — Cython falls back to a Python attribute
+  lookup — and only raises `AttributeError` when that line runs (the xtcocotools case).
 
 ### Testing: test-sources & shadowing — [`gotchas/testing-and-shadowing.md`](gotchas/testing-and-shadowing.md)
 
