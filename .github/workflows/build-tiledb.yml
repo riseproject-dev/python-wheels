@@ -1,0 +1,218 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's wheel builder, taking its "custom libtiledb" path (libtiledb_ref):
+#   https://github.com/TileDB-Inc/TileDB-Py/blob/0.36.1/.github/workflows/build-wheels.yml
+# with the TileDB core library built the way that path builds it:
+#   https://github.com/TileDB-Inc/TileDB/blob/2.30.1/.github/workflows/build-artifacts.yml
+name: Build tiledb wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/tiledb.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tiledb.yml'
+      - 'docs/packages/tiledb.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tiledb.yml'
+      - 'docs/packages/tiledb.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: tiledb
+      version: ${{ inputs.version }}
+
+  # TileDB-Py downloads a prebuilt libtiledb, published for x86_64/arm64 only, so the
+  # core library is built once here and handed to every interpreter's build.
+  build_libtiledb:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build libtiledb for tiledb ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      TILEDB_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout TileDB-Py ${{ env.TILEDB_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: TileDB-Inc/TileDB-Py
+          ref: ${{ env.TILEDB_VERSION }}
+          persist-credentials: false
+
+      - name: Read the TileDB core version TileDB-Py pins
+        id: core
+        run: |
+          version=$(sed -n 's/^ *VERSION \([0-9][0-9.]*\)$/\1/p' CMakeLists.txt)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout TileDB ${{ steps.core.outputs.version }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: TileDB-Inc/TileDB
+          ref: ${{ steps.core.outputs.version }}
+          path: libtiledb-src
+          persist-credentials: false
+
+      # TileDB ships release triplets for x64/arm64 only; riscv64 gets the same one.
+      - name: Add a riscv64 release triplet
+        working-directory: libtiledb-src
+        run: sed 's/arm64/riscv64/' ports/triplets/arm64-linux-release.cmake > ports/triplets/riscv64-linux-release.cmake
+
+      # S3/Azure/GCS and serialization are off: their vcpkg trees (aws-sdk-cpp,
+      # google-cloud-cpp/gRPC, azure-sdk, capnproto, curl) have no riscv64 port testing.
+      - name: Build TileDB
+        env:
+          TILEDB_PACKAGE_VERSION: ${{ steps.core.outputs.version }}
+        run: |
+          docker run --rm -i --network=host \
+            -v "$GITHUB_WORKSPACE:/work" -w /work/libtiledb-src \
+            -e TILEDB_PACKAGE_VERSION -e VCPKG_FORCE_SYSTEM_BINARIES=YES -e HOST_IDS="$(id -u):$(id -g)" \
+            "$MANYLINUX_RISCV64_IMAGE" \
+            bash <<'SCRIPT'
+          set -eux
+          dump_logs() {
+            for f in $(find /tmp/build -name '*.log'); do
+              echo "::group::$f"; cat "$f"; echo "::endgroup::"
+            done
+          }
+          trap dump_logs ERR
+          yum install -y ninja-build perl-IPC-Cmd perl-Time-Piece curl zip unzip tar
+          git config --global --add safe.directory '*'
+          cmake -S . -B /tmp/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
+            -DCMAKE_INSTALL_PREFIX=./dist \
+            -DTILEDB_INSTALL_LIBDIR=lib \
+            -DTILEDB_S3=OFF \
+            -DTILEDB_AZURE=OFF \
+            -DTILEDB_GCS=OFF \
+            -DTILEDB_SERIALIZATION=OFF \
+            -DTILEDB_WEBP=ON \
+            -DTILEDB_TESTS=OFF \
+            -DVCPKG_TARGET_TRIPLET=riscv64-linux-release
+          cmake --build /tmp/build -j4 --config Release --target package
+          mkdir -p /work/libtiledb-out/licenses
+          cp /tmp/build/tiledb-*.tar.gz /work/libtiledb-out/
+          # libtiledb links its vcpkg dependencies statically; their notices travel with the wheel.
+          cp LICENSE /work/libtiledb-out/licenses/LICENSE-tiledb.txt
+          for dir in /tmp/build/vcpkg_installed/riscv64-linux-release/share/*/; do
+            port=$(basename "$dir")
+            if [ -f "$dir/copyright" ]; then
+              cp "$dir/copyright" "/work/libtiledb-out/licenses/LICENSE-$port.txt"
+            fi
+          done
+          chown -R "$HOST_IDS" /work/libtiledb-out
+          ls -l /work/libtiledb-out /work/libtiledb-out/licenses
+          SCRIPT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tiledb-${{ env.TILEDB_VERSION }}-libtiledb
+          path: libtiledb-out
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_libtiledb]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build tiledb ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 720
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream ships no free-threaded build.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      TILEDB_VERSION: ${{ matrix.version }}
+      SETUPTOOLS_SCM_PRETEND_VERSION_FOR_TILEDB: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout TileDB-Py ${{ env.TILEDB_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: TileDB-Inc/TileDB-Py
+          ref: ${{ env.TILEDB_VERSION }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: tiledb-${{ env.TILEDB_VERSION }}-libtiledb
+          path: libtiledb-dist
+
+      # external/LICENSE-*.txt is already in upstream's wheel.license-files.
+      - name: Unpack libtiledb
+        run: |
+          tar -C libtiledb-dist -xzf libtiledb-dist/tiledb-*.tar.gz
+          cp libtiledb-dist/licenses/LICENSE-*.txt external/
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT_PASS_LINUX: SETUPTOOLS_SCM_PRETEND_VERSION_FOR_TILEDB
+          # PIP_ONLY_BINARY keeps the test extras on our riscv64 builds instead of newer PyPI sdists.
+          CIBW_ENVIRONMENT_LINUX: >-
+            CI_WHEEL_BUILD=1
+            TILEDB_PATH=/project/libtiledb-dist
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,pandas,pyarrow,psutil
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: "bash -c 'export LD_LIBRARY_PATH=\"/project/libtiledb-dist/lib:${LD_LIBRARY_PATH}\"; auditwheel repair -w {dest_dir} {wheel}'"
+          # __init__.py interferes with the tests and is included as local file instead of
+          # used from wheels. To be honest, tests should not be in the source folder at all.
+          CIBW_BEFORE_TEST: rm {project}/tiledb/__init__.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tiledb-${{ env.TILEDB_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish tiledb ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: tiledb-${{ matrix.version }}-*-manylinux_riscv64
