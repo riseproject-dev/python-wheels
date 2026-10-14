@@ -1,0 +1,223 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Upstream (mostrobotpy dist.yml, `rdev.sh ci build-other-wheels`) repackages the
+# wpimath-cpp library WPILib's Gradle build publishes to frcmaven.wpi.edu, which has no
+# riscv64 classifier. This builds that library from allwpilib with its own CMake recipe
+# (cmake.yml), seeds hatch-robotpy's download cache with it, then runs the same
+# `python -m build --no-isolation` on the subproject.
+name: Build robotpy-native-wpimath wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/robotpy-native-wpimath.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-robotpy-native-wpimath.yml'
+      - 'docs/packages/robotpy-native-wpimath.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-robotpy-native-wpimath.yml'
+      - 'docs/packages/robotpy-native-wpimath.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  HATCH_ROBOTPY_VERSION: '0.2.1'
+  PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: robotpy-native-wpimath
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build robotpy-native-wpimath ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    env:
+      PACKAGE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout mostrobotpy ${{ env.PACKAGE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: robotpy/mostrobotpy
+          ref: ${{ env.PACKAGE_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout allwpilib v${{ env.PACKAGE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: wpilibsuite/allwpilib
+          ref: v${{ env.PACKAGE_VERSION }}
+          path: allwpilib
+          sparse-checkout: |
+            cmake
+            thirdparty/googletest
+            wpimath
+            wpiutil
+          persist-credentials: false
+
+      - name: Checkout hatch-robotpy ${{ env.HATCH_ROBOTPY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: robotpy/hatch-robotpy
+          ref: ${{ env.HATCH_ROBOTPY_VERSION }}
+          path: hatch-robotpy
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: |
+          git -C allwpilib apply "$GITHUB_WORKSPACE"/python-wheels/patches/robotpy-native-wpimath/"$PACKAGE_VERSION"/0001-*.patch
+          git -C hatch-robotpy apply "$GITHUB_WORKSPACE"/python-wheels/patches/robotpy-native-wpimath/"$PACKAGE_VERSION"/0002-*.patch
+
+      # The subproject directory has no licence of its own, so upstream's wheels ship none.
+      - name: Add the allwpilib licences
+        run: |
+          cp allwpilib/LICENSE.md subprojects/robotpy-native-wpimath/LICENSE.md
+          cp allwpilib/ThirdPartyNotices.txt subprojects/robotpy-native-wpimath/LICENSE.ThirdPartyNotices.txt
+
+      - name: Write the build script
+        run: |
+          cat > "$RUNNER_TEMP/build.sh" <<'EOF'
+          set -euo pipefail
+
+          # wpiutil is configured exactly as for robotpy-native-wpiutil; only libwpimath is shipped.
+          cmake -S allwpilib --preset default \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/tmp/wpimath \
+            -DWITH_JAVA=OFF \
+            -DWITH_NTCORE=OFF \
+            -DWITH_WPIMATH=ON \
+            -DWITH_WPILIB=OFF \
+            -DWITH_CSCORE=OFF \
+            -DWITH_GUI=OFF \
+            -DWITH_SIMULATION_MODULES=OFF \
+            -DWITH_BENCHMARK=OFF \
+            -DUSE_SYSTEM_PROTOBUF=OFF \
+            -DNO_WERROR=ON
+          cmake --build allwpilib/build-cmake --parallel "$(nproc)" --target wpimath wpimath_test
+          (cd allwpilib/build-cmake && ctest --output-on-failure -R '^wpimath$')
+          cmake --install allwpilib/build-cmake/wpimath
+          patchelf --set-rpath '$ORIGIN' /tmp/wpimath/lib/libwpimath.so
+
+          /opt/python/cp313-cp313/bin/python -m venv /tmp/venv
+          . /tmp/venv/bin/activate
+          pip install build ninja hatchling 'hatch-nativelib~=0.2.0' \
+            --only-binary robotpy-native-wpiutil "robotpy-native-wpiutil==$PACKAGE_VERSION"
+          SETUPTOOLS_SCM_PRETEND_VERSION="$HATCH_ROBOTPY_VERSION" pip install ./hatch-robotpy
+
+          export HATCH_ROBOTPY_CACHE=/tmp/maven
+          mkdir -p "$HATCH_ROBOTPY_CACHE" /tmp/classifier/linux/riscv64/shared
+          cp /tmp/wpimath/lib/libwpimath.so /tmp/classifier/linux/riscv64/shared/
+          (cd /tmp/classifier && python -m zipfile -c "$HATCH_ROBOTPY_CACHE/wpimath-cpp-$PACKAGE_VERSION-linuxriscv64.zip" linux)
+          (cd /tmp/wpimath/include/wpimath && python -m zipfile -c "$HATCH_ROBOTPY_CACHE/wpimath-cpp-$PACKAGE_VERSION-headers.zip" .)
+
+          (cd subprojects/robotpy-native-wpimath && python -m build --no-isolation --wheel --outdir /tmp/dist)
+          # libwpiutil.so comes from the robotpy-native-wpiutil dependency, as upstream's wheel expects.
+          auditwheel repair --plat manylinux_2_39_riscv64 --exclude libwpiutil.so -w wheelhouse /tmp/dist/*.whl
+
+          pip install wheelhouse/*.whl
+          g++ -std=c++20 /work/smoke.cpp -o /tmp/smoke \
+            $(pkgconf-pypi --cflags --libs robotpy-native-wpimath) \
+            -Wl,-rpath,"$(pkgconf-pypi --variable=libdir robotpy-native-wpimath)" \
+            -Wl,-rpath,"$(pkgconf-pypi --variable=libdir robotpy-native-wpiutil)"
+          /tmp/smoke
+          EOF
+
+          cat > "$RUNNER_TEMP/smoke.cpp" <<'EOF'
+          #include <cmath>
+
+          #include <fmt/format.h>
+          #include <frc/geometry/Ellipse2d.h>
+          #include <frc/geometry/Pose2d.h>
+          #include <wpi/SmallVector.h>
+          #include <wpi/protobuf/Protobuf.h>
+
+          int main() {
+            frc::Pose2d pose{1_m, 2_m, 45_deg};
+            wpi::ProtobufMessage<frc::Pose2d> message;
+            wpi::SmallVector<uint8_t, 64> buf;
+            if (!message.Pack(buf, pose)) return 1;
+            auto unpacked = message.Unpack(buf);
+            if (!unpacked || *unpacked != pose) return 2;
+            frc::Ellipse2d ellipse{frc::Pose2d{}, 2_m, 1_m};
+            auto nearest = ellipse.Nearest(frc::Translation2d{3_m, 0_m});
+            if (std::abs(nearest.X().value() - 2.0) > 1e-6 || std::abs(nearest.Y().value()) > 1e-6) return 3;
+            fmt::print("Pose2d {} bytes, nearest ({}, {})\n", buf.size(), nearest.X().value(), nearest.Y().value());
+            return 0;
+          }
+          EOF
+
+      - name: Build and test libwpimath, then build and repair the wheel
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE":/workspace \
+            -v "$RUNNER_TEMP":/work \
+            --workdir /workspace \
+            -e PACKAGE_VERSION \
+            -e HATCH_ROBOTPY_VERSION \
+            -e PIP_EXTRA_INDEX_URL \
+            "$MANYLINUX_RISCV64_IMAGE" \
+            bash /work/build.sh
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.13'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install and load the wheel
+        run: |
+          uv pip install --extra-index-url "$PIP_EXTRA_INDEX_URL" wheelhouse/*.whl
+          python -c "import native.wpimath._init_robotpy_native_wpimath"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: robotpy-native-wpimath-${{ matrix.version }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish robotpy-native-wpimath ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: robotpy-native-wpimath-${{ matrix.version }}-*-manylinux_riscv64
