@@ -1,0 +1,126 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `BuildWheels` job of
+# https://github.com/OpenJobDescription/.github/blob/mainline/.github/workflows/reusable_maturin_prerelease.yml
+name: Build openjd-model wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/openjd-model.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-openjd-model.yml'
+      - 'docs/packages/openjd-model.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-openjd-model.yml'
+      - 'docs/packages/openjd-model.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: openjd-model
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build openjd-model ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        include:
+          # rust-bindings/Cargo.toml declares `pyo3 = { features = ["abi3-py39"] }`
+          # unconditionally, so every build is abi3 with no extra maturin args;
+          # built on cp39, the oldest interpreter the tag claims, and re-tested
+          # on the newer ones via cibuildwheel's find_compatible_wheel. Upstream
+          # ships no free-threaded wheel, and pydantic-core (a test-only dep)
+          # has no cp314t build on our registry yet, so cp314t is dropped too.
+          - tag: cp39-abi3
+            build: >-
+              cp39-manylinux_riscv64 cp310-manylinux_riscv64
+              cp311-manylinux_riscv64 cp312-manylinux_riscv64
+              cp313-manylinux_riscv64 cp314-manylinux_riscv64
+
+    env:
+      OPENJD_MODEL_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout openjd-model-for-python ${{ env.OPENJD_MODEL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: OpenJobDescription/openjd-model-for-python
+          ref: ${{ env.OPENJD_MODEL_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # pydantic-core (pulled in transitively by the pydantic runtime
+          # dependency) has no riscv64 wheel for cp39 on our registry yet; the
+          # wheel itself is unaffected, only cp39's test install is.
+          CIBW_TEST_SKIP: cp39-*
+          CIBW_TEST_REQUIRES: pytest pytest-xdist pytest-timeout hypothesis
+          CIBW_TEST_SOURCES: test
+          CIBW_TEST_COMMAND: >-
+            python -c "import openjd._openjd_rs as m, importlib.metadata as md;
+            assert m.__file__.endswith('.so'), m.__file__;
+            assert any(str(p).endswith('licenses/LICENSE') for p in md.files('openjd-model'))" &&
+            python -m pytest -rfEx --numprocesses=auto --timeout=30
+            --import-mode=importlib
+            --ignore=test/openjd/model_v0/benchmark --ignore=test/openjd/model_v1/benchmark
+            test
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: openjd-model-${{ env.OPENJD_MODEL_VERSION }}-${{ matrix.tag }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish openjd-model ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: openjd-model-${{ matrix.version }}-*-manylinux_riscv64
