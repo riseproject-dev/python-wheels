@@ -1,0 +1,176 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/CGAL/cgal-swig-bindings/blob/v6.0.1.post202410241521/.github/workflows/tests.yml
+# and the cgal/python-wheel:manylinux2014 image its Linux leg builds in.
+name: Build cgal wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cgal.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cgal.yml'
+      - 'docs/packages/cgal.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cgal.yml'
+      - 'docs/packages/cgal.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # cgal/python-wheel:manylinux2014 builds github.com/CGAL/LAStools master, unchanged since 2020.
+  LASTOOLS_COMMIT: 654f84e7b01d21d0306442897cb00d3047816179
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cgal
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cgal ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+    env:
+      CGAL_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout cgal-swig-bindings ${{ env.CGAL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: CGAL/cgal-swig-bindings
+          ref: v${{ env.CGAL_VERSION }}
+          persist-credentials: false
+
+      # The wheel version is <CGAL release>.post<bindings commit date>.
+      - name: Resolve the CGAL release
+        run: echo "CGAL_CORE_VERSION=${CGAL_VERSION%%.post*}" >> "$GITHUB_ENV"
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # SWIG 4.5 dropped the PyInt_* compatibility macros SWIG_CGAL/Python still calls.
+          CIBW_BEFORE_ALL_LINUX: >-
+            pipx runpip swig install swig==4.4.1 &&
+            dnf -y install gmp-devel mpfr-devel boost-devel tbb-devel eigen3-devel zlib-ng-compat-devel &&
+            curl -fsSL https://github.com/CGAL/cgal/releases/download/v${{ env.CGAL_CORE_VERSION }}/CGAL-${{ env.CGAL_CORE_VERSION }}.tar.xz | tar xJ -C /tmp &&
+            cmake -S /tmp/CGAL-${{ env.CGAL_CORE_VERSION }} -B /tmp/cgal-build -DCMAKE_BUILD_TYPE=Release &&
+            cmake --install /tmp/cgal-build &&
+            curl -fsSL https://github.com/CGAL/LAStools/archive/${{ env.LASTOOLS_COMMIT }}.tar.gz | tar xz -C /tmp &&
+            cmake -S /tmp/LAStools-${{ env.LASTOOLS_COMMIT }} -B /tmp/las-build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 &&
+            cmake --build /tmp/las-build -j"$(nproc)" &&
+            cmake --install /tmp/las-build &&
+            mv /usr/local/include/LASzip/*.hpp /usr/local/include/ &&
+            mv /usr/local/include/LASlib/*.hpp /usr/local/include/ &&
+            cp /usr/local/share/doc/CGAL/LICENSE {project}/LICENSE.CGAL &&
+            cp /usr/local/share/doc/CGAL/LICENSE.GPL {project}/LICENSE.CGAL.GPL &&
+            cp /usr/local/share/doc/CGAL/LICENSE.LGPL {project}/LICENSE.CGAL.LGPL &&
+            cp /tmp/LAStools-${{ env.LASTOOLS_COMMIT }}/COPYING.txt {project}/LICENSE.LAStools &&
+            cp /usr/share/licenses/gmp/COPYING.LESSERv3 {project}/LICENSE.gmp &&
+            cp /usr/share/licenses/mpfr/COPYING.LESSER {project}/LICENSE.mpfr &&
+            cp /usr/share/licenses/tbb/LICENSE.txt {project}/LICENSE.tbb &&
+            cp /usr/share/licenses/boost-serialization/LICENSE_1_0.txt {project}/LICENSE.boost &&
+            cp /usr/share/licenses/bzip2-libs/LICENSE {project}/LICENSE.bzip2 &&
+            cp /usr/share/licenses/xz-libs/COPYING {project}/LICENSE.xz &&
+            cp /usr/share/licenses/libzstd/LICENSE {project}/LICENSE.zstd
+          CIBW_BEFORE_BUILD: mkdir -p {project}/build/build-python/CGAL
+          CIBW_ENVIRONMENT: >-
+            CGAL_PYTHON_MODULE_VERSION=${{ env.CGAL_VERSION }}
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
+            LD_LIBRARY_PATH={project}/build/lib:/usr/local/lib:$LD_LIBRARY_PATH auditwheel repair -w {dest_dir} {wheel}
+          CIBW_TEST_SOURCES: examples
+          CIBW_TEST_COMMAND: cd examples/python && for i in *.py; do python $i || exit 1; done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cgal-${{ env.CGAL_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      CGAL_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc gmp mpfr
+          output: rpm-gpl-sources.tar
+
+      - name: Combine GPL sources into one archive
+        run: |
+          set -euo pipefail
+          CGAL_CORE_VERSION="${CGAL_VERSION%%.post*}"
+          mkdir gpl-sources
+          tar xf rpm-gpl-sources.tar -C gpl-sources
+          curl -fsSL --retry 5 "https://github.com/CGAL/cgal/releases/download/v${CGAL_CORE_VERSION}/CGAL-${CGAL_CORE_VERSION}.tar.xz" -o "gpl-sources/CGAL-${CGAL_CORE_VERSION}.tar.xz"
+          curl -fsSL --retry 5 "https://github.com/CGAL/LAStools/archive/${LASTOOLS_COMMIT}.tar.gz" -o "gpl-sources/LAStools-${LASTOOLS_COMMIT}.tar.gz"
+          tar cf gpl-sources.tar -C gpl-sources .
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cgal-${{ env.CGAL_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish cgal ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: cgal-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: cgal-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc, gmp, mpfr, CGAL, LAStools
