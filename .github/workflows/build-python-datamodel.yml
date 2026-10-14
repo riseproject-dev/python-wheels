@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build` job of
+# https://github.com/phenobarbital/python-datamodel/blob/0.11.0/.github/workflows/release.yml
+name: Build python-datamodel wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/python-datamodel.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-python-datamodel.yml'
+      - 'docs/packages/python-datamodel.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-python-datamodel.yml'
+      - 'docs/packages/python-datamodel.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: python-datamodel
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build python-datamodel ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # No cp314t: upstream's CIBW_BUILD selects cp3NN-* only and ships no free-threaded wheel.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      PYTHON_DATAMODEL_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-datamodel ${{ env.PYTHON_DATAMODEL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: phenobarbital/python-datamodel
+          ref: ${{ env.PYTHON_DATAMODEL_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: dist
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_ENVIRONMENT_LINUX: "PATH=/root/.cargo/bin:$PATH PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/"
+          CIBW_BEFORE_BUILD_LINUX: >-
+            curl https://sh.rustup.rs -sSf | sh -s -- -y &&
+            export PATH=/root/.cargo/bin:$PATH &&
+            pip install maturin &&
+            python scripts/stage_rust_ext.py --manylinux off
+          CIBW_TEST_COMMAND: >-
+            python -c "import datamodel.rs_parsers as r; assert r.HAS_RUST"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: python-datamodel-${{ env.PYTHON_DATAMODEL_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish python-datamodel ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: python-datamodel-${{ matrix.version }}-*-manylinux_riscv64
