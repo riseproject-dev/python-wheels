@@ -1,0 +1,143 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Mirrors the Linux leg of upstream's .github/workflows/wheel.yml (called from
+# pr_and_main.yml/release.yml): a scikit-build-core/CMake/pybind11 build, with
+# lib/cmake/scipp-cpm.cmake fetching llnl/units, Boost headers, Eigen3, GoogleTest and
+# oneTBB at configure time. GoogleTest is test-only and never installed into the wheel;
+# units/Boost/Eigen3 are statically compiled in, and oneTBB's libtbb.so ships inside the
+# wheel (scipp/lib64/libtbb.so). musllinux is skipped upstream too (`skip = ["*musllinux*"]`
+# in pyproject.toml).
+name: Build scipp wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/scipp.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-scipp.yml'
+      - 'docs/packages/scipp.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-scipp.yml'
+      - 'docs/packages/scipp.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: scipp
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build scipp ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp311", "cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      SCIPP_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout scipp/scipp v${{ env.SCIPP_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: scipp/scipp
+          ref: ${{ env.SCIPP_VERSION }}
+          fetch-depth: 0  # setuptools_scm needs history to determine the version
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch scipp source
+        run: git apply python-wheels/patches/scipp/${{ env.SCIPP_VERSION }}/00*.patch
+
+      # pyproject.toml's license-files is an explicit ["LICENSE"] list (patched to also
+      # match LICENSE.*), so scikit-build-core's default licence glob never runs. The CPM
+      # dependencies ship no licence in upstream's own wheel; stage the ones actually
+      # compiled or linked into it at the root (GoogleTest is test-only).
+      - name: Stage vendored dependency licences
+        run: |
+          set -euxo pipefail
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/llnl/units/v0.13.1/LICENSE" -o LICENSE.units
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/boostorg/boost/boost-1.90.0/LICENSE_1_0.txt" -o LICENSE.boost
+          curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/3.4.0/COPYING.MPL2" -o LICENSE.eigen
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/uxlfoundation/oneTBB/v2023.0.0/LICENSE.txt" -o LICENSE.tbb
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # pip resolves cmake>=3.28 (our registry's newest is 4.0.3); CPM-fetched
+          # dependencies' own cmake_minimum_required predates CMake 4's floor.
+          CIBW_ENVIRONMENT: >-
+            CMAKE_POLICY_VERSION_MINIMUM=3.5
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_EXTRAS: test
+          CIBW_TEST_REQUIRES: scipy graphviz pooch hypothesis
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m; f = {p.name for p in m.files('scipp') if '.dist-info/licenses/' in str(p)}; assert f == {'LICENSE', 'LICENSE.units', 'LICENSE.boost', 'LICENSE.eigen', 'LICENSE.tbb'}, f"
+            && pytest --ignore {project}/tests/plotting --ignore {project}/tests/hypothesis/ --ignore {project}/tests/experimental/ {project}/tests
+          # numpy/scipy have no riscv64 wheel on public PyPI; keep pip on our registry's copies.
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,scipy
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          path = sys.argv[1]
+          names = zipfile.ZipFile(path).namelist()
+          exts = [n for n in names if n.endswith(".so")]
+          assert exts, "no compiled extension in wheel"
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: scipp-${{ env.SCIPP_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish scipp ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: scipp-${{ matrix.version }}-*-manylinux_riscv64
