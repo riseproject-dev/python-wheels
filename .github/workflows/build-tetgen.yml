@@ -1,0 +1,111 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/pyvista/tetgen/blob/v0.8.4/.github/workflows/build-and-deploy.yml
+name: Build tetgen wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/tetgen.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tetgen.yml'
+      - 'docs/packages/tetgen.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tetgen.yml'
+      - 'docs/packages/tetgen.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: tetgen
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build tetgen ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    env:
+      TETGEN_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout tetgen v${{ env.TETGEN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pyvista/tetgen
+          ref: v${{ env.TETGEN_VERSION }}
+          persist-credentials: false
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # build/skip come from upstream's own pyproject.toml [tool.cibuildwheel]:
+          # cp310/cp311 each get a real extension, cp312+ collapse into one
+          # cp312-abi3 wheel (STABLE_ABI in src/CMakeLists.txt), same as upstream's
+          # own 6-wheel (3 abi tags x 2 archs) PyPI release.
+          CIBW_ARCHS: riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,vtk,pymeshfix,matplotlib,pillow,contourpy,kiwisolver,fonttools
+
+      - name: Check the extension and license made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith(".so") and "_tetgen" in n for n in names), (whl, names)
+              assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), (whl, names)
+              assert any(n.endswith("tetgen-license") for n in names), (whl, names)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: tetgen-${{ env.TETGEN_VERSION }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish tetgen ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: tetgen-${{ matrix.version }}-manylinux_riscv64
