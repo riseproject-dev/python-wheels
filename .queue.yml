@@ -7060,7 +7060,7 @@ packages:
   repo: https://gtsam.org/
   status: queued
   pr: null
-  notes: '8 Linux wheels upstream (abi: cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: '8 Linux wheels upstream (abi: cp311,cp312,cp313,cp314); no riscv64 on PyPI or pypi.riseproject.dev. FEASIBILITY NOTES from the gtsam-develop triage (2026-10-14), for whoever ports this: PyPI latest stable is now 4.3.0 (git tag 4.3.0, 8 Linux wheels cp311-cp314 x86_64/aarch64, no sdist) - bump this entry''s version when porting. Build looks tractable, no Bazel/hermetic-toolchain red flags: plain CMake (>=3.16), vendored Eigen/CCOLAMD/SuiteSparse_config/metis/Spectra/cephes under gtsam/3rdparty, pybind11 via the in-tree `wrap` generator. Upstream recipe (.github/workflows/prod-cibw.yml + .github/scripts/python_wheels/cibw_before_all.sh at the tag): host-side `cmake -DGTSAM_BUILD_PYTHON=1` to generate build/python/setup.py, then cibuildwheel on build/python with CIBW_BEFORE_ALL running cibw_before_all.sh <pyver> {project}, which yum-installs wget+doxygen, builds Boost 1.87 from source (b2 --with-graph/move/optional/program_options/random/serialization/smart_ptr/timer/chrono), configures GTSAM (-DGTSAM_BUILD_WITH_WERROR=ON -DGTSAM_BUILD_UNSTABLE=ON -DGTSAM_USE_QUATERNIONS=OFF -DGTSAM_WITH_TBB=OFF -DGTSAM_BUILD_WITH_MARCH_NATIVE=OFF -DGTSAM_GENERATE_DOC_XML=1 -DGTWRAP_ADD_DOCSTRINGS=ON ...), runs doxygen, then `make install` + `make python-stubs`/`python-unstable-stubs` with -j1 on Linux (wrapper TUs OOM otherwise). setup.py.in forces has_ext_modules() since the .so is prebuilt. Everything (Boost + ~1450 .cpp + wrapper) is rebuilt per interpreter in BEFORE_ALL, so expect a very long riscv64 job (build-once-C++ pattern worth considering). Only arch-specific CMake is FindMKL/FindMOSEK (both optional). In quay.io/pypa/manylinux_2_39_riscv64: GCC 14.3.1, cmake 4.4.4, dnf has boost-devel 1.83 (appstream), tbb-devel 2021.11, doxygen 1.13.2 (CRB) - so Boost could come from dnf instead of the 1.87 source build; watch GTSAM_BUILD_WITH_WERROR=ON under GCC 14. Upstream smoke test is just `import gtsam`; python/gtsam/tests has ~116 unittest files for a fuller test.'
 - pkg: river
   version: 0.26.1
   home: https://riverml.xyz/
@@ -13163,23 +13163,23 @@ packages:
   version: 4.3a2.dev202609030306
   home: https://gtsam.org/
   repo: https://gtsam.org/
-  status: queued
+  status: parked
   pr: null
-  notes: '5 Linux wheels upstream (abi: cp311,cp312,cp313); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: '5 Linux wheels upstream (abi: cp311,cp312,cp313); no riscv64 on PyPI or pypi.riseproject.dev. PARKED per gotcha 581 (feasibility-and-triage.md): a rolling develop-branch nightly, not a trackable release; port the stable `gtsam` entry instead (same borglab/gtsam source, same CMake build; feasibility notes are on that entry). Evidence (checked 2026-10-14): (1) No sdist in any of the 24 releases PyPI currently lists, and no per-build tag (git ls-remote --tags: only 4.x/4.3aN/4.3.0 release tags). (2) The version is not source-derived: .github/workflows/build-cibw.yml runs on every push to develop, sets DEVELOP=1 and TIMESTAMP=$(date +%Y%m%d%H%M) from the runner clock, and CMakeLists.txt turns that into MAJOR.MINOR.PATCH.devTIMESTAMP (setup name gtsam-develop). Unlike tf-nightly the commit IS recoverable heuristically: the timestamp matches the triggering develop merge''s committer time to within a minute (dev202609030306 = 7c74831d, Merge PR #2779; dev202610020315 = d9fad91, PR #2829; dev202610012057 = d57c37a committed 20:56), but a RISE build would have to fake TIMESTAMP to reproduce the filename. (3) ci_scripts/check_versions.py drops is_devrelease versions, so a docs/packages/gtsam-develop.yaml could never be upgrade-tracked; the queued 4.3a2.dev202609030306 is already stale (PyPI latest 4.3.2.dev202610020315, and the base version itself moved 4.3a2 -> 4.3.1 -> 4.3.2). (4) Upstream prunes: only 24 releases remain, oldest 4.3a2.dev202609011210, despite years of nightlies; build-cibw.yml carries a cleanup_gtsam_develop.sh --keep 5 step (temporarily commented out), so pinned versions vanish from PyPI. Gotcha 581: never let a nightly be a project''s first riscv64 port.'
 - pkg: hydride
   version: 1.2.3
   home: https://hydride.biotite-python.org
   repo: https://github.com/biotite-dev/hydride
-  status: queued
-  pr: null
-  notes: '3 Linux wheels upstream (abi: cp310,cp311,cp312); no riscv64 on PyPI or pypi.riseproject.dev.'
+  status: ci-running
+  pr: https://github.com/riseproject-dev/python-wheels/pull/3225
+  notes: '3 Linux wheels upstream (abi: cp310,cp311,cp312); no riscv64 on PyPI or pypi.riseproject.dev. PR #3225 open. 1.2.3 is the latest PyPI release (checked 2026-10-14); upstream also has a v1.2.4 git tag (2025-11-24) but it still declares __version__ = "1.2.3" and was never uploaded to PyPI, so the port builds the v1.2.3 tag. Cython (relax.pyx) + setuptools; setup.py imports biotite at BUILD time to compile a fragment library over all ~50.5k CCD components (pickled into the wheel), so the build env needs biotite from our registry (1.7.1, published, cp312-cp314 only -> matrix cp312/cp313/cp314, no cp314t). The fragment-library step alone took ~37 min single-core on x86_64, so riscv64 jobs get timeout-minutes 720. Two patches, both reproduce on x86: 0001 Backport of upstream bba37a7 (v1.2.3 setup.py catches only KeyError but biotite >= 1.0 raises ValueError for CCD components with missing coordinates -> build aborts); 0002 Issue biotite-dev/hydride#29/#30 (biotite 1.7''s Rust CellList returns int64 from get_atoms() and rejects a float64 periodic box, so relax_hydrogen() fails: 141/1327 tests fail unpatched against biotite 1.7.1; casting at the call site makes all 1327 pass, x86_64 local run). Note for local reruns: with PYTHONUNBUFFERED=1 set in the environment, 4 test_cli bcif-to-stdout cases fail because sys.stdout.buffer becomes a raw FileIO that biotite''s is_binary() rejects; not a real failure.'
 - pkg: transformations
   version: 2026.8.8
   home: https://www.cgohlke.com
   repo: https://github.com/cgohlke/transformations
-  status: queued
-  pr: null
-  notes: '6 Linux wheels upstream (abi: cp312,cp314,cp315); no riscv64 on PyPI or pypi.riseproject.dev.'
+  status: ci-running
+  pr: https://github.com/riseproject-dev/python-wheels/pull/3221
+  notes: '6 Linux wheels upstream (abi: cp312,cp314,cp315); no riscv64 on PyPI or pypi.riseproject.dev. PR #3221 open. 2026.8.8 is still the latest release (checked 2026-10-14). Single-file C extension (transformations/transformations.c) against numpy, setuptools backend. setup.py builds a cp312-abi3 wheel by default (CG_LIMITED_API defaults to 1) and switches itself to a regular build under Py_GIL_DISABLED, so upstream''s wheels are cp312-abi3 + cp314t + cp315t (cp315 is a 3.15 pre-release interpreter in their cibuildwheel matrix, not a real ABI to target). Port mirrors upstream''s wheel.yml: matrix cp312 (CIBW_BUILD cp312+cp313+cp314, so the abi3 wheel is built once on its floor and retested on cp313/cp314 via find_compatible_wheel, standing in for upstream''s separate 3.14 abi3 test step) and cp314t; test = upstream''s `pytest --doctest-modules --pyargs transformations`. Validated locally under QEMU in quay.io/pypa/manylinux_2_39_riscv64: cp312-abi3 wheel 45 doctests passed on cp313, cp314t wheel 45 passed. Same shape as build-imagecodecs.yml (same author).'
 - pkg: biscuit-python
   version: 0.4.0
   home: https://biscuitsec.org/usage/python
