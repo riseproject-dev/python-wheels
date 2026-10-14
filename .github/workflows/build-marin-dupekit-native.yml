@@ -1,0 +1,172 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the Linux leg of the `dupekit` family in
+# https://github.com/marin-community/marin/blob/a1a192c57155f987a7403e13db1839e2bfa4dcb8/.github/workflows/marin-release-libs-wheels.yaml
+# (scripts/ci/package_release.py build/validate-wheel) and on lib/dupekit's
+# unit-test lane in .github/workflows/unified-unit.yaml.
+name: Build marin-dupekit-native wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/marin-dupekit-native.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-marin-dupekit-native.yml'
+      - 'docs/packages/marin-dupekit-native.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-marin-dupekit-native.yml'
+      - 'docs/packages/marin-dupekit-native.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # marin-community/marin tags no dupekit release: every version is a CI dev
+  # build whose version upstream stamps at release time. This is the commit
+  # whose lib/dupekit/rust tree matches the 0.1.11.dev38062449553 sdist on PyPI
+  # byte for byte apart from that stamp (gotcha 103). Move it together with the
+  # pending version in docs/packages/marin-dupekit-native.yaml.
+  DUPEKIT_REF: a1a192c57155f987a7403e13db1839e2bfa4dcb8
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: marin-dupekit-native
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build marin-dupekit-native ${{ matrix.version }} cp312-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+
+    env:
+      DUPEKIT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout marin @ ${{ env.DUPEKIT_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: marin-community/marin
+          ref: ${{ env.DUPEKIT_REF }}
+          persist-credentials: false
+
+      - name: Stamp release version
+        run: |
+          python3 - <<'EOF'
+          import os, sys
+          from pathlib import Path
+
+          sys.path.insert(0, "scripts/ci")
+          import package_release as p
+
+          version = p.cargo_compatible_version(os.environ["DUPEKIT_VERSION"])
+          p._stamp_versions(Path.cwd(), p.PACKAGES["dupekit"].build, version)
+          EOF
+          grep -n '^version' lib/dupekit/rust/Cargo.toml
+
+      # maturin only globs licence files next to lib/dupekit/rust/pyproject.toml;
+      # the monorepo's LICENSE is at the root, so upstream's wheels ship none (gotcha 146).
+      - name: Copy LICENSE next to the crate's pyproject.toml
+        run: cp LICENSE lib/dupekit/rust/LICENSE
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --out dist
+          manylinux: '2_39'
+          working-directory: lib/dupekit/rust
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: marin-dupekit-native-${{ env.DUPEKIT_VERSION }}-cp312-abi3-manylinux_riscv64
+          path: lib/dupekit/rust/dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test marin-dupekit-native ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    env:
+      DUPEKIT_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+      UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+      UV_INDEX_STRATEGY: unsafe-best-match
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # pyo3 abi3-py312: one wheel for >=3.12; free-threaded CPython cannot load an abi3 wheel.
+        python-version: ['3.12', '3.13', '3.14']
+
+    steps:
+      - name: Checkout marin @ ${{ env.DUPEKIT_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: marin-community/marin
+          ref: ${{ env.DUPEKIT_REF }}
+          persist-credentials: false
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: marin-dupekit-native-${{ env.DUPEKIT_VERSION }}-cp312-abi3-manylinux_riscv64
+          path: dist
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install wheel and test dependencies
+        run: |
+          uv pip install dist/*.whl \
+            huggingface-hub "pyarrow>=23.0.0" "pytest>=8.3.2" pytest-timeout pytest-xdist
+
+      - name: Validate wheel
+        run: python -c "import dupekit_native"
+
+      - name: Test wheel
+        run: pytest --durations=5 -n auto --dist=worksteal --tb=short lib/dupekit/tests
+
+  publish:
+    name: Publish marin-dupekit-native ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: marin-dupekit-native-${{ matrix.version }}-*-manylinux_riscv64
