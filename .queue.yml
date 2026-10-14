@@ -12932,9 +12932,9 @@ packages:
   version: 0.7.1
   home: https://github.com/PanQiWei/AutoGPTQ
   repo: https://github.com/PanQiWei/AutoGPTQ
-  status: queued
+  status: parked
   pr: null
-  notes: '4 Linux wheels upstream (abi: cp310,cp311,cp38,cp39); no riscv64 on PyPI or pypi.riseproject.dev.'
+  notes: 'Parked: no compiled CPU artifact exists to port, and upstream is unmaintained. Read setup.py at the 0.7.1 tag (identical in the PyPI sdist). BUILD_CUDA_EXT defaults to 1 with no toolkit auto-detection: it does `import torch` (sys.exit(1) under pip''s default build isolation, which has no torch), and with a CPU-only torch `torch.version.cuda` is None, so `CUDA_VERSION = ''''.join(os.environ.get(''CUDA_VERSION'', None).split(''.''))` raises AttributeError. Plain `pip install auto-gptq` on riscv64 therefore fails at build time. Every ext_module (autogptq_cuda_64/256, exllama_kernels, exllamav2_kernels, autogptq_marlin_cuda) is a torch CUDAExtension. The only CPU kernel, cQIGen, sits inside the same BUILD_CUDA_EXT branch, is off by default (DISABLE_QIGEN=1) and hardcodes x86 flags (-mavx -mavx2 -mfma -march=native). BUILD_CUDA_EXT=0 skips all extensions, and a local uv build of the sdist produced auto_gptq-0.7.1-py3-none-any.whl (Root-Is-Purelib, zero .so). At runtime qlinear_cuda falls back to a torch.matmul dequant path, so `BUILD_CUDA_EXT=0 pip install auto-gptq` already works on riscv64 and there is nothing arch-specific to publish (gotcha 24). Upstream README: ''AutoGPTQ is unmaintained - we suggest using GPTQModel''. Its successor gptqmodel (7.6.0) ships only an sdist on PyPI, so there is no Linux-wheel gap to fill there either (gotcha 50). Revisit only if a release adds a real CPU extension.'
 - pkg: faster-fifo
   version: 1.5.2
   home: https://github.com/alex-petrenko/faster-fifo
@@ -12943,19 +12943,19 @@ packages:
   pr: https://github.com/riseproject-dev/python-wheels/pull/1479
   notes: '20 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp39); no riscv64 on PyPI or pypi.riseproject.dev.'
 - pkg: torchmonarch
-  version: 0.6.0
+  version: 0.7.0
   home: https://meta-pytorch.org/monarch/
   repo: https://github.com/meta-pytorch/monarch
-  status: queued
-  pr: null
-  notes: '8 Linux wheels upstream (abi: cp310,cp311,cp312,cp313); no riscv64 on PyPI or pypi.riseproject.dev.'
+  status: ci-running
+  pr: https://github.com/riseproject-dev/python-wheels/pull/3182
+  notes: 'PR #3182 open, built at 0.7.0 (newest release; the queue had 0.6.0). Not CUDA-gated: setup.py auto-detects CUDA/ROCm and builds the tensor engine CPU-only when neither is present (MONARCH_GPU_PLATFORM=none forces it). That is how upstream builds its macOS wheels, and its README documents CPU-only Linux builds. nccl-sys, rdmaxcel-sys (bindgen/cxx) and the RDMA/libtorch_cuda pieces are only reached through the tensor_engine_gpu/rdma cargo features. torch-sys-cuda without `cuda` and torch-sys2 are pure pyo3, and the two C++ extensions (_C, _gradient_generator) link only c10/torch/torch_cpu/torch_python. Unlike instanttensor (gotcha 657), the actor runtime has no device gate. requires_dist has no torch pin and resolves for cp312-314 on riscv64 (py-spy, pyzmq, xxhash and pyarrow from our registry; clusterscope is pure). Build: setuptools-rust PyO3 over an ~850-crate workspace on pinned nightly-2026-07-05, which ships riscv64 host tools. It builds against our torch==2.14.0 (upstream uses 2.14.1) with `build --no-isolation` as upstream does, and needs protoc (tracing-perfetto-sdk-schema; CRB protoc 3.19.6 parses its single proto2 file, checked locally). The dashboard is bundled on ubuntu-latest because node has no riscv64 build. auditwheel excludes libtorch/libc10. The wheel links ~850 crates, so expect roughly 8+ h per interpreter at CARGO_BUILD_JOBS=2 with 16 GB swap (gotcha 141 calibration). Tests: import plus upstream''s test_extension_linking, test_rust_bindings_load, test_grad_generator and test_python_actors::test_stream. That last test carries a 60 s pytest-timeout marker, the first thing to look at if it flakes on riscv64. Matrix cp312/313/314; upstream ships no free-threaded build. Not built locally: the full build is too long for this host, which had ~4 GB free.'
 - pkg: tiledb
   version: 0.36.1
   home: https://github.com/TileDB-Inc/TileDB-Py
   repo: https://github.com/TileDB-Inc/TileDB-Py
-  status: queued
-  pr: null
-  notes: '12 Linux wheels upstream (abi: cp310,cp311,cp312,cp313,cp314,cp39); no riscv64 on PyPI or pypi.riseproject.dev.'
+  status: ci-running
+  pr: https://github.com/riseproject-dev/python-wheels/pull/3183
+  notes: 'PR #3183 open. TileDB-Py (scikit-build-core + pybind11) does not build TileDB core. Its CMakeLists downloads a prebuilt libtiledb 2.30.1 from TileDB''s releases (linux x86_64/arm64 only; any other Linux arch falls through to the x86_64 tarball). The port takes upstream''s own custom-libtiledb path (TILEDB_PATH + LD_LIBRARY_PATH auditwheel repair): a separate build_libtiledb job builds TileDB-Inc/TileDB at the version TileDB-Py pins, read from CMakeLists, the way TileDB''s build-artifacts.yml does. It runs in the manylinux_2_39_riscv64 image with vcpkg (pinned 2026-02-19 baseline, which post-dates gotcha 641''s riscv64 processor fix and builds vcpkg-tool from source with VCPKG_FORCE_SYSTEM_BINARIES) and a riscv64-linux-release triplet sed-copied from TileDB''s arm64 one. S3/Azure/GCS/serialization are OFF (aws-sdk-cpp, google-cloud-cpp/gRPC, azure, capnproto/curl), so the deps are only blosc2/bzip2/lz4/openssl/spdlog/fmt/nlohmann-json/zlib/zstd/libwebp. The upstream test suite skips missing backends (serialization module-level skip, vfs.supports checks), and enabling S3 later is a follow-up. The vcpkg copyright files plus TileDB''s LICENSE are staged as external/LICENSE-*.txt, which upstream''s wheel.license-files already globs. Test extras (pandas<3 -> 2.3.3, pyarrow 25.0.1, dask[distributed]) resolve for cp312/313/314 but not cp314t, which upstream does not ship anyway. Not built locally (host ~4 GB free). Things to check on the first run: TILEDB_WERROR stays at upstream''s default ON under the riscv64 GCC, and whether auditwheel grafts any GCC runtime (libatomic) that would need a gpl_sources job.'
 - pkg: xtcocotools
   version: 1.14.3
   home: https://github.com/jin-s13/xtcocoapi
