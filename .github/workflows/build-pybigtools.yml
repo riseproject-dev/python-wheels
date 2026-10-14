@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `linux` job of
+# https://github.com/jackh726/bigtools/blob/pybigtools@v0.3.0/.github/workflows/release-python.yml
+# and the `test-python` job of
+# https://github.com/jackh726/bigtools/blob/pybigtools@v0.3.0/.github/workflows/ci.yml
+name: Build pybigtools wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pybigtools.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pybigtools.yml'
+      - 'docs/packages/pybigtools.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pybigtools.yml'
+      - 'docs/packages/pybigtools.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_PYTHON_PREFERENCE: only-managed
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pybigtools
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pybigtools ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # pyo3 0.22 caps at CPython 3.13 and predates free-threading; upstream ships cp39-cp313.
+        python: ["cp312", "cp313"]
+
+    env:
+      PYBIGTOOLS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout bigtools pybigtools@v${{ env.PYBIGTOOLS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: jackh726/bigtools
+          ref: pybigtools@v${{ env.PYBIGTOOLS_VERSION }}
+          persist-credentials: false
+
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --out dist --interpreter ${{ steps.interp.outputs.value }} --manifest-path pybigtools/Cargo.toml --no-default-features --features remote
+          manylinux: '2_39'
+          before-script-linux: git config --global --add safe.directory "*"
+
+      - name: Verify the wheel ships the compiled extension and licence
+        run: |
+          python3 - dist/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert any(n.startswith("pybigtools/pybigtools.") and n.endswith(".so") for n in names), names
+          assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
+          print(sys.argv[1], "ok")
+          EOF
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ steps.interp.outputs.value }}
+          activate-environment: true
+          enable-cache: false
+
+      # pybbi, the reference implementation test_raster.py compares against,
+      # has no riscv64 wheel and builds from its sdist against these.
+      - name: Install pybbi build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends libpng-dev libssl-dev zlib1g-dev pkg-config
+
+      - name: Test wheel
+        working-directory: pybigtools
+        run: |
+          uv pip install --no-build-package numpy ../dist/*.whl "pybbi>=0.4.2" pytest "smart_open[http]"
+          pytest
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pybigtools-${{ env.PYBIGTOOLS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pybigtools ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pybigtools-${{ matrix.version }}-*-manylinux_riscv64
