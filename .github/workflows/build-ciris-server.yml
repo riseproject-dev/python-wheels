@@ -1,0 +1,172 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/CIRISAI/CIRISServer/blob/v0.5.224/.github/workflows/build-wheels.yml
+name: Build ciris-server wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ciris-server.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ciris-server.yml'
+      - 'docs/packages/ciris-server.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ciris-server.yml'
+      - 'docs/packages/ciris-server.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_TIMEOUT: "60"
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: ciris-server
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build ciris-server ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      CIRIS_SERVER_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout CIRISServer v${{ env.CIRIS_SERVER_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: CIRISAI/CIRISServer
+          ref: v${{ env.CIRIS_SERVER_VERSION }}
+          persist-credentials: false
+
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 16
+
+      - name: Build wheel (maturin)
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --strip --out dist -i python3.10
+          manylinux: '2_39'
+          before-script-linux: |
+            git config --global --add safe.directory "*"
+            dnf install -y sqlite-devel systemd-devel openssl-devel
+            # auditwheel bundles OpenSSL, and libdbus-sys/onig_sys compile their vendored C sources in.
+            cargo fetch --locked
+            registry=$(echo "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*)
+            cp /usr/share/licenses/openssl-libs/LICENSE.txt LICENSE.openssl
+            cp "$registry"/libdbus-sys-*/vendor/dbus/COPYING LICENSE.dbus
+            cp "$registry"/onig_sys-*/oniguruma/COPYING LICENSE.oniguruma
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.10'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Check the wheel ships every licence
+        run: |
+          python3 - dist/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          for lic in ("LICENSE", "LICENSE.openssl", "LICENSE.dbus", "LICENSE.oniguruma"):
+              assert any(n.endswith(".dist-info/licenses/" + lic) for n in names), lic
+          print(sys.argv[1], "ok")
+          EOF
+
+      - name: Verify-FFI fold smoke (CIRISServer#232 — symbols must survive the linker strip)
+        env:
+          NEED: >-
+            ciris_verify_ffi_link_anchor ciris_verify_jcs_canonicalize
+            ciris_verify_self_enc_pubkeys ciris_verify_self_enc_respond
+            ciris_verify_wrap_dek_for_recipient ciris_verify_unwrap_dek
+            ciris_verify_kex_respond_hybrid_with_public
+            ciris_verify_create_federation_identity
+            ciris_verify_locale_merkle_root ciris_verify_admit_attestation
+        run: |
+          set -euo pipefail
+          WHL=$(ls dist/*.whl | head -1)
+          echo "wheel: $WHL"
+          uv pip install --force-reinstall --no-deps "$WHL"
+          python -c "import ctypes,os,ciris_server; p=ciris_server.verify_ffi_path(); print('verify_ffi_path ->',p); lib=ctypes.CDLL(p); need=os.environ['NEED'].split(); missing=[s for s in need if not hasattr(lib,s)]; assert not missing, 'verify FFI symbols MISSING from _native (--gc-sections stripped the fold): %s' % missing; print('OK (ctypes) - verify FFI folded: %d symbols resolvable from the built wheel' % len(need))"
+
+      - name: FFI symbol inventory (LTO must not drop what only ctypes calls)
+        env:
+          MIN_VERIFY_SYMBOLS: 88
+          NEED_PYINIT: >-
+            PyInit__native PyInit_ciris_edge PyInit_ciris_lens_core
+            PyInit_ciris_persist PyInit_pyo3_async_runtimes
+        run: |
+          set -euo pipefail
+          WHL=$(ls dist/*.whl | head -1)
+          TMP=$(mktemp -d)
+          unzip -q "$WHL" -d "$TMP"
+          LIB=$(find "$TMP" -name '_native*.so' | head -1)
+          test -n "$LIB" || { echo "::error::no _native lib inside $WHL"; exit 1; }
+          SYMFILE=$(mktemp)
+          nm -D --defined-only "$LIB" > "$SYMFILE"
+          TOTAL=$(wc -l < "$SYMFILE" | tr -d ' ')
+          N=$(grep -c 'ciris_verify_' "$SYMFILE" || true)
+          echo "  symbol table entries: $TOTAL; ciris_verify_*: $N (floor $MIN_VERIFY_SYMBOLS)"
+          if [ "$N" -lt "$MIN_VERIFY_SYMBOLS" ]; then
+            echo "::error::$(basename "$WHL") exports $N ciris_verify_* symbols, under the $MIN_VERIFY_SYMBOLS floor."
+            exit 1
+          fi
+          MISSING=""
+          for s in $NEED_PYINIT; do grep -q "$s" "$SYMFILE" || MISSING="$MISSING $s"; done
+          if [ -n "$MISSING" ]; then
+            echo "::error::module entry point(s) missing from $(basename "$WHL"):$MISSING"
+            exit 1
+          fi
+          echo "  OK - inventory intact: $N verify symbols + all $(echo "$NEED_PYINIT" | wc -w) module entry points"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ciris-server-${{ env.CIRIS_SERVER_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish ciris-server ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: ciris-server-${{ matrix.version }}-*-manylinux_riscv64
