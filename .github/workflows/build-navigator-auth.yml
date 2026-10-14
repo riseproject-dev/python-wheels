@@ -1,0 +1,127 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-wheels` job of
+# https://github.com/phenobarbital/navigator-auth/blob/0.28.7/.github/workflows/release.yml
+name: Build navigator-auth wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/navigator-auth.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-navigator-auth.yml'
+      - 'docs/packages/navigator-auth.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-navigator-auth.yml'
+      - 'docs/packages/navigator-auth.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: navigator-auth
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build navigator-auth ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # No cp314t: upstream's CIBW_BUILD selects cp3NN-* only and ships no free-threaded wheel.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      NAVIGATOR_AUTH_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout navigator-auth ${{ env.NAVIGATOR_AUTH_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: phenobarbital/navigator-auth
+          ref: ${{ env.NAVIGATOR_AUTH_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: dist
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_BEFORE_BUILD: "curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal && pip install cython setuptools-rust"
+          CIBW_ENVIRONMENT: 'PATH=$HOME/.cargo/bin:$PATH'
+
+      - name: Verify wheel tags and compiled extensions
+        env:
+          EXPECTED_CPYTHON_TAG: ${{ matrix.python }}
+        run: |
+          python3 - <<'EOF'
+          import glob, os, zipfile
+
+          expected = {
+              "navigator_auth/rs_pep",
+              "navigator_auth/libs/json",
+              "navigator_auth/libs/cipher",
+              "navigator_auth/libs/parser",
+              "navigator_auth/libs/policy_eval",
+          }
+          wheels = glob.glob("dist/*.whl")
+          assert wheels, "no wheels were produced in dist/"
+
+          found_cpython_tags = set()
+          for whl in wheels:
+              filename = whl.rsplit("/", 1)[-1]
+              python_tag, _abi_tag, platform_tag = filename[:-4].split("-")[-3:]
+              found_cpython_tags.add(python_tag)
+              assert platform_tag.endswith("_riscv64"), (
+                  f"unexpected platform tag for {whl}: {platform_tag}"
+              )
+              found = {n.split(".", 1)[0] for n in zipfile.ZipFile(whl).namelist()
+                       if n.endswith(".so")}
+              assert found == expected, f"{whl}: extensions {sorted(found)} != {sorted(expected)}"
+              print(f"OK {whl}: {sorted(found)} [{python_tag}-{platform_tag}]")
+
+          assert found_cpython_tags == {os.environ["EXPECTED_CPYTHON_TAG"]}, found_cpython_tags
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: navigator-auth-${{ env.NAVIGATOR_AUTH_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish navigator-auth ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: navigator-auth-${{ matrix.version }}-*-manylinux_riscv64
