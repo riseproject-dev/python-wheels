@@ -1,0 +1,240 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# Upstream builds libsapien and the Python bindings as two separate CMake
+# stages (setup.py --sapien-only then --pybind-only per interpreter, scripts/
+# build.sh / build_aarch64.sh) rather than via cibuildwheel; this workflow
+# follows the same shape, driving the manylinux image directly instead of a
+# matrix per interpreter so the expensive C++ world (PhysX, svulkan2 and its
+# FetchContent deps) is only built once. PhysX has no riscv64 precompiled
+# archive, so it's built from source from sapien-sim/PhysX (the exact fork
+# SAPIEN pins, not raw NVIDIA-Omniverse/PhysX) and fed back in via
+# SAPIEN_PHYSX5_DIR. GPU PhysX, CUDA and OpenImageDenoise are all off
+# (SAPIEN_CUDA defaults OFF without a CUDA_PATH).
+name: Build sapien wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/sapien.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sapien.yml'
+      - 'docs/packages/sapien.yaml'
+      - 'patches/sapien/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sapien.yml'
+      - 'docs/packages/sapien.yaml'
+      - 'patches/sapien/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  PHYSX_TAG: 105.1-physx-5.3.1.patch0
+  AUDITWHEEL_FORK_REF: fe61bcdfb78f3955d9a3b6fbb05e3852c32239b0
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: sapien
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build sapien ${{ matrix.version }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      SAPIEN_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout haosulab/SAPIEN ${{ env.SAPIEN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: haosulab/SAPIEN
+          ref: ${{ env.SAPIEN_VERSION }}
+          submodules: recursive
+          path: sapien
+          persist-credentials: false
+
+      - name: Checkout sapien-sim/PhysX ${{ env.PHYSX_TAG }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: sapien-sim/PhysX
+          ref: ${{ env.PHYSX_TAG }}
+          path: physx-src
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply riscv64 patches
+        run: |
+          set -eux
+          PATCH_DIR="$PWD/python-wheels/patches/sapien/${SAPIEN_VERSION}"
+          cd physx-src
+          git apply -v "$PATCH_DIR"/0001-physx-foundation-add-riscv64-to-PX_P64_FAMILY.patch
+          git apply -v "$PATCH_DIR"/0002-physx-serialization-add-riscv64-binary-platform-tag.patch
+          git apply -v "$PATCH_DIR"/0003-physx-cmake-extend-aarch64-warning-relaxation-to-riscv64.patch
+          cd ../sapien
+          git apply -v "$PATCH_DIR"/0004-cmake-skip-cuda-language-on-riscv64.patch
+          git apply -v "$PATCH_DIR"/0005-cmake-physx5-add-riscv64-library-path.patch
+          git apply -v "$PATCH_DIR"/0006-setup.py-plumb-sapien_physx5_dir.patch
+          git apply -v "$PATCH_DIR"/0007-svulkan2-openvr-add-riscv64-branch.patch
+
+      - name: Build PhysX, SAPIEN core and the Python wheels
+        run: |
+          mkdir -p output "$HOME/.cache/sapien-ccache"
+          docker run -i --rm \
+            -v "$PWD/sapien:/sapien" \
+            -v "$PWD/physx-src:/physx-src" \
+            -v "$PWD/output:/output" \
+            -v "$HOME/.cache/sapien-ccache:/ccache" \
+            -e CCACHE_DIR=/ccache \
+            -e PIP_EXTRA_INDEX_URL \
+            -e AUDITWHEEL_FORK_REF \
+            -e CMAKE_BUILD_PARALLEL_LEVEL=4 \
+            "$MANYLINUX_RISCV64_IMAGE" bash -s <<'SAPIEN_BUILD_EOF'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+
+          dnf install -y --setopt=install_weak_deps=False \
+            ninja-build \
+            libXinerama-devel libXrandr-devel libXcursor-devel libXi-devel \
+            wayland-devel libxkbcommon-devel wayland-protocols-devel
+
+          PYBIN0=/opt/python/cp312-cp312/bin
+          export PATH="$PYBIN0:$PATH"
+          "$PYBIN0/pip" install -U "git+https://github.com/fbxiang/auditwheel.git@${AUDITWHEEL_FORK_REF}"
+          cat > /usr/local/bin/auditwheel <<AW_EOF
+          #!${PYBIN0}/python
+          import re, sys
+          from auditwheel.main import main
+          if __name__ == "__main__":
+              sys.argv[0] = re.sub(r"(-script\.pyw|\.exe)?\$", "", sys.argv[0])
+              sys.exit(main())
+          AW_EOF
+          chmod +x /usr/local/bin/auditwheel
+
+          # No riscv64 PhysX precompiled archive exists (sapien-sim/physx-precompiled
+          # ships macOS/linux-aarch64/linux-x86_64/windows only), so build it from
+          # source. TARGET_BUILD_PLATFORM=linux is PhysX's generic Linux build used
+          # for x86_64 and aarch64 alike (the real per-arch logic lives in
+          # source/compiler/cmake/linux/CMakeLists.txt, keyed off
+          # CMAKE_SYSTEM_PROCESSOR) -- there is no separate riscv64 preset to add.
+          PHYSX_INSTALL=/tmp/physx_install
+          mkdir -p "$PHYSX_INSTALL/bin/linux.riscv64/release"
+          command -v ccache >/dev/null 2>&1 && \
+            PHYSX_CCACHE_ARGS="-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache" || \
+            PHYSX_CCACHE_ARGS=""
+          cmake -S /physx-src/physx/compiler/public -B /tmp/physx_build -G Ninja \
+            -DTARGET_BUILD_PLATFORM=linux \
+            -DPHYSX_ROOT_DIR=/physx-src/physx \
+            -DPX_GENERATE_STATIC_LIBRARIES=1 \
+            -DPX_BUILDSNIPPETS=0 \
+            -DPX_BUILDPVDRUNTIME=0 \
+            -DCMAKE_BUILD_TYPE=release \
+            ${PHYSX_CCACHE_ARGS}
+          cmake --build /tmp/physx_build
+          find /physx-src/physx/bin -name 'libPhysX*_static_64.a' \
+            -exec cp {} "$PHYSX_INSTALL/bin/linux.riscv64/release/" \;
+          ls "$PHYSX_INSTALL/bin/linux.riscv64/release"
+          cp -r /physx-src/physx/include "$PHYSX_INSTALL/include"
+
+          cd /sapien
+          "$PYBIN0/python3" -m pip install -U setuptools wheel
+          command -v ccache >/dev/null 2>&1 && \
+            export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
+          "$PYBIN0/python3" setup.py bdist_wheel --sapien-only \
+            --build-dir=sapien_build --physx5-dir="$PHYSX_INSTALL"
+
+          for PYTAG in cp312-cp312 cp313-cp313 cp314-cp314 cp314-cp314t; do
+            PYBIN=/opt/python/${PYTAG}/bin
+            "$PYBIN/python3" -m pip install -U setuptools wheel
+            "$PYBIN/python3" setup.py bdist_wheel --pybind-only \
+              --build-dir=sapien_build --physx5-dir="$PHYSX_INSTALL"
+          done
+
+          PACKAGE_VERSION=$("$PYBIN0/python3" setup.py --get-version)
+          mkdir -p /output
+          for whl in dist/sapien-"${PACKAGE_VERSION}"-*.whl; do
+            /usr/local/bin/auditwheel repair "$whl" \
+              --exclude 'libvulkan*' --exclude 'libOpenImageDenoise*' \
+              --exclude 'libm.so*' --exclude 'libc.so*' --exclude 'libdl.so*' --exclude 'libpthread.so*' \
+              --internal libsapien --internal libsvulkan2 \
+              -w /output
+          done
+          ls -la /output
+          SAPIEN_BUILD_EOF
+
+      - name: Test sapien wheel (physics only, no GPU/Vulkan on this runner)
+        run: |
+          docker run -i --rm \
+            -v "$PWD/output:/output" \
+            -e PIP_EXTRA_INDEX_URL \
+            "$MANYLINUX_RISCV64_IMAGE" bash -s <<'SAPIEN_TEST_EOF'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+
+          for PYTAG in cp312-cp312 cp313-cp313 cp314-cp314 cp314-cp314t; do
+            PYBIN=/opt/python/${PYTAG}/bin
+            WHEEL=$(ls /output/sapien-*-"${PYTAG}"-manylinux_*riscv64.whl)
+            "$PYBIN/pip" install "$WHEEL"
+            "$PYBIN/python3" -c "
+          import sapien
+
+          scene = sapien.Scene()
+          scene.physx_system.timestep = 1 / 100
+          scene.create_actor_builder().add_box_collision(half_size=[1, 1, 1]).build_static()
+          for _ in range(10):
+              scene.step()
+          print('sapien physx smoke test OK:', sapien.__version__)
+          "
+          done
+          SAPIEN_TEST_EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sapien-${{ env.SAPIEN_VERSION }}-manylinux_riscv64
+          path: output/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish sapien ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: sapien-${{ matrix.version }}-manylinux_riscv64
