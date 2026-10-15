@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/v2.6.0/.github/workflows/wheel_workflow.yml
+name: Build opencolorio wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/opencolorio.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-opencolorio.yml'
+      - 'docs/packages/opencolorio.yaml'
+      - 'patches/opencolorio/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-opencolorio.yml'
+      - 'docs/packages/opencolorio.yaml'
+      - 'patches/opencolorio/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: opencolorio
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build opencolorio ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      OPENCOLORIO_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout opencolorio v${{ env.OPENCOLORIO_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: AcademySoftwareFoundation/OpenColorIO
+          ref: v${{ env.OPENCOLORIO_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch opencolorio source
+        run: git apply python-wheels/patches/opencolorio/${{ env.OPENCOLORIO_VERSION }}/00*.patch
+
+      # setup.py builds with -DOCIO_INSTALL_EXT_PACKAGES=ALL, which ExternalProject-builds
+      # Imath, OpenEXR, expat, pystring, yaml-cpp, minizip-ng, lcms2, pybind11 and zlib from
+      # source for every interpreter; this is upstream's own recipe, unmodified.
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_COMMAND: >-
+            python -c "import importlib.metadata as m; f = sorted(str(p).split('licenses/', 1)[1] for p in m.files('opencolorio') if '.dist-info/licenses/' in str(p)); assert f == ['LICENSE', 'LICENSE.argparse', 'LICENSE.deflate', 'LICENSE.expat', 'LICENSE.imath', 'LICENSE.lcms2', 'LICENSE.minizip-ng', 'LICENSE.openexr', 'LICENSE.openjph', 'LICENSE.pybind11', 'LICENSE.pystring', 'LICENSE.sampleicc', 'LICENSE.strutil', 'LICENSE.xxhash', 'LICENSE.yaml-cpp', 'LICENSE.zlib'], f" &&
+            python {project}/tests/python/OpenColorIOTestSuite.py &&
+            ociocheck
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: opencolorio-${{ env.OPENCOLORIO_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish opencolorio ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: opencolorio-${{ matrix.version }}-*-manylinux_riscv64
