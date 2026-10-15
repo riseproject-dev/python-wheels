@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/christoph2/pyxcp/blob/01d202d91dfe3d672db9543100dc97760bf84e1f/.github/workflows/pythonapp.yml
+name: Build pyxcp wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyxcp.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyxcp.yml'
+      - 'docs/packages/pyxcp.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyxcp.yml'
+      - 'docs/packages/pyxcp.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # Upstream publishes from master without tagging, so pin the release commit: its
+  # tree is identical to the 0.29.19 PyPI sdist. Update alongside PYXCP_VERSION.
+  PYXCP_REF: 01d202d91dfe3d672db9543100dc97760bf84e1f
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyxcp
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyxcp ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp310", "cp311", "cp312", "cp313", "cp314"]
+
+    env:
+      PYXCP_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyxcp ${{ env.PYXCP_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: christoph2/pyxcp
+          ref: ${{ env.PYXCP_REF }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_REQUIRES: pytest
+          # test_scripts.py reads ../../pyproject.toml relative to the tests directory.
+          CIBW_TEST_SOURCES: pyxcp/tests pyproject.toml
+          CIBW_TEST_COMMAND: >-
+            python -c "import pyxcp.recorder.rekorder as m; assert m.__file__.endswith('.so'), m.__file__" &&
+            pytest pyxcp/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyxcp-${{ env.PYXCP_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyxcp ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyxcp-${{ matrix.version }}-*-manylinux_riscv64
