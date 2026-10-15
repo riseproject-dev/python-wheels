@@ -1,0 +1,142 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build`/`test` jobs of:
+# https://github.com/Tencent/ncnn/blob/master/.github/workflows/pnnx.yml
+name: Build pnnx wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pnnx.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pnnx.yml'
+      - 'docs/packages/pnnx.yaml'
+      - 'patches/pnnx/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pnnx.yml'
+      - 'docs/packages/pnnx.yaml'
+      - 'patches/pnnx/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # pnnx ships no sdist and no git tag; its PyPI version is the UTC build date
+  # (tools/pnnx/python/setup.py's set_version() is time.strftime("%Y%m%d")).
+  # Pinned to the last commit touching tools/pnnx or src/layer/* before the
+  # 20260526 release's upload_time_iso_8601 (2026-05-26T08:12Z).
+  PNNX_REF: b76824882e68d4a675c96e3f7e70d0104b2ff9c7
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pnnx
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+    name: Build pnnx ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+
+    env:
+      PNNX_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout ncnn ${{ env.PNNX_REF }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Tencent/ncnn
+          ref: ${{ env.PNNX_REF }}
+          sparse-checkout: |
+            tools/pnnx
+            LICENSE.txt
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch pnnx source
+        run: git apply python-wheels/patches/pnnx/${{ env.PNNX_VERSION }}/*.patch
+
+      # setuptools only auto-discovers LICENSE* next to setup.py; the repo's
+      # licence file lives three directories up (ncnn covers the whole tree).
+      - name: Stage the licence
+        run: cp LICENSE.txt tools/pnnx/python/LICENSE.txt
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: tools/pnnx/python
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # pnnx links libtorch at build time (CMakeLists.txt's find_package(Torch
+          # REQUIRED), probed via `import torch` when no Torch_INSTALL_DIR is set);
+          # torch has no riscv64 wheel on public PyPI, only on our own registry.
+          CIBW_BEFORE_BUILD: "pip install --only-binary=:all: torch"
+          CIBW_ENVIRONMENT: >-
+            CMAKE_BUILD_PARALLEL_LEVEL=8
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=torch
+          # setup.py's CMakeBuild shells out to cmake, which re-probes `import
+          # torch` itself; an isolated build env would not see the torch
+          # CIBW_BEFORE_BUILD already installed.
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          # TorchVision and onnxruntime are optional (CMakeLists.txt's own
+          # find_package(... QUIET) / find_library() fall back to "without"
+          # when absent); neither has a build-ready riscv64 recipe here, so
+          # this wheel converts plain TorchScript graphs but skips ONNX
+          # import/export and torchvision-op fusion.
+          CIBW_TEST_SOURCES: tools/pnnx/python/tests
+          CIBW_TEST_REQUIRES: pytest packaging
+          CIBW_TEST_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=torch
+          CIBW_TEST_COMMAND: python -m pytest tools/pnnx/python/tests -v
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pnnx-${{ env.PNNX_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pnnx ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pnnx-${{ matrix.version }}-*-manylinux_riscv64
