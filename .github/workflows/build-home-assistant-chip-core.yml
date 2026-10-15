@@ -1,0 +1,254 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_prepare`/`build_linux_python_lib` jobs of:
+# https://github.com/home-assistant-libs/chip-wheels/blob/2025.7.0/.github/workflows/build.yaml
+name: Build home-assistant-chip-core wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/home-assistant-chip-core.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-home-assistant-chip-core.yml'
+      - 'docs/packages/home-assistant-chip-core.yaml'
+      - 'patches/home-assistant-chip-core/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-home-assistant-chip-core.yml'
+      - 'docs/packages/home-assistant-chip-core.yaml'
+      - 'patches/home-assistant-chip-core/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  GN_REVISION: 0625da07ece7b1a374ec0719b6f40ebe3d0950c1
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: home-assistant-chip-core
+      version: ${{ inputs.version }}
+
+  # ZAP code generation has no riscv64 build (project-chip/zap ships prebuilt
+  # Electron/node binaries for x86_64/arm64 only), so it runs once here on a
+  # regular x86_64 runner -- same split chip-wheels' own build.yaml uses
+  # between build_prepare (ubuntu-24.04) and its per-arch build job -- and the
+  # pre-generated output is carried into build_wheels via
+  # chip_code_pre_generated_directory, which never invokes ZAP itself.
+  build_prepare:
+    name: Prepare home-assistant-chip-core ${{ matrix.version }}
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    runs-on: ubuntu-24.04
+    env:
+      CHIP_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout home-assistant-libs/chip-wheels ${{ env.CHIP_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: home-assistant-libs/chip-wheels
+          ref: ${{ env.CHIP_VERSION }}
+          submodules: true
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Checkout connectedhomeip submodules
+        working-directory: connectedhomeip
+        run: scripts/checkout_submodules.py --shallow --platform linux
+
+      - name: Patch CIPD bootstrap for riscv64
+        working-directory: connectedhomeip
+        run: git apply ../python-wheels/patches/home-assistant-chip-core/${{ env.CHIP_VERSION }}/*.patch
+
+      - name: Apply chip-wheels patches
+        working-directory: connectedhomeip
+        run: |
+          for patch in ../*.patch; do
+            echo "Applying ${patch}"
+            patch -p1 < "$patch"
+          done
+
+      - name: Bootstrap
+        working-directory: connectedhomeip
+        run: bash scripts/bootstrap.sh -p all,linux
+
+      - name: ZAP code pre-generation
+        working-directory: connectedhomeip
+        run: scripts/run_in_build_env.sh "scripts/codepregen.py ./zzz_pregenerated/"
+
+      - name: Create Matter SDK tar
+        run: tar -caf connectedhomeip-${{ env.CHIP_VERSION }}.tar.zst --exclude ./connectedhomeip/.environment --use-compress-program=zstdmt connectedhomeip
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: home-assistant-chip-core-${{ env.CHIP_VERSION }}-matter-sdk
+          path: connectedhomeip-${{ env.CHIP_VERSION }}.tar.zst
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_prepare]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build home-assistant-chip-core ${{ matrix.version }} cp37-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440  # full Pigweed/GN/Ninja CHIP SDK compile from source
+    # container.image can't read the env context, so the image is repeated
+    # literally here; MANYLINUX_RISCV64_IMAGE below still pins gpl_sources to
+    # the same one.
+    container:
+      image: quay.io/pypa/manylinux_2_39_riscv64
+
+    defaults:
+      run:
+        working-directory: connectedhomeip
+
+    env:
+      CHIP_VERSION: ${{ matrix.version }}
+
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: home-assistant-chip-core-${{ env.CHIP_VERSION }}-matter-sdk
+
+      - name: Extract Matter SDK from tar
+        working-directory: ./
+        run: |
+          dnf install -y --enablerepo=crb zstd \
+            openssl-devel glib2-devel libnl3-devel cairo-devel \
+            gobject-introspection-devel dbus-devel python3-devel
+          tar -xaf connectedhomeip-${{ env.CHIP_VERSION }}.tar.zst --use-compress-program=zstdmt
+          git config --global --add safe.directory '*'
+          echo "/opt/python/cp312-cp312/bin" >> "$GITHUB_PATH"
+
+      # Rocky 10's riscv64 CIPD backend has no fuchsia/third_party/ninja build
+      # at all, and gn_gen.sh's own gn/ninja fetch goes through the CIPD
+      # client this job's patched pigweed wrapper.py bootstraps -- same "no
+      # CIPD gn/ninja on riscv64" situation build-skia-python.yml/
+      # build-skia-pathops.yml already solved: build gn from source and get
+      # ninja from its own riscv64 PyPI wheel, ahead of bootstrap.sh.
+      - name: Install gn and ninja
+        run: |
+          set -e
+          python3 -m pip install ninja
+          git clone https://gn.googlesource.com/gn /tmp/gn
+          git -C /tmp/gn checkout "${GN_REVISION}"
+          (cd /tmp/gn && CXX=g++ python3 build/gen.py --allow-warnings && ninja -C out gn)
+          install -m 0755 /tmp/gn/out/gn /usr/local/bin/gn
+
+      - name: Bootstrap
+        run: bash scripts/bootstrap.sh -p linux
+
+      - name: Setup build and run build
+        run: |
+          scripts/build/gn_gen.sh --args=" \
+                                          chip_project_config_include_dirs=[\"//..\"] \
+                                          chip_crypto=\"boringssl\" \
+                                          enable_rtti=true \
+                                          chip_config_memory_debug_checks=false \
+                                          chip_config_memory_debug_dmalloc=false \
+                                          chip_exchange_node_id_logging=true \
+                                          chip_mdns=\"minimal\" \
+                                          chip_minmdns_default_policy=\"libnl\" \
+                                          chip_python_version=\"${{ env.CHIP_VERSION }}\"  \
+                                          chip_python_package_prefix=\"home-assistant-chip\" \
+                                          chip_python_platform_tag=\"manylinux_2_39\" \
+                                          chip_code_pre_generated_directory=\"$(pwd)/zzz_pregenerated\" \
+                                          "
+          scripts/run_in_build_env.sh "ninja -C ./out chip-repl"
+
+      - name: Run Python library specific unit tests
+        run: |
+          scripts/run_in_build_env.sh 'pip3 install ./out/controller/python/home_assistant_chip_core-${{ env.CHIP_VERSION }}-cp37-abi3-manylinux_2_39_riscv64.whl'
+          scripts/run_in_build_env.sh 'pip3 install ./out/controller/python/home_assistant_chip_clusters-${{ env.CHIP_VERSION }}-py3-none-any.whl'
+          scripts/run_in_build_env.sh 'pip3 install ./out/controller/python/home_assistant_chip_repl-${{ env.CHIP_VERSION }}-py3-none-any.whl'
+          scripts/run_in_build_env.sh '(cd src/controller/python/test/unit_tests/ && python3 -m unittest -v)'
+
+      - name: Repair wheel
+        run: |
+          mkdir -p ../wheelhouse
+          pip3 install auditwheel
+          auditwheel repair -w ../wheelhouse --plat manylinux_2_39_riscv64 \
+            out/controller/python/home_assistant_chip_core-${{ env.CHIP_VERSION }}-cp37-abi3-manylinux_2_39_riscv64.whl
+          cp out/controller/python/home_assistant_chip_clusters-${{ env.CHIP_VERSION }}-py3-none-any.whl ../wheelhouse/
+          cp out/controller/python/home_assistant_chip_repl-${{ env.CHIP_VERSION }}-py3-none-any.whl ../wheelhouse/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: home-assistant-chip-core-${{ env.CHIP_VERSION }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources (glib2, libnl3) for home-assistant-chip-core ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+    env:
+      CHIP_VERSION: ${{ matrix.version }}
+
+    steps:
+      # auditwheel vendors the image's libglib-2.0/libgobject-2.0/libgio-2.0
+      # (glib2, LGPL) and libnl-3/libnl-route-3 (libnl3, LGPL) into the wheel.
+      - name: Collect glib2/libnl3 source RPMs from manylinux_riscv64
+        uses: riseproject-dev/python-wheels/actions/collect-gpl-sources@main
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: glib2 libnl3
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: home-assistant-chip-core-${{ env.CHIP_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish home-assistant-chip-core ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: home-assistant-chip-core-${{ matrix.version }}-manylinux_riscv64
+      gpl-sources-artifact: home-assistant-chip-core-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: glib2, libnl3
