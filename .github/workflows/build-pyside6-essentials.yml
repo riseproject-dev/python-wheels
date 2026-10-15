@@ -1,0 +1,159 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on: https://code.qt.io/cgit/pyside/pyside-setup.git/tree/create_wheels.py?h=6.11.2
+name: Build pyside6-essentials wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyside6-essentials.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyside6-essentials.yml'
+      - 'docs/packages/pyside6-essentials.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyside6-essentials.yml'
+      - 'docs/packages/pyside6-essentials.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Rocky 10's riscv64 repos ship no patchelf package (gotcha 95), and pip installing
+  # the `patchelf` PyPI package builds NixOS/patchelf from source, which runs its own
+  # `make check` and fails 8/48 tests on riscv64. pyside-setup's build_patchelf() just
+  # needs the binary on PATH, so fetch NixOS/patchelf's own riscv64 release instead.
+  PATCHELF_VERSION: '0.17.2'
+  PATCHELF_SHA256: '4b28f7bc890c42076b2955be2229ac1607aa9a6d4ee40e33d69517ef0c403a56'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyside6-essentials
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build pyside6-essentials ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+
+    env:
+      PYSIDE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyside-setup ${{ env.PYSIDE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pyside/pyside-setup
+          ref: ${{ env.PYSIDE_VERSION }}
+          persist-credentials: false
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
+
+      # pyside-setup's build_scripts/config.py only exposes four --build-type values
+      # (all/shiboken6/shiboken6-generator/pyside6); PySide6_Essentials, PySide6_Addons
+      # and the PySide6 meta-wheel aren't build targets at all, they're carved out of
+      # one accumulated build/<env>a/package_for_wheels tree by create_wheels.py. So
+      # shiboken6-generator and shiboken6 are rebuilt here too (even though only
+      # Essentials is published by this workflow) to populate that tree; a future
+      # pyside6-addons/pyside6 port can extend this same build (gotcha 382).
+      - name: Build shiboken6-generator, shiboken6 and pyside6, then carve out wheels
+        run: |
+          docker run --rm -v "$(pwd):/work" -w /work \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            -e PATCHELF_VERSION="${PATCHELF_VERSION}" \
+            -e PATCHELF_SHA256="${PATCHELF_SHA256}" \
+            "${MANYLINUX_RISCV64_IMAGE}" bash -c '
+            set -euxo pipefail
+            dnf -y install clang-devel llvm-devel "qt6-qt*-devel" \
+              libxcb-devel libX11-devel libxkbcommon-devel fontconfig-devel
+            curl -fsSL -o /tmp/patchelf.tar.gz \
+              "https://github.com/NixOS/patchelf/releases/download/${PATCHELF_VERSION}/patchelf-${PATCHELF_VERSION}-riscv64.tar.gz"
+            echo "${PATCHELF_SHA256}  /tmp/patchelf.tar.gz" | sha256sum -c -
+            tar xzf /tmp/patchelf.tar.gz -C /usr/local
+            rm -f /tmp/patchelf.tar.gz
+            pybin=/opt/python/cp312-cp312/bin
+            export PATH="$pybin:$PATH"
+            "$pybin/pip" install -q \
+              "setuptools==78.1.0" "packaging==24.2" "build==1.2.2.post1" \
+              "wheel==0.46.3" "distro==1.9.0" "ninja==1.13.2" "pyproject_hooks==1.2.0"
+            tar xJf /opt/_internal/static-libs-for-embedding-only.tar.xz -C /opt/_internal
+            "$pybin/python3" setup.py bdist_wheel \
+              --build-type=shiboken6-generator \
+              --qtpaths=/usr/bin/qtpaths6 \
+              --cmake=/usr/bin/cmake \
+              --parallel="$(nproc)" \
+              --skip-docs \
+              --limited-api=yes
+            "$pybin/pip" install -q --no-deps dist/shiboken6_generator-*.whl
+            "$pybin/python3" setup.py bdist_wheel \
+              --build-type=shiboken6 \
+              --qtpaths=/usr/bin/qtpaths6 \
+              --cmake=/usr/bin/cmake \
+              --parallel="$(nproc)" \
+              --skip-docs \
+              --limited-api=yes
+            "$pybin/pip" install -q dist/shiboken6-*.whl
+            "$pybin/python3" setup.py bdist_wheel \
+              --build-type=pyside6 \
+              --standalone \
+              --qtpaths=/usr/bin/qtpaths6 \
+              --cmake=/usr/bin/cmake \
+              --parallel="$(nproc)" \
+              --skip-docs \
+              --limited-api=yes
+            "$pybin/python3" create_wheels.py --no-examples
+            "$pybin/pip" install -q auditwheel
+            "$pybin/python3" -m auditwheel repair --plat manylinux_2_39_riscv64 \
+              -w audited dist/pyside6_essentials-*.whl
+            rm -f dist/*.whl
+            mv audited/*.whl dist/
+            "$pybin/pip" install -q dist/pyside6_essentials-*.whl
+            "$pybin/python3" -c "
+            from PySide6 import QtCore, QtGui, QtWidgets, QtNetwork, QtQml, QtQuick, QtSql, QtSvg
+            print(\"PySide6 Essentials import OK\")
+            "
+          '
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyside6-essentials-${{ env.PYSIDE_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: dist/pyside6_essentials-*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyside6-essentials ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyside6-essentials-${{ matrix.version }}-*-manylinux_riscv64
