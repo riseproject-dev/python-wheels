@@ -10797,62 +10797,9 @@ packages:
   version: 6.32.8
   home: https://root.cern.ch/cling
   repo: https://root.cern.ch/cling
-  status: queued
-  pr: null
-  notes: 'Still queued after read-only triage; no worktree/branch/PR created (too large
-    for one session''s budget, not blocked). 1 Linux wheel upstream (manylinux2014_x86_64,
-    py2.py3-none) plus macOS x86_64/arm64 and Windows win32/win_amd64, and a real 63.8MB
-    sdist; no riscv64 anywhere. Upstream is wlav/cppyy-backend''s cling/ subproject (home
-    and repo both point at the real root.cern.ch/cling docs; PyPI''s own summary admits
-    building from source "takes a long time because LLVM must be compiled"). Downloaded
-    and inspected the real v6.32.8 sdist directly (no local build attempted, per the
-    disk-pressure note below): cling/setup.py''s create_src_directory.py fetches ROOT''s
-    official root_v6.32.08.source.tar.gz from root.cern.ch and copies its interpreter/
-    subtree verbatim (plus 13 small cling-specific patches) as the build source;
-    src/interpreter/llvm-project is a full, current (RISCV GlobalISel-era, not an old
-    cut-down fork) LLVM/Clang monorepo snapshot - 232MB uncompressed, ~13,000 files, not
-    a trimmed single-purpose tree. Feasibility is good, not hard-blocked: ROOT''s own
-    src/interpreter/CMakeLists.txt already has a first-class riscv64 branch
-    (elseif(ROOT_ARCHITECTURE MATCHES riscv64) set(ROOT_CLING_TARGET "RISCV")), the same
-    shape as its existing AArch64/ARM/PowerPC/SystemZ branches, and
-    llvm-project/llvm/lib/Target/RISCV is the complete modern upstream RISCV backend
-    (AsmParser/Disassembler/GISel/JITLink ELF_riscv.{h,cpp} all present); grepping
-    Cling''s own (non-LLVM) interpreter/metaprocessor code turned up zero arch-specific
-    files at all, so Cling''s JIT glue is arch-agnostic by construction and leans
-    entirely on LLVM''s own RISCV codegen+JIT support - no gap found there. The one real
-    snag: this cling-only sdist''s src/CMakeLists.txt never include()s ROOT''s
-    cmake/modules/SetUpLinux.cmake (which has no riscv64 case and would FATAL_ERROR on
-    an unrecognized processor) - grepped every CMakeLists.txt in the sdist and confirmed
-    that file is dead code in this build path - so ROOT_ARCHITECTURE is simply never set
-    here and cling''s own dispatch falls through to its "all" branch, meaning an
-    unmodified build would compile every LLVM backend (x86/arm/aarch64/powerpc/systemz/
-    riscv/...), not just RISCV;NVPTX. Fixable with a one-line CMake override
-    (-DROOT_ARCHITECTURE=linuxriscv64gcc, or -DLLVM_TARGETS_TO_BUILD=RISCV;NVPTX
-    directly, on setup.py''s cmake invocation - no source patch needed) and not a hard
-    blocker, just a scope lever this port would need to pull itself. Scale is the real
-    concern, sized against this repo''s own precedent: this is a full LLVM+Clang build
-    (-Dminimal=ON trims installed tools, not the compiled library surface, and
-    CLANG_BUILD_TOOLS/LLVM_BUILD_TOOLS are off) plus Cling''s own interpreter/
-    metaprocessor layer and PCH/dictionary generation on top - at least as large as
-    build-libclang.yml''s LLVM/Clang 18.1.1 build, this repo''s single largest build to
-    date at roughly 10h per attempt over 3 attempts (2 tooling-only failures before it
-    went green), and likely larger once Cling''s own layer is added. Upstream''s own
-    CircleCI job for the (non-default, manually-triggered) linux-aarch64 wheel runs on
-    only a 4-vCPU arm.large resource_class with no explicit job-timeout override,
-    consistent with the "takes a long time" warning; no linux-aarch64 wheel is actually
-    published to PyPI for 6.32.8 despite that job existing, so there is no real upstream
-    build-time number to cite, only the resource-class ceiling as a lower bound on
-    effort. Given disk is tight on this shared host (~5-6GB free, concurrent agents) and
-    a build at this scale needs real CI iteration (libclang took 3 full ~10h attempts to
-    land), a full attempt does not fit one session''s budget. Left queued, not parked -
-    no hard blocker was found; ROOT upstream already treats riscv64 as a first-class
-    CMake target in the exact file that matters. Scope note for whoever picks this up:
-    start from build-libclang.yml''s shape (single py2.py3-none job; dnf
-    libstdc++-static / a gpl_sources job are likely needed again for the same
-    static-libgcc/libstdc++ reasons), add the ROOT_ARCHITECTURE or
-    LLVM_TARGETS_TO_BUILD override to scope the LLVM build to RISCV;NVPTX instead of
-    all, and budget timeout-minutes well above libclang''s 1440 given Cling''s added
-    interpreter layer and PCH generation on top of a full Clang build.'
+  status: ci-running
+  pr: https://github.com/riseproject-dev/python-wheels/pull/3275
+  notes: 'Feasible, ported: 6.32.8 confirmed still latest on PyPI. PR #3275 open. Re-verified against a real shallow clone of wlav/cppyy-backend at cppyy-cling-6.32.8 rather than trusting the prior triage secondhand: src/interpreter/CMakeLists.txt''s ROOT_ARCHITECTURE MATCHES riscv64 -> ROOT_CLING_TARGET=RISCV branch is confirmed verbatim (same shape as AArch64/ARM/PowerPC/SystemZ above it), and llvm-project/llvm/lib/Target/RISCV has 116 files, a full modern RISCV backend. BUT: grepped src/CMakeLists.txt for ROOT_ARCHITECTURE/SetUpLinux - zero hits, it never includes cmake/modules/SetUpLinux.cmake (which sets that variable, and only for arm64/ppc64/arm/s390 anyway, not riscv64 either) - so that riscv64 CMake branch is dead code for this cling-only build; the real Linux dispatch in setup.py''s my_cmake_build.run() never passes -DLLVM_TARGETS_TO_BUILD at all on Linux (only macOS-arm64/Windows get an explicit value), silently building every LLVM backend via CMake''s all fallback - the actual core feasibility fix needed is scoping that, not the dead CMake branch. Confirmed create_src_directory.py fetches root_v6.32.08.source.tar.gz (~184MB) from root.cern.ch at build time (not in git) - matches upstream''s own before-all step. Read upstream''s real CI (cling-wheels.yml): plain manylinux2014 x86_64, cp310 only, timeout-minutes 600, NO auditwheel repair on Linux at all. setup.py has no runtime deps and no -static-libgcc/-static-libstdc++ anywhere (unlike libclang) - no gpl_sources job needed. Workflow (single-job docker-driven shape like build-libclang.yml, timeout-minutes 1440): checkout cppyy-backend at the tag, apply patches, run create_src_directory.py on the bare runner (stdlib-only network fetch), drive manylinux_2_39_riscv64 for python3 setup.py bdist_wheel. Two non-obvious load-bearing details found: setup.py''s bdist_wheel.finalize_options() unconditionally overwrites plat_name via get_platform() before calling the parent, discarding any --plat-name flag - can only be tagged via the _PYTHON_HOST_PLATFORM env var; and is_manylinux() only matches 3 hardcoded old CentOS /etc/redhat-release strings (manylinux1/2010/2014) - our Rocky-10-based image would silently misdetect as non-manylinux, flowing into RelWithDebInfo (full debug symbols on an already-huge build) and a different default C++ standard than every published platform. Two patches (both Upstream-Status: To upstream, both git apply --check verified against a fresh clone in the exact checkout layout the workflow uses): 0001 generalizes is_manylinux() to also check AUDITWHEEL_PLAT (additive/fallback-preserving); 0002 adds an elif ''linux'' in sys.platform branch setting -DLLVM_TARGETS_TO_BUILD=RISCV;NVPTX, mirroring the existing macOS-arm64 branch - the core feasibility fix, without it the build compiles every LLVM target instead of just one. CI running at handback - all 7 checks still queued behind the runner backlog, the real multi-hour riscv64 build_wheels job hadn''t started - genuinely unproven, as expected for this scale (same bracket as libclang/circt/iree-base-compiler). Watch for: whether the image''s system cmake is new enough for this LLVM snapshot (neither this build nor libclang/circt install cmake separately, precedent says probably fine but unconfirmed for this exact LLVM version), and whether _PYTHON_HOST_PLATFORM actually produces the intended wheel tag through this package''s nonstandard bdist_wheel override (reasoned through, not run).'
 - pkg: eth-brownie
   version: 1.22.2
   home: https://github.com/eth-brownie/brownie
