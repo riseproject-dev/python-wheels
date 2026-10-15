@@ -1,0 +1,174 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `makepanda` job of
+# https://github.com/panda3d/panda3d/blob/v1.10.16/.github/workflows/ci.yml
+name: Build panda3d wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/panda3d.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-panda3d.yml'
+      - 'docs/packages/panda3d.yaml'
+      - 'patches/panda3d/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-panda3d.yml'
+      - 'docs/packages/panda3d.yaml'
+      - 'patches/panda3d/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: panda3d
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build panda3d ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 600
+
+    env:
+      PANDA3D_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout panda3d v${{ env.PANDA3D_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: panda3d/panda3d
+          ref: v${{ env.PANDA3D_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply riscv64 patches
+        run: git apply -v python-wheels/patches/panda3d/${{ env.PANDA3D_VERSION }}/*.patch
+
+      - name: Build and test wheels
+        run: |
+          mkdir -p wheelhouse
+          docker run --rm -i --network=host \
+            -v "$(pwd):/work" \
+            -w /work \
+            -e PANDA3D_VERSION \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          # Matches upstream's own Ubuntu apt-get list (build-essential bison flex
+          # libfreetype6-dev libgl1-mesa-dev libjpeg-dev libode-dev libopenal-dev
+          # libpng-dev libssl-dev libvorbis-dev libx11-dev libxcursor-dev
+          # libxrandr-dev nvidia-cg-toolkit zlib1g-dev), minus ode-devel (not
+          # packaged for Rocky 10) and nvidia-cg-toolkit (x86-only, no riscv64
+          # build ever existed) -- makepanda's SmartPkgEnable probes for each
+          # package and silently drops the feature (ODE physics, Cg shaders)
+          # rather than failing when one is missing, the same way it already
+          # does for Bullet on upstream's own Linux CI.
+          dnf install -y --setopt=install_weak_deps=False \
+            bison flex freetype-devel mesa-libGL-devel libjpeg-turbo-devel \
+            libpng-devel openssl-devel libvorbis-devel libogg-devel \
+            libX11-devel libXcursor-devel libXrandr-devel openal-soft-devel zlib-devel
+
+          for pydir in cp312-cp312 cp313-cp313 cp314-cp314 cp314-cp314t; do
+            PY="/opt/python/${pydir}/bin/python3"
+            "${PY}" makepanda/makepanda.py --everything --no-eigen --wheel \
+              --outputdir=built --version="${PANDA3D_VERSION}" \
+              --threads="$(nproc)" --verbose
+
+            whl=$(ls panda3d-*.whl)
+            mv "${whl}" wheelhouse/
+
+            "${PY}" -m venv /tmp/test-venv
+            /tmp/test-venv/bin/pip install -q "wheelhouse/${whl}" pytest
+            /tmp/test-venv/bin/python -m pytest -x -q
+            rm -rf /tmp/test-venv
+          done
+          SCRIPT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: panda3d-${{ env.PANDA3D_VERSION }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources for panda3d ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      PANDA3D_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The engine is compiled with the image's GCC and links its libstdc++;
+      # freetype's Rocky 10 build resolves to its GPLv2 option (same as
+      # build-pygame.yml's freetype entry, from the same image).
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc freetype
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: panda3d-${{ env.PANDA3D_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish panda3d ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: panda3d-${{ matrix.version }}-manylinux_riscv64
+      gpl-sources-artifact: panda3d-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc and freetype
