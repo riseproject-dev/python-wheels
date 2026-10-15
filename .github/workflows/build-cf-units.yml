@@ -1,0 +1,146 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the Linux leg of upstream's own
+# .github/workflows/ci-wheels.yml, narrowed to riscv64.
+name: Build cf-units wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cf-units.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cf-units.yml'
+      - 'docs/packages/cf-units.yaml'
+      - 'patches/cf-units/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cf-units.yml'
+      - 'docs/packages/cf-units.yaml'
+      - 'patches/cf-units/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  UDUNITS2_VERSION: '2.2.28'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cf-units
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cf-units ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream builds cp311-* and cp314-* for every arch, but
+        # CF_UNITS_LIMITED_API=1 makes the extension abi3 (gotcha 11): the
+        # cp314 leg would just rebuild the identical cp311-abi3 artifact, so
+        # only the abi3 floor is built here.
+        python: ["cp311"]
+
+    env:
+      CF_UNITS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout cf-units v${{ env.CF_UNITS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: SciTools/cf-units
+          ref: v${{ env.CF_UNITS_VERSION }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch cf-units source
+        run: git apply python-wheels/patches/cf-units/${{ env.CF_UNITS_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # udunits2-devel is EPEL-only (gotcha 51: no EPEL on riscv64), so
+          # UDUNITS-2 is built from source instead, the same workaround
+          # build-pygame.yml uses for portmidi.
+          CIBW_BEFORE_ALL_LINUX: |
+            dnf install -y expat-devel
+            curl -fsSL https://github.com/Unidata/UDUNITS-2/archive/refs/tags/v${UDUNITS2_VERSION}.tar.gz -o udunits2.tar.gz
+            tar xzf udunits2.tar.gz
+            cmake -S UDUNITS-2-${UDUNITS2_VERSION} -B udunits2-build -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_BUILD_TYPE=Release
+            cmake --build udunits2-build -j"$(nproc)"
+            cmake --install udunits2-build
+            echo /usr/local/lib > /etc/ld.so.conf.d/udunits2.conf
+            ldconfig
+            cp UDUNITS-2-${UDUNITS2_VERSION}/COPYRIGHT LICENSE.udunits2
+          CIBW_ENVIRONMENT_LINUX: >-
+            CF_UNITS_LIMITED_API=1
+            UDUNITS2_INCDIR=/usr/local/include
+            UDUNITS2_LIBDIR=/usr/local/lib
+            UDUNITS2_XML_PATH=/usr/local/share/udunits/udunits2.xml
+          CIBW_TEST_REQUIRES: pytest tomli
+          CIBW_TEST_COMMAND: >-
+            python -c "import cf_units; print(f'cf-units v{cf_units.__version__}')" &&
+            python -m pytest --pyargs cf_units
+
+      - name: Check the wheel ships the compiled extension and its licence
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("cf_units/_udunits2") and n.endswith(".so") for n in names), (whl, names)
+              licences = {n.rsplit("/", 1)[-1] for n in names if n.startswith("cf_units-") and "/licenses/" in n}
+              assert licences == {"LICENSE", "LICENSE.udunits2"}, (whl, licences)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cf-units-${{ env.CF_UNITS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cf-units ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: cf-units-${{ matrix.version }}-*-manylinux_riscv64
