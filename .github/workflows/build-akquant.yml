@@ -1,0 +1,121 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/akfamily/akquant/blob/v0.3.65/.github/workflows/release.yml
+name: Build akquant wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/akquant.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-akquant.yml'
+      - 'docs/packages/akquant.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-akquant.yml'
+      - 'docs/packages/akquant.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  CARGO_INCREMENTAL: "0"
+  # Upstream's own non-tag values: thin LTO with one codegen unit over the polars crate graph exhausts the riscv64 runners.
+  CARGO_PROFILE_RELEASE_LTO: "false"
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+  CARGO_BUILD_JOBS: "2"
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: akquant
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build akquant ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      AKQUANT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout akquant v${{ env.AKQUANT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: akfamily/akquant
+          ref: v${{ env.AKQUANT_VERSION }}
+          persist-credentials: false
+
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 10
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --out dist -i python3.13
+          manylinux: '2_39'
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.13'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Test wheel
+        env:
+          UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+          UV_INDEX_STRATEGY: unsafe-best-match
+          UV_ONLY_BINARY: numpy,pandas,pyarrow,polars-runtime-32,pydantic-core
+        run: |
+          uv pip install --force-reinstall dist/*.whl pytest httpx
+          cd "$RUNNER_TEMP"
+          python -c 'import akquant, akquant.akquant as m; assert m.__file__.endswith(".so"), m.__file__; print(akquant.__file__)'
+          python -m pytest "${GITHUB_WORKSPACE}/tests" --rootdir "${GITHUB_WORKSPACE}" -p no:cacheprovider
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: akquant-${{ env.AKQUANT_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish akquant ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: akquant-${{ matrix.version }}-*-manylinux_riscv64
