@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/OpenNMT/Tokenizer/blob/v1.38.1/.github/workflows/ci.yml
+name: Build pyonmttok wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyonmttok.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyonmttok.yml'
+      - 'docs/packages/pyonmttok.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyonmttok.yml'
+      - 'docs/packages/pyonmttok.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyonmttok
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyonmttok ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+    env:
+      PYONMTTOK_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout Tokenizer v${{ env.PYONMTTOK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: OpenNMT/Tokenizer
+          ref: v${{ env.PYONMTTOK_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: bindings/python
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Mirrors bindings/python/tools/prepare_build_environment_linux.sh: build ICU
+          # statically from source, then build the Tokenizer C++ library (LIB_ONLY, bundling
+          # the vendored SentencePiece submodule) against it. dnf (not pip) installs cmake,
+          # same as build-ctranslate2.yml, since CIBW_BEFORE_ALL runs outside the per-interpreter
+          # venv where our registry's PIP_EXTRA_INDEX_URL applies.
+          CIBW_BEFORE_ALL_LINUX: |
+            set -ex
+            dnf install -y cmake
+            curl -L -O https://github.com/unicode-org/icu/releases/download/release-73-2/icu4c-73_2-src.tgz
+            tar xf icu4c-73_2-src.tgz
+            cd icu/source
+            CFLAGS="-O3 -fPIC" CXXFLAGS="-O3 -fPIC" ./configure --disable-shared --enable-static --prefix=/usr/local/icu
+            make -j"$(nproc)" install
+            cd /project
+            cmake -S . -B build -D LIB_ONLY=ON -D ICU_ROOT=/usr/local/icu
+            cmake --build build -j"$(nproc)" --target install
+            ldconfig
+          CIBW_BEFORE_BUILD: pip install pybind11==2.10.1
+          CIBW_ENVIRONMENT_LINUX: >-
+            TOKENIZER_ROOT=/project/build/install
+            ICU_ROOT=/usr/local/icu
+          CIBW_TEST_COMMAND: pytest {project}/bindings/python/test/test.py
+          CIBW_TEST_REQUIRES: pytest
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyonmttok-${{ env.PYONMTTOK_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyonmttok ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyonmttok-${{ matrix.version }}-*-manylinux_riscv64
