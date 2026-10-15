@@ -1,0 +1,194 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's release builder and its CPU (macOS) leg:
+#   https://github.com/meta-pytorch/monarch/blob/v0.7.0/.github/workflows/publish_release.yml
+#   https://github.com/meta-pytorch/monarch/blob/v0.7.0/.github/workflows/build-dist.yml
+#   https://github.com/meta-pytorch/monarch/blob/v0.7.0/.github/workflows/build-macos.yml
+# and the dashboard build of
+#   https://github.com/meta-pytorch/monarch/blob/v0.7.0/.github/workflows/ci.yml
+name: Build torchmonarch wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/torchmonarch.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-torchmonarch.yml'
+      - 'docs/packages/torchmonarch.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-torchmonarch.yml'
+      - 'docs/packages/torchmonarch.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: torchmonarch
+      version: ${{ inputs.version }}
+
+  build_frontend:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build torchmonarch ${{ matrix.version }} dashboard frontend
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      TORCHMONARCH_VERSION: ${{ matrix.version }}
+
+    steps:
+      # The dashboard is an esbuild bundle: arch-independent output, and node.js has no riscv64 release.
+      - name: Checkout monarch v${{ env.TORCHMONARCH_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: meta-pytorch/monarch
+          ref: v${{ env.TORCHMONARCH_VERSION }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '20'
+
+      # The CSS move and index.html copy are what setup.py's build_frontend adds after
+      # `npm run build`; with build/index.html present it skips npm inside the container.
+      - name: Install and build dashboard frontend
+        working-directory: python/monarch/monarch_dashboard/frontend
+        run: |
+          npm ci
+          mkdir -p build/static/css
+          npm run build
+          mv build/static/js/main.css build/static/css/main.css
+          cp public/index.html build/index.html
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: torchmonarch-${{ env.TORCHMONARCH_VERSION }}-dashboard
+          path: python/monarch/monarch_dashboard/frontend/build
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, build_frontend]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build torchmonarch ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream ships no free-threaded build.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      TORCHMONARCH_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout monarch v${{ env.TORCHMONARCH_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: meta-pytorch/monarch
+          ref: v${{ env.TORCHMONARCH_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: torchmonarch-${{ env.TORCHMONARCH_VERSION }}-dashboard
+          path: python/monarch/monarch_dashboard/frontend/build
+
+      # Same OOM guard build-deltalake.yml/build-daft.yml need on these runners for a
+      # comparably sized (~850-crate) Rust workspace.
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 16
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # protoc is for the tracing-perfetto-sdk-schema crate; clang-devel (libclang.so) is
+          # for bindgen, which libsqlite3-sys's build script also needs on a CPU build - not
+          # only the CUDA/RDMA crates upstream's own clang-devel/libunwind comment calls out.
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf install -y protobuf-compiler clang-devel &&
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none &&
+            $HOME/.cargo/bin/rustup toolchain install --profile minimal
+            "$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain)"
+          # Upstream builds with `python -m build --wheel --no-isolation` against a preinstalled
+          # torch; ours is the newest riscv64 torch on the registry.
+          CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
+          CIBW_BEFORE_BUILD: pip install torch==2.14.0 -r build-requirements.txt
+          # CARGO_BUILD_JOBS=2 keeps the link of the ~280 MB extension within runner memory.
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            MONARCH_VERSION=${{ env.TORCHMONARCH_VERSION }}
+            CARGO_BUILD_JOBS=2
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=torch,numpy
+          # monarch.common._C and monarch.gradient._gradient_generator link libtorch, which the
+          # torch wheel provides at runtime; upstream's wheels do not vendor it either.
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
+            auditwheel repair -w {dest_dir} {wheel}
+            --exclude libtorch.so
+            --exclude libtorch_cpu.so
+            --exclude libtorch_python.so
+            --exclude libc10.so
+          CIBW_TEST_REQUIRES: torch==2.14.0 pytest pytest-timeout pytest-asyncio
+          CIBW_TEST_SOURCES: python/tests pyproject.toml
+          # Upstream's wheel check (`import monarch`), plus its own CPU-runnable tests for
+          # the extension linkage, the C++ gradient generator, and an actor round trip.
+          CIBW_TEST_COMMAND: >-
+            python -c "import monarch" &&
+            python -m pytest -p no:cacheprovider
+            python/tests/test_extension_linking.py
+            python/tests/test_rust_bindings_load.py
+            python/tests/test_grad_generator.py
+            python/tests/test_python_actors.py::test_stream
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: torchmonarch-${{ env.TORCHMONARCH_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish torchmonarch ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: torchmonarch-${{ matrix.version }}-*-manylinux_riscv64
