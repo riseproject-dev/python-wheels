@@ -1,0 +1,130 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/wlav/cppyy-backend/blob/cppyy-cling-6.32.8/.github/workflows/cling-wheels.yml
+name: Build cppyy-cling wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cppyy-cling.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cppyy-cling.yml'
+      - 'docs/packages/cppyy-cling.yaml'
+      - 'patches/cppyy-cling/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cppyy-cling.yml'
+      - 'docs/packages/cppyy-cling.yaml'
+      - 'patches/cppyy-cling/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  WHEEL_PLATFORM_TAG: manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cppyy-cling
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build cppyy-cling ${{ matrix.version }} py2.py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440  # full LLVM/Clang + Cling build from source
+
+    env:
+      CPPYY_CLING_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout cppyy-backend cppyy-cling-${{ env.CPPYY_CLING_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: wlav/cppyy-backend
+          ref: cppyy-cling-${{ env.CPPYY_CLING_VERSION }}
+          path: cppyy-backend
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git -C cppyy-backend apply -v ../python-wheels/patches/cppyy-cling/${{ env.CPPYY_CLING_VERSION }}/*.patch
+
+      # Upstream's own cibuildwheel config runs this as `before-all`; it pulls
+      # ROOT's release source tarball from root.cern.ch and copies its
+      # interpreter/ subtree (Cling + the LLVM/Clang monorepo) into cling/src.
+      - name: Fetch Cling's ROOT source tree
+        working-directory: cppyy-backend/cling
+        run: python3 create_src_directory.py
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
+
+      - name: Build the wheel
+        run: |
+          docker run --rm -v "$(pwd)/cppyy-backend/cling:/work" -w /work \
+            -e WHEEL_PLATFORM_TAG \
+            "${MANYLINUX_RISCV64_IMAGE}" bash -c '
+            set -euxo pipefail
+            pybin=/opt/python/cp312-cp312/bin
+            # setup.py does `import distutils`, removed from the stdlib in 3.12;
+            # setuptools (unlike wheel alone) installs the shim that resolves it.
+            "$pybin/pip" install -q -U setuptools wheel
+            # AUDITWHEEL_PLAT/_PYTHON_HOST_PLATFORM: setup.py only recognizes
+            # manylinux1/2010/2014 by /etc/redhat-release (gotcha patch 1); set
+            # the former so it builds Release (not debug-laden RelWithDebInfo)
+            # like every other published platform, and the latter is what the
+            # custom bdist_wheel command (via distutils get_platform()) tags
+            # the wheel with.
+            AUDITWHEEL_PLAT="${WHEEL_PLATFORM_TAG}" _PYTHON_HOST_PLATFORM="${WHEEL_PLATFORM_TAG}" \
+              "$pybin/python3" setup.py bdist_wheel
+            "$pybin/pip" install -q dist/*.whl
+            "$pybin/python3" -c "import cppyy_backend"
+          '
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cppyy-cling-${{ env.CPPYY_CLING_VERSION }}-py2.py3-none-manylinux_riscv64
+          path: cppyy-backend/cling/dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cppyy-cling ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: cppyy-cling-${{ matrix.version }}-*-manylinux_riscv64

@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 15 Oct 2026 06:29:40 +0000
+Subject: [PATCH] setup: recognize current-generation manylinux images
+
+Upstream-Status: To upstream [not yet submitted; generalizes a check that predates manylinux_2_28+]
+
+is_manylinux() only recognizes manylinux1/manylinux2010/manylinux2014 by
+matching three hardcoded /etc/redhat-release strings (CentOS 5.11/6.10/
+7.9.2009). quay.io/pypa/manylinux_2_39_riscv64 (this repo's riscv64 image,
+PEP 600) is Rocky Linux 10-based and matches none of them, so
+is_manylinux() silently returns False inside it. That flag drives two
+decisions in my_cmake_build.run(): the CMake build type (Release vs.
+RelWithDebInfo, the latter keeping full debug info -- "too large for
+wheels" per this same file's own comment) and the default STDCXX (17 vs.
+20), plus my_install.run()'s cxxversion-advertising rewrite ("reset the
+default cxxversion to 20 if no user override" on real manylinux builds).
+Misdetecting manylinux here would ship a riscv64 wheel built differently
+(bigger, debug-laden, and advertising a C++ standard it wasn't actually
+built with) from every other published platform.
+
+All pypa/manylinux images, including the newer PEP 600 (_2_28/_2_34/
+_2_39) generations, bake in AUDITWHEEL_PLAT (the policy auditwheel itself
+targets, e.g. manylinux_2_39_riscv64) -- a stable, generation-independent
+marker. Check it first and keep the existing string match as a fallback
+for the images it already recognized.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ cling/setup.py | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/cling/setup.py b/cling/setup.py
+index d7826bf..8dbdf4e 100755
+--- a/cling/setup.py
++++ b/cling/setup.py
+@@ -44,6 +44,11 @@ def is_manylinux():
+     global _is_manylinux
+     if _is_manylinux is None:
+         _is_manylinux = False
++        # all pypa/manylinux images, including the PEP 600 generations that
++        # post-date the CentOS-release checks below, export this.
++        if os.environ.get('AUDITWHEEL_PLAT', '').startswith('manylinux'):
++            _is_manylinux = True
++            return _is_manylinux
+         try:
+             for line in open('/etc/redhat-release').readlines():
+               # mark manylinux1, manylinux2010, or manylinux2014
