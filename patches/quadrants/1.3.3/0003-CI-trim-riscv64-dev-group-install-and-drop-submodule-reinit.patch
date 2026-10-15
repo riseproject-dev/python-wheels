@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: RISE Project CI <ci@riseproject.dev>
+Date: Thu, 15 Oct 2026 00:10:00 +0000
+Subject: [PATCH] CI: trim riscv64's dev-group install and drop its submodule
+ re-init
+
+pyproject.toml's dev dependency group (installed wholesale by
+1_prerequisites.sh) pulls in pyright, which ships no riscv64 wheel and
+has no sdist to fall back to (it wraps a prebuilt Node binary per
+platform) -- `pip install --group dev` has no partial-success mode, so
+one unresolvable package fails the whole install. On riscv64, install
+only what build.py's `pip wheel --no-build-isolation` actually needs:
+build-system.requires (scikit-build-core, nanobind, numpy,
+setuptools_scm), the cmake/ninja it drives them with, and
+psutil/requests (qd_build's own non-stdlib imports). Install ccache
+too: setup_sccache() (patched earlier) no-ops on riscv64, and
+CMakeLists.txt's own find_program(ccache) is what caches the
+per-interpreter rebuilds instead.
+
+The hardcoded `git config --global --add safe.directory
+/__w/quadrants/quadrants` assumes upstream's own checkout path; our
+workflow checks quadrants out under python-wheels' own job workspace,
+not /__w/quadrants/quadrants, and actions/checkout already ran with
+submodules: recursive, so the follow-up `git submodule update` is
+both redundant and pointed at a path that doesn't exist here. Skip
+both on riscv64.
+
+Upstream-Status: Inappropriate [riscv64 has no pyright wheel, and our workflow checks the repo out at a different path than upstream's own CI does]
+
+Signed-off-by: RISE Project CI <ci@riseproject.dev>
+---
+ .../manylinux_wheel/1_prerequisites.sh        | 21 +++++++++++++++----
+ 1 file changed, 17 insertions(+), 4 deletions(-)
+
+diff --git a/.github/workflows/scripts_new/manylinux_wheel/1_prerequisites.sh b/.github/workflows/scripts_new/manylinux_wheel/1_prerequisites.sh
+index 03ca845..76157e2 100644
+--- a/.github/workflows/scripts_new/manylinux_wheel/1_prerequisites.sh
++++ b/.github/workflows/scripts_new/manylinux_wheel/1_prerequisites.sh
+@@ -3,12 +3,25 @@
+ set -ex
+ 
+ pip install -U pip
+-pip install --group dev
++if [[ "$(uname -m)" == "riscv64" ]]; then
++    # --group dev also pulls pyright, which ships no riscv64 wheel and no sdist to fall back
++    # to (it wraps a prebuilt Node binary); install only what `pip wheel --no-build-isolation`
++    # below actually needs: build.py's own [build-system].requires, plus the cmake/ninja it
++    # drives them with, plus psutil/requests (qd_build's own non-stdlib imports).
++    pip install "cmake<4.0.0" ninja "nanobind>=2.0.0,<2.14.0" "scikit-build-core>=0.10" \
++        "setuptools_scm>=6.0" "numpy>=2.0.0" psutil requests
++    yum install -y ccache  # setup_sccache() no-ops on riscv64; CMakeLists.txt's own
++                           # find_program(ccache) picks this up as the compiler launcher instead.
++else
++    pip install --group dev
++fi
+ 
+ yum install -y git wget
+-# Note: following depends on the name of the repo:
+-git config --global --add safe.directory /__w/quadrants/quadrants
+-git submodule update --init --jobs 2
++if [[ "$(uname -m)" != "riscv64" ]]; then
++    # Note: following depends on the name of the repo:
++    git config --global --add safe.directory /__w/quadrants/quadrants
++    git submodule update --init --jobs 2
++fi
+ 
+ LLVM_DIR=$(python download_llvm.py | tail -n 1)
+ export PATH=${LLVM_DIR}/bin:$PATH
