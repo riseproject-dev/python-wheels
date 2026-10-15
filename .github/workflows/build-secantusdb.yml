@@ -1,0 +1,122 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+name: Build secantusdb wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/secantusdb.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-secantusdb.yml'
+      - 'docs/packages/secantusdb.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-secantusdb.yml'
+      - 'docs/packages/secantusdb.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_ONLY_BINARY: ':all:'
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Matches the pypa/cibuildwheel@v4.2.1 action pin in upstream's publish.yml.
+  CIBUILDWHEEL_VERSION: '4.2.1'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: secantusdb
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build secantusdb ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      SECANTUSDB_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout SecantusDB v${{ env.SECANTUSDB_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: jdrumgoole/SecantusDB
+          ref: v${{ env.SECANTUSDB_VERSION }}
+          persist-credentials: false
+
+      # Only vendor/wiredtiger feeds the build; the other 11 submodules are
+      # driver-gauge repos upstream's own wheels.yml also skips this way.
+      - name: Checkout the WiredTiger submodule
+        run: >-
+          git submodule update --init --depth 1 vendor/wiredtiger ||
+          git submodule update --init vendor/wiredtiger
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install cibuildwheel
+        run: uv pip install "cibuildwheel==${{ env.CIBUILDWHEEL_VERSION }}"
+
+      # Build/test config (scikit-build-core, test-requires, test-command) comes
+      # from upstream's own [tool.cibuildwheel] in pyproject.toml; only the
+      # riscv64-specific parts are set here. SECANTUS_BUILD_STORAGE_ENGINE stays
+      # OFF (its CMake default), so the wheel carries no Rust extension and the
+      # [tool.cibuildwheel.linux] before-build's clang/rustup/lz4-devel install
+      # (needed only when that flag is ON) is replaced below with just the
+      # lz4/zlib headers WiredTiger's builtin block-compressor extensions link
+      # against.
+      - name: Build wheels
+        run: python -m cibuildwheel --output-dir wheelhouse
+        env:
+          CIBW_ARCHS_LINUX: auto
+          CIBW_SKIP: "cp310-* cp311-* *-musllinux_*"
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_BUILD_LINUX: "dnf install -y --setopt=install_weak_deps=False lz4-devel zlib-devel"
+          CIBW_ENVIRONMENT_LINUX: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: secantusdb-${{ env.SECANTUSDB_VERSION }}-cibw-wheels-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish secantusdb ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: secantusdb-${{ matrix.version }}-*-manylinux_riscv64
