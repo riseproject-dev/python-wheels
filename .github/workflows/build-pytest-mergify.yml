@@ -1,0 +1,155 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# pytest-mergify has no public source repository: upstream's README (since
+# Mergifyio/pytest-mergify#517) says development moved to
+# Mergifyio/mergify-ci-integrations, a private monorepo this build cannot
+# check out. The released sdist is self-contained -- it carries the whole
+# Cargo workspace maturin needs (root Cargo.toml/Cargo.lock, crates/*, the
+# clients/pytest-mergify crate and its tests) -- so it is fetched from PyPI
+# and fed to cibuildwheel directly, as the closest available thing to
+# upstream (gotcha 156).
+name: Build pytest-mergify wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pytest-mergify.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pytest-mergify.yml'
+      - 'docs/packages/pytest-mergify.yaml'
+      - 'patches/pytest-mergify/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pytest-mergify.yml'
+      - 'docs/packages/pytest-mergify.yaml'
+      - 'patches/pytest-mergify/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pytest-mergify
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pytest-mergify ${{ matrix.version }} cp39-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      PYTEST_MERGIFY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Fetch pytest-mergify ${{ env.PYTEST_MERGIFY_VERSION }} sdist
+        run: |
+          url="$(curl -sSfL "https://pypi.org/pypi/pytest-mergify/${PYTEST_MERGIFY_VERSION}/json" \
+            | python3 -c 'import json,sys; print(next(u["url"] for u in json.load(sys.stdin)["urls"] if u["packagetype"] == "sdist"))')"
+          curl -sSfL -o sdist.tar.gz "$url"
+          tar xzf sdist.tar.gz
+          test -f "pytest_mergify-${PYTEST_MERGIFY_VERSION}/pyproject.toml"
+
+      - name: Patch pytest-mergify source
+        run: git apply -p1 --directory "pytest_mergify-${PYTEST_MERGIFY_VERSION}" python-wheels/patches/pytest-mergify/${{ env.PYTEST_MERGIFY_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          package-dir: pytest_mergify-${{ env.PYTEST_MERGIFY_VERSION }}
+        env:
+          # pyo3's abi3-py39 feature (patched from upstream's abi3-py38 --
+          # gotcha 96) is on unconditionally, so one cp39-abi3 wheel serves
+          # every GIL-ful interpreter; upstream ships no free-threaded wheel
+          # because abi3 and Py_GIL_DISABLED only meet on 3.14+. cibuildwheel
+          # compiles once on cp39 -- the riscv64 image's oldest interpreter --
+          # and re-tests that wheel on the newer ones. musllinux is dropped:
+          # rustup.rs ships no riscv64 musl toolchain.
+          CIBW_BUILD: >-
+            cp39-manylinux_riscv64 cp310-manylinux_riscv64
+            cp311-manylinux_riscv64 cp312-manylinux_riscv64
+            cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # pyproject.toml ships no [tool.cibuildwheel], so the Rust toolchain
+          # its maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_TEST_REQUIRES: >-
+            pytest-timeout pytest-xdist freezegun anys
+            opentelemetry-proto>=1.29
+          # Relative to cwd (the workspace root, where the sdist was
+          # extracted beside python-wheels/), not to package-dir --
+          # copy_test_sources() resolves CIBW_TEST_SOURCES against the
+          # former (gotcha 156).
+          CIBW_TEST_SOURCES: pytest_mergify-${{ env.PYTEST_MERGIFY_VERSION }}/clients/pytest-mergify/tests
+          # PYTHONNODEBUGRANGES=1 turns off PEP 657 fine-grained error
+          # locations (the caret-underline line under a failing statement):
+          # without it, tests/test_spans.py::test_test_failure's expected
+          # span attributes (recorded without that line) mismatch the
+          # traceback pytest renders on 3.11+, on every interpreter here.
+          CIBW_TEST_COMMAND: >-
+            env PYTHONNODEBUGRANGES=1 python -m pytest -v
+            pytest_mergify-${{ env.PYTEST_MERGIFY_VERSION }}/clients/pytest-mergify/tests
+
+      - name: Check the extension made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert "pytest_mergify/_mergify_ci.abi3.so" in names, names
+              assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pytest-mergify-${{ env.PYTEST_MERGIFY_VERSION }}-cp39-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pytest-mergify ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pytest-mergify-${{ matrix.version }}-*-manylinux_riscv64
