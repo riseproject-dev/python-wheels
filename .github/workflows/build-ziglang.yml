@@ -1,0 +1,145 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://codeberg.org/ziglang/zig-pypi/src/branch/main/.forgejo/workflows/cd.yml
+name: Build ziglang wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ziglang.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ziglang.yml'
+      - 'docs/packages/ziglang.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ziglang.yml'
+      - 'docs/packages/ziglang.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # zig-pypi lives on Codeberg, not GitHub; pin main's HEAD rather than a tag
+  # since the repo cuts no releases of its own (make_wheels.py tracks Zig's
+  # own ziglang.org/download/index.json, not this repo's history).
+  ZIGLANG_PYPI_REF: 378665cf13e9d2cc67a5bef4dd69b574188496c4
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: ziglang
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build ziglang ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+
+    env:
+      ZIGLANG_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout zig-pypi
+        run: git clone --depth 1 https://codeberg.org/ziglang/zig-pypi.git zig-pypi
+
+      - name: Pin zig-pypi to the known-good commit
+        working-directory: zig-pypi
+        run: |
+          git fetch --depth 1 origin "${{ env.ZIGLANG_PYPI_REF }}"
+          git checkout "${{ env.ZIGLANG_PYPI_REF }}"
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - run: pip install "wheel~=0.41.0" twine
+
+      # make_wheels.py downloads the official riscv64-linux Zig tarball from
+      # ziglang.org (sha256-verified against ziglang.org/download/index.json)
+      # and repackages it; nothing is compiled here, same as upstream's own
+      # release job.
+      - name: Build the riscv64-linux wheel
+        working-directory: zig-pypi
+        run: python3 make_wheels.py --outdir ../dist/ --version ${{ env.ZIGLANG_VERSION }} --platform riscv64-linux
+
+      - run: twine check --strict dist/*.whl
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ziglang-${{ env.ZIGLANG_VERSION }}-py3-none-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test ziglang ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13']
+
+    env:
+      ZIGLANG_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ziglang-${{ env.ZIGLANG_VERSION }}-py3-none-manylinux_riscv64
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - run: pip install --no-index --find-links . ziglang
+
+      # The wheel bundles a real riscv64-linux Zig binary, not a Python
+      # extension; running it is the only proof that the binary this job
+      # downloaded actually executes on riscv64 hardware instead of just
+      # sitting in the wheel unexecuted.
+      - name: Run the bundled riscv64 Zig binary
+        run: |
+          python -m ziglang version
+          echo 'pub fn main() void {}' > empty.zig
+          python -m ziglang build-exe empty.zig -femit-bin=empty
+          file ./empty | grep -q 'RISC-V'
+          ./empty
+
+  publish:
+    name: Publish ziglang ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: ziglang-${{ matrix.version }}-py3-none-manylinux_riscv64
