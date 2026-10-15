@@ -1,0 +1,162 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_linux_macos_wheels` job of
+# https://github.com/louisabraham/pydivsufsort/blob/v0.0.20/.github/workflows/build-and-upload.yml
+name: Build pydivsufsort wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pydivsufsort.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pydivsufsort.yml'
+      - 'docs/packages/pydivsufsort.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pydivsufsort.yml'
+      - 'docs/packages/pydivsufsort.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pydivsufsort
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pydivsufsort ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      PYDIVSUFSORT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pydivsufsort ${{ env.PYDIVSUFSORT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: louisabraham/pydivsufsort
+          ref: v${{ env.PYDIVSUFSORT_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream builds libdivsufsort on the host runner, before cibuildwheel
+          # starts, then skips the rebuild inside the container
+          # (SKIP_LIBDIVSUFSORT_BUILD). Our riscv64 runner has no PyPI cmake wheel
+          # to fall back on (gotcha 1 shape), so this builds libdivsufsort inside
+          # the manylinux container instead, with the same CMake invocation as
+          # upstream's build.sh.
+          CIBW_BEFORE_ALL: |
+            set -e
+            dnf install -y -q cmake
+            cmake -S {project}/libdivsufsort -B /tmp/libdivsufsort-build \
+              -DBUILD_DIVSUFSORT64=ON -DBUILD_EXAMPLES=OFF -DUSE_OPENMP=ON \
+              -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+            cmake --build /tmp/libdivsufsort-build -j"$(nproc)"
+            cp /tmp/libdivsufsort-build/lib/libdivsufsort.so* \
+               /tmp/libdivsufsort-build/lib/libdivsufsort64.so* \
+               {project}/pydivsufsort/
+            # Upstream's own wheel omits this; the wheel ships libdivsufsort's
+            # compiled .so as package_data, so its licence travels with it too.
+            cp {project}/libdivsufsort/LICENSE {project}/LICENSE.libdivsufsort
+          CIBW_ENVIRONMENT: SKIP_LIBDIVSUFSORT_BUILD=1
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: pytest {project}/tests
+
+      - name: Check the bundled licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          expected = {"LICENSE", "LICENSE.libdivsufsort"}
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              found = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n}
+              assert expected <= found, f"{whl}: missing {expected - found}"
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pydivsufsort-${{ env.PYDIVSUFSORT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      PYDIVSUFSORT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # libdivsufsort is built with -DUSE_OPENMP=ON, dynamically linking the
+      # image's libgomp, which auditwheel then vendors into the wheel.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pydivsufsort-${{ env.PYDIVSUFSORT_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish pydivsufsort ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    with:
+      artifact-pattern: pydivsufsort-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: pydivsufsort-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
