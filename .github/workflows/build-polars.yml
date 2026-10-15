@@ -1,0 +1,133 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# This workflow is based on the `base-package` job of:
+# https://github.com/pola-rs/polars/blob/main/.github/workflows/release-python.yml
+
+name: Build polars wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/polars.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-polars.yml'
+      - 'docs/packages/polars.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-polars.yml'
+      - 'docs/packages/polars.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  PYTHON_VERSION: '3.12'
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_ONLY_BINARY: ':all:'
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: polars
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build polars ${{ matrix.version }} py3-none-any
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      POLARS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout polars py-${{ env.POLARS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pola-rs/polars
+          ref: py-${{ env.POLARS_VERSION }}
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install yq
+        run: uv pip install yq
+
+      - name: Check polars-runtime-32 pin
+        env:
+          POLARS_PYPROJECT_TOML: py-polars/pyproject.toml
+        run: |
+          set -e
+
+          VERSION=$(tomlq '.project.version' "$POLARS_PYPROJECT_TOML" | tr -d '"')
+          RT32_VERSION=($(tomlq '.project.dependencies[0]' "$POLARS_PYPROJECT_TOML" | tr -d '"'))
+
+          [[ "$VERSION" == "${RT32_VERSION[2]}" ]] || (echo "Incorrect rt32 version" && exit 1)
+
+      - name: Build sdist and wheel
+        run: uv build py-polars --out-dir dist
+
+      # `polars` carries no compiled code of its own (py3-none-any): the only
+      # riscv64-specific fact this port needs to prove is that it actually
+      # resolves and runs against polars-runtime-32, the compiled backend this
+      # repo already publishes (build-polars-runtime.yml) -- hence testing on
+      # the riscv64 runner rather than upstream's ubuntu-latest.
+      - name: Test wheel against the published riscv64 runtime
+        run: |
+          uv pip install --force-reinstall --verbose dist/*.whl "polars-runtime-32==${{ env.POLARS_VERSION }}"
+          python -c '
+          import polars as pl
+          pl.show_versions()
+          df = pl.DataFrame({"a": [1, 2, 3]})
+          assert df.select(pl.col("a").sum()).item() == 6
+          '
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: polars-${{ env.POLARS_VERSION }}-py3-none-any
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish polars ${{ matrix.version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    with:
+      artifact-pattern: polars-${{ matrix.version }}-*
