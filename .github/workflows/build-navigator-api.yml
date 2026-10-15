@@ -1,0 +1,128 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build` job of
+# https://github.com/phenobarbital/navigator/blob/4.0.0/.github/workflows/release.yml
+name: Build navigator-api wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/navigator-api.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-navigator-api.yml'
+      - 'docs/packages/navigator-api.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-navigator-api.yml'
+      - 'docs/packages/navigator-api.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: navigator-api
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build navigator-api ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # No cp314t: upstream skips free-threaded builds.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      NAVIGATOR_API_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout navigator ${{ env.NAVIGATOR_API_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: phenobarbital/navigator
+          ref: ${{ env.NAVIGATOR_API_VERSION }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: python -c "import navigator, navigator.types, navigator.utils.types; assert navigator.types.__file__.endswith('.so'), f'navigator.types not compiled -> {navigator.types.__file__}'; assert navigator.utils.types.__file__.endswith('.so'), f'navigator.utils.types not compiled -> {navigator.utils.types.__file__}'; print('OK - Navigator test passed:', navigator.version()); print('OK - Compiled extensions verified:', navigator.types.__file__, navigator.utils.types.__file__)"
+          # As upstream does for cp314: runtime deps (navconfig, navigator-auth, asyncdb, python-datamodel) have no riscv64 wheels yet.
+          CIBW_TEST_SKIP: "*"
+
+      - name: Verify compiled extensions are present in the wheel
+        env:
+          EXPECTED_CPYTHON_TAG: ${{ matrix.python }}
+        run: |
+          python3 - <<'EOF'
+          import glob, os, sys, zipfile
+
+          REQUIRED_EXTENSIONS = ("navigator/types", "navigator/utils/types")
+
+          wheels = glob.glob("wheelhouse/*.whl")
+          if not wheels:
+              sys.exit("ERROR: No wheels found in wheelhouse/")
+
+          for wheel_path in wheels:
+              members = zipfile.ZipFile(wheel_path).namelist()
+              missing = [
+                  m for m in REQUIRED_EXTENSIONS
+                  if not any(n.startswith(f"{m}.") and n.endswith(".so") for n in members)
+              ]
+              if missing:
+                  sys.exit(f"ERROR: {wheel_path}: missing compiled extension(s) for {missing}")
+
+              python_tag, _abi_tag, platform_tag = wheel_path[:-4].split("-")[-3:]
+              if not (platform_tag.startswith("manylinux") and platform_tag.endswith("riscv64")):
+                  sys.exit(f"ERROR: {wheel_path}: unsupported platform tag {platform_tag}")
+              if python_tag != os.environ["EXPECTED_CPYTHON_TAG"]:
+                  sys.exit(f"ERROR: {wheel_path}: unexpected python tag {python_tag}")
+
+              print(f"OK: {wheel_path}: required extensions present ({platform_tag})")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: navigator-api-${{ env.NAVIGATOR_API_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish navigator-api ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: navigator-api-${{ matrix.version }}-*-manylinux_riscv64
