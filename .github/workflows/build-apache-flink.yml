@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel build:
+#   https://github.com/apache/flink/blob/release-2.3.0/.github/workflows/nightly.yml
+#   (build_python_wheels job)
+name: Build apache-flink wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/apache-flink.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-apache-flink.yml'
+      - 'docs/packages/apache-flink.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-apache-flink.yml'
+      - 'docs/packages/apache-flink.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: apache-flink
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build apache-flink ${{ matrix.version }} cp312-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      APACHE_FLINK_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout apache/flink release-${{ env.APACHE_FLINK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: apache/flink
+          ref: release-${{ env.APACHE_FLINK_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: flink-python
+          output-dir: wheelhouse/
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # apache-beam/pyarrow/grpcio/pemja, each pinned to the exact
+          # version inside flink's declared windows, are riscv64-only on our
+          # own registry.
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # The cimport'd apache_beam.runners.worker.operations.Operation (and
+          # the other Beam cdef classes beam_operations_fast/beam_coder_impl_fast/
+          # beam_stream_fast cimport) is a Cython size-checked type import: it
+          # fails at import time, not at build time, if the installed apache-beam
+          # wheel's ABI doesn't match what this wheel was compiled against.
+          CIBW_TEST_COMMAND: >-
+            python -c "
+            import pyflink;
+            from pyflink.fn_execution import coder_impl_fast, stream_fast;
+            from pyflink.fn_execution.beam import beam_coder_impl_fast, beam_operations_fast, beam_stream_fast;
+            from pyflink.table import aggregate_fast, window_aggregate_fast;
+            print('pyflink compiled extensions OK')
+            "
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: apache-flink-${{ env.APACHE_FLINK_VERSION }}-cp312-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish apache-flink ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: apache-flink-${{ matrix.version }}-*-manylinux_riscv64
