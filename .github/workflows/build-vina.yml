@@ -1,0 +1,121 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/ccsb-scripps/AutoDock-Vina/blob/v1.2.7/.github/workflows/pypi-build.yml
+name: Build vina wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/vina.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-vina.yml'
+      - 'docs/packages/vina.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-vina.yml'
+      - 'docs/packages/vina.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: vina
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build vina ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    env:
+      VINA_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout AutoDock-Vina v${{ env.VINA_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ccsb-scripps/AutoDock-Vina
+          ref: v${{ env.VINA_VERSION }}
+          persist-credentials: false
+
+      - name: Prepare the python package directory
+        # Mirrors upstream's own `cp -R ./build/python/* .` wheel-build step: the
+        # setup.py in build/python addresses its native sources (src/lib/*.cpp) and
+        # SWIG interface relative to the repository root, so it is copied there
+        # rather than used as cibuildwheel's package-dir.
+        run: cp -R ./build/python/* .
+
+      - name: Write the wheel test
+        run: |
+          cat > test_vina.py <<'EOF'
+          from vina import Vina
+
+          v = Vina(sf_name="vina", verbosity=0)
+          assert v.__class__.__name__ == "Vina"
+          EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Rocky 10's own boost-devel (behind crb) and swig packages replace
+          # upstream's from-source SWIG 4.0.2 + Boost 1.82.0 builds (both built purely
+          # for a build-time compiler/linker, so the substitution has no effect on
+          # what ships in the wheel).
+          CIBW_BEFORE_ALL: dnf -y install --enablerepo=crb boost-devel swig
+          CIBW_TEST_SOURCES: test_vina.py
+          CIBW_TEST_COMMAND: python test_vina.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: vina-${{ env.VINA_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish vina ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: vina-${{ matrix.version }}-*-manylinux_riscv64
