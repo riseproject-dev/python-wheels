@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` (ubuntu-latest leg) of
+# https://github.com/Auterion/libmav-python/blob/0.1.1/.github/workflows/wheels.yml
+name: Build libmav wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/libmav.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-libmav.yml'
+      - 'docs/packages/libmav.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-libmav.yml'
+      - 'docs/packages/libmav.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: libmav
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build libmav ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Plain pybind11 extension, no abi3 -- every interpreter needs its own
+        # build, matching upstream's own cp38-cp312 matrix. cp314t is dropped:
+        # the vendored pybind11 2.13.6 submodule predates its nogil support and
+        # the module declares no gil_used(false), so it would just re-enable
+        # the GIL (same reasoning as build-py-rust-stemmers.yml).
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      LIBMAV_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Use HTTPS for the libmav submodule's ssh:// URL
+        run: git config --global url."https://github.com/".insteadOf "git@github.com:"
+
+      - name: Checkout libmav-python ${{ env.LIBMAV_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Auterion/libmav-python
+          ref: ${{ env.LIBMAV_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Write VERSION.txt
+        # Same mechanism setup.py's get_version() uses on upstream's own
+        # release builds -- avoids depending on `git describe` resolving a tag
+        # from a shallow clone.
+        run: echo -n "${{ env.LIBMAV_VERSION }}" > VERSION.txt
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # musllinux dropped (no upstream musllinux_riscv64 precedent needed
+          # here -- pybind11/CMake only, no Rust toolchain involved).
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_BUILD: rm -rf {project}/build
+          CIBW_BEFORE_ALL_LINUX: dnf install -y libatomic
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: >-
+            python -c "import libmav as m; assert m.__file__.endswith('.so'), m.__file__" &&
+            python -m pytest -v {project}/test.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: libmav-${{ env.LIBMAV_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish libmav ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: libmav-${{ matrix.version }}-*-manylinux_riscv64
