@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/vaexio/vaex/blob/core-v4.19.0/.github/workflows/wheel.yml
+name: Build vaex-core wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/vaex-core.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-vaex-core.yml'
+      - 'docs/packages/vaex-core.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-vaex-core.yml'
+      - 'docs/packages/vaex-core.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: vaex-core
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build vaex-core ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # vaex-core's own setup.py pins python_requires to >=3.9,<3.13, the
+        # same cp39-cp312 span upstream publishes wheels for.
+        python: ["cp39", "cp310", "cp311", "cp312"]
+        libc: [manylinux, musllinux]
+
+    env:
+      VAEX_CORE_VERSION: ${{ matrix.version }}
+
+    steps:
+      # vaex-core lives in a subdirectory of the vaex monorepo and vendors
+      # pybind11/string-view-lite/hopscotch-map/flat_hash_map as submodules.
+      - name: Checkout vaex core-v${{ env.VAEX_CORE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: vaexio/vaex
+          ref: core-v${{ env.VAEX_CORE_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: packages/vaex-core
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          # superstrings links against pcre/pcrecpp (upstream's own
+          # bin/install_pcre.sh: a distro package, falling back to a source
+          # build); manylinux_2_39_riscv64 is Rocky-based (dnf), musllinux is
+          # Alpine (apk). python3-dev/openssl-dev mirror upstream's own
+          # musllinux CIBW_BEFORE_BUILD_LINUX for its pyproject.toml build deps.
+          CIBW_BEFORE_ALL_LINUX: |
+            set -ex
+            if command -v apk > /dev/null; then
+              apk add --no-cache pcre-dev python3-dev openssl-dev
+            else
+              dnf install -y pcre-devel
+            fi
+          CIBW_TEST_COMMAND: python -c "import vaex; print(vaex.from_arrays(x=[1,2]))"
+          CIBW_TEST_ENVIRONMENT_LINUX: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=:all:
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: vaex_core-${{ env.VAEX_CORE_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish vaex-core ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: vaex_core-${{ matrix.version }}-*-*_riscv64
