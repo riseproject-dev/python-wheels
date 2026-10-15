@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 15 Oct 2026 00:00:00 +0000
+Subject: [PATCH] setup: refresh config.guess/config.sub for riscv64
+
+Upstream-Status: Inappropriate [riscv64 build infra, irrelevant to jeffdaily/parasail-python]
+
+build_parasail() downloads a plain GitHub archive snapshot of
+jeffdaily/parasail's master branch (not a `make dist` release tarball),
+so it carries no generated `configure` and falls back to `autoreconf
+-fi`. That only installs *missing* auxiliary files; it does not
+overwrite the config.guess/config.sub already committed to the C
+library's tree, and those predate riscv64 (added to config.sub in
+2017), so `./configure` dies with "cannot guess build type; you must
+specify one" on the riscv64 manylinux runner -- the exact shape of
+CLAUDE.md gotcha 138 (libspatialite's 2009-dated pair hitting the same
+wall on aarch64/riscv64).
+
+The manylinux_riscv64 image already carries a current automake, whose
+own config.guess/config.sub do recognise riscv64 (gotcha 138's fix), so
+copy those over the stale ones before configure runs.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ setup.py | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/setup.py b/setup.py
+index 1111111..2222222 100644
+--- a/setup.py
++++ b/setup.py
+@@ -1,4 +1,5 @@
+ import codecs
++import glob
+ import os
+ import platform
+ import re
+@@ -313,9 +314,17 @@ def build_parasail(libname):
+     if not os.access(os.path.join(parasail_root,'version.sh'), os.X_OK):
+         print("fixing executable bits after unzipping")
+         fix_permissions(parasail_root)
+     else:
+         print("parasail archive executable permissions ok")
+
++    # gotcha 138 (manylinux-image-and-toolchain.md): the committed
++    # config.guess/config.sub predate riscv64; refresh them from automake's
++    # copy, which the manylinux image already carries.
++    for config_aux in ('config.guess', 'config.sub'):
++        found = glob.glob('/usr/share/automake-*/{}'.format(config_aux))
++        if found:
++            shutil.copy(found[0], os.path.join(parasail_root, config_aux))
++
+     root = find_file('configure', parasail_root)
+     if root is None:
+         print("Unable to find parasail configure script")
+--
+2.50.1
