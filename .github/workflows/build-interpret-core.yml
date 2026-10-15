@@ -1,0 +1,216 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Mirrors the bld, vis, bdist and testB jobs of upstream's ci.yml, narrowed to riscv64:
+#   https://github.com/interpretml/interpret/blob/v0.7.8/.github/workflows/ci.yml
+name: Build interpret-core wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/interpret-core.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-interpret-core.yml'
+      - 'docs/packages/interpret-core.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-interpret-core.yml'
+      - 'docs/packages/interpret-core.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: interpret-core
+      version: ${{ inputs.version }}
+
+  vis:
+    name: Build interpret-core ${{ matrix.version }} vis
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    env:
+      INTERPRET_CORE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: interpretml/interpret
+          ref: v${{ env.INTERPRET_CORE_VERSION }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '22.x'
+
+      - name: Build vis
+        working-directory: shared/vis
+        run: |
+          npm install
+          npm run build-prod
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: interpret-core-${{ env.INTERPRET_CORE_VERSION }}-vis
+          path: shared/vis/dist
+          if-no-files-found: error
+
+  build_wheel:
+    name: Build interpret-core ${{ matrix.version }} py3-none-manylinux_riscv64
+    needs: [setup, vis]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    env:
+      INTERPRET_CORE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: interpretml/interpret
+          ref: v${{ env.INTERPRET_CORE_VERSION }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: interpret-core-${{ env.INTERPRET_CORE_VERSION }}-vis
+          path: python/interpret-core/interpret/root/bld/lib/
+
+      - name: Pull manylinux_riscv64 image
+        run: docker pull "${MANYLINUX_RISCV64_IMAGE}"
+
+      # build.sh has no riscv64 target; its default one builds the generic libebm.so (the -release_arm
+      # sources and flags, no x86 SIMD) that _native.py loads before any per-arch library.
+      - name: Build and test libebm, then build the wheel
+        run: |
+          docker run --rm -i \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          dnf -y install libstdc++-static
+
+          /bin/sh ./shared/libebm/tests/libebm_test.sh
+          cp bld/lib/libebm.so python/interpret-core/interpret/root/bld/lib/
+
+          # setup.py lives in a subdirectory, so upstream's wheel carries no licence file.
+          cp LICENSE python/interpret-core/
+
+          export PATH="/opt/python/cp312-cp312/bin:${PATH}"
+          python -m pip install --upgrade pip build wheel
+          cd python/interpret-core
+          python -m build --wheel --outdir dist
+          python -m wheel tags --platform-tag linux_riscv64 --remove dist/*.whl
+          auditwheel repair --plat manylinux_2_39_riscv64 -w /work/wheelhouse dist/*.whl
+          SCRIPT
+
+      - name: Check the wheel carries libebm, the vis bundle and the licence
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              assert whl.endswith("manylinux_2_39_riscv64.whl"), whl
+              names = set(zipfile.ZipFile(whl).namelist())
+              for path in ("interpret/root/bld/lib/libebm.so",
+                           "interpret/root/bld/lib/interpret-inline.js",
+                           "interpret/root/bld/lib/interpret-inline.js.LICENSE.txt"):
+                  assert path in names, (whl, path)
+              assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), whl
+              assert not any(".libs/" in n for n in names), whl
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: interpret-core-${{ env.INTERPRET_CORE_VERSION }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test interpret-core ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # pandas ships no free-threaded riscv64 wheel.
+        python-version: ['3.12', '3.13', '3.14']
+    env:
+      INTERPRET_CORE_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+      UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+      UV_INDEX_STRATEGY: unsafe-best-match
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: interpretml/interpret
+          ref: v${{ env.INTERPRET_CORE_VERSION }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: interpret-core-${{ env.INTERPRET_CORE_VERSION }}-py3-none-manylinux_riscv64
+          path: bld/bdist
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      # shap is left out of upstream's extras: it needs numba, which has no riscv64 build.
+      - name: pytest
+        run: |
+          install_file=$(echo bld/bdist/interpret_core-*.whl)
+          uv pip install "${install_file}[debug,notebook,plotly,lime,sensitivity,linear,treeinterpreter,aplr,dash,skoperules,excel,testing]"
+          mkdir -p "tmp/zqmr/t"
+          cp -R "python/interpret-core/tests/" "tmp/zqmr/t/"
+          cd "tmp/zqmr/t"
+          python -m pytest -vv -n auto
+
+  publish:
+    name: Publish interpret-core ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: interpret-core-${{ matrix.version }}-py3-none-manylinux_riscv64
