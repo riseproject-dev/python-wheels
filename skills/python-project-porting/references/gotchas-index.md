@@ -1,6 +1,6 @@
 # Gotchas index — router for the themed gotcha files
 
-The porting gotchas (558 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
+The porting gotchas (559 of them) live in [`references/gotchas/`](gotchas/), split by theme so only the relevant slice loads. Every gotcha keeps a **permanent number** cited elsewhere as "gotcha N" (and in workflow comments as "CLAUDE.md gotcha N"). Numbers are stable IDs — **not sequential**, and four are **reused** with different content (two each of 33, 55, 56, 57), disambiguated by theme below.
 
 ## How to find the gotcha you need
 
@@ -1161,6 +1161,10 @@ The porting gotchas (558 of them) live in [`references/gotchas/`](gotchas/), spl
 - **625** — Conan's `openssl` recipe maps riscv64 to `linux-generic32`; override with
   `CONAN_OPENSSL_CONFIGURATION=linux-generic64`, not `linux64-riscv64`, whose AES asm `jal`
   overflows `R_RISCV_JAL` when `libcrypto.a` is linked into a large `.so` (sqlcipher3).
+- **661** — `VTK_INSTALL_SDK=ON` already writes a full `include/`+`vtk-config.cmake` tree as a
+  side effect of the install step `build-vtk.yml` already runs; tar it up and
+  `upload-artifact` it separately rather than rebuilding anything or touching the published
+  wheel (the vtk / cadquery-ocp case).
 
 ### Compiled-vs-pure detection & the require-extension knob — [`gotchas/compiled-vs-pure-detection.md`](gotchas/compiled-vs-pure-detection.md)
 

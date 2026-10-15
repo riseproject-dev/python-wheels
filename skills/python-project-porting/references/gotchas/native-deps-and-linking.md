@@ -58,6 +58,9 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
   `CONAN_OPENSSL_CONFIGURATION` overrides it, but `linux64-riscv64`'s AES asm `jal`s a global
   symbol and overflows `R_RISCV_JAL` once `libcrypto.a` lands in a big `.so` — use
   `linux-generic64` (the sqlcipher3 case).
+- **661** — `VTK_INSTALL_SDK=ON`'s headers/cmake-config output is a free side effect of a
+  build step that already runs; tar it up and upload it as its own artifact rather than
+  rebuilding anything or touching the published wheel (the vtk / cadquery-ocp case).
 ---
 
 16. **All-static BUNDLED build + a dep the project can't bundle = link failure.**
@@ -890,3 +893,33 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/native-deps-and-linkin
     - The same recipe falls through to `linux-generic32` for any other arch it doesn't
       list, so check its `_targets` table whenever a Conan-built OpenSSL targets a new arch.
 
+661. **A wheel-only publish of a large C++ library can leave `VTK_INSTALL_SDK=ON`'s own
+    output on the build-room floor, blocking an unrelated downstream port that needs the
+    headers rather than the `.so`s (the vtk / cadquery-ocp case).** `build-vtk.yml` already
+    configures with `-DVTK_INSTALL_SDK=ON` and runs `cmake --build /build --target install`,
+    which writes a full `include/` tree and the generated `vtk-config.cmake` package files to
+    `CMAKE_INSTALL_PREFIX` — but the workflow only ever packages `vtkmodules/*.so` into the
+    wheel (`setup.py bdist_wheel`), so none of that SDK output ever left the runner. A
+    downstream consumer that needs to `find_package(VTK)` at build time (cadquery-ocp's CMake
+    does) has no riscv64 headers to point it at, even though the matching `.so`s are sitting
+    right there in the published wheel.
+    - **No extra compute is needed — the SDK is a side effect of a build step that already
+      runs.** Don't rebuild anything to get it; just `tar` up the already-installed
+      `include/` directory and the directory holding `vtk-config.cmake` (`find
+      /build/install -iname 'vtk-config.cmake'` locates it regardless of
+      `CMAKE_INSTALL_LIBDIR` being `lib` vs `lib64`), then `actions/upload-artifact` it
+      separately from the wheel. This is additive: it doesn't touch the existing wheel build
+      or its publish step at all.
+    - **One matrix leg's SDK is enough when the interpreter matrix doesn't configure
+      identically.** If a free-threaded leg (or any other) disables an extra module
+      (`VTK_MODULE_ENABLE_VTK_IONetCDF=NO` for `cp314t` here) that the other legs keep on,
+      pick a leg whose module set matches what the downstream consumer actually needs rather
+      than assuming every leg's install tree is interchangeable.
+    - **A plain GitHub Actions artifact, not a second published wheel, is the conservative
+      choice when the consumer isn't ready yet.** `_publish-wheel.yml`'s GitHub Release path
+      is the only durable (non-expiring) destination this repo has, and it's wired for wheels
+      (plus one GPL-sources tarball) only; extending it to a non-wheel SDK tarball is a
+      shared-workflow change that affects every package, not a one-package addition. An
+      artifact with a lengthened `retention-days` is the additive option — note in the PR that
+      it is time-limited and will need re-cutting (or a proper publish path) once the
+      downstream port actually resumes.
