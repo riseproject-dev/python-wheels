@@ -1,0 +1,147 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# This workflow is based on the `prepare-python` job of
+# https://github.com/vortex-data/vortex/blob/0.85.0/.github/workflows/package.yml
+name: Build vortex-data wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/vortex-data.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-vortex-data.yml'
+      - 'docs/packages/vortex-data.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-vortex-data.yml'
+      - 'docs/packages/vortex-data.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_ONLY_BINARY: ':all:'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: vortex-data
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build vortex-data ${{ matrix.version }} cp311-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      VORTEX_DATA_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout vortex ${{ env.VORTEX_DATA_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: vortex-data/vortex
+          ref: ${{ env.VORTEX_DATA_VERSION }}
+          persist-credentials: false
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+
+      # vortex-python's default "tui" feature pulls in the full datafusion crate, making
+      # this a comparably large build to build-datafusion.yml on the same runner fleet.
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 16
+
+      - name: Install cargo-edit
+        uses: taiki-e/cache-cargo-install-action@66c9585ef5ca780ee69399975a5e911f47905995
+        with:
+          tool: cargo-edit@0.13.10
+
+      - name: Cargo Set Version
+        run: cargo set-version --workspace ${{ env.VORTEX_DATA_VERSION }}
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          args: >
+            --release
+            --manifest-path vortex-python/Cargo.toml
+            --out dist
+          manylinux: '2_39'
+          before-script-linux: git config --global --add safe.directory "*"
+        env:
+          MATURIN_PEP517_USE_BASE_PYTHON: 'true'
+          PYO3_ENVIRONMENT_SIGNATURE: cpython3
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+          CARGO_BUILD_JOBS: '2'
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Test wheel
+        run: |
+          uv pip install --force-reinstall dist/*.whl
+          uv pip install pytest
+          python -c 'import vortex; print(vortex.__version__)'
+          cd vortex-python
+          python -m pytest -v test/ \
+            --ignore=test/test_cuda.py \
+            --ignore=test/test_duckdb.py \
+            --ignore=test/test_hf_datasets.py \
+            --ignore=test/test_polars_.py \
+            --ignore=test/test_fork.py
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: vortex-data-${{ env.VORTEX_DATA_VERSION }}-cp311-abi3-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish vortex-data ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    with:
+      artifact-pattern: vortex-data-${{ matrix.version }}-*-manylinux_riscv64
