@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000005 Mon Sep 17 00:00:00 2001
+From: RISE Project CI <ci@riseproject.dev>
+Date: Mon, 28 Sep 2026 00:00:00 +0000
+Subject: [PATCH] cmake: drop FFHT SIMD arch fatal error, portable fallback exists
+
+extension/llm/custom_ops/CMakeLists.txt picks a vendored FFHT (Fast
+Hadamard Transform) SIMD kernel source file to compile based on
+CMAKE_SYSTEM_PROCESSOR -- fht_neon.c for aarch64/arm64/armv7, fht_avx.c for
+x86_64/AMD64 -- and hard-errors for every other architecture, riscv64
+included:
+
+  CMake Error: Unsupported CMAKE_SYSTEM_PROCESSOR riscv64. (If 32-bit x86,
+  try using fht_avx.c and send a PR if it works!)
+
+But nothing on such an architecture actually needs an FFHT SIMD kernel.
+extension/llm/custom_ops/spinquant/fast_hadamard_transform.h's
+fast_hadamard_transform_ffht_impl() -- the only caller of fht_float()/
+fht_double() outside the vendored FFHT sources themselves -- already
+branches on the compiler-defined architecture macros, not
+CMAKE_SYSTEM_PROCESSOR:
+
+  #if defined(__aarch64__) || defined(__x86_64__)
+    fht_float(vec, log2_vec_size);
+    normalize_after_fht(vec, log2_vec_size);
+  #else
+    fast_hadamard_transform_simple_impl(vec, log2_vec_size);
+  #endif
+
+so on any architecture other than __aarch64__/__x86_64__ -- riscv64
+included -- the portable, scalar fast_hadamard_transform_simple_impl() is
+already used at compile time, and the FFHT SIMD kernel's fht_float()/
+fht_double() symbols are never referenced, let alone linked. The
+CMakeLists.txt FATAL_ERROR was refusing to configure over a source file
+that would never have been needed. Replace it with a STATUS message and
+add no FFHT source at all for these architectures; the vendored fht_avx.c/
+fht_neon.c/fht_sse.c/dumb_fht.c files use a different, narrower API
+(void dumb_fht(float*, int) vs. fht_float()'s int fht_float(float*, int),
+and no fht_double()/_oop equivalents) and were never a drop-in match
+regardless of architecture.
+
+Upstream-Status: To upstream [not yet submitted; the FATAL_ERROR blocks every architecture outside x86_64/aarch64/armv7 even though fast_hadamard_transform.h already has a portable fallback that needs none of them, independent of riscv64]
+
+Signed-off-by: RISE Project CI <ci@riseproject.dev>
+---
+ extension/llm/custom_ops/CMakeLists.txt | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/extension/llm/custom_ops/CMakeLists.txt b/extension/llm/custom_ops/CMakeLists.txt
+index fa847cb..d9f6e4f 100644
+--- a/extension/llm/custom_ops/CMakeLists.txt
++++ b/extension/llm/custom_ops/CMakeLists.txt
+@@ -58,10 +58,16 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)")
+        "extension/llm/custom_ops/spinquant/third-party/FFHT/fht_avx.c"
+   )
+ else()
++  # No FFHT SIMD kernel exists for this architecture, but none is required:
++  # fast_hadamard_transform_ffht_impl() (fast_hadamard_transform.h) only
++  # calls fht_float() when __aarch64__ or __x86_64__ is defined, and already
++  # falls back at compile time to the portable
++  # fast_hadamard_transform_simple_impl() everywhere else, so nothing here
++  # links against fht_float/fht_double.
+   message(
+-    FATAL_ERROR
+-      "Unsupported CMAKE_SYSTEM_PROCESSOR ${CMAKE_SYSTEM_PROCESSOR}. (If \
+-32-bit x86, try using fht_avx.c and send a PR if it works!)"
++    STATUS
++      "No FFHT SIMD kernel for CMAKE_SYSTEM_PROCESSOR ${CMAKE_SYSTEM_PROCESSOR}; "
++      "using the portable fast_hadamard_transform_simple_impl fallback."
+   )
+ endif()
+
+--
+2.34.1
