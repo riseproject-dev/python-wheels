@@ -1,0 +1,124 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels_linux` job of
+# https://github.com/BrianPugh/hdiffpatch-python/blob/v2.6.0/.github/workflows/build_wheels.yaml
+name: Build hdiffpatch wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/hdiffpatch.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-hdiffpatch.yml'
+      - 'docs/packages/hdiffpatch.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-hdiffpatch.yml'
+      - 'docs/packages/hdiffpatch.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: hdiffpatch
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build hdiffpatch ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      HDIFFPATCH_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout hdiffpatch v${{ env.HDIFFPATCH_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: BrianPugh/hdiffpatch-python
+          ref: v${{ env.HDIFFPATCH_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      # setup.py compiles HDiffPatch core, zstd, tinyuz, brotli, lzham_codec,
+      # tamp, lzma, bzip2, zlib, lz4 and libdeflate straight from their
+      # vendored submodules, but the wheel ships only hdiffpatch-python's own
+      # Apache-2.0 LICENSE at the project root. The default LICEN[CS]E*/
+      # COPYING* glob (PEP 639, no license-files override in pyproject.toml)
+      # picks up anything added here with no packaging change.
+      - name: Stage the vendored dependencies' licences
+        run: |
+          set -euo pipefail
+          cp hdiffpatch/_c_src/HDiffPatch/LICENSE LICENSE.hdiffpatch-core
+          cp hdiffpatch/_c_src/zstd/LICENSE LICENSE.zstd
+          cp hdiffpatch/_c_src/zstd/COPYING COPYING.zstd
+          cp hdiffpatch/_c_src/tinyuz/LICENSE LICENSE.tinyuz
+          cp hdiffpatch/_c_src/brotli/LICENSE LICENSE.brotli
+          cp hdiffpatch/_c_src/lzham_codec/LICENSE LICENSE.lzham-codec
+          cp hdiffpatch/_c_src/tamp/LICENSE LICENSE.tamp
+          cp hdiffpatch/_c_src/bzip2/LICENSE LICENSE.bzip2
+          cp hdiffpatch/_c_src/zlib/LICENSE LICENSE.zlib
+          cp hdiffpatch/_c_src/lz4/LICENSE LICENSE.lz4
+          cp hdiffpatch/_c_src/libdeflate/COPYING COPYING.libdeflate
+          # libmd5 and the lzma submodule carry no standalone LICENSE file;
+          # reproduce the notice each actually carries (zlib-style header
+          # comment, LZMA SDK's public-domain doc section).
+          sed -n '1,21p' hdiffpatch/_c_src/libmd5/md5.h > LICENSE.libmd5
+          sed -n '27,38p' hdiffpatch/_c_src/lzma/DOC/lzma-sdk.txt > LICENSE.lzma
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: >-
+            python -c "import hdiffpatch._c_extension as m; assert m.__file__.endswith('.so'), m.__file__" &&
+            python -m pytest {package}/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: hdiffpatch-${{ env.HDIFFPATCH_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish hdiffpatch ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: hdiffpatch-${{ matrix.version }}-*-manylinux_riscv64
