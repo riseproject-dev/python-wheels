@@ -1,0 +1,257 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 15 Oct 2026 00:00:00 +0000
+Subject: [PATCH] build_environment: skip LLVM/OSL/ISPC/OIDN/Embree/level-zero
+ + GPU-vendor cluster on riscv64
+
+Upstream-Status: Inappropriate [riscv64 is unsupported by these dependencies; the GPU-vendor cluster is x86/CUDA/HIP/oneAPI-only]
+
+build_files/build_environment (the standalone CMake project behind `make
+deps` / Windows' build_deps.cmd, distinct from the main Blender configure)
+unconditionally include()s a target for every dependency, with no gating
+besides the existing BLENDER_PLATFORM_ARM skip of the Intel GPU-vendor
+toolchain cluster (hiprt/dpcpp/dpcpp_deps/emhash/parallelhashmap/igc/
+gmmlib/ocloc). None of LLVM, OSL (which needs LLVM), ISPC, Embree,
+OpenImageDenoise or level-zero build or run on riscv64 today (LLVM has
+no riscv64 JIT/codegen path exercised here, ISPC/Embree/OIDN are
+x86-SIMD-only, level-zero is Intel oneAPI's Level Zero loader), and the
+GPU-vendor cluster is already unconditionally x86/CUDA/HIP/oneAPI-only
+hardware-acceleration code with no riscv64 relevance either.
+
+Introduces BLENDER_PLATFORM_RISCV64 in cmake/options.cmake, set exactly
+like the adjacent BLENDER_PLATFORM_ARM from CMAKE_SYSTEM_PROCESSOR, and
+uses it in CMakeLists.txt to skip include()-ing llvm.cmake, osl.cmake,
+ispc.cmake, openimagedenoise.cmake and embree.cmake, to extend the
+level-zero.cmake include's existing `NOT APPLE` guard, and to extend the
+GPU-vendor cluster's existing BLENDER_PLATFORM_ARM guard.
+
+cmake/download.cmake pre-fetches every dependency's upstream source
+tarball via file(DOWNLOAD...) at CONFIGURE time with no gating
+whatsoever (not even by BLENDER_PLATFORM_ARM: today's aarch64 and Apple
+Silicon builds already download the entire unused GPU-vendor cluster's
+sources for nothing). Skipping only the above include()s would still
+download LLVM's, Embree's etc. full source archives on a disk-
+constrained riscv64 runner even though nothing builds them, so this
+mirrors every include() cut above into download.cmake too: 24
+download_source() calls removed under the same BLENDER_PLATFORM_RISCV64
+guard (LLVM, OSL, ISPC, OIDN, EMBREE, HIPRT individually, plus the
+contiguous 18-line LEVEL_ZERO..OCLOC GPU-vendor block).
+
+Deliberately left untouched: USD, MaterialX, OpenVDB, Alembic, Draco,
+OpenSubdiv, Manifold, Ceres all keep building from source on riscv64, as
+on every other non-ARM platform. build_environment is a structurally
+separate CMake project (`project("BlenderDependencies")`) with its own
+option surface; it has zero coupling to the main Blender configure's
+WITH_USD/WITH_MATERIALX/WITH_ALEMBIC/WITH_DRACO/WITH_OPENVDB cache
+variables (grep confirms none of those five tokens appear anywhere under
+build_files/build_environment/), so a future decision to pass
+-DWITH_USD=OFF etc. on the main configure does not reduce this stage's
+own build scope at all.
+
+Validated via three standalone CMake configure-only passes against a
+sparse v5.2.2 checkout (native x86_64, and cross-compile-flagged aarch64
+and riscv64 via toolchain files -- a bare -DCMAKE_SYSTEM_PROCESSOR
+override is silently clobbered back to the host arch once project() runs
+compiler detection, so CMAKE_SYSTEM_NAME/CMAKE_TOOLCHAIN_FILE cross mode
+is required instead), with download_source()'s network call and
+check_software.cmake's host-tool gate stubbed to a no-op for the dry run
+only (not shipped in this patch): x86_64 and aarch64 configure
+byte-identically with vs without the patch (zero regression risk);
+riscv64 drops exactly the 12 target families (external_llvm/osl/ispc/
+openimagedenoise/embree/hiprt/dpcpp/igc/gmmlib/ocloc/level-zero/emhash/
+parallelhashmap, counting dpcpp_deps/parallelhashmap under their parent
+families) and exactly 24 of 117 download_source() calls (93 remain),
+with every kept target (openvdb/openimageio/opencolorio/usd/materialx/
+opensubdiv/alembic/manifold/draco/ceres/tbb/python/openpgl/ffmpeg/fmt/
+pugixml/...) still present and still downloading/building.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+ build_files/build_environment/CMakeLists.txt  | 20 +++---
+ .../build_environment/cmake/download.cmake    | 62 ++++++++++++-------
+ .../build_environment/cmake/options.cmake     |  4 ++
+ 3 files changed, 55 insertions(+), 31 deletions(-)
+
+diff --git a/build_files/build_environment/CMakeLists.txt b/build_files/build_environment/CMakeLists.txt
+index be01fba..8433d99 100644
+--- a/build_files/build_environment/CMakeLists.txt
++++ b/build_files/build_environment/CMakeLists.txt
+@@ -69,8 +69,10 @@ elseif(UNIX AND NOT APPLE)
+ endif()
+ include(cmake/tbb.cmake)
+ include(cmake/python.cmake)
+-include(cmake/llvm.cmake)
+-include(cmake/osl.cmake)
++if(NOT BLENDER_PLATFORM_RISCV64)
++  include(cmake/llvm.cmake)
++  include(cmake/osl.cmake)
++endif()
+ include(cmake/cython.cmake)
+ include(cmake/numpy.cmake)
+ include(cmake/zstandard.cmake)
+@@ -87,7 +89,7 @@ include(cmake/fribidi.cmake)
+ include(cmake/harfbuzz.cmake)
+ include(cmake/xr_openxr.cmake)
+ if(NOT APPLE)
+-  if(NOT BLENDER_PLATFORM_ARM)
++  if(NOT (BLENDER_PLATFORM_ARM OR BLENDER_PLATFORM_RISCV64))
+     include(cmake/hiprt.cmake)
+     include(cmake/dpcpp.cmake)
+     include(cmake/dpcpp_deps.cmake)
+@@ -100,14 +102,16 @@ if(NOT APPLE)
+     endif()
+   endif()
+ endif()
+-include(cmake/ispc.cmake)
++if(NOT BLENDER_PLATFORM_RISCV64)
++  include(cmake/ispc.cmake)
++endif()
+ include(cmake/openpgl.cmake)
+ # EMBREE needs to be included after `dpcpp` as it uses it for compiling with GPU support
+ if(BLENDER_PLATFORM_WINDOWS_ARM)
+   # WoA needs EMBREE to be built with the VS Generator + LLVM,
+   # put it in its own file to avoid clutter.
+   include(cmake/embree_windows_arm.cmake)
+-else()
++elseif(NOT BLENDER_PLATFORM_RISCV64)
+   include(cmake/embree.cmake)
+ endif()
+ include(cmake/fmt.cmake)
+@@ -129,7 +133,7 @@ if(BLENDER_PLATFORM_ARM)
+ endif()
+ 
+ include(cmake/webp.cmake)
+-if(NOT APPLE)
++if(NOT APPLE AND NOT BLENDER_PLATFORM_RISCV64)
+   include(cmake/level-zero.cmake)
+ endif()
+ 
+@@ -140,7 +144,9 @@ if(NOT WIN32 OR ENABLE_MSYS2)
+   include(cmake/fftw.cmake)
+   include(cmake/aom.cmake)
+   if(NOT WIN32 OR BUILD_MODE STREQUAL Release)
+-    include(cmake/openimagedenoise.cmake)
++    if(NOT BLENDER_PLATFORM_RISCV64)
++      include(cmake/openimagedenoise.cmake)
++    endif()
+     include(cmake/lame.cmake)
+     include(cmake/ogg.cmake)
+     include(cmake/vorbis.cmake)
+diff --git a/build_files/build_environment/cmake/download.cmake b/build_files/build_environment/cmake/download.cmake
+index 1f55daa..f455553 100644
+--- a/build_files/build_environment/cmake/download.cmake
++++ b/build_files/build_environment/cmake/download.cmake
+@@ -91,10 +91,14 @@ download_source(OPENSUBDIV)
+ download_source(SDL)
+ download_source(OPENCOLORIO)
+ download_source(MINIZIPNG)
+-download_source(LLVM)
++if(NOT BLENDER_PLATFORM_RISCV64)
++  download_source(LLVM)
++endif()
+ download_source(OPENIMAGEIO)
+ download_source(TIFF)
+-download_source(OSL)
++if(NOT BLENDER_PLATFORM_RISCV64)
++  download_source(OSL)
++endif()
+ download_source(PYTHON)
+ download_source(TBB)
+ download_source(OPENVDB)
+@@ -127,16 +131,22 @@ download_source(FFI)
+ download_source(LZMA)
+ download_source(SSL)
+ download_source(SQLITE)
+-download_source(EMBREE)
++if(NOT BLENDER_PLATFORM_RISCV64)
++  download_source(EMBREE)
++endif()
+ download_source(USD)
+ download_source(MATERIALX)
+-download_source(OIDN)
++if(NOT BLENDER_PLATFORM_RISCV64)
++  download_source(OIDN)
++endif()
+ download_source(NASM)
+ download_source(XR_OPENXR_SDK)
+ download_source(WL_PROTOCOLS)
+ download_source(WAYLAND)
+ download_source(WAYLAND_WESTON)
+-download_source(ISPC)
++if(NOT BLENDER_PLATFORM_RISCV64)
++  download_source(ISPC)
++endif()
+ download_source(GMP)
+ download_source(POTRACE)
+ download_source(HARU)
+@@ -149,24 +159,26 @@ download_source(ROBINMAP)
+ download_source(IMATH)
+ download_source(PYSTRING)
+ download_source(OPENPGL)
+-download_source(LEVEL_ZERO)
+-download_source(DPCPP)
+-download_source(VCINTRINSICS)
+-download_source(OPENCLHEADERS)
+-download_source(ICDLOADER)
+-download_source(EMHASH)
+-download_source(DPCPP_SPIRV_HEADERS)
+-download_source(UNIFIED_MEMORY_FRAMEWORK)
+-download_source(PARALLEL_HASHMAP)
+-download_source(IGC)
+-download_source(IGC_LLVM)
+-download_source(IGC_OPENCL_CLANG)
+-download_source(IGC_VCINTRINSICS)
+-download_source(IGC_SPIRV_HEADERS)
+-download_source(IGC_SPIRV_TOOLS)
+-download_source(IGC_SPIRV_TRANSLATOR)
+-download_source(GMMLIB)
+-download_source(OCLOC)
++if(NOT BLENDER_PLATFORM_RISCV64)
++  download_source(LEVEL_ZERO)
++  download_source(DPCPP)
++  download_source(VCINTRINSICS)
++  download_source(OPENCLHEADERS)
++  download_source(ICDLOADER)
++  download_source(EMHASH)
++  download_source(DPCPP_SPIRV_HEADERS)
++  download_source(UNIFIED_MEMORY_FRAMEWORK)
++  download_source(PARALLEL_HASHMAP)
++  download_source(IGC)
++  download_source(IGC_LLVM)
++  download_source(IGC_OPENCL_CLANG)
++  download_source(IGC_VCINTRINSICS)
++  download_source(IGC_SPIRV_HEADERS)
++  download_source(IGC_SPIRV_TOOLS)
++  download_source(IGC_SPIRV_TRANSLATOR)
++  download_source(GMMLIB)
++  download_source(OCLOC)
++endif()
+ download_source(AOM)
+ download_source(FRIBIDI)
+ download_source(HARFBUZZ)
+@@ -181,7 +193,9 @@ download_source(SPIRV_TOOLS)
+ download_source(VULKAN_MEMORY_ALLOCATOR)
+ download_source(PYBIND11)
+ download_source(DEFLATE)
+-download_source(HIPRT)
++if(NOT BLENDER_PLATFORM_RISCV64)
++  download_source(HIPRT)
++endif()
+ download_source(NANOBIND)
+ download_source(MANIFOLD)
+ download_source(RUBBERBAND)
+diff --git a/build_files/build_environment/cmake/options.cmake b/build_files/build_environment/cmake/options.cmake
+index f4a05b2..7d63886 100644
+--- a/build_files/build_environment/cmake/options.cmake
++++ b/build_files/build_environment/cmake/options.cmake
+@@ -241,6 +241,10 @@ else()
+       set(BLENDER_PLATFORM_ARM ON)
+     endif()
+ 
++    if("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "riscv64")
++      set(BLENDER_PLATFORM_RISCV64 ON)
++    endif()
++
+     set(PLATFORM_CFLAGS "-fPIC")
+     set(PLATFORM_CXXFLAGS "-std=c++20 -fPIC")
+     set(PLATFORM_LDFLAGS "")
