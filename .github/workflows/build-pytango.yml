@@ -1,0 +1,239 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# cppTango's own dependency chain mirrors the one baked into upstream's build image
+# (registry.gitlab.com/tango-controls/docker/pytango-builder, built from
+# https://gitlab.com/tango-controls/docker/pytango-builder/-/blob/main/Dockerfile), minus
+# everything gated behind TANGO_USE_TELEMETRY=OFF (grpc/abseil/protobuf/c-ares/re2/
+# opentelemetry-cpp/curl/nlohmann_json/openssl/zlib - cppTango's configure/CMakeLists.txt
+# nests all of it inside if(TANGO_USE_TELEMETRY), with no partial coupling elsewhere).
+# The wheel build itself mirrors .linux-gitlab-ci.yml's linux:build-wheel job.
+name: Build pytango wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pytango.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pytango.yml'
+      - 'docs/packages/pytango.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pytango.yml'
+      - 'docs/packages/pytango.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PIP_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+  # Pins taken verbatim from pytango-builder's dependencies.lock, minus every
+  # telemetry-only dependency (abseil/protobuf/c-ares/re2/openssl/grpc/curl/opentelemetry).
+  LIBZMQ_REF: v4.3.5
+  CPPZMQ_REF: v4.11.0
+  OMNIORB_VERSION: 4.3.4
+  OMNIORB_SHA256: 79720d415d23cd8da99287a4ef4da0aa1bd34d3e4c7b1530715600adc5ed3dc3
+  TANGO_IDL_REF: 6.0.4
+  CPPTANGO_REF: 10.3.4
+  TANGOTEST_REF: '3.14'
+  CXX_STANDARD: 17
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pytango
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pytango ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    container:
+      image: quay.io/pypa/manylinux_2_39_riscv64
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    env:
+      PYTANGO_VERSION: ${{ matrix.version }}
+      PYTHON_TAGS: cp310 cp311 cp312 cp313 cp314
+
+    steps:
+      - name: Checkout pytango v${{ env.PYTANGO_VERSION }}
+        run: |
+          set -eux
+          git clone --recurse-submodules --depth 1 --branch "v${PYTANGO_VERSION}" \
+            https://gitlab.com/tango-controls/pytango.git pytango
+
+      # libjpeg-turbo-devel is the only one of cppTango's unconditional deps Rocky 10
+      # packages for riscv64 (confirmed against the real riscv64 repodata under
+      # AppStream/CRB/BaseOS); omniORB4/cppzmq/libzmq have no riscv64 package anywhere in
+      # Rocky's own repos or in EPEL (which carries no riscv64 repo at all), so those three
+      # are built from source below, same as this repo's own pyzmq.yaml already does for
+      # libzmq 4.3.5 on riscv64.
+      - name: Install dependencies with dnf
+        run: |
+          set -eux
+          echo "/usr/local/lib64" >> /etc/ld.so.conf.d/01-pytango.conf
+          # ninja-build: the ci-Linux-wheel CMake preset (via ci-unix) selects the Ninja generator.
+          dnf install -y --setopt=install_weak_deps=False libjpeg-turbo-devel pkgconf-pkg-config ninja-build
+          echo "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig" >> "$GITHUB_ENV"
+          mkdir -p /tmp/licenses
+
+      - name: Build libzmq ${{ env.LIBZMQ_REF }}
+        run: |
+          set -eux
+          git clone -b "${LIBZMQ_REF}" --depth 1 https://github.com/zeromq/libzmq /tmp/libzmq
+          cmake -S /tmp/libzmq -B /tmp/libzmq/build \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DENABLE_DRAFTS=OFF \
+            -DWITH_DOC=OFF \
+            -DZMQ_BUILD_TESTS=OFF \
+            -DCMAKE_CXX_STANDARD="${CXX_STANDARD}"
+          cmake --build /tmp/libzmq/build --parallel "$(nproc)" --target install
+          ldconfig
+          rm -rf /tmp/libzmq
+
+      - name: Build cppzmq ${{ env.CPPZMQ_REF }}
+        run: |
+          set -eux
+          git clone -b "${CPPZMQ_REF}" --depth 1 https://github.com/zeromq/cppzmq /tmp/cppzmq
+          cmake -S /tmp/cppzmq -B /tmp/cppzmq/build -DCPPZMQ_BUILD_TESTS=OFF
+          cmake --build /tmp/cppzmq/build --parallel "$(nproc)" --target install
+          rm -rf /tmp/cppzmq
+
+      # omniORB's own config.sub/config.guess predate riscv64 entirely (stamped 2001); the
+      # fix is to replace them with automake's up-to-date copies the image already carries
+      # (CLAUDE.md gotcha 138/327), not to patch omniORB. --with-openssl is dropped: it only
+      # enables the optional SSL CORBA transport (README.unix.txt), and we no longer build
+      # OpenSSL now that telemetry is off.
+      - name: Build omniORB ${{ env.OMNIORB_VERSION }}
+        run: |
+          set -eux
+          mkdir /tmp/omniorb && cd /tmp/omniorb
+          curl --fail --show-error --retry 3 --retry-delay 2 -L \
+            -o omniorb.tar.bz2 "https://sourceforge.net/projects/omniorb/files/omniORB/omniORB-${OMNIORB_VERSION}/omniORB-${OMNIORB_VERSION}.tar.bz2/download"
+          echo "${OMNIORB_SHA256}  omniorb.tar.bz2" | sha256sum -c -
+          tar xjf omniorb.tar.bz2 --strip-components=1
+          cp /usr/share/automake-*/config.guess /usr/share/automake-*/config.sub bin/scripts/
+          ./configure --build=riscv64-unknown-linux-gnu \
+            PYTHON=/opt/python/cp312-cp312/bin/python3
+          make -j"$(nproc)"
+          make install
+          ldconfig
+          cp COPYING.LIB /tmp/licenses/LICENSE.omniorb
+          cd / && rm -rf /tmp/omniorb
+
+      - name: Build tango-idl ${{ env.TANGO_IDL_REF }}
+        run: |
+          set -eux
+          git clone --depth 1 --branch "${TANGO_IDL_REF}" https://gitlab.com/tango-controls/tango-idl /tmp/tango-idl
+          cmake -S /tmp/tango-idl -B /tmp/tango-idl/build
+          cmake --build /tmp/tango-idl/build --parallel "$(nproc)" --target install
+          cp /tmp/tango-idl/LICENSE /tmp/licenses/LICENSE.tango-idl
+          rm -rf /tmp/tango-idl
+
+      - name: Build cppTango ${{ env.CPPTANGO_REF }}
+        run: |
+          set -eux
+          git clone --recurse-submodules --depth 1 --branch "${CPPTANGO_REF}" https://gitlab.com/tango-controls/cppTango /tmp/cppTango
+          cmake -S /tmp/cppTango -B /tmp/cppTango/build \
+            -DBUILD_TESTING=OFF \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DTANGO_USE_TELEMETRY=OFF \
+            -DCMAKE_CXX_STANDARD="${CXX_STANDARD}"
+          cmake --build /tmp/cppTango/build --parallel "$(nproc)" --target install
+          ldconfig
+          cp /tmp/cppTango/LICENSE /tmp/licenses/LICENSE.cpptango
+          rm -rf /tmp/cppTango
+
+      - name: Build TangoTest ${{ env.TANGOTEST_REF }}
+        run: |
+          set -eux
+          git clone --recurse-submodules --depth 1 --branch "${TANGOTEST_REF}" https://gitlab.com/tango-controls/TangoTest /tmp/TangoTest
+          cmake -S /tmp/TangoTest -B /tmp/TangoTest/build \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DCMAKE_CXX_STANDARD="${CXX_STANDARD}"
+          cmake --build /tmp/TangoTest/build --parallel "$(nproc)" --target install
+          ldconfig
+          rm -rf /tmp/TangoTest
+
+      # Upstream's own wheel ships no licence text at all for any of these (checked its
+      # published wheel); PEP 639's default license-files glob (LICEN[CS]E*, root only) picks
+      # these up the same way build-coolprop.yml's LICENSE.eigen et al. already do.
+      - name: Stage bundled dependency licences
+        working-directory: pytango
+        run: |
+          set -eux
+          curl -fsSL --retry 3 "https://raw.githubusercontent.com/zeromq/libzmq/${LIBZMQ_REF}/LICENSE" -o LICENSE.libzmq
+          curl -fsSL --retry 3 "https://raw.githubusercontent.com/zeromq/cppzmq/${CPPZMQ_REF}/LICENSE" -o LICENSE.cppzmq
+          curl -fsSL --retry 3 "https://raw.githubusercontent.com/libjpeg-turbo/libjpeg-turbo/$(rpm -q --qf '%{VERSION}' libjpeg-turbo-devel)/LICENSE.md" -o LICENSE.libjpeg-turbo
+          cp /tmp/licenses/LICENSE.omniorb /tmp/licenses/LICENSE.tango-idl /tmp/licenses/LICENSE.cpptango .
+
+      # Each wheel is tested right after it is built, in this same container: TangoTest
+      # and libtango.so etc. are only installed system-wide here (in /usr/local), not
+      # bundled into a reusable image, so a separate job (a fresh container) would have
+      # none of them - only the pytango-own .so auditwheel vendors into the wheel itself.
+      # [tests] only, not [tests,telemetry]: telemetry needs cppTango built with it on,
+      # which we don't do (see the workflow header comment).
+      - name: Build and test wheels
+        working-directory: pytango
+        run: |
+          set -eux
+          mkdir -p /tmp/wheelhouse
+          for tag in $PYTHON_TAGS; do
+            py="/opt/python/${tag}-${tag}/bin/python"
+            "$py" -m pip install -U pip build
+            rm -rf dist cmakebuild
+            "$py" -m build --wheel \
+              --config-setting=cmake.build-type="RelWithDebInfo" \
+              --config-setting=cmake.args="--preset=ci-Linux-wheel"
+            auditwheel repair --strip -w /tmp/wheelhouse dist/pytango-*.whl
+
+            "$py" -m venv "/tmp/venv-${tag}"
+            . "/tmp/venv-${tag}/bin/activate"
+            pip install -U pip
+            pip install "$(ls /tmp/wheelhouse/pytango-*-${tag}-*.whl)[tests]"
+            python -c "import tango; print(tango.Release.version)"
+            pytest || pytest --lf
+            deactivate
+          done
+          ls -la /tmp/wheelhouse
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pytango-${{ env.PYTANGO_VERSION }}-manylinux_riscv64
+          path: /tmp/wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pytango ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pytango-${{ matrix.version }}-manylinux_riscv64
