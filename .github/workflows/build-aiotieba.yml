@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/lumina37/aiotieba/blob/v4.8.1/.github/workflows/Publish.yml
+name: Build aiotieba wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/aiotieba.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-aiotieba.yml'
+      - 'docs/packages/aiotieba.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-aiotieba.yml'
+      - 'docs/packages/aiotieba.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: aiotieba
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build aiotieba ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      AIOTIEBA_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout aiotieba v${{ env.AIOTIEBA_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: lumina37/aiotieba
+          ref: v${{ env.AIOTIEBA_VERSION }}
+          persist-credentials: false
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: false
+
+      # The extension compiles vendored mbedtls/base32/crc32 (Apache-2.0), xxHash (BSD-2-Clause) and rapidjson (MIT) sources whose notices upstream's wheel omits.
+      - name: Stage vendored licences
+        run: |
+          curl -fsSL --retry 5 https://www.apache.org/licenses/LICENSE-2.0.txt -o LICENSE.apache-2.0
+          curl -fsSL --retry 5 https://raw.githubusercontent.com/Cyan4973/xxHash/v0.8.3/LICENSE -o LICENSE.xxhash
+          curl -fsSL --retry 5 https://raw.githubusercontent.com/Tencent/rapidjson/v1.1.0/license.txt -o LICENSE.rapidjson
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          config-file: cibuildwheel.toml
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: UV_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+
+      - name: Check wheel licences
+        run: |
+          unzip -Z1 wheelhouse/*.whl | grep '\.dist-info/licenses/' | sed 's#.*/##' | sort | tee licences.txt
+          printf '%s\n' LICENSE LICENSE.apache-2.0 LICENSE.rapidjson LICENSE.xxhash | diff - licences.txt
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: aiotieba-${{ env.AIOTIEBA_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish aiotieba ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: aiotieba-${{ matrix.version }}-*-manylinux_riscv64
