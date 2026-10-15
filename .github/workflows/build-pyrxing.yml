@@ -1,0 +1,127 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/tanagumo/pyrxing/blob/v0.8.0/.github/workflows/build.yml
+name: Build pyrxing wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyrxing.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyrxing.yml'
+      - 'docs/packages/pyrxing.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyrxing.yml'
+      - 'docs/packages/pyrxing.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyrxing
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyrxing ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # No abi3 feature on the pyo3 dependency, so every interpreter needs
+        # its own build, same as upstream's `-i python3.11 ... python3.14`.
+        python: ['cp311', 'cp312', 'cp313', 'cp314']
+
+    env:
+      PYRXING_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyrxing v${{ env.PYRXING_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: tanagumo/pyrxing
+          ref: v${{ env.PYRXING_VERSION }}
+          persist-credentials: false
+
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        env:
+          # Matches upstream's own linux job, which builds the bundled
+          # zxing-cpp C++ core (already proven on this riscv64 image by the
+          # zxing-cpp package itself) with this standard set.
+          CXXFLAGS: "-std=c++20"
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --out dist -i ${{ steps.interp.outputs.value }}
+          manylinux: '2_39'
+          before-script-linux: |
+            git config --global --add safe.directory "*"
+            yum install -y cmake
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ steps.interp.outputs.value }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Test wheel
+        run: |
+          set -ex
+          uv pip install pyrxing --no-index --find-links dist --force-reinstall
+          uv pip install pillow
+          python -c "
+          from PIL import Image
+          from pyrxing import read_barcode
+          result = read_barcode(Image.open('assets/test_qr_code.png'))
+          assert result is not None and result.text, result
+          "
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyrxing-${{ env.PYRXING_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyrxing ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyrxing-${{ matrix.version }}-*-manylinux_riscv64
