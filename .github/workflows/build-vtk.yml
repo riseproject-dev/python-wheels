@@ -184,6 +184,19 @@ jobs:
             auditwheel show dist/*.whl
             auditwheel repair -w /build/wheelhouse dist/*.whl
             ;;
+          sdk)
+            # VTK_INSTALL_SDK=ON (already set above) makes the "build" case's own
+            # install step write a full include/ tree and the generated
+            # vtk-config*.cmake package files under /build/install; this just
+            # collects those into a standalone tarball for cadquery-ocp (gotcha 661).
+            mkdir -p /build/sdk/include
+            cp -a /build/install/include/. /build/sdk/include/
+            cmake_config=$(find /build/install -iname 'vtk-config.cmake' -print -quit)
+            [ -n "${cmake_config}" ]
+            mkdir -p /build/sdk/cmake
+            cp -a "$(dirname "${cmake_config}")/." /build/sdk/cmake/
+            tar -C /build/sdk -czf /build/vtk-sdk.tar.gz .
+            ;;
           test)
             "${python_exe}" -m venv /tmp/venv
             . /tmp/venv/bin/activate
@@ -217,6 +230,33 @@ jobs:
           name: vtk-${{ env.VTK_VERSION }}-${{ matrix.python }}-manylinux_riscv64
           path: build/wheelhouse/*.whl
           if-no-files-found: error
+
+      # One leg's SDK is enough: cp312/cp313/cp314 configure the same module set (only
+      # cp314t additionally disables IONetCDF above), and cp314t isn't a cadquery-ocp
+      # target (gotcha 661). continue-on-error on both steps: this is a best-effort extra
+      # artifact, not something a future version's real wheel publish should ever block on.
+      - name: Package the VTK SDK
+        if: matrix.python == 'cp312'
+        continue-on-error: true
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "${PWD}":/vtk \
+            -v "${PWD}/build":/build \
+            --workdir /vtk \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /vtk/riscv64-build-and-test.sh sdk
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: matrix.python == 'cp312'
+        continue-on-error: true
+        with:
+          name: vtk-${{ env.VTK_VERSION }}-sdk
+          path: build/vtk-sdk.tar.gz
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Test wheel
         run: |
