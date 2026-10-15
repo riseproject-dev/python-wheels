@@ -1,0 +1,196 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `build` job of
+# https://github.com/anntzer/mplcairo/blob/v0.6.1/.github/workflows/build.yml
+name: Build mplcairo wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/mplcairo.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mplcairo.yml'
+      - 'docs/packages/mplcairo.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mplcairo.yml'
+      - 'docs/packages/mplcairo.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: mplcairo
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build mplcairo ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      MPLCAIRO_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout mplcairo v${{ env.MPLCAIRO_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: anntzer/mplcairo
+          ref: v${{ env.MPLCAIRO_VERSION }}
+          persist-credentials: false
+
+      - name: Stage the licence-collection script
+        run: |
+          cat > collect-licenses.sh <<'COLLECT_EOF'
+          #!/bin/bash
+          # SPDX-FileCopyrightText: 2026 The RISE Project
+          # SPDX-License-Identifier: MIT
+          #
+          # Stage, at the project root, the licence of every shared library auditwheel
+          # vendors into the wheel out of the build image (cairo and its own closure;
+          # Raqm/Fribidi are dlopen'd at runtime, never linked, so they carry no
+          # obligation here).
+          set -euo pipefail
+
+          project="${1:?usage: collect-licenses.sh <project-dir>}"
+
+          mapfile -t roots < <(ldconfig -p | awk '/libcairo\.so|libfreetype\.so|libfontconfig\.so|libpixman-1\.so/ {print $NF}')
+
+          mapfile -t allow < <(
+              "$(dirname "$(readlink -f "$(command -v auditwheel)")")/python" - <<'PY'
+          import json, pathlib, auditwheel
+
+          policy = pathlib.Path(auditwheel.__file__).parent / "policy" / "manylinux-policy.json"
+          policies = json.loads(policy.read_text())
+          print("\n".join(next(p["lib_whitelist"] for p in policies if p["name"] == "manylinux_2_39")))
+          PY
+          )
+
+          mapfile -t libs < <(
+              ldd "${roots[@]}" | tr ' ' '\n' | grep '^/' | sort -u |
+                  grep -vFf <(printf '%s\n' "${allow[@]}")
+          )
+
+          mapfile -t pkgs < <(
+              rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null |
+                  grep -E '^[A-Za-z0-9._+-]+$' | sort -u
+          )
+
+          for pkg in "${pkgs[@]}"; do
+              mapfile -t files < <(rpm -q --licensefiles "$pkg" 2>/dev/null || true)
+
+              if [ -z "${files[0]:-}" ]; then
+                  srpm=$(rpm -q --qf '%{SOURCERPM}\n' "$pkg")
+                  mapfile -t files < <(
+                      rpm -qa --qf '%{SOURCERPM} %{NAME}\n' |
+                          awk -v s="$srpm" '$1 == s { print $2 }' |
+                          xargs -r rpm -q --licensefiles 2>/dev/null | sort -u
+                  )
+              fi
+
+              if [ -z "${files[0]:-}" ]; then
+                  dnf -y reinstall --setopt=tsflags= "$pkg" >/dev/null
+                  mapfile -t files < <(rpm -qd "$pkg" | grep -iE '/(LICEN[CS]E|COPYING|NOTICE)')
+              fi
+
+              for f in "${files[@]}"; do
+                  [ -f "$f" ] || continue
+                  cp "$f" "$project/LICENSE.${pkg}.$(basename "$f")"
+              done
+              compgen -G "$project/LICENSE.$pkg.*" >/dev/null ||
+                  { echo "no licence file found for $pkg" >&2; exit 1; }
+          done
+
+          ls -1 "$project"/LICENSE.* | sed "s|$project/||"
+          COLLECT_EOF
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream's own manylinux build sets MPLCAIRO_NO_PYCAIRO=1 to avoid needing
+          # pycairo's headers at build time (pycairo itself ships no Linux wheel on any
+          # arch, so cairo's own include path would otherwise have to be built from its
+          # sdist first). freetype-devel/fontconfig-devel ship in Rocky's own repos (no
+          # EPEL/CRB needed); Raqm's header is auto-downloaded by setup.py when no
+          # raqm.pc is found, matching upstream's non-manylinux-script fallback path.
+          CIBW_BEFORE_BUILD_LINUX: >-
+            dnf install -y cairo-devel freetype-devel fontconfig-devel &&
+            bash {project}/collect-licenses.sh {project}
+          CIBW_ENVIRONMENT: >-
+            MPLCAIRO_NO_PYCAIRO=1
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_REQUIRES: pillow
+          CIBW_TEST_COMMAND: >-
+            python -c "
+            import matplotlib; matplotlib.use('module://mplcairo.base');
+            import matplotlib.pyplot as plt;
+            plt.plot([1, 2, 3]);
+            plt.savefig('test.png');
+            import os; assert os.path.getsize('test.png') > 0;
+            import mplcairo; print(mplcairo.get_versions())"
+
+      - name: Check the wheel ships the extension and the bundled licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          assert any(n.startswith("mplcairo/_mplcairo") and n.endswith(".so") for n in names), names
+          licences = {
+              n.split("/")[-1] for n in names if ".dist-info/licenses/" in n and not n.endswith("/")
+          }
+          print("\n".join(sorted(licences)))
+          assert "LICENSE.txt" in licences, licences
+          for pkg in ("cairo", "freetype", "fontconfig", "pixman"):
+              assert any(n.startswith(f"LICENSE.{pkg}") for n in licences), (pkg, licences)
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mplcairo-${{ env.MPLCAIRO_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish mplcairo ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: mplcairo-${{ matrix.version }}-*-manylinux_riscv64
