@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the manylinux leg of ReportLab's own build-wheels job at
+# https://github.com/MrBitBucket/rl-accel-mirror/blob/master/.github/workflows/buildwheels.yml
+# (the author's read-only git mirror of their hg.reportlab.com repo; no releases are
+# tagged there, so the ref below pins the commit whose src/_rl_accel.c VERSION macro
+# matches docs/packages/rl-accel.yaml, verified byte-identical to the PyPI sdist -
+# move both together on a version bump).
+name: Build rl-accel wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/rl-accel.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-rl-accel.yml'
+      - 'docs/packages/rl-accel.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-rl-accel.yml'
+      - 'docs/packages/rl-accel.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: rl-accel
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build rl-accel ${{ matrix.version }} cp37-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      RL_ACCEL_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout rl_accel ${{ env.RL_ACCEL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: MrBitBucket/rl-accel-mirror
+          ref: c40d10c99b5a1a7e88146bacab67c36541a371ee
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          # setup.py's bdist_wheel_abi3 always tags the wheel cp37-abi3 on Linux
+          # (gotcha 34 shape), so build once and let cibuildwheel reuse+retest the
+          # same wheel on cp313/cp314 (gotcha 96). No free-threaded wheel: cp314t
+          # can't target Py_LIMITED_API, same as upstream builds only cp313-*.
+          CIBW_BUILD: >-
+            cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_TEST_COMMAND: >-
+            python {project}/tests/testcs.py &&
+            python {project}/tests/testrc.py | tee /tmp/testrc.out &&
+            ! grep -q 'reference counts changed' /tmp/testrc.out
+
+      - name: Check the wheel is abi3 and carries the compiled extension + LICENSE
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              assert "-cp37-abi3-" in whl, whl
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.endswith("_rl_accel.abi3.so") for n in names), names
+              licenses = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+              assert licenses == {"LICENSE.txt"}, (whl, licenses)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rl-accel-${{ env.RL_ACCEL_VERSION }}-cp37-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish rl-accel ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: rl-accel-${{ matrix.version }}-*-manylinux_riscv64
