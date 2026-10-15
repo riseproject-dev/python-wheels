@@ -1,0 +1,189 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# This workflow is based on: https://github.com/borglab/gtsam/blob/4.3.0/.github/workflows/prod-cibw.yml
+# and .github/scripts/python_wheels/cibw_before_all.sh at the same tag.
+name: Build gtsam wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/gtsam.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-gtsam.yml'
+      - 'docs/packages/gtsam.yaml'
+      - 'patches/gtsam/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-gtsam.yml'
+      - 'docs/packages/gtsam.yaml'
+      - 'patches/gtsam/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: gtsam
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build gtsam ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+
+    env:
+      GTSAM_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout gtsam ${{ env.GTSAM_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: borglab/gtsam
+          ref: ${{ env.GTSAM_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          sparse-checkout: patches/gtsam
+          persist-credentials: false
+
+      - name: Apply gtsam patches
+        run: git apply -v python-wheels/patches/gtsam/${{ env.GTSAM_VERSION }}/0001*.patch
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+
+      - name: Build and test wheels
+        run: |
+          mkdir -p wheelhouse wheelhouse-raw
+          set -o pipefail
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT' 2>&1 | tee build.log
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False boost-devel doxygen
+          /opt/python/cp312-cp312/bin/pip install -q -r python/dev_requirements.txt
+
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGTSAM_BUILD_TESTS=OFF \
+            -DGTSAM_BUILD_EXAMPLES_ALWAYS=OFF \
+            -DGTSAM_BUILD_UNSTABLE=ON \
+            -DGTSAM_UNSTABLE_BUILD_PYTHON=ON \
+            -DGTSAM_USE_QUATERNIONS=OFF \
+            -DGTSAM_WITH_TBB=OFF \
+            -DGTSAM_BUILD_WITH_MARCH_NATIVE=OFF \
+            -DGTSAM_ALLOW_DEPRECATED_SINCE_V43=OFF \
+            -DGTSAM_BUILD_PYTHON=ON \
+            -DGTSAM_PYTHON_VERSION=3.12 \
+            -DPYTHON_EXECUTABLE=/opt/python/cp312-cp312/bin/python3 \
+            -DGTSAM_GENERATE_DOC_XML=1 \
+            -DGTWRAP_ADD_DOCSTRINGS=ON
+          doxygen build/doc/Doxyfile.xml
+
+          # libgtsam/libgtsam_unstable's ~1450 translation units don't depend on the Python
+          # version; build them once here at full parallelism, then only reconfigure+rebuild
+          # the pybind11 wrapper module (gtsam_py/gtsam_unstable_py) per interpreter below
+          # (CLAUDE.md gotcha 15's shape), instead of the whole build repeating 4x the way
+          # cibw_before_all.sh's per-job CIBW_BEFORE_ALL does it.
+          cmake --build build --target gtsam gtsam_unstable -j"$(nproc)"
+
+          for entry in cp311-cp311:3.11 cp312-cp312:3.12 cp313-cp313:3.13 cp314-cp314:3.14; do
+            python="${entry%:*}"
+            pyver="${entry#*:}"
+            pybin="/opt/python/${python}/bin"
+            "${pybin}/pip" install -q -r python/dev_requirements.txt auditwheel
+
+            cmake -S . -B build \
+              -DGTSAM_PYTHON_VERSION="${pyver}" \
+              -DPYTHON_EXECUTABLE="${pybin}/python3"
+            # The wrapper translation units need substantial memory; serialize them.
+            cmake --build build --target python-stubs python-unstable-stubs -j1
+
+            (cd build/python && "${pybin}/python3" -m pip wheel . --no-deps -w /work/wheelhouse-raw)
+            "${pybin}/python3" -m auditwheel repair --plat manylinux_2_39_riscv64 --strip \
+              -w wheelhouse wheelhouse-raw/gtsam-*.whl
+            rm -f wheelhouse-raw/*.whl
+
+            "${pybin}/pip" install -q wheelhouse/gtsam-*-"${python%%-*}"-"${python%%-*}"-manylinux_2_39_riscv64.whl
+            ( cd /tmp && "${pybin}/python3" -c "import platform; print(platform.machine()); import gtsam; print(gtsam.__file__)" )
+          done
+          SCRIPT
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: gtsam-${{ env.GTSAM_VERSION }}-build-log
+          path: build.log
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: gtsam-${{ env.GTSAM_VERSION }}-wheels-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Run the python/gtsam test suite
+        run: |
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          for python in cp311-cp311 cp312-cp312 cp313-cp313 cp314-cp314; do
+            pybin="/opt/python/${python}/bin"
+            "${pybin}/pip" install -q /work/wheelhouse/gtsam-*-"${python%%-*}"-"${python%%-*}"-*.whl pytest
+            # /work holds the gtsam checkout, whose python/gtsam is importable as a
+            # namespace package and would shadow the installed wheel.
+            ( cd /work/python/gtsam/tests && "${pybin}/python3" -m pytest -v . )
+            ( cd /work/python/gtsam_unstable/tests && "${pybin}/python3" -m pytest -v . )
+          done
+          SCRIPT
+
+  publish:
+    name: Publish gtsam ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: gtsam-${{ matrix.version }}-*-manylinux_riscv64
