@@ -1,0 +1,103 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on upstream's own wheel build setup:
+#   https://github.com/brandon-rhodes/python-sgp4/blob/2.27/.github/workflows/ci.yml
+#   https://github.com/brandon-rhodes/python-sgp4/blob/2.27/pyproject.toml
+name: Build sgp4 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/sgp4.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sgp4.yml'
+      - 'docs/packages/sgp4.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sgp4.yml'
+      - 'docs/packages/sgp4.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: sgp4
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build sgp4 ${{ matrix.version }} ${{ matrix.build }}
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # setup.py only builds the Py_LIMITED_API extension for 3.11+ (and not
+        # under free-threading, which pyproject.toml's own skip list excludes
+        # entirely); one cp311-abi3 build covers cp311-cp314, so cp310 is the
+        # only interpreter that needs its own non-abi3 wheel.
+        build:
+          - "cp310-manylinux_riscv64"
+          - "cp311-manylinux_riscv64"
+
+    env:
+      SGP4_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-sgp4 ${{ env.SGP4_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: brandon-rhodes/python-sgp4
+          ref: ${{ env.SGP4_VERSION }}
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          only: ${{ matrix.build }}
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # Upstream's own wheel job (unlike its sdist job) forces the
+          # accelerated C++ extension to build rather than silently falling
+          # back to the pure-Python implementation.
+          CIBW_ENVIRONMENT: PYTHON_SGP4_COMPILE=always
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sgp4-${{ env.SGP4_VERSION }}-${{ matrix.build }}
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish sgp4 ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: sgp4-${{ matrix.version }}-*-manylinux_riscv64
