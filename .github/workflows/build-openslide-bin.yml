@@ -1,0 +1,126 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This replays upstream's own Linux builder container
+# (https://github.com/openslide/openslide-bin/blob/v4.0.1.2/builder/linux/Dockerfile)
+# against quay.io/pypa/manylinux_riscv64 instead of AlmaLinux 8, which has no riscv64
+# port, and adds the machines/native-linux-riscv64.ini upstream has no equivalent for.
+# CRB is already enabled on this image (unlike AlmaLinux 8, which needs
+# dnf config-manager --set-enabled powertools + epel-release, and EPEL has no riscv64
+# repo at all), and nasm is dropped since it's only used by openslide-bin's x86_64 asm.
+name: Build openslide-bin wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/openslide-bin.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-openslide-bin.yml'
+      - 'docs/packages/openslide-bin.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-openslide-bin.yml'
+      - 'docs/packages/openslide-bin.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: openslide-bin
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build openslide-bin ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      OPENSLIDE_BIN_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout openslide-bin v${{ env.OPENSLIDE_BIN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: openslide/openslide-bin
+          ref: v${{ env.OPENSLIDE_BIN_VERSION }}
+          persist-credentials: false
+
+      - name: Write machines/native-linux-riscv64.ini
+        run: |
+          cat > machines/native-linux-riscv64.ini <<'EOF'
+          [built-in options]
+          prefix = '/'
+          c_args = ['-O2', '-g', '-fpic', '-ffunction-sections', '-fdata-sections', '-fstack-clash-protection', '-fexceptions', '-ftree-vectorize', '-fstack-protector-strong', '-D_FORTIFY_SOURCE=2']
+          c_link_args = ['-Wl,-z,relro', '-Wl,-z,now', '-Wl,--gc-sections', '-Wl,--exclude-libs,ALL']
+          cpp_args = ['-O2', '-g', '-fpic', '-ffunction-sections', '-fdata-sections', '-fstack-clash-protection', '-fexceptions', '-ftree-vectorize', '-fstack-protector-strong', '-D_FORTIFY_SOURCE=2']
+          cpp_link_args = ['-Wl,-z,relro', '-Wl,-z,now', '-Wl,--gc-sections', '-Wl,--exclude-libs,ALL']
+          pkg_config_path = ''
+
+          [properties]
+          pkg_config_libdir = '/native/lib/pkgconfig'
+          openslide_bin_platform = 'linux-riscv64'
+          python_platform_tag = 'manylinux_2_39_riscv64'
+          EOF
+
+      - name: Build and smoke-test wheel
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "$(pwd)":/workspace \
+            --workdir /workspace \
+            --pull=newer \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash -ec '
+              export PATH=/opt/python/cp312-cp312/bin:$PATH
+              dnf -y install gcc-c++ git-core ninja-build patchelf zstd
+              pip install --disable-pip-version-check auditwheel license-expression meson
+              touch /etc/openslide-linux-builder-v8
+              git config --global --add safe.directory "*"
+              ./bintool bdist -x ""
+            '
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: openslide-bin-${{ env.OPENSLIDE_BIN_VERSION }}-manylinux_riscv64
+          path: ./openslide_bin-*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish openslide-bin ${{ matrix.version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: openslide-bin-${{ matrix.version }}-manylinux_riscv64
