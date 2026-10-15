@@ -1,0 +1,103 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/chemfiles/chemfiles.py/blob/0.10.4/.github/workflows/wheels.yml
+name: Build chemfiles wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/chemfiles.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-chemfiles.yml'
+      - 'docs/packages/chemfiles.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-chemfiles.yml'
+      - 'docs/packages/chemfiles.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: chemfiles
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build chemfiles ${{ matrix.version }} py2.py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+
+    env:
+      CHEMFILES_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout chemfiles.py ${{ env.CHEMFILES_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: chemfiles/chemfiles.py
+          ref: ${{ env.CHEMFILES_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # setup.py's own bdist_wheel override forces the py2.py3-none tag, so one build serves every interpreter.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL: dnf install -y -q cmake ninja-build
+          # The pip-installed cmake/ninja build-system requirements ship no riscv64 wheel;
+          # --no-build-isolation makes setup.py's cmake_configure/cmake_build commands shell
+          # out to the dnf-installed system binaries instead.
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=numpy
+          CIBW_TEST_REQUIRES: numpy
+          CIBW_TEST_COMMAND: python -c "import chemfiles; chemfiles.Frame()"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: chemfiles-${{ env.CHEMFILES_VERSION }}-py2.py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish chemfiles ${{ matrix.version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: chemfiles-${{ matrix.version }}-*-manylinux_riscv64
