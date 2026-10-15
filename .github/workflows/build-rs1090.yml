@@ -1,0 +1,132 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/xoolive/jet1090/blob/v0.7.0/.github/workflows/wheels.yml
+name: Build rs1090 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/rs1090.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-rs1090.yml'
+      - 'docs/packages/rs1090.yaml'
+      - 'patches/rs1090/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-rs1090.yml'
+      - 'docs/packages/rs1090.yaml'
+      - 'patches/rs1090/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # Matches upstream's own wheels.yml: PyO3 0.29 free-threaded support isn't
+  # built there either.
+  PYO3_NO_FREE_THREADED: '1'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: rs1090
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build rs1090 ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.libc }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314"]
+        libc: ["manylinux", "musllinux"]
+        include:
+          - python: cp312
+            interpreter: python3.12
+          - python: cp313
+            interpreter: python3.13
+          - python: cp314
+            interpreter: python3.14
+
+    env:
+      RS1090_VERSION: ${{ matrix.version }}
+
+    steps:
+      # python/ is a member of the jet1090 Cargo workspace and builds
+      # against its sibling crates/rs1090, so the checkout root is the
+      # workspace root, not python/ itself.
+      - name: Checkout jet1090 v${{ env.RS1090_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: xoolive/jet1090
+          ref: v${{ env.RS1090_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch rs1090 source
+        run: git apply python-wheels/patches/rs1090/${{ env.RS1090_VERSION }}/*.patch
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          working-directory: python
+          target: riscv64gc-unknown-linux-gnu
+          args: --release -i ${{ matrix.interpreter }} --out dist
+          manylinux: ${{ matrix.libc == 'musllinux' && 'musllinux_1_2' || '2_39' }}
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Test wheel
+        run: |
+          set -euo pipefail
+          uv pip install pytest typing_extensions python/dist/*.whl
+          python -c "import rs1090._rust as m; assert m.__file__.endswith('.so'), m.__file__"
+          pytest python/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rs1090-${{ env.RS1090_VERSION }}-${{ matrix.python }}-${{ matrix.libc }}_riscv64
+          path: python/dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish rs1090 ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: rs1090-${{ matrix.version }}-*riscv64
