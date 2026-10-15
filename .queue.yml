@@ -11752,27 +11752,9 @@ packages:
   version: 0.15.3
   home: https://ladybugdb.com/
   repo: https://github.com/lbugdb/lbug
-  status: queued
-  pr: null
-  notes: >-
-    Confirmed via PyPI metadata + source diff: real-ladybug is the SAME LadybugDB/lbug
-    project as the already-published `ladybug` (PR #2336) -- v0.15.3 is an old tag of
-    github.com/LadybugDB/ladybug, built under the PyPI name real_ladybug before upstream
-    freed up the `ladybug` name. The gotcha-572 VMRegion mmap patch and the
-    extension.cpp getArch() riscv64 patch from PR #2336 are both still needed (verified
-    against v0.15.3's actual source: neither fix is upstream there). BLOCKER: unlike
-    0.19.1+, v0.15.3's scripts/pip-package/setup.py has no LBUG_API_PRECOMPILED_LIB_PATH
-    build-once/link-per-interpreter split -- CMakeBuild.build_extension() unconditionally
-    runs `make clean && make python`, a full from-scratch compile of ~800 C++ files, for
-    each of cp312/cp313/cp314/cp314t with zero reuse between them. ccache/sccache (which
-    CMakeLists.txt tries) is unavailable on riscv64 manylinux images (EPEL is disabled
-    there), so there is no caching fallback either. A single such build already needed a
-    1440-minute ceiling in the merged 0.19.1 workflow; doing it 4x with no CI feedback yet
-    on this exact source tree is too large and too risky for this session. Porting this
-    needs either a new patch backporting the precompiled-lib split into v0.15.3's CMake/
-    setup.py (real engineering, needs CI iteration to get right), or a decision that this
-    superseded PyPI-name alias of the already-published `ladybug` is not worth the cost --
-    left queued rather than parked since it is buildable in principle, not infeasible.
+  status: ci-running
+  pr: https://github.com/riseproject-dev/python-wheels/pull/3272
+  notes: 'Feasible, ported - the prior BLOCKER was based on an incomplete read of v0.15.3''s actual CMakeLists.txt and is overturned. PR #3272 open. real_ladybug is confirmed the same LadybugDB/lbug codebase already published as ladybug (PR #2336), kept under its superseded PyPI name - judged worth shipping anyway (cheap once buildable, keeps a previously-released pinnable name alive on riscv64), not a low-value skip. Disproved the BLOCKER by reading upstream source directly (raw.githubusercontent.com, no clone needed): v0.15.3''s CMakeLists.txt/Makefile already carry the full precompiled-lib CMake plumbing (LBUG_API_USE_PRECOMPILED_LIB etc, added originally for the Node.js binding under deprecated LBUG_NODEJS_* aliases) - only 3 small call sites were missing vs v0.19.1: (1) CMakeLists.txt''s BUILD_LBUG guard around the global include_directories() call, (2) tools/python_api/CMakeLists.txt''s target_link_libraries needing an if(LBUG_API_USE_PRECOMPILED_LIB) branch since the lbug CMake target doesn''t exist when BUILD_LBUG=FALSE, (3) setup.py wiring LBUG_API_PRECOMPILED_LIB_PATH into EXTRA_CMAKE_FLAGS. Verified locally via a CMake configure-only pass (no compile, fake precompiled-lib path) that ninja -t targets shows zero src/*.cpp.o compile units once patched - the ~800-file lbug compile is genuinely skipped, 1 build instead of 4. Patch 0004 (Upstream-Status: Backport, linked to v0.19.1''s CMakeLists.txt). The two already-proven riscv64 patches from PR #2336 (gotcha 572 VMRegion mmap reservation shrink, extension.cpp getArch() riscv64-as-its-own-platform) ported and rewritten against v0.15.3''s actual file content (diverges slightly from 0.19.1 - no <unistd.h>, uses <format> instead) rather than reused verbatim; git apply --check verified against a fresh v0.15.3 checkout. Test suite validated locally before burning CI time (gotcha 52 technique): pip installed upstream''s own x86_64 real_ladybug==0.15.3 wheel plus the real test files, ran entirely off-riscv64 - 229 passed/1 failed both with pyarrow~=20.0 and with pyarrow==25.0.1 (the only riscv64 build here); the 1 failure (test_json.py''s roundtrip test) 404s against upstream''s extension server identically on upstream''s own x86_64 wheel - not riscv64-specific, deselected. Found v0.15.3''s test_datatype.py (unlike later ladybug) imports pandas unconditionally, needing it added to the cp314t ignore list that PR #2336 didn''t need; the reduced cp314t selection verified 117/117 locally too. build-real-ladybug.yml mirrors build-ladybug.yml''s build-once/link-per-interpreter 3-job shape (build-liblbug-once -> build-wheels-per-interpreter -> publish), with per-job git-apply filters adjusted since this patch set touches root files (CMakeLists.txt/setup.py) that need to land in the sdist, not just tools/python_api/* like ladybug''s - each filter verified by actually running git apply against a scratch checkout. GCC 14 (image default, no gcc-toolset-13) and openssl-devel (Rocky 10''s default OpenSSL is 3, no openssl3/openssl3-devel) substituted for upstream''s precise deps; no ccache (none available on riscv64 runners). ~20 vendored libraries (MIT/BSD/Apache-2.0), upstream ships no licence text for them, patched in. CI running at handback - lint jobs still queued, the two riscv64 jobs (build_precompiled_bin 1440min ceiling for the full ~800-file compile, build_wheels x4 interpreters) hadn''t started - watch closely, hours-scale given the full compile happens once here (unlike the already-merged ladybug which could reuse a cache).'
 - pkg: silx
   version: 3.1.1
   home: http://www.silx.org
