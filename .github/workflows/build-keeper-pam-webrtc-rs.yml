@@ -1,0 +1,161 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# keeper-pam-webrtc-rs has no public source repository and no public CI: Keeper
+# Security publishes only the PyPI sdist, so the sdist is fetched here and patched
+# (patches/keeper-pam-webrtc-rs/): the mandatory (non-optional) guacr-database ->
+# keeperdb-core dependency is a git dependency on a private Keeper-Security repo
+# unreachable outside their org, but it is also a workspace member never activated
+# by this wheel's own Cargo feature set (crates/webrtc-bindings pins
+# default-features = false, features = ["python-support"] on the published crate,
+# same as upstream's own build), so dropping it changes nothing about what is
+# actually compiled. Everything else mirrors upstream's own packaging: maturin over
+# crates/webrtc-bindings/Cargo.toml, PyO3 abi3 (retagged from py38 to py39, the
+# riscv64 image's real floor), one wheel for every interpreter.
+name: Build keeper-pam-webrtc-rs wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/keeper-pam-webrtc-rs.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-keeper-pam-webrtc-rs.yml'
+      - 'docs/packages/keeper-pam-webrtc-rs.yaml'
+      - 'patches/keeper-pam-webrtc-rs/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-keeper-pam-webrtc-rs.yml'
+      - 'docs/packages/keeper-pam-webrtc-rs.yaml'
+      - 'patches/keeper-pam-webrtc-rs/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: keeper-pam-webrtc-rs
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build keeper-pam-webrtc-rs ${{ matrix.version }} cp39-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      KEEPER_PAM_WEBRTC_RS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Fetch keeper-pam-webrtc-rs ${{ env.KEEPER_PAM_WEBRTC_RS_VERSION }} sdist
+        run: |
+          url="$(curl -sSfL "https://pypi.org/pypi/keeper-pam-webrtc-rs/${KEEPER_PAM_WEBRTC_RS_VERSION}/json" \
+            | python3 -c 'import json,sys; print(next(u["url"] for u in json.load(sys.stdin)["urls"] if u["packagetype"] == "sdist"))')"
+          curl -sSfL -o sdist.tar.gz "$url"
+          tar xzf sdist.tar.gz
+          test -f "keeper_pam_webrtc_rs-${KEEPER_PAM_WEBRTC_RS_VERSION}/pyproject.toml"
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch keeper-pam-webrtc-rs source
+        run: |
+          cd "keeper_pam_webrtc_rs-${KEEPER_PAM_WEBRTC_RS_VERSION}"
+          git apply ../python-wheels/patches/keeper-pam-webrtc-rs/${KEEPER_PAM_WEBRTC_RS_VERSION}/*.patch
+
+      - name: Stage smoke test
+        run: |
+          mkdir -p tests
+          cat > tests/test_smoke.py <<'PYTEST'
+          """Smoke test for the riscv64 keeper-pam-webrtc-rs wheel.
+
+          Upstream ships no Python test suite with the sdist; this exercises the
+          compiled PyO3 extension's documented entry points (README.md).
+          """
+
+          import keeper_pam_webrtc_rs
+
+
+          def test_extension_module_is_compiled():
+              assert keeper_pam_webrtc_rs.__file__.endswith(".so"), keeper_pam_webrtc_rs.__file__
+
+
+          def test_logger_and_registry():
+              keeper_pam_webrtc_rs.initialize_logger("riscv64-smoke-test")
+              registry = keeper_pam_webrtc_rs.PyTubeRegistry()
+              assert registry is not None
+          PYTEST
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          package-dir: keeper_pam_webrtc_rs-${{ env.KEEPER_PAM_WEBRTC_RS_VERSION }}
+          only: cp39-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: python -m pytest -v tests
+
+      - name: Check the wheel ships the compiled extension and the licence
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          whl = sys.argv[1]
+          names = zipfile.ZipFile(whl).namelist()
+          sos = [n for n in names if n.endswith(".so")]
+          assert len(sos) == 1, names
+          licences = {n.rsplit("/", 1)[1]
+                      for n in names if ".dist-info/licenses/" in n} - {""}
+          assert licences == {"LICENSE"}, (whl, licences)
+          print(whl, "ok:", sos[0])
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: keeper-pam-webrtc-rs-${{ env.KEEPER_PAM_WEBRTC_RS_VERSION }}-cp39-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish keeper-pam-webrtc-rs ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: keeper-pam-webrtc-rs-${{ matrix.version }}-*-manylinux_riscv64
