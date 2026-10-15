@@ -1,0 +1,360 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Upstream ships wheels via a private Jenkins/vcpkg pipeline with no public CI to mirror;
+# this instead builds python/CMakeLists.txt's own two-stage shape directly: the top-level
+# CMakeLists.txt (BUILD_PYTHON_MODULE=OFF) installs the six ouster_* subsystems once, then
+# the per-interpreter cibuildwheel job configures python/CMakeLists.txt against that install
+# via find_package(OusterSDK). vcpkg has no riscv64 binary cache, so the libraries Rocky 10
+# does not package are built here instead, following build-pycolmap.yml's ceres pattern.
+name: Build ouster-sdk wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ouster-sdk.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ouster-sdk.yml'
+      - 'docs/packages/ouster-sdk.yaml'
+      - 'patches/ouster-sdk/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ouster-sdk.yml'
+      - 'docs/packages/ouster-sdk.yaml'
+      - 'patches/ouster-sdk/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # eigen3-devel/openssl-devel/libcurl-devel/libpng-devel/zlib-ng-compat-devel are on the
+  # image's default repos; tbb-devel/libpcap-devel/libzip-devel are CRB-only (gotcha 51).
+  DNF_PACKAGES: >-
+    ninja-build eigen3-devel openssl-devel libcurl-devel libpng-devel
+    zlib-ng-compat-devel libzstd-devel mesa-libGL-devel libX11-devel
+    libXinerama-devel libXrandr-devel libXcursor-devel libXi-devel
+    wayland-devel libxkbcommon-devel wayland-protocols-devel
+    tbb-devel libpcap-devel libzip-devel
+  GLOG_VERSION: 0.7.1
+  CERES_VERSION: 2.2.0
+  LIBTINS_VERSION: 4.5
+  FLATBUFFERS_VERSION: 24.3.25
+  GLFW_VERSION: 3.4.0
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: ouster-sdk
+      version: ${{ inputs.version }}
+
+  sdk:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build OusterSDK ${{ matrix.version }} manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 2880
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      OUSTER_SDK_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout ouster-sdk v${{ env.OUSTER_SDK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ouster-lidar/ouster-sdk
+          ref: v${{ env.OUSTER_SDK_VERSION }}
+          path: ouster-sdk
+          persist-credentials: false
+
+      - name: Restore the OusterSDK dependencies
+        id: deps
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: sdk
+          key: ouster-sdk-deps-manylinux_riscv64-glog${{ env.GLOG_VERSION }}-ceres${{ env.CERES_VERSION }}-libtins${{ env.LIBTINS_VERSION }}-flatbuffers${{ env.FLATBUFFERS_VERSION }}-glfw${{ env.GLFW_VERSION }}
+
+      - name: Build the OusterSDK dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p sdk
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}/sdk:/opt/ouster" \
+            -e DNF_PACKAGES \
+            -e GLOG_VERSION -e CERES_VERSION -e LIBTINS_VERSION -e FLATBUFFERS_VERSION -e GLFW_VERSION \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False --enablerepo=crb ${DNF_PACKAGES}
+
+          export CMAKE_POLICY_VERSION_MINIMUM=3.5
+          export PKG_CONFIG_PATH=/opt/ouster/lib/pkgconfig
+          common=(-GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/ouster
+                  -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_PREFIX_PATH=/opt/ouster)
+          licenses=/opt/ouster/share/licenses
+          mkdir -p "${licenses}"
+          cd /tmp
+
+          git clone --depth 1 --branch "v${GLOG_VERSION}" https://github.com/google/glog
+          cmake -S glog -B glog/build "${common[@]}" \
+            -DBUILD_SHARED_LIBS=ON -DBUILD_TESTING=OFF -DWITH_GFLAGS=OFF -DWITH_GTEST=OFF
+          cmake --build glog/build --target install --parallel "$(nproc)"
+          cp glog/COPYING "${licenses}/glog-COPYING"
+
+          # No SuiteSparse: ouster_mapping/src/pose_optimizer.cpp only ever asks Ceres for
+          # SPARSE_NORMAL_CHOLESKY, which EIGENSPARSE alone satisfies.
+          git clone --depth 1 --branch "${CERES_VERSION}" https://github.com/ceres-solver/ceres-solver
+          cmake -S ceres-solver -B ceres-solver/build "${common[@]}" \
+            -DBUILD_SHARED_LIBS=ON -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF -DBUILD_BENCHMARKS=OFF \
+            -DGFLAGS=OFF -DUSE_CUDA=OFF -DSUITESPARSE=OFF -DLAPACK=OFF -DEIGENSPARSE=ON \
+            -DSCHUR_SPECIALIZATIONS=ON -DPROVIDE_UNINSTALL_TARGET=OFF
+          cmake --build ceres-solver/build --target install --parallel "$(nproc)"
+          cp ceres-solver/LICENSE "${licenses}/ceres-solver-LICENSE"
+
+          # No Rocky/EPEL package anywhere (EPEL has no riscv64 arch at all); cmake/Findlibtins.cmake
+          # falls back to pkg-config + `find_library(... NAMES libtins.so ...)` so this must be shared.
+          git clone --depth 1 --branch "v${LIBTINS_VERSION}" https://github.com/mfontanini/libtins
+          cmake -S libtins -B libtins/build "${common[@]}" \
+            -DLIBTINS_BUILD_SHARED=ON -DLIBTINS_BUILD_TESTS=OFF -DLIBTINS_BUILD_EXAMPLES=OFF
+          cmake --build libtins/build --target install --parallel "$(nproc)"
+
+          # Pinned to vcpkg.json's override (not Rocky's, which doesn't package flatbuffers
+          # at all) so the OSF file format flatc generates matches what upstream ships.
+          git clone --depth 1 --branch "v${FLATBUFFERS_VERSION}" https://github.com/google/flatbuffers
+          cmake -S flatbuffers -B flatbuffers/build "${common[@]}" \
+            -DFLATBUFFERS_BUILD_FLATC=ON -DFLATBUFFERS_BUILD_TESTS=OFF -DFLATBUFFERS_BUILD_FLATHASH=OFF
+          cmake --build flatbuffers/build --target install --parallel "$(nproc)"
+
+          # Static (upstream's own LICENSE-bin already documents it that way): avoids a
+          # runtime .so for a library whose only consumer never needs a live display in CI.
+          git clone --depth 1 --branch "${GLFW_VERSION}" https://github.com/glfw/glfw
+          cmake -S glfw -B glfw/build "${common[@]}" -DBUILD_SHARED_LIBS=OFF \
+            -DGLFW_BUILD_EXAMPLES=OFF -DGLFW_BUILD_TESTS=OFF -DGLFW_BUILD_DOCS=OFF \
+            -DGLFW_BUILD_X11=ON -DGLFW_BUILD_WAYLAND=ON
+          cmake --build glfw/build --target install --parallel "$(nproc)"
+
+          # BUILD_PERCEPTION only ever adds the vcpkg "perception"/cgal manifest feature;
+          # ouster_perception/CMakeLists.txt links ouster_perception_private only if that
+          # target exists, which needs the closed-source _private submodule this repo lacks,
+          # so it always falls back to the stub regardless (confirmed from source, gotcha 136).
+          cmake -S /ouster-sdk -B /tmp/build-sdk "${common[@]}" \
+            -DBUILD_SENSOR=ON -DBUILD_PCAP=ON -DBUILD_OSF=ON -DBUILD_VIZ=ON -DBUILD_MAPPING=ON \
+            -DBUILD_PERCEPTION=OFF -DBUILD_SHARED_LIBRARY=OFF -DBUILD_PYTHON_MODULE=OFF \
+            -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF
+          cmake --build /tmp/build-sdk --target install --parallel "$(nproc)"
+          cp /ouster-sdk/LICENSE /ouster-sdk/LICENSE-bin "${licenses}/"
+          ls "${licenses}"
+          SCRIPT
+
+      - name: Save the OusterSDK dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: sdk
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+
+      - name: Pack the OusterSDK
+        run: tar -C sdk -czf ouster-sdk-sdk.tar.gz .
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ouster-sdk-${{ env.OUSTER_SDK_VERSION }}-sdk
+          path: ouster-sdk-sdk.tar.gz
+          if-no-files-found: error
+
+  build_wheels:
+    needs: [setup, sdk]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build ouster-sdk ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream's own wheels cover cp38-cp314 (no free-threaded interpreter); trimmed to
+        # the newest three like build-pycolmap.yml, to bound an already large from-source
+        # dependency chain across the matrix.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      OUSTER_SDK_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout ouster-sdk v${{ env.OUSTER_SDK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ouster-lidar/ouster-sdk
+          ref: v${{ env.OUSTER_SDK_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch ouster-sdk
+        run: git apply python-wheels/patches/ouster-sdk/${{ env.OUSTER_SDK_VERSION }}/*.patch
+
+      - name: Download the OusterSDK
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ouster-sdk-${{ env.OUSTER_SDK_VERSION }}-sdk
+
+      # auditwheel vendors the from-source shared libraries and the dnf image libraries
+      # they and ouster_core/ouster_osf pull in; ship the licence of each alongside
+      # OusterSDK's own (which already covers everything statically linked into them).
+      - name: Write the wheel repair script
+        run: |
+          cat > riscv64-repair-wheel.sh <<'EOF'
+          set -euxo pipefail
+          wheel="$1"
+          dest="$2"
+          work="$(mktemp -d)"
+          mkdir -p "${work}/core" "${work}/licenses" "${work}/repaired"
+          auditwheel repair -w "${work}/repaired" "${wheel}"
+          cp /opt/ouster/share/licenses/* "${work}/licenses/"
+          python3 -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); z.extractall(sys.argv[2], [n for n in z.namelist() if n.startswith("ouster/sdk/_bindings")])' "${wheel}" "${work}/core"
+          mapfile -t grafted < <(python3 -c 'import re, sys, zipfile; print("\n".join(re.sub(r"-[0-9a-f]{8}(\.so)", r"\1", n.split("/")[-1]) for n in zipfile.ZipFile(sys.argv[1]).namelist() if n.startswith("ouster_sdk.libs/") and n != "ouster_sdk.libs/"))' "${work}"/repaired/*.whl)
+          mapfile -t libs < <(ldd "${work}"/core/ouster/sdk/_bindings*.so | tr ' ' '\n' | grep '^/' | grep -v '^/opt/ouster/' | sort -u \
+            | xargs readlink -f | while read -r lib; do if printf '%s\n' "${grafted[@]}" | grep -qxF "$(basename "${lib}")"; then echo "${lib}"; fi; done)
+          mapfile -t pkgs < <(rpm -qf --qf '%{NAME}\n' "${libs[@]}" 2>/dev/null | grep -E '^[A-Za-z0-9._+-]+$' | sort -u)
+          dnf reinstall -y --setopt=tsflags= "${pkgs[@]}" >/dev/null || true
+          for pkg in "${pkgs[@]}"; do
+            files=$(rpm -qL "${pkg}" | grep -v '^(contains no files)$' || true)
+            if [ -n "${files}" ]; then
+              for file in ${files}; do cp "${file}" "${work}/licenses/${pkg}-$(basename "${file}")"; done
+            else
+              rpm -q --qf '%{NAME} %{VERSION}: %{LICENSE}\n' "${pkg}" >> "${work}/licenses/third-party.txt"
+            fi
+          done
+          python3 - "${work}"/repaired/*.whl "${work}/licenses" "${dest}" <<'PY'
+          import base64, hashlib, os, sys, zipfile
+
+          wheel, licenses, dest = sys.argv[1:]
+          with zipfile.ZipFile(wheel) as src:
+              entries = [(info, src.read(info)) for info in src.infolist()]
+          record_name = next(info.filename for info, _ in entries if info.filename.endswith(".dist-info/RECORD"))
+          dist_info = record_name.split("/")[0]
+          with zipfile.ZipFile(os.path.join(dest, os.path.basename(wheel)), "w", zipfile.ZIP_DEFLATED) as out:
+              for info, data in entries:
+                  if info.filename == record_name:
+                      record = data.decode()
+                  else:
+                      out.writestr(info, data)
+              record = record if record.endswith("\n") else record + "\n"
+              for name in sorted(os.listdir(licenses)):
+                  path = f"{dist_info}/licenses/{name}"
+                  with open(os.path.join(licenses, name), "rb") as f:
+                      data = f.read()
+                  out.writestr(path, data)
+                  digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+                  record += f"{path},sha256={digest},{len(data)}\n"
+              out.writestr(record_name, record)
+          PY
+          EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf install -y --setopt=install_weak_deps=False --enablerepo=crb ${{ env.DNF_PACKAGES }} &&
+            mkdir -p /opt/ouster &&
+            tar -C /opt/ouster -xzf {project}/ouster-sdk-sdk.tar.gz
+          # find_package(OusterSDK) re-runs cmake/Findlibtins.cmake (pkg-config) and
+          # cmake/Findglfw3.cmake/FindFlatbuffers.cmake (CONFIG mode via CMAKE_PREFIX_PATH)
+          # to populate the exported targets' link interface; python/CMakeLists.txt then
+          # links the OusterSDK static archives and libtins/glog/ceres .so's by bare name
+          # (-lfoo), which only the linker's own LIBRARY_PATH env var resolves.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            CMAKE_PREFIX_PATH=/opt/ouster
+            PKG_CONFIG_PATH=/opt/ouster/lib/pkgconfig
+            LIBRARY_PATH=/opt/ouster/lib
+            LD_LIBRARY_PATH=/opt/ouster/lib
+            VCPKG_MANIFEST_MODE=OFF
+            OUSTER_SDK_CMAKE_ARGS=-DBUILD_PERCEPTION=OFF
+            LDFLAGS=-Wl,--as-needed
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: bash {project}/riscv64-repair-wheel.sh {wheel} {dest_dir}
+          CIBW_TEST_EXTRAS: test
+          CIBW_TEST_REQUIRES: pytest-xdist
+          # Same suite and invocation as upstream's own CI (python/tests, no live sensor or
+          # display needed); hil/ (hardware-in-the-loop) is a separate, unrun suite upstream
+          # only mypy-checks. Confirm the compiled extension (not python/src) is what loaded.
+          CIBW_TEST_COMMAND: >-
+            python -c "import ouster.sdk._bindings as b; assert '/python/src/' not in b.__file__, b.__file__" &&
+            cd {project}/python/tests && python -m pytest -n auto -q
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources for ouster-sdk ${{ matrix.version }}
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      OUSTER_SDK_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # gcc (ouster_mapping's OpenMP needs libgomp) and libcurl's copyleft closure, both
+      # vendored out of the build image.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc keyutils-libs libssh libidn2 libunistring libxcrypt systemd-libs libcap pcre2
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ouster-sdk-${{ env.OUSTER_SDK_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish ouster-sdk ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: ouster-sdk-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: ouster-sdk-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc and the copyleft libraries bundled in the wheel
