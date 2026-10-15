@@ -1,0 +1,247 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/microsoft/onnxruntime/blob/v1.24.1/.github/workflows/linux_openvino_ci.yml
+# (CPU-only: --use_openvino CPU --enable_generic_interface --build_shared_lib), adapted to drive
+# build.py in two passes so the OpenVINO runtime libs can be copied into onnxruntime/capi between
+# them (upstream does this inside a private microsoft/onnxruntime-github-actions action), and to
+# build against our own published riscv64 openvino wheel instead of Intel's x86_64 toolkit tarball.
+name: Build onnxruntime-openvino wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/onnxruntime-openvino.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-onnxruntime-openvino.yml'
+      - 'docs/packages/onnxruntime-openvino.yaml'
+      - 'patches/onnxruntime-openvino/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-onnxruntime-openvino.yml'
+      - 'docs/packages/onnxruntime-openvino.yaml'
+      - 'patches/onnxruntime-openvino/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # Upstream's AzureCR build image isn't public; manylinux is the closest equivalent.
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # The OpenVINO runtime this EP is linked against, fetched from our own registry. Its
+  # shared libs are not tied to a CPython version, so one wheel's libs/ dir is reused for
+  # every interpreter below regardless of which OpenVINO wheel it was built for.
+  OPENVINO_VERSION: 2026.3.1
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: onnxruntime-openvino
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build onnxruntime-openvino ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440  # 24h
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream's own linux_openvino_ci.yml only builds/tests cp312; cp311 and cp313 are
+        # the other interpreters its PyPI release ships. No cp314/cp314t: upstream doesn't
+        # build those for this distribution and 1.24.1 predates cp314's release.
+        python: ["cp311", "cp312", "cp313"]
+
+    env:
+      ORT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout onnxruntime v${{ env.ORT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: microsoft/onnxruntime
+          ref: v${{ env.ORT_VERSION }}
+          submodules: none
+          persist-credentials: false
+          path: onnxruntime
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch onnxruntime source
+        working-directory: onnxruntime
+        run: git apply -v ../python-wheels/patches/onnxruntime-openvino/${{ env.ORT_VERSION }}/*.patch
+
+      - name: Write container script
+        run: |
+          mkdir -p build
+          cat > onnxruntime/riscv64-build-and-test.sh <<'EOF'
+          #!/bin/bash
+          set -e -x
+
+          python_dir="/opt/python/${PYTHON_TAG}-${PYTHON_TAG}/bin"
+          # Upstream prepends it too: some dependency CMakeLists invoke a bare `python3`.
+          export PATH="${python_dir}:${PATH}"
+          python_exe="${python_dir}/python"
+
+          # Several FetchContent'ed deps predate CMake 4; 3.31 matches upstream's build images.
+          # Retried: a mirrorlist hiccup here otherwise throws away a multi-hour runner slot.
+          for i in 1 2 3; do dnf install -y cmake && break || sleep 30; done
+
+          export ONNX_ML=1
+          export CMAKE_ARGS="-DONNX_GEN_PB_TYPE_STUBS=ON -DONNX_WERROR=OFF"
+          "${python_exe}" -m pip install -r /onnxruntime_src/tools/ci_build/github/linux/python/requirements.txt
+
+          ov_dir=/opt/openvino
+          if [ ! -d "${ov_dir}" ]; then
+            mkdir -p /tmp/ov-wheel
+            "${python_exe}" -m pip download --no-deps --only-binary=:all: \
+              --python-version 312 --implementation cp --abi cp312 \
+              --platform manylinux_2_39_riscv64 \
+              -d /tmp/ov-wheel "openvino==${OPENVINO_VERSION}"
+            mkdir -p "${ov_dir}"
+            "${python_exe}" -m zipfile -e /tmp/ov-wheel/openvino-*.whl "${ov_dir}"
+            rm -rf /tmp/ov-wheel
+          fi
+
+          build_args=(
+            --build_dir /build
+            --config Release
+            --allow_running_as_root
+            --skip_submodule_sync
+            --use_binskim_compliant_compile_flags
+            --compile_no_warning_as_error
+            --cmake_path /usr/bin/cmake
+            --parallel
+            --use_openvino CPU
+            --enable_generic_interface
+            --build_shared_lib
+            --cmake_extra_defines "OpenVINO_DIR=${ov_dir}/openvino/cmake"
+          )
+
+          case "$1" in
+          build)
+            # Pass 1: compile the core, providers and pybind module, but not the wheel --
+            # setup.py only bundles the OpenVINO runtime libs it finds already sitting in
+            # onnxruntime/capi (gotcha: upstream's own wheel build does this same copy, just
+            # inside a private microsoft/onnxruntime-github-actions action step we can't reuse).
+            "${python_exe}" /onnxruntime_src/tools/ci_build/build.py "${build_args[@]}" --update --build
+
+            capi_dir=/build/Release/onnxruntime/capi
+            for lib in libopenvino_riscv_cpu_plugin.so \
+                       libopenvino_auto_plugin.so \
+                       libopenvino_hetero_plugin.so \
+                       libtbb.so.12 \
+                       libtbbmalloc.so.2 \
+                       libopenvino.so.2631 \
+                       libopenvino_c.so.2631 \
+                       libopenvino_onnx_frontend.so.2631; do
+              cp "${ov_dir}/openvino/libs/${lib}" "${capi_dir}/"
+            done
+
+            # Pass 2: --build re-runs the (now incremental, near no-op) native build, then
+            # build_wheel packages it -- picking up the OpenVINO libs just copied in above.
+            "${python_exe}" /onnxruntime_src/tools/ci_build/build.py "${build_args[@]}" --build --build_wheel
+            ;;
+          test)
+            "${python_exe}" -m pip install onnx
+            "${python_exe}" -m pip install --no-index --find-links /build/Release/dist onnxruntime-openvino
+            (cd /tmp && "${python_exe}" -c "
+          import numpy as np
+          import onnx
+          from onnx import helper, TensorProto
+          import onnxruntime as ort
+          from onnxruntime.capi import onnxruntime_pybind11_state as s
+
+          print(ort.__version__, s.__file__)
+          assert s.__file__.endswith('.so'), s.__file__
+          providers = ort.get_available_providers()
+          print(providers)
+          assert 'OpenVINOExecutionProvider' in providers, providers
+
+          x = helper.make_tensor_value_info('x', TensorProto.FLOAT, [1, 4])
+          y = helper.make_tensor_value_info('y', TensorProto.FLOAT, [1, 4])
+          node = helper.make_node('Relu', ['x'], ['y'])
+          graph = helper.make_graph([node], 'relu_graph', [x], [y])
+          model = helper.make_model(graph, opset_imports=[helper.make_opsetid('', 13)])
+          onnx.checker.check_model(model)
+
+          sess = ort.InferenceSession(model.SerializeToString(), providers=['OpenVINOExecutionProvider'])
+          result = sess.run(None, {'x': np.array([[-2.0, -1.0, 0.0, 3.0]], dtype=np.float32)})[0]
+          assert np.array_equal(result, [[0.0, 0.0, 0.0, 3.0]]), result
+          print('OpenVINOExecutionProvider inference OK:', result)")
+            ;;
+          *)
+            echo "usage: $0 <build|test>" >&2
+            exit 1
+            ;;
+          esac
+          EOF
+
+      - name: Build wheel
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "${PWD}/onnxruntime":/onnxruntime_src \
+            -v "${PWD}/build":/build \
+            --workdir /onnxruntime_src \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            -e OPENVINO_VERSION="${{ env.OPENVINO_VERSION }}" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            --pull=newer \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /onnxruntime_src/riscv64-build-and-test.sh build
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: onnxruntime-openvino-${{ env.ORT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: build/Release/dist/*.whl
+          if-no-files-found: error
+
+      - name: Test wheel
+        run: |
+          podman run -t \
+            --log-driver=none \
+            --network=host \
+            -v "${PWD}/onnxruntime":/onnxruntime_src \
+            -v "${PWD}/build":/build \
+            --workdir /onnxruntime_src \
+            -e PYTHON_TAG="${{ matrix.python }}" \
+            -e OPENVINO_VERSION="${{ env.OPENVINO_VERSION }}" \
+            -e PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash /onnxruntime_src/riscv64-build-and-test.sh test
+
+  publish:
+    name: Publish onnxruntime-openvino ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: onnxruntime-openvino-${{ matrix.version }}-*-manylinux_riscv64

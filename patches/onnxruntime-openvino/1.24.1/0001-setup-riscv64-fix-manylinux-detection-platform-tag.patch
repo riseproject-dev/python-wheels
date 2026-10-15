@@ -1,0 +1,76 @@
+From 915751762ba7dbb0e06be980ef3372c25a16fc99 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 15 Oct 2026 04:32:53 +0000
+Subject: [PATCH] setup: riscv64: fix manylinux detection, platform tag and
+ OpenVINO runtime lib names
+
+AUDITWHEEL_PLAT on our riscv64 manylinux image is manylinux_2_39_riscv64,
+which is not in the hardcoded manylinux_tags allow-list, so is_manylinux
+was False and the whole is_openvino packaging path (OpenVINO runtime libs
+co-located + patchelf $ORIGIN rpath, bdist_wheel.get_tag override) was
+skipped entirely, producing a wheel with no bundled OpenVINO runtime.
+
+Add manylinux_2_39_riscv64 to the allow-list, stop hardcoding x86_64 in
+get_tag() (use platform.machine() instead), and point the ov_libs
+patchelf/packaging list at the actual shared library names our published
+openvino riscv64 wheel ships: libopenvino_riscv_cpu_plugin.so (no Intel
+GPU plugin exists for riscv64) and SONAME-versioned libopenvino*.so.2631
+/ libtbb.so.12 instead of the unversioned x86_64 names upstream hardcodes.
+
+Upstream-Status: Inappropriate [upstream only supports Intel x86_64 for onnxruntime-openvino; see linux_openvino_ci.yml's own "OpenVino only supports Intel X64" comment]
+---
+ setup.py | 17 +++++++++--------
+ 1 file changed, 9 insertions(+), 8 deletions(-)
+
+diff --git a/setup.py b/setup.py
+index df62fdb..58c736b 100644
+--- a/setup.py
++++ b/setup.py
+@@ -119,6 +119,7 @@ manylinux_tags = [
+     "manylinux_2_28_aarch64",
+     "manylinux_2_34_x86_64",
+     "manylinux_2_34_aarch64",
++    "manylinux_2_39_riscv64",
+ ]
+ is_manylinux = environ.get("AUDITWHEEL_PLAT", None) in manylinux_tags
+ 
+@@ -143,12 +144,13 @@ try:
+                 if platform.system() == "Linux":
+                     # Get the right platform tag by querying the linker version
+                     glibc_major, glibc_minor = popen("ldd --version | head -1").read().split()[-1].split(".")
++                    machine = platform.machine()
+                     """# See https://github.com/mayeut/pep600_compliance/blob/master/
+                     pep600_compliance/tools/manylinux-policy.json"""
+                     if glibc_major == "2" and glibc_minor == "17":
+-                        plat = "manylinux_2_17_x86_64.manylinux2014_x86_64"
++                        plat = f"manylinux_2_17_{machine}.manylinux2014_{machine}"
+                     else:  # For manylinux2014 and above, no alias is required
+-                        plat = f"manylinux_{glibc_major}_{glibc_minor}_x86_64"
++                        plat = f"manylinux_{glibc_major}_{glibc_minor}_{machine}"
+                 tags = next(sys_tags())
+                 return (tags.interpreter, tags.abi, plat)
+ 
+@@ -496,15 +498,14 @@ else:
+ if is_manylinux:
+     if is_openvino:
+         ov_libs = [
+-            "libopenvino_intel_cpu_plugin.so",
+-            "libopenvino_intel_gpu_plugin.so",
++            "libopenvino_riscv_cpu_plugin.so",
+             "libopenvino_auto_plugin.so",
+             "libopenvino_hetero_plugin.so",
+-            "libtbb.so.2",
++            "libtbb.so.12",
+             "libtbbmalloc.so.2",
+-            "libopenvino.so",
+-            "libopenvino_c.so",
+-            "libopenvino_onnx_frontend.so",
++            "libopenvino.so.2631",
++            "libopenvino_c.so.2631",
++            "libopenvino_onnx_frontend.so.2631",
+         ]
+         for x in ov_libs:
+             y = "onnxruntime/capi/" + x
+-- 
+2.43.0
+
