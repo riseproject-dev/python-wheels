@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Wed, 15 Oct 2026 00:00:00 +0000
+Subject: [PATCH] CMakeLists: patch fetched deboost.context for riscv64
+
+deboost.context (fetched via FetchContent, pinned at 259fc4103bad) already
+ships riscv64 assembly for its fcontext stack-switching routines
+(asm/{make,jump,ontop}_riscv64_sysv_elf_gas.S), but its own CMakeLists.txt's
+UNIX arch dispatch only branches on `arm`/`aarch64`, then falls through to
+a CMAKE_SIZEOF_VOID_P-based x86_64/i386 choice for everything else. On
+riscv64 this silently selects the x86_64 .S files instead of the riscv64
+ones that are already present but unreachable dead code.
+
+Insert the missing `elseif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "riscv64")`
+branch into the fetched CMakeLists.txt via FetchContent's own PATCH_COMMAND,
+before FetchContent_MakeAvailable() processes it as a subdirectory. The
+`[=[ ... ]=]` CMake bracket argument keeps the embedded `$`, `"` and `\n`
+tokens completely literal, so they reach `sed` unevaluated and only get
+interpreted as CMake syntax later, inside deboost.context's own
+CMakeLists.txt, in the same way the surrounding arm/aarch64 branches are.
+
+Upstream-Status: To upstream [not filed yet; the underlying arch-dispatch bug belongs in septag/deboost.context, which this project vendors via FetchContent rather than owning]
+---
+ CMakeLists.txt | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -82,7 +82,12 @@
+ FetchContent_Declare(
+   deboost_context
+   GIT_REPOSITORY https://github.com/septag/deboost.context.git
+-  GIT_HASH "259fc4103bad6bb484d5ff426ace56ac557107a4" EXCLUDE_FROM_ALL)
++  GIT_HASH "259fc4103bad6bb484d5ff426ace56ac557107a4" EXCLUDE_FROM_ALL
++  # deboost.context ships riscv64 asm (asm/{make,jump,ontop}_riscv64_sysv_elf_gas.S) but
++  # its CMakeLists.txt's UNIX dispatch has no riscv64 branch and silently falls through
++  # to the x86_64 one; insert the missing branch before its own FetchContent_MakeAvailable
++  # runs the subdirectory's CMakeLists.txt.
++  PATCH_COMMAND sed -i [=[s/# PC (x86\/x64)/elseif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "riscv64")\n        set(CPU_ARCH "riscv64")\n        set(ASM_EXT "sysv_elf_gas.S")\n    # PC (x86\/x64)/]=] CMakeLists.txt)
+ FetchContent_MakeAvailable(deboost_context)
+ 
+ add_compile_definitions(
