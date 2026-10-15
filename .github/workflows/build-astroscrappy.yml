@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the build job of
+# https://github.com/astropy/astroscrappy/blob/v1.3.0/.github/workflows/ci.yml,
+# which calls OpenAstronomy/github-actions-workflows' publish.yml.
+name: Build astroscrappy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/astroscrappy.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-astroscrappy.yml'
+      - 'docs/packages/astroscrappy.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-astroscrappy.yml'
+      - 'docs/packages/astroscrappy.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: astroscrappy
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build astroscrappy ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream's [tool.cibuildwheel] skips cp*t-* (no free-threaded build).
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      ASTROSCRAPPY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout astroscrappy v${{ env.ASTROSCRAPPY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: astropy/astroscrappy
+          ref: v${{ env.ASTROSCRAPPY_VERSION }}
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build and test wheel
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_ASTROSCRAPPY=${{ env.ASTROSCRAPPY_VERSION }}
+          CIBW_TEST_EXTRAS: test
+          CIBW_TEST_COMMAND: pytest -p no:warnings --pyargs astroscrappy
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,scipy,astropy,pyerfa,pyyaml
+        run: |
+          set -euo pipefail
+          uv pip install --upgrade cibuildwheel
+          python -m cibuildwheel --output-dir wheelhouse .
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: astroscrappy-${{ env.ASTROSCRAPPY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish astroscrappy ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: astroscrappy-${{ matrix.version }}-*-manylinux_riscv64
