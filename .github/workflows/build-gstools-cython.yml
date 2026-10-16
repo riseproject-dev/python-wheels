@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/GeoStat-Framework/GSTools-Cython/blob/v1.2.0/.github/workflows/main.yml
+name: Build gstools-cython wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/gstools-cython.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-gstools-cython.yml'
+      - 'docs/packages/gstools-cython.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-gstools-cython.yml'
+      - 'docs/packages/gstools-cython.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: gstools-cython
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build gstools-cython ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      GSTOOLS_CYTHON_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout GSTools-Cython v${{ env.GSTOOLS_CYTHON_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: GeoStat-Framework/GSTools-Cython
+          ref: v${{ env.GSTOOLS_CYTHON_VERSION }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          # musllinux is dropped: numpy has no musllinux_riscv64 wheel on pypi.riseproject.dev.
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # numpy is both a build and a runtime dependency; only our registry has riscv64
+          # wheels, and PIP_ONLY_BINARY keeps a newer PyPI sdist from winning the resolution.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+
+      - name: Check the wheel ships the licence and the compiled extensions
+        run: |
+          python3 - <<'EOF'
+          import glob, zipfile
+
+          names = zipfile.ZipFile(glob.glob("wheelhouse/*.whl")[0]).namelist()
+          assert any(n.endswith("dist-info/licenses/LICENSE") for n in names), names
+          for ext in ("field", "krige", "variogram"):
+              assert any(n.startswith(f"gstools_cython/{ext}.") and n.endswith(".so") for n in names), names
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: gstools-cython-${{ env.GSTOOLS_CYTHON_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish gstools-cython ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: gstools-cython-${{ matrix.version }}-*-manylinux_riscv64
