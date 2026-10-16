@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Mon, 12 Oct 2026 00:00:00 +0000
+Subject: [PATCH] drjit-core: do not include <immintrin.h> on riscv64
+
+A scikit-build build takes Dr.Jit's headers from the installed drjit wheel,
+but src/python/CMakeLists.txt also adds the vendored ext/drjit include
+directories with -I to every Python extension target, so those copies win
+over the wheel's -isystem ones. drjit-core/intrin.h assumes "not aarch64"
+means x86 and includes <immintrin.h>:
+
+    fatal error: immintrin.h: No such file or directory
+
+This is the same hunk as patches/drjit/1.5.0/0001 applied to the drjit
+wheel this build links against, so the vendored and installed headers stay
+identical. Every intrinsic gated behind this header is itself gated behind
+a compiler-predefined macro (__F16C__, __AVX__, ...) never defined on
+riscv64.
+
+Upstream-Status: To upstream [not yet submitted; belongs in mitsuba-renderer/drjit-core together with the drjit riscv64 fix, then picked up here through the ext/drjit submodule]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/ext/drjit/ext/drjit-core/include/drjit-core/intrin.h b/ext/drjit/ext/drjit-core/include/drjit-core/intrin.h
+--- a/ext/drjit/ext/drjit-core/include/drjit-core/intrin.h
++++ b/ext/drjit/ext/drjit-core/include/drjit-core/intrin.h
+@@ -15,6 +15,10 @@
+ #  if defined(__aarch64__)
+ #    include <arm_neon.h>
+ #    include <arm_fp16.h>
++#  elif !defined(__i386__) && !defined(__x86_64__)
++    // Neither x86 nor aarch64: no intrinsics header needed. Every intrinsic
++    // gated behind this header is itself gated behind a real compiler flag
++    // macro (__F16C__, __AVX__, etc.) that is never defined here.
+ #  elif !defined(DRJIT_DISABLE_AVX512) || !defined(__AVX512F__)
+ #    include <immintrin.h>
+ #  else
