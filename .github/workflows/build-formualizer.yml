@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-wheels-linux` and `build-wheels-musllinux` jobs of
+# https://github.com/PSU3D0/formualizer/blob/v0.11.1/.github/workflows/release.yml
+# and the `test-python` job of
+# https://github.com/PSU3D0/formualizer/blob/v0.11.1/.github/workflows/ci.yml
+name: Build formualizer wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/formualizer.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-formualizer.yml'
+      - 'docs/packages/formualizer.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-formualizer.yml'
+      - 'docs/packages/formualizer.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: formualizer
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build formualizer ${{ matrix.version }} ${{ matrix.tag }}-${{ matrix.platform }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # pyo3's abi3-py310 feature is on unconditionally (bindings/python/Cargo.toml), so one
+        # abi3 wheel serves every GIL-ful interpreter; pyo3 disables abi3 under
+        # Py_GIL_DISABLED, giving the free-threaded build its own wheel.
+        tag: [cp310-abi3, cp314t]
+        platform: [manylinux, musllinux]
+
+    env:
+      FORMUALIZER_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout formualizer v${{ env.FORMUALIZER_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: PSU3D0/formualizer
+          ref: v${{ env.FORMUALIZER_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: bindings/python
+          output-dir: wheelhouse/
+        env:
+          # Built on cp310 -- the oldest interpreter the abi3 tag claims -- and
+          # re-tested on the newer ones via find_compatible_wheel.
+          CIBW_BUILD: >-
+            ${{ matrix.tag == 'cp310-abi3'
+            && format('cp310-{0}_riscv64 cp311-{0}_riscv64 cp312-{0}_riscv64 cp313-{0}_riscv64 cp314-{0}_riscv64', matrix.platform)
+            || format('cp314t-{0}_riscv64', matrix.platform) }}
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.99.0
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_TEST_GROUPS: dev
+          CIBW_TEST_SOURCES: bindings/python/tests bindings/python/pyproject.toml
+          CIBW_TEST_COMMAND: >-
+            python -c "import formualizer.formualizer_py as m, importlib.metadata as md;
+            assert m.__file__.endswith('.so'), m.__file__;
+            assert any(str(p).endswith('licenses/LICENSE-MIT') for p in md.files('formualizer'))" &&
+            cd bindings/python && python -m pytest
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: formualizer-${{ env.FORMUALIZER_VERSION }}-${{ matrix.tag }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish formualizer ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: formualizer-${{ matrix.version }}-*_riscv64
