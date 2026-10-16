@@ -1,0 +1,131 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Mirrors the Linux x86_64 core of upstream's .github/workflows/build_wheels.yml
+# (dev/jamie/more_pythons branch) build_wheels_x86_64 job.
+name: Build whylogs-sketching wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/whylogs-sketching.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-whylogs-sketching.yml'
+      - 'docs/packages/whylogs-sketching.yaml'
+      - 'patches/whylogs-sketching/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-whylogs-sketching.yml'
+      - 'docs/packages/whylogs-sketching.yaml'
+      - 'patches/whylogs-sketching/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # whylabs/whylogs-sketching tags no releases, so pin the release commit: its tree
+  # (dev/jamie/more_pythons, "add python 3.13 wheels to build step") is byte-identical
+  # to the 3.4.1.dev3 PyPI sdist (setup.py, pyproject.toml and every source file match,
+  # modulo build artifacts). Update it alongside WHYLOGS_SKETCHING_VERSION.
+  WHYLOGS_SKETCHING_REF: c81f372d971bc461d5fe1c2967aa9d609af2f23a
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: whylogs-sketching
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build whylogs-sketching ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp39", "cp310", "cp311", "cp312"]
+
+    env:
+      WHYLOGS_SKETCHING_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout whylabs/whylogs-sketching ${{ env.WHYLOGS_SKETCHING_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: whylabs/whylogs-sketching
+          ref: ${{ env.WHYLOGS_SKETCHING_REF }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # vector_of_kll_sketches's own operator= assigns to its const k_/d_ members,
+      # which GCC 13 (this image's compiler) rejects; not riscv64-specific (gotcha 23 shape).
+      - name: Patch whylogs-sketching source
+        run: git apply python-wheels/patches/whylogs-sketching/${{ env.WHYLOGS_SKETCHING_VERSION }}/00*.patch
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_BEFORE_TEST: pip install pytest numpy
+          # tests/ has __init__.py, and the checkout root's own python/ source tree
+          # would shadow the installed wheel if pytest ran from the checkout (gotcha 25);
+          # stage only python/tests into an empty cwd.
+          CIBW_TEST_SOURCES: python/tests
+          CIBW_TEST_COMMAND: python -m pytest python/tests
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          path = sys.argv[1]
+          names = zipfile.ZipFile(path).namelist()
+          exts = [n for n in names if n.endswith(".so")]
+          assert exts and all("whylogs_sketching" in n for n in exts), exts
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          assert {"LICENSE", "NOTICE"} <= licences, licences
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: whylogs-sketching-${{ env.WHYLOGS_SKETCHING_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish whylogs-sketching ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: whylogs-sketching-${{ matrix.version }}-*riscv64
