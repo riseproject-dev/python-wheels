@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/emcache/emcache/blob/v1.3.3/.github/workflows/release.yml
+name: Build emcache wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/emcache.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-emcache.yml'
+      - 'docs/packages/emcache.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-emcache.yml'
+      - 'docs/packages/emcache.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: emcache
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build emcache ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    env:
+      EMCACHE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout emcache v${{ env.EMCACHE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: emcache/emcache
+          ref: v${{ env.EMCACHE_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_BUILD: make -C vendor/murmur3 static && make cythonize
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          # Rocky 10's memcached stands in for upstream's compose.yaml service containers.
+          CIBW_BEFORE_TEST_LINUX: >-
+            dnf -y install memcached &&
+            memcached -d -u root -p 11211 &&
+            memcached -d -u root -p 11212 &&
+            memcached -d -u root -p 11213 --enable-ssl
+            -o ssl_chain_cert={project}/tests/acceptance/data/localhost.crt,ssl_key={project}/tests/acceptance/data/localhost.key &&
+            memcached -d -u root -p 11214 -S -Y {project}/tests/acceptance/data/auth_pwd.txt &&
+            memcached -d -u root -s /tmp/emcache.test1.sock &&
+            memcached -d -u root -s /tmp/emcache.test2.sock
+          CIBW_TEST_REQUIRES: pytest==8.2.2 pytest-mock==3.14.0 pytest-asyncio==0.23.8
+          CIBW_TEST_SOURCES: tests pyproject.toml
+          CIBW_TEST_COMMAND: python -m pytest -sv tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: emcache-${{ env.EMCACHE_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish emcache ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: emcache-${{ matrix.version }}-*-manylinux_riscv64
