@@ -1,0 +1,103 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build-wheels` job of
+# https://github.com/daler/pybedtools/blob/v0.12.1/.github/workflows/main.yml
+name: Build pybedtools wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pybedtools.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pybedtools.yml'
+      - 'docs/packages/pybedtools.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pybedtools.yml'
+      - 'docs/packages/pybedtools.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pybedtools
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pybedtools ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # numpy (as of 2.5.0) floors at cp312, and pandas has no cp314t wheel on
+        # the registry, so the intersection of pybedtools' own cp39-cp314 matrix
+        # with what numpy/pandas/pysam actually provide here is cp312-cp314.
+        python: ['cp312', 'cp313', 'cp314']
+
+    env:
+      PYBEDTOOLS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pybedtools v${{ env.PYBEDTOOLS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: daler/pybedtools
+          ref: v${{ env.PYBEDTOOLS_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_BUILD: "pip install 'cython>3.0' setuptools && python setup.py cythonize"
+          CIBW_TEST_REQUIRES: numpy pysam
+          CIBW_TEST_COMMAND: >-
+            python -c "import pybedtools; from pybedtools.cbedtools import create_interval_from_list; iv = create_interval_from_list(['chr1', '1', '100']); assert str(iv).startswith('chr1'), iv; print('ok')"
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pybedtools-${{ env.PYBEDTOOLS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pybedtools ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pybedtools-${{ matrix.version }}-*-manylinux_riscv64
