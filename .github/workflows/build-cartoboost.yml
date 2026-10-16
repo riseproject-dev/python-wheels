@@ -1,0 +1,185 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `wheels` (linux) and `smoke` jobs of
+# https://github.com/theculliganman/cartoboost/blob/v0.3.12/.github/workflows/publish-pypi.yml
+name: Build cartoboost wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cartoboost.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cartoboost.yml'
+      - 'docs/packages/cartoboost.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cartoboost.yml'
+      - 'docs/packages/cartoboost.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cartoboost
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build cartoboost ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ['cp312', 'cp313', 'cp314', 'cp314t']
+
+    env:
+      CARTOBOOST_VERSION: ${{ matrix.version }}
+      UV_PYTHON_PREFERENCE: only-managed
+      UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_ONLY_BINARY: ':all:'
+
+    steps:
+      - name: Checkout cartoboost v${{ env.CARTOBOOST_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: theculliganman/cartoboost
+          ref: v${{ env.CARTOBOOST_VERSION }}
+          persist-credentials: false
+
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          manylinux: '2_39'
+          args: >-
+            --release
+            --compatibility pypi
+            --out dist
+            --features webgpu
+            --interpreter ${{ steps.interp.outputs.value }}
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ steps.interp.outputs.value }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Verify minimal wheel dependencies
+        run: |
+          python - <<'PY'
+          from email.parser import BytesParser
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheels = list(Path("dist").glob("*.whl"))
+          assert len(wheels) == 1, wheels
+          with ZipFile(wheels[0]) as archive:
+              metadata_path = next(
+                  name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
+              )
+              metadata = BytesParser().parsebytes(archive.read(metadata_path))
+          requirements = metadata.get_all("Requires-Dist", [])
+          unconditional = [requirement for requirement in requirements if "extra ==" not in requirement]
+          if len(unconditional) != 2 or not all(
+              requirement.lower().startswith("numpy") for requirement in unconditional
+          ):
+              raise SystemExit(
+                  f"unexpected unconditional wheel dependencies: {unconditional!r}"
+              )
+          PY
+
+      - name: Install and smoke test wheel
+        run: |
+          uv pip install numpy
+          # pypi.riseproject.dev has no cp314t pandas wheel, so the pandas forecasting check is skipped there
+          if [ "${{ matrix.python }}" != "cp314t" ]; then uv pip install pandas; fi
+          uv pip install --no-deps --no-index --find-links dist cartoboost
+          cd "$RUNNER_TEMP"
+          python -c "import cartoboost; print(cartoboost.__version__)"
+          python -c "import cartoboost._native as m; assert m.__file__.endswith('.so'), m.__file__"
+          python - <<'PY'
+          import numpy as np
+          import os
+          import tempfile
+          from importlib.metadata import entry_points
+          from cartoboost import CartoBoostRegressor
+
+          assert not any(ep.name == 'cartoboost' for ep in entry_points(group='console_scripts'))
+          x = np.arange(96, dtype=float).reshape(48, 2)
+          y = x[:, 0] * 0.25 - x[:, 1] * 0.1
+          model = CartoBoostRegressor(n_estimators=4, max_depth=2)
+          model.fit(x, y)
+          assert model.predict(x).shape == (48,)
+
+          try:
+              import pandas as pd
+          except ImportError:
+              raise SystemExit(0)
+          from cartoboost.forecasting import CartoBoostLagForecaster, ForecastFrame, LagConfig
+          frame = ForecastFrame.from_pandas(
+              pd.DataFrame({
+                  'timestamp': pd.date_range('2024-01-01', periods=40, freq='D'),
+                  'target': np.arange(40, dtype=float),
+              }),
+              timestamp_col='timestamp', target_col='target', freq='D',
+          )
+          forecast = CartoBoostLagForecaster(
+              lag_config=LagConfig(lags=[1, 2]), n_estimators=4,
+              max_depth=2, min_samples_leaf=1,
+          ).fit(frame)
+          with tempfile.TemporaryDirectory() as temp_dir:
+              artifact = os.path.join(temp_dir, 'forecast.json')
+              forecast.save(artifact)
+              restored = CartoBoostLagForecaster.load(artifact)
+              assert forecast.predict(2).predictions() == restored.predict(2).predictions()
+          PY
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cartoboost-${{ env.CARTOBOOST_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish cartoboost ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: cartoboost-${{ matrix.version }}-*-manylinux_riscv64
