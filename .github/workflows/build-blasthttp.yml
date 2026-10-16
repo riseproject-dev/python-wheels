@@ -1,0 +1,153 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on the `linux-build` and `python-tests` jobs of
+# https://github.com/blacklanternsecurity/blasthttp/blob/5a10fd55590c4046d54bc7f74824dfa733a7e89d/.github/workflows/python-tests.yml
+name: Build blasthttp wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/blasthttp.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-blasthttp.yml'
+      - 'docs/packages/blasthttp.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-blasthttp.yml'
+      - 'docs/packages/blasthttp.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # Upstream releases without git tags, so pin the release commit: the merge of
+  # #86, whose tree matches the 0.10.0 PyPI sdist. Update it alongside the
+  # version in docs/packages/blasthttp.yaml.
+  BLASTHTTP_REF: 5a10fd55590c4046d54bc7f74824dfa733a7e89d
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: blasthttp
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build blasthttp ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream ships no free-threaded wheel and its #[pymodule] does not
+        # declare gil_used = false.
+        python: ['cp312', 'cp313', 'cp314']
+
+    env:
+      BLASTHTTP_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout blasthttp ${{ env.BLASTHTTP_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: blacklanternsecurity/blasthttp
+          ref: ${{ env.BLASTHTTP_REF }}
+          persist-credentials: false
+
+      - name: Determine target interpreter
+        id: interp
+        run: |
+          v="${{ matrix.python }}"
+          v="${v#cp}"
+          echo "value=python${v:0:1}.${v:1}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+        with:
+          target: riscv64gc-unknown-linux-gnu
+          args: --release --out dist -i ${{ steps.interp.outputs.value }}
+          manylinux: '2_39'
+          # The statically linked OpenSSL ships no licence in upstream's wheel.
+          before-script-linux: |
+            set -e
+            yum install -y perl-core 2>/dev/null || true
+            ./scripts/build-openssl.sh
+            OPENSSL_INSTALL="$(pwd)/vendor/openssl/install"
+            export OPENSSL_DIR="$OPENSSL_INSTALL"
+            export OPENSSL_STATIC=1
+            export OPENSSL_NO_VENDOR=1
+            for var in $(env | grep '_OPENSSL_DIR=' | cut -d= -f1); do
+              export "$var=$OPENSSL_INSTALL"
+            done
+            cp vendor/openssl/openssl-*/LICENSE.txt LICENSE.openssl
+
+      - name: Check the wheel ships the extension and every licence
+        run: |
+          set -euo pipefail
+          python3 - dist/*.whl <<'EOF'
+          import os, sys, zipfile
+          whl = sys.argv[1]
+          assert os.path.basename(whl).startswith(f"blasthttp-{os.environ['BLASTHTTP_VERSION']}-"), whl
+          names = zipfile.ZipFile(whl).namelist()
+          sos = [n for n in names if n.endswith(".so")]
+          assert any(n.startswith("blasthttp/blasthttp.") for n in sos), sos
+          licences = {n.rsplit("/", 1)[1] for n in names if ".dist-info/licenses/" in n} - {""}
+          assert licences == {"LICENSE", "LICENSE.openssl"}, (whl, licences)
+          print(whl, "->", sos)
+          EOF
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ steps.interp.outputs.value }}
+          activate-environment: true
+          enable-cache: false
+
+      - name: Run Python tests
+        env:
+          UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+          UV_INDEX_STRATEGY: unsafe-best-match
+          UV_ONLY_BINARY: ':all:'
+        run: |
+          uv pip install dist/*.whl 'pytest>=8' 'pytest-asyncio>=0.23'
+          python -c "import blasthttp; print(f'blasthttp {blasthttp.__version__}')"
+          pytest tests/python/ -v
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: blasthttp-${{ env.BLASTHTTP_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish blasthttp ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: blasthttp-${{ matrix.version }}-*-manylinux_riscv64
