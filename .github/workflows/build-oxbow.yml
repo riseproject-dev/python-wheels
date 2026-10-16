@@ -1,0 +1,130 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/abdenlab/oxbow/blob/py-oxbow@v0.8.2/.github/workflows/release-python.yml
+name: Build oxbow wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/oxbow.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-oxbow.yml'
+      - 'docs/packages/oxbow.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-oxbow.yml'
+      - 'docs/packages/oxbow.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: oxbow
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build oxbow ${{ matrix.version }} cp312-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      OXBOW_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout oxbow py-oxbow@v${{ env.OXBOW_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: abdenlab/oxbow
+          ref: py-oxbow@v${{ env.OXBOW_VERSION }}
+          persist-credentials: false
+
+      - name: Stage the licences beside oxbow's pyproject.toml
+        # maturin globs LICEN[CS]E* relative to the pyproject directory, which
+        # in this monorepo is py-oxbow/ -- so upstream's published wheels
+        # carry no licence text at all (gotcha 146).
+        run: cp LICENSE-MIT LICENSE-APACHE py-oxbow/
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: py-oxbow
+          output-dir: wheelhouse/
+        env:
+          # abi3-py39 is fixed in py-oxbow/Cargo.toml, so one build serves
+          # every interpreter; built on cp312 (the oldest in our matrix) and
+          # re-tested on the newer ones via find_compatible_wheel. No
+          # cp314t: pyo3's abi3 feature predates PEP 703 free-threading.
+          CIBW_BUILD: cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # oxbow ships no [tool.cibuildwheel], so the Rust toolchain its
+          # maturin backend needs is installed in-container here.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy
+          CIBW_TEST_REQUIRES: pytest pytest-manifest cloudpickle
+          CIBW_TEST_SOURCES: tests
+          CIBW_TEST_COMMAND: cd {project} && python -m pytest -v tests
+
+      - name: Verify the wheel ships the compiled extension and licences
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          sos = sorted(n for n in names if n.endswith(".so"))
+          print("\n".join(sos))
+          assert any("oxbow" in n for n in sos), sos
+
+          lic = sorted(n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n and not n.endswith("/"))
+          print("\n".join(lic))
+          assert {"LICENSE-MIT", "LICENSE-APACHE"} <= set(lic), lic
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: oxbow-${{ env.OXBOW_VERSION }}-cp312-abi3-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish oxbow ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: oxbow-${{ matrix.version }}-*-manylinux_riscv64
