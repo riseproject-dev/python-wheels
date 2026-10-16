@@ -1,0 +1,64 @@
+From 42bef96af7bf5d31989f27840ad488e761c92f55 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 16 Oct 2026 00:48:10 +0000
+Subject: [PATCH] setup.py: fix TBB cmake-dir rename for a custom
+ (non-downloaded) TBB
+
+copy_package_data()'s openvino_replacements only stripped the literal
+"runtime/3rdparty/tbb" prefix out of the PACKAGE_PREFIX_DIR-relative path
+baked into OpenVINOConfig.cmake's _tbb_dir, then renamed what remained to
+"openvino/cmake". That matches install_tbb.cmake's tbb_downloaded branch,
+where OV_TBB_DIR_INSTALL is exactly that flat prefix with nothing after it.
+
+It does not match the tbb_custom branch (taken whenever TBB_DIR/TBBROOT is
+defined, e.g. building against a from-source oneTBB via
+-DTBB_DIR=<prefix>/lib/cmake/TBB instead of the one ov_download_tbb() would
+fetch): there, OV_TBB_DIR_INSTALL is TBBROOT's relative offset to TBB_DIR
+appended onto that same prefix (e.g.
+"runtime/3rdparty/tbb/lib/cmake/TBB" for a modern oneTBB laid out the
+conventional way). The old regex only consumed the "runtime/3rdparty/tbb"
+part and left "/lib/cmake/TBB" dangling after the rename, baking
+"${PACKAGE_PREFIX_DIR}/openvino/cmake/lib/cmake/TBB" into _tbb_dir -- a path
+that does not exist, since this same function already flattens every
+*.cmake file (TBB's included) directly into openvino/cmake. Any downstream
+find_package(OpenVINO) against such a wheel fails at configure time with
+"File or directory .../openvino/cmake/lib/cmake/TBB ... does not exist".
+
+Match (and drop) an optional nested suffix too, so both branches collapse
+to the same flat openvino/cmake this step already produces. A negative
+lookahead keeps "tbb" from also matching the unrelated
+"runtime/3rdparty/tbb_bind_2_5" (OV_TBBBIND_DIR) path.
+
+Upstream-Status: To upstream [not yet reported upstream; this session has no access to open an openvinotoolkit/openvino issue]
+---
+ setup.py | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/setup.py b/setup.py
+index 0c04e59f..85d028cd 100644
+--- a/setup.py
++++ b/setup.py
+@@ -479,8 +479,18 @@ class PrepareLibs(build_clib):
+         os.makedirs(package_cmake_dir, exist_ok=True)
+ 
+         openvino_replacements = {
+-            # change the location of TBBConfig.cmake (runtime/3rdparty/tbb -> openvino/cmake)
+-            r"(\{PACKAGE_PREFIX_DIR\})\/runtime\/3rdparty\/tbb": rf"\1/{WHEEL_PACKAGE_DIR}/cmake",
++            # change the location of TBBConfig.cmake (runtime/3rdparty/tbb[/<nested path>] -> openvino/cmake)
++            #
++            # The nested suffix only appears for a custom (non-downloaded) TBB: install_tbb.cmake's
++            # tbb_custom branch bakes OV_TBB_DIR_INSTALL as TBBROOT's relative offset to TBB_DIR
++            # (e.g. "runtime/3rdparty/tbb/lib/cmake/TBB" for a modern oneTBB built from source and
++            # pointed to via -DTBB_DIR=<prefix>/lib/cmake/TBB), on top of the flat
++            # "runtime/3rdparty/tbb" the tbb_downloaded branch always uses. Matching only the literal
++            # prefix left that suffix dangling after the rename, baking a nonexistent
++            # "openvino/cmake/lib/cmake/TBB" into _tbb_dir even though this step already flattens
++            # every *.cmake file (including TBB's) directly into openvino/cmake. The negative
++            # lookahead keeps this from also eating the unrelated "tbb_bind_2_5" path.
++            r"(\{PACKAGE_PREFIX_DIR\})\/runtime\/3rdparty\/tbb(?!_)(?:\/[^\"]*)?": rf"\1/{WHEEL_PACKAGE_DIR}/cmake",
+             # change the path where the libraries are installed (runtime/lib/intel64/Release -> openvino/libs)
+             r"(\{_IMPORT_PREFIX\})\/(.*)\/(.+\.[lib|dylib|so|dll])": rf"\1/{WHEEL_LIBS_INSTALL_DIR}/\3",
+             # change the path where the include files are installed (runtime/include -> openvino/include)
+-- 
+2.43.0
+
