@@ -1,0 +1,194 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own riscv64-adjacent recipe in python/pyproject.toml's
+# [tool.cibuildwheel.linux] (no GitHub Actions wheel-building workflow exists
+# upstream; this documented recipe is what their own baseline `ngt` wheels on
+# PyPI are built from):
+#   https://github.com/yahoojapan/NGT/blob/v2.8.1/python/pyproject.toml
+name: Build ngt wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ngt.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ngt.yml'
+      - 'docs/packages/ngt.yaml'
+      - 'patches/ngt/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ngt.yml'
+      - 'docs/packages/ngt.yaml'
+      - 'patches/ngt/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # kept in sync with the gpl_sources job below
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: ngt
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build ngt ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      NGT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout NGT v${{ env.NGT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: yahoojapan/NGT
+          ref: v${{ env.NGT_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply python-wheels/patches/ngt/${{ env.NGT_VERSION }}/*.patch
+
+      # python/pyproject.toml's own [tool.cibuildwheel.linux] before-all
+      # expects an `ngt-src/` checkout staged next to the package (comment:
+      # "ngt-src/ is staged next to the package") - upstream's own tooling
+      # does this outside of what's committed to the repo.
+      - name: Stage the NGT core checkout next to the Python package
+        run: |
+          mkdir -p python/ngt-src
+          cp -r CMakeLists.txt LICENSE README.md VERSION bin lib samples utils python/ngt-src/
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: python
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf -y install cmake blas-devel lapack-devel &&
+            cmake -S ngt-src -B build-ci -DCMAKE_BUILD_TYPE=Release
+            -DNGT_AVX_DISABLED=ON -DNGT_MARCH_NATIVE_DISABLED=ON &&
+            cmake --build build-ci --parallel $(nproc) &&
+            cp build-ci/lib/NGT/libngt.a . &&
+            cp build-ci/lib/NGT/defines.h build-ci/lib/NGT/version_defs.h ngt-src/lib/NGT/
+          CIBW_ENVIRONMENT_LINUX: >-
+            NGT_STATIC_LIBRARY_PATH=libngt.a
+            NGT_INCLUDE_DIR=ngt-src/lib
+            NGT_BUILD_STATIC=1
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+          # Upstream ships no pytest suite for the Python bindings (only a
+          # demo script with hardcoded relative paths to its sample
+          # dataset); synthesize a round-trip create/insert/search smoke test.
+          CIBW_TEST_COMMAND: >-
+            python3 -c "
+            import ngtpy, random;
+            ngtpy.create(path=b'/tmp/ngt-smoke-index', dimension=16, distance_type='L2');
+            idx = ngtpy.Index(b'/tmp/ngt-smoke-index');
+            vecs = [[random.random() for _ in range(16)] for _ in range(200)];
+            idx.batch_insert(vecs);
+            idx.save();
+            results = idx.search(vecs[0], size=5);
+            assert len(results) == 5, results;
+            assert results[0][0] == 0, results;
+            print('ngt smoke test ok')"
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for path in sys.argv[1:]:
+              names = zipfile.ZipFile(path).namelist()
+              assert any(n.startswith("ngtpy") and n.endswith(".so") for n in names), (path, names)
+              print(path, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ngt-${{ env.NGT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      NGT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # OpenMP (find_package(OpenMP REQUIRED)) links libgomp, which
+      # auditwheel vendors into ngt.libs/.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ngt-${{ env.NGT_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish ngt ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: ngt-${{ matrix.version }}-*-manylinux_riscv64
+      gpl-sources-artifact: ngt-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc
