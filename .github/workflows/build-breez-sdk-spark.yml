@@ -80,15 +80,22 @@ jobs:
           # build-language-bindings + build-linux-wheels{matrix:python} split)
           # and run its own uniffi-bindgen to generate the Python glue,
           # exactly as upstream's CI does.
+          # spark-token-primitives (transitive, via the bindings crate) generates code
+          # with prost-build and needs `protoc` in the container; Rocky 10's CRB repo
+          # (enabled in manylinux_2_39_riscv64) has it, but at 3.19, which resolves the
+          # well-known types from /usr/include rather than carrying them in the binary
+          # (CLAUDE.md gotcha 100) -- hence PROTOC_INCLUDE.
           CIBW_BEFORE_ALL_LINUX: >-
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
             export PATH="$PATH:$HOME/.cargo/bin" &&
+            yum install -y protobuf-compiler protobuf-devel &&
+            export PROTOC_INCLUDE=/usr/include &&
             cd {project} &&
             cargo build --release --manifest-path crates/breez-sdk/bindings/Cargo.toml --features uniffi-cli &&
             cargo run --manifest-path crates/breez-sdk/bindings/Cargo.toml --features uniffi-cli --bin uniffi-bindgen -- generate --library target/release/libbreez_sdk_spark_bindings.so --no-format --language python -o crates/breez-sdk/bindings/langs/python/src/breez_sdk_spark &&
             cp target/release/libbreez_sdk_spark_bindings.so crates/breez-sdk/bindings/langs/python/src/breez_sdk_spark/ &&
             sed -i -e 's/    version=".*",/    version="${{ env.BREEZ_SDK_SPARK_VERSION }}",/' crates/breez-sdk/bindings/langs/python/setup.py
-          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin" PROTOC_INCLUDE=/usr/include
           CIBW_TEST_COMMAND: >-
             python -c "import breez_sdk_spark, os;
             so = os.path.join(os.path.dirname(breez_sdk_spark.__file__), 'libbreez_sdk_spark_bindings.so');
