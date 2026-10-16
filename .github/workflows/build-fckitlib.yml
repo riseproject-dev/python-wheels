@@ -8,8 +8,9 @@
 # builds against our own published eckitlib wheel instead of upstream's exact
 # eckitlib==2.0.7.19 pin, which our registry does not carry. Upstream's own
 # pre-compile.sh explicitly skips auditwheel to avoid it vendoring eckit's shared
-# libraries into this wheel; this keeps that choice but still bundles libgfortran/
-# libquadmath (not on the manylinux baseline, unlike libstdc++/libgcc_s/libm) and
+# libraries into this wheel; this keeps that choice but still bundles libgfortran
+# (not on the manylinux baseline, unlike libstdc++/libgcc_s/libm) and, where GCC
+# builds it for the target (not riscv64 -- see gotcha 435), libquadmath; and
 # repoints the RPATH at a sibling eckitlib package instead of the build container's
 # own absolute path, which is what upstream's published wheel carries verbatim.
 name: Build fckitlib wheels (riscv64)
@@ -181,7 +182,13 @@ jobs:
 
               GFORTRAN_LIB=$(find /usr/lib64 /usr/lib -name "libgfortran.so.5" 2>/dev/null | head -1)
               QUADMATH_LIB=$(find /usr/lib64 /usr/lib -name "libquadmath.so.0" 2>/dev/null | head -1)
-              cp -L "$GFORTRAN_LIB" "$QUADMATH_LIB" /tmp/install/fckitlib/lib64/
+              cp -L "$GFORTRAN_LIB" /tmp/install/fckitlib/lib64/
+              # gotcha 435: libquadmath does not exist on riscv64 at all -- GCC only builds
+              # it where __float128 differs from long double (x86-64), never on riscv64/aarch64
+              # -- so only copy it when the image actually has it.
+              if [ -n "$QUADMATH_LIB" ]; then
+                cp -L "$QUADMATH_LIB" /tmp/install/fckitlib/lib64/
+              fi
 
               # Upstream ships this RPATH as the literal absolute path of its own
               # build container (readelf -d on the published wheel shows
@@ -190,7 +197,10 @@ jobs:
               patchelf --set-rpath "\$ORIGIN:\$ORIGIN/../../eckitlib/lib64" /tmp/install/fckitlib/lib64/libfckit.so
 
               GFORTRAN_PKG=$(rpm -qf "$GFORTRAN_LIB" --qf "%{NAME}\n")
-              QUADMATH_PKG=$(rpm -qf "$QUADMATH_LIB" --qf "%{NAME}\n")
+              QUADMATH_PKG=""
+              if [ -n "$QUADMATH_LIB" ]; then
+                QUADMATH_PKG=$(rpm -qf "$QUADMATH_LIB" --qf "%{NAME}\n")
+              fi
               for pkg in $GFORTRAN_PKG $QUADMATH_PKG; do
                 licence_file=$(rpm -ql "$pkg" | grep "^/usr/share/licenses/" | head -1)
                 if [ -n "$licence_file" ]; then
@@ -212,7 +222,9 @@ jobs:
           import sys, zipfile
 
           names = zipfile.ZipFile(sys.argv[1]).namelist()
-          for lib in ("libfckit.so", "libgfortran.so.5", "libquadmath.so.0"):
+          # gotcha 435: libquadmath.so.0 is not expected here -- GCC never builds it for
+          # riscv64, so it is only bundled conditionally and is absent on this platform.
+          for lib in ("libfckit.so", "libgfortran.so.5"):
               assert any(n.endswith(f"lib64/{lib}") for n in names), (lib, names)
           assert any(n.endswith("bin/fckit") for n in names), names
           assert any(n.endswith(".dist-info/licenses/fckit.txt") for n in names), names
