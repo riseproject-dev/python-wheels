@@ -1,0 +1,169 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the build job of
+# https://github.com/spacetelescope/drizzle/blob/3.0.0/.github/workflows/build.yml,
+# narrowed to the Linux glibc cibuildwheel job.
+name: Build drizzle wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/drizzle.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-drizzle.yml'
+      - 'docs/packages/drizzle.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-drizzle.yml'
+      - 'docs/packages/drizzle.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: drizzle
+      version: ${{ inputs.version }}
+
+  # setup.py hard-codes the abi3 floor at cp310 (Py_LIMITED_API 0x030A0000),
+  # so cibuildwheel builds once there and reuses the wheel on cp311-cp314
+  # (find_compatible_wheel). astropy (test-only) has no cp310 riscv64 wheel,
+  # so cp310 is built but not tested.
+  build_abi3:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build drizzle ${{ matrix.version }} cp310-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      DRIZZLE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout drizzle ${{ env.DRIZZLE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: spacetelescope/drizzle
+          ref: ${{ env.DRIZZLE_VERSION }}
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build and test wheel
+        env:
+          CIBW_BUILD: 'cp310-manylinux_riscv64 cp311-manylinux_riscv64 cp312-manylinux_riscv64 cp313-manylinux_riscv64 cp314-manylinux_riscv64'
+          CIBW_TEST_SKIP: cp310-*
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DRIZZLE=${{ env.DRIZZLE_VERSION }}
+          CIBW_TEST_EXTRAS: test
+          CIBW_TEST_COMMAND: 'python -c "from drizzle import cdrizzle" && pytest -q --pyargs drizzle'
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,astropy,pyerfa,pyyaml
+        run: |
+          set -euo pipefail
+          uv pip install --upgrade cibuildwheel
+          python -m cibuildwheel --output-dir wheelhouse
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: drizzle-${{ env.DRIZZLE_VERSION }}-cp310-abi3-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  # Free-threaded wheel: per-interpreter, no abi3 (Py_LIMITED_API is skipped
+  # under Py_GIL_DISABLED in setup.py). Only cp314t - the riscv64 image has
+  # no cp313t interpreter.
+  build_freethreaded:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build drizzle ${{ matrix.version }} cp314t-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      DRIZZLE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout drizzle ${{ env.DRIZZLE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: spacetelescope/drizzle
+          ref: ${{ env.DRIZZLE_VERSION }}
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Build and test wheel
+        env:
+          CIBW_BUILD: cp314t-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DRIZZLE=${{ env.DRIZZLE_VERSION }}
+          CIBW_TEST_EXTRAS: test
+          CIBW_TEST_COMMAND: 'python -c "from drizzle import cdrizzle" && pytest -q --pyargs drizzle'
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy,astropy,pyerfa,pyyaml
+        run: |
+          set -euo pipefail
+          uv pip install --upgrade cibuildwheel
+          python -m cibuildwheel --output-dir wheelhouse
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: drizzle-${{ env.DRIZZLE_VERSION }}-cp314t-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish drizzle ${{ matrix.version }}
+    needs: [setup, build_abi3, build_freethreaded]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: drizzle-${{ matrix.version }}-*-manylinux_riscv64
