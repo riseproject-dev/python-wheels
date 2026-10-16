@@ -185,7 +185,6 @@ def find_upstream_issue(package: str) -> Optional[str]:
         issue_title = f"{package} riscv64 support"
         result = subprocess.run([
             "gh", "issue", "list",
-            "--milestone", "Upstream",
             "--search", issue_title,
             "--json", "number",
             "--jq", ".[0].number",
