@@ -1,0 +1,213 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Upstream (mostrobotpy dist.yml, `rdev.sh ci build-other-wheels`) repackages the
+# wpiutil-cpp library WPILib's Gradle build publishes to frcmaven.wpi.edu, which has no
+# riscv64 classifier. This builds that library from allwpilib with its own CMake recipe
+# (cmake.yml), seeds hatch-robotpy's download cache with it, then runs the same
+# `python -m build --no-isolation` on the subproject.
+name: Build robotpy-native-wpiutil wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/robotpy-native-wpiutil.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-robotpy-native-wpiutil.yml'
+      - 'docs/packages/robotpy-native-wpiutil.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-robotpy-native-wpiutil.yml'
+      - 'docs/packages/robotpy-native-wpiutil.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  HATCH_ROBOTPY_VERSION: '0.2.1'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: robotpy-native-wpiutil
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build robotpy-native-wpiutil ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 360
+    env:
+      PACKAGE_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout mostrobotpy ${{ env.PACKAGE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: robotpy/mostrobotpy
+          ref: ${{ env.PACKAGE_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout allwpilib v${{ env.PACKAGE_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: wpilibsuite/allwpilib
+          ref: v${{ env.PACKAGE_VERSION }}
+          path: allwpilib
+          sparse-checkout: |
+            cmake
+            thirdparty/googletest
+            wpiutil
+          persist-credentials: false
+
+      - name: Checkout hatch-robotpy ${{ env.HATCH_ROBOTPY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: robotpy/hatch-robotpy
+          ref: ${{ env.HATCH_ROBOTPY_VERSION }}
+          path: hatch-robotpy
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: |
+          git -C allwpilib apply "$GITHUB_WORKSPACE"/python-wheels/patches/robotpy-native-wpiutil/"$PACKAGE_VERSION"/0001-*.patch
+          git -C hatch-robotpy apply "$GITHUB_WORKSPACE"/python-wheels/patches/robotpy-native-wpiutil/"$PACKAGE_VERSION"/0002-*.patch
+
+      # The subproject directory has no licence of its own, so upstream's wheels ship none.
+      - name: Add the allwpilib licences
+        run: |
+          cp allwpilib/LICENSE.md subprojects/robotpy-native-wpiutil/LICENSE.md
+          cp allwpilib/ThirdPartyNotices.txt subprojects/robotpy-native-wpiutil/LICENSE.ThirdPartyNotices.txt
+
+      - name: Write the build script
+        run: |
+          cat > "$RUNNER_TEMP/build.sh" <<'EOF'
+          set -euo pipefail
+
+          /opt/python/cp313-cp313/bin/python -m venv /tmp/venv
+          . /tmp/venv/bin/activate
+          pip install build ninja hatchling 'hatch-nativelib~=0.2.0'
+          SETUPTOOLS_SCM_PRETEND_VERSION="$HATCH_ROBOTPY_VERSION" pip install ./hatch-robotpy
+
+          cmake -S allwpilib --preset default \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/tmp/wpiutil \
+            -DWITH_JAVA=OFF \
+            -DWITH_NTCORE=OFF \
+            -DWITH_WPIMATH=OFF \
+            -DWITH_WPILIB=OFF \
+            -DWITH_CSCORE=OFF \
+            -DWITH_GUI=OFF \
+            -DWITH_SIMULATION_MODULES=OFF \
+            -DWITH_BENCHMARK=OFF \
+            -DUSE_SYSTEM_PROTOBUF=OFF \
+            -DNO_WERROR=ON
+          cmake --build allwpilib/build-cmake --parallel "$(nproc)"
+          (cd allwpilib/build-cmake && ctest --output-on-failure)
+          cmake --install allwpilib/build-cmake
+          patchelf --set-rpath '$ORIGIN' /tmp/wpiutil/lib/libwpiutil.so
+
+          export HATCH_ROBOTPY_CACHE=/tmp/maven
+          mkdir -p "$HATCH_ROBOTPY_CACHE" /tmp/classifier/linux/riscv64/shared
+          cp /tmp/wpiutil/lib/libwpiutil.so /tmp/classifier/linux/riscv64/shared/
+          (cd /tmp/classifier && python -m zipfile -c "$HATCH_ROBOTPY_CACHE/wpiutil-cpp-$PACKAGE_VERSION-linuxriscv64.zip" linux)
+          (cd /tmp/wpiutil/include/wpiutil && python -m zipfile -c "$HATCH_ROBOTPY_CACHE/wpiutil-cpp-$PACKAGE_VERSION-headers.zip" .)
+
+          (cd subprojects/robotpy-native-wpiutil && python -m build --no-isolation --wheel --outdir /tmp/dist)
+          auditwheel repair --plat manylinux_2_39_riscv64 -w wheelhouse /tmp/dist/*.whl
+
+          pip install wheelhouse/*.whl
+          g++ -std=c++20 /work/smoke.cpp -o /tmp/smoke \
+            $(pkgconf-pypi --cflags --libs robotpy-native-wpiutil) \
+            -Wl,-rpath,"$(pkgconf-pypi --variable=libdir robotpy-native-wpiutil)"
+          /tmp/smoke
+          EOF
+
+          cat > "$RUNNER_TEMP/smoke.cpp" <<'EOF'
+          #include <string>
+
+          #include <fmt/format.h>
+          #include <google/protobuf/descriptor.pb.h>
+          #include <wpi/timestamp.h>
+
+          int main() {
+            google::protobuf::FileDescriptorProto out;
+            out.set_name("riscv64.proto");
+            out.add_message_type()->set_name("Probe");
+            std::string bytes;
+            if (!out.SerializeToString(&bytes)) return 1;
+            google::protobuf::FileDescriptorProto in;
+            if (!in.ParseFromString(bytes) || in.message_type(0).name() != "Probe") return 2;
+            if (wpi::Now() == 0) return 3;
+            fmt::print("{} {} bytes\n", in.name(), bytes.size());
+            return 0;
+          }
+          EOF
+
+      - name: Build and test libwpiutil, then build and repair the wheel
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE":/workspace \
+            -v "$RUNNER_TEMP":/work \
+            --workdir /workspace \
+            -e PACKAGE_VERSION \
+            -e HATCH_ROBOTPY_VERSION \
+            "$MANYLINUX_RISCV64_IMAGE" \
+            bash /work/build.sh
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.13'
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install and load the wheel
+        run: |
+          uv pip install wheelhouse/*.whl
+          python -c "import native.wpiutil._init_robotpy_native_wpiutil"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: robotpy-native-wpiutil-${{ matrix.version }}-py3-none-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish robotpy-native-wpiutil ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: robotpy-native-wpiutil-${{ matrix.version }}-*-manylinux_riscv64
