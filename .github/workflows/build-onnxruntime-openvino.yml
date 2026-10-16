@@ -141,7 +141,19 @@ jobs:
             # setup.py only bundles the OpenVINO runtime libs it finds already sitting in
             # onnxruntime/capi (gotcha: upstream's own wheel build does this same copy, just
             # inside a private microsoft/onnxruntime-github-actions action step we can't reuse).
-            "${python_exe}" /onnxruntime_src/tools/ci_build/build.py "${build_args[@]}" --update --build
+            #
+            # This has to be *two* build.py invocations, not one: build.py only turns on
+            # -Donnxruntime_ENABLE_PYTHON (which is what makes cmake/onnxruntime_python.cmake's
+            # POST_BUILD step on onnxruntime_pybind11_state create and populate onnxruntime/capi/
+            # in the first place) when --build_wheel/--gen_doc/--enable_training is passed, and
+            # that only takes effect on an --update (cmake configure) run -- `cmake --build` alone
+            # never re-reads it. But passing --build_wheel together with --build in the same
+            # invocation also runs build_python_wheel() at the end of that *same* process, i.e.
+            # before this script gets control back to copy the OpenVINO libs in below, so the
+            # resulting wheel would silently ship without them. Hence: configure-with-pybind-on
+            # first (no --build, so nothing compiles or packages yet), then compile separately.
+            "${python_exe}" /onnxruntime_src/tools/ci_build/build.py "${build_args[@]}" --update --build_wheel
+            "${python_exe}" /onnxruntime_src/tools/ci_build/build.py "${build_args[@]}" --build
 
             capi_dir=/build/Release/onnxruntime/capi
             for lib in libopenvino_riscv_cpu_plugin.so \
