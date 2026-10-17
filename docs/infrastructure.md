@@ -46,10 +46,11 @@ repository:
 2. `Branch` should be set to `gh-pages` `/(root)`
 
 When this is configured, any push to `main` touching the `docs` folder
-triggers a docs build and deploy. The `gh-pages` branch also serves
-`pypi.riseproject.dev`'s `simple`/`project` package index, maintained by a
-separate, external process — the docs deploy step passes `keep_files: true`
-to `peaceiris/actions-gh-pages` so it never touches that content.
+triggers a docs build and deploy. The deploy replaces the whole content of the
+`gh-pages` branch, including the `simple`/`project` package index (generated
+from `docs/packages/*.yaml`), so nothing should be committed there by hand.
+The custom domain is written to `CNAME` by the `cname` input of
+`peaceiris/actions-gh-pages`.
 
 Note that the `gh-pages` branch should be automatically created by the
 workflows, but if not it must be created manually with an empty `.nojekyll` file
