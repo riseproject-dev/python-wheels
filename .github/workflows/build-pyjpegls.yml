@@ -1,0 +1,131 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on upstream's own cibuildwheel-driven
+# https://github.com/pydicom/pyjpegls/blob/v1.5.1/.github/workflows/release-wheels.yml,
+# narrowed to Linux riscv64, with the tests of its pr-tests.yml.
+name: Build pyjpegls wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/pyjpegls.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyjpegls.yml'
+      - 'docs/packages/pyjpegls.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-pyjpegls.yml'
+      - 'docs/packages/pyjpegls.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: pyjpegls
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build pyjpegls ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Mirrors upstream's own pr-tests.yml/release-wheels.yml matrix
+        # (3.9-3.13). Upstream ships no cp314 or cp314t wheel, has no
+        # free-threaded CI env, and the Cython extension declares no
+        # Py_mod_gil slot, so both are left out rather than shipped
+        # untested (gotcha 33/127).
+        python: ["cp39", "cp310", "cp311", "cp312", "cp313"]
+
+    env:
+      PYJPEGLS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyjpegls v${{ env.PYJPEGLS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pydicom/pyjpegls
+          ref: v${{ env.PYJPEGLS_VERSION }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # The extension compiles in the vendored CharLS (BSD-3-Clause) but the
+      # wheel ships no licence at all, for either project.
+      - name: Patch pyjpegls source
+        run: |
+          git apply python-wheels/patches/pyjpegls/${{ env.PYJPEGLS_VERSION }}/00*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: pytest --pyargs jpeg_ls.tests
+
+      - name: Check the wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("_CharLS") and n.endswith(".so") for n in names), whl
+              for lic in ("LICENSE", "LICENSE.charls"):
+                  assert any(n.endswith(".dist-info/licenses/" + lic) for n in names), (whl, lic)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pyjpegls-${{ env.PYJPEGLS_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish pyjpegls ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: pyjpegls-${{ matrix.version }}-*-manylinux_riscv64
