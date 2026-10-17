@@ -1,0 +1,109 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 15 Oct 2026 00:00:00 +0000
+Subject: [PATCH] build: link the python extension against a precompiled
+ liblbug
+
+Upstream-Status: Backport [https://github.com/LadybugDB/ladybug/blob/v0.19.1/CMakeLists.txt]
+
+setup.py's CMakeBuild.build_extension() runs `make clean && make
+python` unconditionally, a full from-scratch compile of liblbug's
+~800 C++ files, once per cibuildwheel interpreter (cp312/cp313/cp314/
+cp314t). On riscv64 manylinux there is no ccache/sccache fallback
+(EPEL is disabled on that image), so building real_ladybug this way
+needs the full compile four times with no reuse between interpreters.
+
+LadybugDB/ladybug v0.19.1 already solves this generically for every
+language binding: CMakeLists.txt takes a LBUG_API_USE_PRECOMPILED_LIB
+option backed by LBUG_API_PRECOMPILED_LIB_PATH, which this repo's
+`ladybug` package (PR #2336) already relies on to compile liblbug.a
+once and link it into each interpreter's extension module separately.
+Those two CMake cache variables, and the Makefile's EXTRA_CMAKE_FLAGS
+passthrough that sets them, are already present verbatim in
+real_ladybug 0.15.3's own CMakeLists.txt/Makefile (they were added for
+the Node.js binding first, under the deprecated LBUG_NODEJS_* alias
+names CMakeLists.txt still maps to/from). What v0.15.3 is missing is
+the two small call sites v0.19.1 added on top of that infrastructure:
+
+- CMakeLists.txt: the global `src/include` include_directories() call
+  was gated on BUILD_LBUG alone, so it never ran when
+  LBUG_API_USE_PRECOMPILED_LIB forces BUILD_LBUG off, and nothing
+  else added those headers to the python extension's include path.
+- tools/python_api/CMakeLists.txt: unconditionally linked `_lbug`
+  against the `lbug` CMake target, which does not exist when
+  BUILD_LBUG is off (add_subdirectory(src) is skipped). Link against
+  the precompiled static archive via LBUG_API_PRECOMPILED_LIB_PATH
+  instead when LBUG_API_USE_PRECOMPILED_LIB is set, same as
+  v0.19.1's tools/python_api/CMakeLists.txt (minus the LBUG_SOURCE_DIR
+  standalone-build support v0.19.1 also added there, unneeded here
+  since this repo always builds through the root CMakeLists.txt).
+- scripts/pip-package/setup.py: wire LBUG_API_PRECOMPILED_LIB_PATH
+  from the environment into the above two CMake cache variables via
+  EXTRA_CMAKE_FLAGS, same as v0.19.1's setup.py.
+
+With this, the riscv64 workflow builds liblbug.a once (BUILD_LBUG=TRUE,
+the existing default) and each cibuildwheel interpreter leg only
+compiles+links the small python_api glue against it
+(LBUG_API_USE_PRECOMPILED_LIB=TRUE), instead of recompiling all of
+liblbug four times.
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9ea9408..d974e39 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -475,7 +475,7 @@ add_definitions(-DLBUG_ROOT_DIRECTORY="${PROJECT_SOURCE_DIR}")
+ add_definitions(-DLBUG_CMAKE_VERSION="${CMAKE_PROJECT_VERSION}")
+ add_definitions(-DLBUG_EXTENSION_VERSION="0.15.0")
+
+-if(BUILD_LBUG)
++if(BUILD_LBUG OR LBUG_API_USE_PRECOMPILED_LIB)
+ include_directories(
+     src/include
+     ${CMAKE_CURRENT_BINARY_DIR}/src/include
+diff --git a/scripts/pip-package/setup.py b/scripts/pip-package/setup.py
+index 2338bbf..ee655bc 100644
+--- a/scripts/pip-package/setup.py
++++ b/scripts/pip-package/setup.py
+@@ -84,6 +84,14 @@ class CMakeBuild(build_ext):
+
+         # Build the native extension.
+         full_cmd = ['make', 'python', 'NUM_THREADS=%d' % num_cores]
++        precompiled_lib_path = os.environ.get('LBUG_API_PRECOMPILED_LIB_PATH', '').strip()
++        if precompiled_lib_path:
++            self.announce("Using precompiled liblbug from %s." % precompiled_lib_path)
++            full_cmd.append(
++                'EXTRA_CMAKE_FLAGS=-DBUILD_LBUG=FALSE -DBUILD_SHELL=FALSE '
++                '-DLBUG_API_USE_PRECOMPILED_LIB=TRUE '
++                '-DLBUG_API_PRECOMPILED_LIB_PATH=%s' % precompiled_lib_path
++            )
+         subprocess.run(full_cmd, cwd=build_dir, check=True, env=env_vars)
+         self.announce("Done building native extension.")
+         self.announce("Copying native extension...")
+diff --git a/tools/python_api/CMakeLists.txt b/tools/python_api/CMakeLists.txt
+index 29f8781..949a546 100644
+--- a/tools/python_api/CMakeLists.txt
++++ b/tools/python_api/CMakeLists.txt
+@@ -33,9 +33,20 @@ set_target_properties(_lbug
+         RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/build/real_ladybug"
+         ARCHIVE_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/build/real_ladybug")
+
+-target_link_libraries(_lbug
+-        PRIVATE
+-        lbug)
++if(LBUG_API_USE_PRECOMPILED_LIB)
++    if(NOT LBUG_API_PRECOMPILED_LIB_PATH)
++        message(FATAL_ERROR "LBUG_API_PRECOMPILED_LIB_PATH must be set when LBUG_API_USE_PRECOMPILED_LIB is enabled.")
++    endif()
++    target_link_libraries(_lbug
++            PRIVATE
++            ${LBUG_API_PRECOMPILED_LIB_PATH}
++            lbug_link_deps)
++    target_compile_definitions(_lbug PRIVATE LBUG_STATIC_DEFINE)
++else()
++    target_link_libraries(_lbug
++            PRIVATE
++            lbug)
++endif()
+
+ target_include_directories(
+         _lbug
