@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/sase-org/sase-core/blob/v0.39.0/.github/workflows/release-plz.yml
+name: Build sase-core-rs wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/sase-core-rs.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sase-core-rs.yml'
+      - 'docs/packages/sase-core-rs.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sase-core-rs.yml'
+      - 'docs/packages/sase-core-rs.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: sase-core-rs
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build sase-core-rs ${{ matrix.version }} cp312-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+
+    env:
+      SASE_CORE_RS_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout sase-core-rs ${{ env.SASE_CORE_RS_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: sase-org/sase-core
+          ref: v${{ env.SASE_CORE_RS_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch sase-core-rs source
+        run: git apply python-wheels/patches/sase-core-rs/${{ env.SASE_CORE_RS_VERSION }}/00*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: crates/sase_core_py
+          output-dir: wheelhouse/
+          # pyo3 abi3-py312 (crates/sase_core_py/Cargo.toml), matching
+          # upstream's own single wheel per platform for 3.12+.
+          only: cp312-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # sase-core-rs ships no [tool.cibuildwheel], so the Rust
+          # toolchain its maturin backend needs is installed in-container.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_TEST_COMMAND: >-
+            python -c "import sase_core_rs; assert sase_core_rs.sase_core_rs.__file__.endswith('.so'), sase_core_rs.sase_core_rs.__file__; print('import ok')" &&
+            python -c "import sase_core_rs; print('parse_query ok:', sase_core_rs.parse_query('status:Ready'))"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sase-core-rs-${{ env.SASE_CORE_RS_VERSION }}-cp312-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish sase-core-rs ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: sase-core-rs-${{ matrix.version }}-*-manylinux_riscv64
