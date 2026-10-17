@@ -38,20 +38,18 @@ registry credentials are required.
 ## GitHub Pages Configuration
 
 The `.github/workflows/website.yml` workflow handles building and deploying
-documentation, including providing previews of the docs on a per-PR basis. For
-this to work correctly, the following settings need to be configured under
-`Settings -> Pages -> Build and deployment` in the repository:
+documentation. For this to work correctly, the following settings need to be
+configured under `Settings -> Pages -> Build and deployment` in the
+repository:
 
 1. `Source` should be set to `Deploy from a branch`
 2. `Branch` should be set to `gh-pages` `/(root)`
 
-When this is configured, any changes touching the `docs` folder will trigger a
-docs build, where upon completion the `rossjrw/pr-preview-action` will
-automatically comment on the PR with a link looking like:
-
-```
-https://riseproject-dev.github.io/python-wheels/pr-preview/pr-171/
-```
+When this is configured, any push to `main` touching the `docs` folder
+triggers a docs build and deploy. The `gh-pages` branch also serves
+`pypi.riseproject.dev`'s `simple`/`project` package index, maintained by a
+separate, external process — the docs deploy step passes `keep_files: true`
+to `peaceiris/actions-gh-pages` so it never touches that content.
 
 Note that the `gh-pages` branch should be automatically created by the
 workflows, but if not it must be created manually with an empty `.nojekyll` file
