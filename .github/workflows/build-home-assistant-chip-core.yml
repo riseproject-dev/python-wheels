@@ -35,6 +35,8 @@ permissions:
 env:
   # gn/gn git_revision pinned by the Pigweed submodule's cipd_setup/pigweed.json
   GN_REVISION: 487f8353f15456474437df32bb186187b0940b45
+  # infra/3pp/tools/protoc version pinned by the same pigweed.json
+  PROTOC_VERSION: '28.2'
   MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
 
 jobs:
@@ -191,6 +193,26 @@ jobs:
           git -C /tmp/gn checkout "${GN_REVISION}"
           (cd /tmp/gn && CXX=g++ python3 build/gen.py --allow-warnings && ninja -C out gn)
           install -m 0755 /tmp/gn/out/gn /usr/local/bin/gn
+
+      # Pigweed's bootstrap runs a bare `protoc` from PATH to generate the
+      # Python protos, and infra/3pp/tools/protoc has no linux-riscv64 CIPD
+      # build. CRB's protobuf-compiler (3.19.6) rejects --experimental_editions
+      # and the riscv64 grpcio-tools bundles protoc 35, whose output won't load
+      # under CHIP's protobuf==5.28.3, so build Pigweed's own version. The
+      # well-known .protos go in /opt/protoc/include, found relative to the binary.
+      - name: Install protoc
+        run: |
+          set -e
+          git clone --depth 1 --branch "v${PROTOC_VERSION}" https://github.com/protocolbuffers/protobuf /tmp/protobuf
+          git -C /tmp/protobuf submodule update --init --depth 1 third_party/abseil-cpp
+          cmake -S /tmp/protobuf -B /tmp/protobuf/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/protoc \
+            -Dprotobuf_BUILD_TESTS=OFF -Dprotobuf_BUILD_LIBUPB=OFF -Dprotobuf_WITH_ZLIB=OFF
+          cmake --build /tmp/protobuf/build --target protoc
+          cmake --install /tmp/protobuf/build --component protoc
+          cmake --install /tmp/protobuf/build --component protobuf-headers
+          ln -s /opt/protoc/bin/protoc /usr/local/bin/protoc
+          protoc --version
 
       - name: Bootstrap
         run: bash scripts/bootstrap.sh -p linux
