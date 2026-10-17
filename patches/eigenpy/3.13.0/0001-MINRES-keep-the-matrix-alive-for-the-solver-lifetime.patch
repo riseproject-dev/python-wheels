@@ -1,0 +1,129 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sat, 17 Oct 2026 00:00:00 +0000
+Subject: [PATCH] MINRES: keep the matrix alive for the solver's lifetime
+
+Eigen's iterative solvers do not copy the matrix handed to compute(),
+analyzePattern(), factorize() or the matrix constructor: IterativeSolverBase
+only keeps an Eigen::Ref<const MatrixType> to it, and the matrix must outlive
+the solver. The MINRES binding passes it the MatrixType that Boost.Python
+converted from the numpy argument, which is a temporary freed as soon as the
+constructor (or compute()) returns, so every later solve() reads freed memory.
+
+Under valgrind, test_MINRES.py on the released x86_64 wheel reports "Invalid
+read of size 8 ... inside a block of size 80,000 free'd" from minres() ->
+selfadjoint_matrix_vector_product: the 100x100 matrix copy freed by the
+constructor. On x86_64 the freed block happens to be left untouched and the
+test passes; on riscv64 it is reused before solve() runs and the solver works
+on garbage, so the first `is_approx(A.dot(X_est), B, 1e-6)` fails.
+
+Hold the solver in a Boost.Python HeldType that owns a copy of the matrix and
+points the solver at that copy, from the constructor as well as from
+compute(), analyzePattern() and factorize().
+
+Upstream-Status: To upstream [not yet submitted; the same code is still on stack-of-tasks/eigenpy devel]
+---
+ include/eigenpy/solvers/MINRES.hpp | 55 +++++++++++++++++++++++++-------
+ 1 file changed, 42 insertions(+), 13 deletions(-)
+
+diff --git a/include/eigenpy/solvers/MINRES.hpp b/include/eigenpy/solvers/MINRES.hpp
+--- a/include/eigenpy/solvers/MINRES.hpp
++++ b/include/eigenpy/solvers/MINRES.hpp
+@@ -13,10 +13,32 @@
+ #include "eigenpy/utils/scalar-name.hpp"
+ 
+ namespace eigenpy {
++namespace details {
++// Eigen's iterative solvers only keep an Eigen::Ref to the matrix given to
++// compute(), analyzePattern() or factorize(), so that matrix must outlive the
++// solver. A matrix converted from Python is a temporary destroyed as soon as
++// the call returns, so the Python-side solver keeps its own copy of it.
++template <typename _Solver>
++struct IterativeSolverHolder : _Solver {
++  typedef _Solver Solver;
++  typedef typename Solver::MatrixType MatrixType;
++
++  explicit IterativeSolverHolder(PyObject*) {}
++
++  IterativeSolverHolder(PyObject*, const MatrixType& matrix)
++      : m_matrix(matrix) {
++    Solver::compute(m_matrix);
++  }
++
++  MatrixType m_matrix;
++};
++}  // namespace details
++
+ template <typename _Solver>
+ struct IterativeSolverBaseVisitor
+     : public boost::python::def_visitor<IterativeSolverBaseVisitor<_Solver>> {
+   typedef _Solver Solver;
++  typedef details::IterativeSolverHolder<Solver> Holder;
+   typedef typename Solver::MatrixType MatrixType;
+   typedef typename Solver::Preconditioner Preconditioner;
+   typedef typename Solver::Scalar Scalar;
+@@ -28,26 +50,17 @@
+ 
+   template <class PyClass>
+   void visit(PyClass& cl) const {
+-    cl.def("analyzePattern",
+-           (Solver & (Solver::*)(const Eigen::EigenBase<MatrixType>& matrix)) &
+-               Solver::analyzePattern,
+-           bp::args("self", "A"),
++    cl.def("analyzePattern", &analyzePattern, bp::args("self", "A"),
+            "Initializes the iterative solver for the sparsity pattern of the "
+            "matrix A for further solving Ax=b problems.",
+            bp::return_self<>())
+         .def(
+-            "factorize",
+-            (Solver & (Solver::*)(const Eigen::EigenBase<MatrixType>& matrix)) &
+-                Solver::factorize,
+-            bp::args("self", "A"),
++            "factorize", &factorize, bp::args("self", "A"),
+             "Initializes the iterative solver with the numerical values of the "
+             "matrix A for further solving Ax=b problems.",
+             bp::return_self<>())
+         .def(
+-            "compute",
+-            (Solver & (Solver::*)(const Eigen::EigenBase<MatrixType>& matrix)) &
+-                Solver::compute,
+-            bp::args("self", "A"),
++            "compute", &compute, bp::args("self", "A"),
+             "Initializes the iterative solver with the matrix A for further "
+             "solving Ax=b problems.",
+             bp::return_self<>())
+@@ -106,6 +119,21 @@
+   }
+ 
+  private:
++  static Solver& analyzePattern(Holder& self, const MatrixType& matrix) {
++    self.m_matrix = matrix;
++    return self.analyzePattern(self.m_matrix);
++  }
++
++  static Solver& factorize(Holder& self, const MatrixType& matrix) {
++    self.m_matrix = matrix;
++    return self.factorize(self.m_matrix);
++  }
++
++  static Solver& compute(Holder& self, const MatrixType& matrix) {
++    self.m_matrix = matrix;
++    return self.compute(self.m_matrix);
++  }
++
+   template <typename MatrixOrVector1, typename MatrixOrVector2>
+   static MatrixOrVector1 solveWithGuess(const Solver& self,
+                                         const MatrixOrVector1& b,
+@@ -153,7 +181,8 @@
+   }
+ 
+   static void expose(const std::string& name) {
+-    bp::class_<Solver, boost::noncopyable>(
++    bp::class_<Solver, details::IterativeSolverHolder<Solver>,
++               boost::noncopyable>(
+         name.c_str(),
+         "A minimal residual solver for sparse symmetric problems.\n"
+         "This class allows to solve for A.x = b sparse linear problems using "
+-- 
+2.43.0
+
