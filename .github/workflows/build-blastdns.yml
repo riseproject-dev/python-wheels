@@ -65,11 +65,10 @@ jobs:
         # hits the same gap).
         python: ['cp39', 'cp310', 'cp311', 'cp312', 'cp313', 'cp314', 'cp314t']
         include:
-          # pydantic>=2.12.4 (a runtime dependency) needs pydantic-core==2.41.5,
-          # which this registry has only for cp310-cp314 (no cp39, and no
-          # free-threaded build exists anywhere upstream either). Those two
-          # legs still build and ship a wheel; they just can't exercise the
-          # real test suite here, so they get a wheel-content check instead.
+          # pydantic>=2.12.4 (a runtime dependency) needs pydantic-core, which
+          # this registry has only for cp310-cp314. cp39 still builds and
+          # ships a wheel; it just can't exercise the real test suite here,
+          # so it gets an import check instead.
           - python: cp39
             test: smoke
           - python: cp310
@@ -82,8 +81,15 @@ jobs:
             test: full
           - python: cp314
             test: full
+          # orjson>=3.11.4 (a runtime dependency, imported by blastdns'
+          # __init__) has never published a free-threaded wheel for any
+          # platform, and its build.rs refuses free-threaded Python unless
+          # ORJSON_BUILD_FREETHREADED is set, so blastdns cannot be installed
+          # under cp314t anywhere. Upstream still ships a cp314t wheel, so
+          # build it and let "Check wheel contents" stand as the proof
+          # (gotcha 149).
           - python: cp314t
-            test: smoke
+            test: none
 
     env:
       BLASTDNS_VERSION: ${{ matrix.version }}
@@ -137,6 +143,7 @@ jobs:
           EOF
 
       - name: Install Python
+        if: matrix.test != 'none'
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
         with:
           python-version: ${{ steps.interp.outputs.value }}
@@ -144,6 +151,7 @@ jobs:
           enable-cache: false
 
       - name: Install wheel
+        if: matrix.test != 'none'
         env:
           # blastdns itself depends on orjson>=3.11.4 at runtime. PyPI lists
           # it sdist-only (no riscv64 wheel), so a plain --no-index install
