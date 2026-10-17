@@ -48,10 +48,13 @@ jobs:
 
   # ZAP code generation has no riscv64 build (project-chip/zap ships prebuilt
   # Electron/node binaries for x86_64/arm64 only), so it runs once here on a
-  # regular x86_64 runner -- same split chip-wheels' own build.yaml uses
-  # between build_prepare (ubuntu-24.04) and its per-arch build job -- and the
-  # pre-generated output is carried into build_wheels via
-  # chip_code_pre_generated_directory, which never invokes ZAP itself.
+  # regular x86_64 runner, as in chip-wheels' own build_prepare, and
+  # build_wheels consumes it via chip_code_pre_generated_directory, which
+  # never invokes ZAP itself. Unlike chip-wheels, only zzz_pregenerated/ is
+  # handed over, not a tar of the whole SDK: the riscv64 runners download
+  # Actions artifacts at ~1 MB/s in one non-resumable stream, so that ~4 GB tar
+  # took over an hour and failed whenever the stream broke, while the same
+  # checkout and patches straight from GitHub take minutes there.
   build_prepare:
     name: Prepare home-assistant-chip-core ${{ matrix.version }}
     needs: [setup]
@@ -71,31 +74,7 @@ jobs:
           repository: home-assistant-libs/chip-wheels
           ref: ${{ env.CHIP_VERSION }}
           submodules: true
-          fetch-depth: 0
           persist-credentials: false
-
-      # actions/checkout's submodules:true leaves connectedhomeip/.git as a
-      # gitfile pointing at ../.git/modules/connectedhomeip (standard git
-      # 2.7+ layout) -- fine in this job, but "Create Matter SDK tar" below
-      # packages only connectedhomeip/ itself, dropping that gitlink's
-      # target. build_wheels then extracts the tar into a fresh riscv64
-      # container with no outer chip-wheels checkout at all, so every git
-      # command inside connectedhomeip/ fails ("fatal: gitfile does not
-      # point to a valid repository") -- including pigweed's own bootstrap,
-      # which runs `git submodule status --recursive` there. Move the real
-      # git directory into connectedhomeip/.git itself so it survives the
-      # tar/extract boundary as a standalone repository.
-      - name: Make the connectedhomeip submodule self-contained
-        run: |
-          rm connectedhomeip/.git
-          cp -r .git/modules/connectedhomeip connectedhomeip/.git
-          # `git -C connectedhomeip ...` won't do: any git invocation
-          # resolves core.worktree as part of repo discovery, before running
-          # the command itself, and the copied config's worktree (relative
-          # to its old location, .git/modules/connectedhomeip) now points
-          # one level too far up ("cannot chdir to '../../../connectedhomeip'").
-          # --file edits the config directly, with no repo discovery at all.
-          git config --file connectedhomeip/.git/config --unset core.worktree
 
       - name: Checkout python-wheels
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -127,13 +106,13 @@ jobs:
         working-directory: connectedhomeip
         run: scripts/run_in_build_env.sh "scripts/codepregen.py ./zzz_pregenerated/"
 
-      - name: Create Matter SDK tar
-        run: tar -caf connectedhomeip-${{ env.CHIP_VERSION }}.tar.zst --exclude ./connectedhomeip/.environment --use-compress-program=zstdmt connectedhomeip
+      - name: Create ZAP pre-generated code tar
+        run: tar -caf zzz_pregenerated-${{ env.CHIP_VERSION }}.tar.zst --use-compress-program=zstdmt -C connectedhomeip zzz_pregenerated
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: home-assistant-chip-core-${{ env.CHIP_VERSION }}-matter-sdk
-          path: connectedhomeip-${{ env.CHIP_VERSION }}.tar.zst
+          name: home-assistant-chip-core-${{ env.CHIP_VERSION }}-zap-pregenerated
+          path: zzz_pregenerated-${{ env.CHIP_VERSION }}.tar.zst
           if-no-files-found: error
 
   build_wheels:
@@ -168,20 +147,49 @@ jobs:
       PIP_NO_BINARY: protobuf
 
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+      - name: Checkout home-assistant-libs/chip-wheels ${{ env.CHIP_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          name: home-assistant-chip-core-${{ env.CHIP_VERSION }}-matter-sdk
+          repository: home-assistant-libs/chip-wheels
+          ref: ${{ env.CHIP_VERSION }}
+          submodules: true
+          persist-credentials: false
 
-      - name: Extract Matter SDK from tar
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Install system dependencies
         working-directory: ./
         run: |
           dnf install -y --enablerepo=crb zstd \
             openssl-devel glib2-devel libnl3-devel cairo-devel \
             gobject-introspection-devel dbus-devel python3-devel \
             libstdc++-static
-          tar -xaf connectedhomeip-${{ env.CHIP_VERSION }}.tar.zst --use-compress-program=zstdmt
           git config --global --add safe.directory '*'
           echo "/opt/python/cp312-cp312/bin" >> "$GITHUB_PATH"
+
+      - name: Checkout connectedhomeip submodules
+        run: scripts/checkout_submodules.py --shallow --platform linux
+
+      - name: Apply riscv64 patches
+        run: git apply ../python-wheels/patches/home-assistant-chip-core/${{ env.CHIP_VERSION }}/*.patch
+
+      - name: Apply chip-wheels patches
+        run: |
+          for patch in ../*.patch; do
+            echo "Applying ${patch}"
+            patch -p1 < "$patch"
+          done
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: home-assistant-chip-core-${{ env.CHIP_VERSION }}-zap-pregenerated
+
+      - name: Extract ZAP pre-generated code
+        run: tar -xaf ../zzz_pregenerated-${{ env.CHIP_VERSION }}.tar.zst --use-compress-program=zstdmt
 
       # Rocky 10's riscv64 CIPD backend has no fuchsia/third_party/ninja build
       # at all, and gn_gen.sh's own gn/ninja fetch goes through the CIPD
