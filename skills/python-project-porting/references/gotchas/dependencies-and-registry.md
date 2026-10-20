@@ -299,13 +299,13 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/dependencies-and-regis
       GIL-ful entries keep their full suite:
       ```yaml
       matrix:
-        python: ["cp312", "cp313", "cp314", "cp314t"]
-        include:
-          - python: "cp314t"
-            test_skip: "*"
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
       ...
-          CIBW_TEST_SKIP: ${{ matrix.test_skip }}
+          CIBW_TEST_SKIP: ${{ endsWith(matrix.python, 't') && '*' || '' }}
       ```
+      (A `python-matrix` include list can't take extra per-entry keys, so derive the
+      value from `matrix.python` in an expression. Unconverted workflows can still use a
+      `python:` list plus `include: - python: "cp314t"` / `test_skip: "*"`.)
       An unset matrix key interpolates to the empty string, and cibuildwheel's `test-skip`
       selector treats `""` as "skip nothing" (same `_resolve_cascade` behaviour gotcha 51
       relies on for `before-build`), so the other entries need no second command shape.

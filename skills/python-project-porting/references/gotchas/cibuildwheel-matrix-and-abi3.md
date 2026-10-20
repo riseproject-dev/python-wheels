@@ -100,8 +100,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
     the cp312 abi3 wheel.
     Some packages ship **only** the abi3 wheel with no cp314t variant (litellm: upstream
     publishes `cp310-abi3` only, no free-threaded wheel). In that case the matrix
-    collapses to a single build; run it on cp312 (our minimum) and test-reuse on
-    cp313/cp314 via cibuildwheel's `find_compatible_wheel` logic.
+    collapses to a single build and test-reuse on newer interpreters via cibuildwheel's
+    `find_compatible_wheel` logic. `check_versions.py` derives this shape from the PyPI
+    wheel names on its own (`cp310-abi3` becomes `python-versions: ['3.10']`); if the abi3
+    floor can't build on riscv64, edit it to a floor that can (e.g. `['3.12']`).
     - **maturin abi3 is a pyproject/Cargo feature; setuptools-rust abi3 is a
       build-time *flag* you must inject.** For maturin the abi3 tag comes from
       `wheel.py-api`/the `pyo3/abi3-pyNN` crate feature — set once, inherited. But
@@ -1062,7 +1064,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
     stop at 3.12. Upstream's cp310-cp312-only wheel set is the tell, and the matrix has to
     follow it (`python: ["cp312"]` here) even though cp313/cp314 wheels would build and pass
     an import check. Exercise the tool's front door — the CLI on a two-line file, not
-    `import <pkg>` — on the newest interpreter of the default matrix before committing to it.
+    `import <pkg>` — on the newest interpreter of the matrix before committing to it.
     Applies to anything that consumes the bytecode or AST details of the interpreter it runs
     on: type checkers, bytecode rewriters, coverage/debug tooling.
 
@@ -1115,15 +1117,16 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/cibuildwheel-matrix-an
       comment is explicit that this is unsupported and untested ("no guarantee this will work
       and no support will be provided") — setting it to force a `cp314` build substitutes our
       own untested guess for upstream's own tested ceiling, exactly the divergence goal 2
-      (mirror upstream's own recipe) exists to prevent. Trim the matrix instead:
-      `python: ["cp312", "cp313"]`, deviating from the repo-default four with a one-line
-      comment citing the guard.
+      (mirror upstream's own recipe) exists to prevent. Trim the matrix instead
+      (drop `'3.14'` from `python-versions`, `python-exclude: "cp314*"`, or `python:
+      ["cp312", "cp313"]` in an unconverted workflow) with a one-line comment citing the
+      guard.
     - **Generalizes past cocotb**: any pure-setuptools project that gates its own supported
       range with a version check in `setup.py` (rather than only via `python_requires`, which
       pip enforces as a resolver constraint and never touches the build) needs the same
       treatment — grep the checkout's `setup.py` for `sys.version_info` comparisons against a
-      literal tuple before assuming the repo-default `cp312/cp313/cp314/cp314t` matrix
-      applies.
+      literal tuple before assuming every interpreter `check_versions.py` derives from
+      `requires_python` applies.
     - **Verify site-independent**: `python3.14 -c "exec(open('setup.py').read())"` from the
       checkout root (or just `pip wheel . --no-deps` under a 3.14 interpreter) reproduces the
       `RuntimeError` on any host, x86 included — no riscv64/QEMU needed to confirm the ceiling
