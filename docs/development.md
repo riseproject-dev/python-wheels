@@ -105,23 +105,54 @@ jobs:
 
 ### Target Python Versions
 
-Previously RISE has used a Python version matrix covering the four latest
-releases (`major.minor`, e.g. `3.14`), plus any freethreaded variants available
-(e.g. `3.14t`). As of July 14th, 2026, this includes Pythons 3.11, 3.12, 3.13,
-and 3.14 (along with 3.14t, the freethreaded equivalent). However, the NumPy
-project (as of version 2.5.0) supports Python 3.12 as the minimum. Since this
-package is fundamental to many others which we are supporting, we will follow
-its precedent when defining our version matrix. Some wheels have previously been
-built for 3.13t, but since this was an experimental version with limited support
-we avoid it now.
+RISE builds each release of a package for the Python versions upstream built
+that release for, rather than for a fixed list. Each version entry of
+`docs/packages/<pkg>.yaml` records them:
 
-With these factors, our default version matrix becomes:
+```yaml
+versions:
+- version: 1.2.3
+  python-versions: ['3.10', '3.11', '3.14', '3.14t']
+```
 
-`['3.12', '3.13', '3.14', '3.14t']`
+`ci_scripts/check_versions.py` fills this in from the wheels upstream
+published on PyPI for that version:
 
-Exceptions may be necessary for some packages, which should be carefully
-considered to balance achieving similarity to upstream with feasibility of
-maintenance.
+- a `cpXY-cpXY` or `cpXY-cpXYt` wheel adds `3.X` or `3.Xt` (free-threaded);
+- a `cpXY-abi3` wheel adds a single `3.X` build, which serves every later
+  CPython;
+- with no version-specific wheels at all (sdist-only or pure-Python
+  releases), `requires_python` decides, and no free-threaded build is made.
+
+The nightly job writes it for every version it declares. For a version added
+by hand (a new port, or a manual upgrade), run:
+
+```
+uv run --with-requirements ci_scripts/requirements.txt python3 ci_scripts/check_versions.py --python-versions <pkg>
+```
+
+which adds `python-versions` to every entry of the YAML that lacks it. The
+values must be quoted: unquoted, YAML reads `3.10` as the number 3.1.
+
+A build workflow that sets `python-matrix: true` on its `setup` job gets one
+matrix entry per listed version that cibuildwheel can build for riscv64
+(`RISCV64_PYTHONS` in `ci_scripts/pending_versions.py`: currently 3.9 to 3.15
+and 3.14t/3.15t, but not 3.13t). That list is a technical limit, updated
+when cibuildwheel is bumped, not a policy choice. A version without
+`python-versions` fails the `setup` job.
+
+To build more or fewer interpreters than upstream for one version, edit its
+`python-versions`. To drop interpreters for every version of a package, use
+the `python-exclude` input of `setup`: `python-exclude: "cp39 cp31[01]"`
+drops interpreters (shell-style globs, on cibuildwheel tags), for example
+when a dependency has no riscv64 wheel for them. NumPy 2.5.0 and later only
+support Python 3.12+, so dependents of NumPy usually need to exclude older
+interpreters.
+
+Explain any override in a comment next to it. Most workflows still carry a
+hard-coded `python: [...]` list from before this scheme (the former default
+was `['3.12', '3.13', '3.14', '3.14t']`); each is converted when it is next
+updated to build a new release.
 
 ### uv
 
@@ -200,6 +231,7 @@ jobs:
     with:
       package: numpy
       version: ${{ inputs.version }}
+      python-matrix: true
 
   build_wheels:
     needs: [setup]
@@ -208,15 +240,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        python: ["cp312", "cp313", "cp314", "cp314t"]
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
       NUMPY_VERSION: ${{ matrix.version }}
     ...
 ```
 
 The `if:` guard is required: GitHub Actions rejects a job whose matrix vector is
-empty, and `versions` is `[]` whenever nothing is pending. Job outputs are not
+empty, and `versions` is `[]` whenever nothing is pending. With
+`python-matrix: true`, `_setup.yml` also outputs `matrix`: one
+`{version, python}` entry per interpreter in the version's `python-versions`
+(see [Target Python Versions](#target-python-versions)) that cibuildwheel
+can build for riscv64. The `python-exclude` input drops interpreters for a
+package. Workflows that still hard-code `python: [...]` switch to it when
+next updated for a new release. Job outputs are not
 per matrix leg, so a job must not hand its version to another through
 `outputs:`; use `matrix.version` (or an artifact named after it) instead.
 
