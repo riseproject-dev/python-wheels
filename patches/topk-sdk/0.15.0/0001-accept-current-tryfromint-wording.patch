@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Wed, 15 Oct 2026 00:00:02 +0000
+Subject: [PATCH] tests: accept the current Rust stdlib TryFromIntError wording too
+
+Upstream-Status: To upstream [test asserts the Rust stdlib's old TryFromIntError message; a newer toolchain already renders it differently, reproduces on any architecture]
+
+test_invalid_number_range in TestU8Vector/TestI8Vector/TestBinaryVector
+expects pytest.raises(OverflowError, match=TYPE_ERROR_OUT_OF_RANGE)
+with TYPE_ERROR_OUT_OF_RANGE = "out of range integral type conversion
+attempted", but this build's CI actually raises OverflowError with
+"number too large to fit in target type" / "number too small to fit
+in target type" instead -- same exception type, different wording.
+
+u8/i8 vector arguments are extracted via pyo3's own built-in
+FromPyObject<u8>/FromPyObject<i8> impls, which convert an out-of-range
+Python int by calling u8::try_from(val)/i8::try_from(val) and wrapping
+the resulting std::num::TryFromIntError's Display text
+(`e.to_string()`) in a PyOverflowError (confirmed directly in pyo3
+0.27.0's own source, src/conversions/std/num.rs) -- so the exact
+wording is the Rust standard library's TryFromIntError message, not
+anything topk-py's own code controls. The two wordings above are two
+different TryFromIntError messages a std library can render (the
+exact phrasing has changed across Rust releases); topk-py's Cargo.toml
+pins no Cargo.lock for its own crate, so a fresh build on any platform
+picks up whatever Rust toolchain the runner carries, and this build's
+toolchain renders the newer wording. Not riscv64-specific -- libstd's
+error text is architecture-independent, so an x86_64 build with the
+same toolchain would hit the identical mismatch. Widens the regex to
+accept either wording rather than forcing a narrower toolchain pin
+just for this.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/topk-py/tests/test_data_vector_dense.py b/topk-py/tests/test_data_vector_dense.py
+index 927c4b3..9334f93 100644
+--- a/topk-py/tests/test_data_vector_dense.py
++++ b/topk-py/tests/test_data_vector_dense.py
+@@ -3,7 +3,7 @@ from topk_sdk.data import binary_vector, f8_vector, f16_vector, f32_vector, u8_v
+ 
+ TYPE_ERROR = "Invalid vector value"
+ TYPE_ERROR_INT_TO_VECTOR = "argument 'vector': 'int' object cannot be cast as 'Sequence'"
+-TYPE_ERROR_OUT_OF_RANGE = "out of range integral type conversion attempted"
++TYPE_ERROR_OUT_OF_RANGE = "(out of range integral type conversion attempted|number too (?:large|small) to fit in target type)"
+ TYPE_ERROR_NONE_TO_VECTOR = "argument 'vector': 'NoneType' object cannot be cast as 'Sequence'"
+ TYPE_ERROR_BOOL_TO_VECTOR = "argument 'vector': 'bool' object cannot be cast as 'Sequence'"
+ TYPE_ERROR_FLOAT_TO_VECTOR = "argument 'vector': 'float' object cannot be cast as 'Sequence'"

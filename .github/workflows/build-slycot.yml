@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Mirrors the build-wheels job of upstream's cibuildwheel.yml: a scikit-build-core/CMake
+# build of the SLICOT Fortran library (vendored source, GPL-licensed) wrapped by f2py,
+# linked against scipy_openblas32 (CMAKE_ARGS=-DSLYCOT_BUNDLE_OPENBLAS=ON triggers
+# build-tools/cibw_before_build.py, which pip-installs it, copies its libs into
+# build-libs/ for CMake to find, and copies both its and SLICOT's licence text into the
+# project root for license-files to pick up). Our registry carries scipy_openblas32 up to
+# 0.3.31.22.0; upstream's own pin (0.3.31.22.1) is one patch release newer.
+name: Build slycot wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/slycot.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-slycot.yml'
+      - 'docs/packages/slycot.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-slycot.yml'
+      - 'docs/packages/slycot.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: slycot
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build slycot ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      SLYCOT_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-control/Slycot v${{ env.SLYCOT_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: python-control/Slycot
+          ref: v${{ env.SLYCOT_VERSION }}
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: CMAKE_ARGS='-DSLYCOT_BUNDLE_OPENBLAS=ON' PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_BEFORE_BUILD: python {project}/build-tools/cibw_before_build.py 0.3.31.22.0 {project}
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: LD_LIBRARY_PATH=./build-libs auditwheel repair -w {dest_dir} {wheel}
+          CIBW_TEST_EXTRAS: test
+          CIBW_TEST_COMMAND: pytest --pyargs slycot
+
+      - name: Check the extension and licences made it into the wheel
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("slycot/") and n.endswith(".so") for n in names), names
+              licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                          if ".dist-info/licenses/" in n and not n.endswith("/")}
+              assert "LICENSE-SLICOT.txt" in licences, licences
+              print(whl, "ok", licences)
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: slycot-${{ env.SLYCOT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish slycot ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: slycot-${{ matrix.version }}-*-manylinux_riscv64
