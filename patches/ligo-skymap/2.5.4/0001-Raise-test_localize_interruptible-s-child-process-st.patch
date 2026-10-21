@@ -1,0 +1,41 @@
+From daeb106b380036bfe5177b3dedb98a9d8a309baa Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Fri, 16 Oct 2026 08:01:48 +0000
+Subject: [PATCH] Raise test_localize_interruptible's child-process start
+ timeout
+
+The child process signals `started` as its very first action
+(before calling localize()), so this wait is purely process-startup
+overhead (fork + reimporting the interpreter/LAL stack), not test
+logic. On a riscv64 CI runner -- slower, and possibly contended with
+other concurrent jobs -- that startup can take longer than upstream's
+5-second budget sized for fast x86 CI, and pytest-rerunfailures'
+built-in @pytest.mark.flaky(reruns=5) on this same test already
+confirms it: the build failed this exact assertion five times in a
+row. Raising the ceiling to 60s costs nothing on fast hardware, since
+the wait returns as soon as the event is set.
+
+Upstream-Status: Inappropriate [riscv64 CI is slower than the x86 hardware this timeout was sized for; not a defect on any platform upstream tests]
+---
+ ligo/skymap/bayestar/tests/test_bayestar.py | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/ligo/skymap/bayestar/tests/test_bayestar.py b/ligo/skymap/bayestar/tests/test_bayestar.py
+index f11567b..7f6c089 100644
+--- a/ligo/skymap/bayestar/tests/test_bayestar.py
++++ b/ligo/skymap/bayestar/tests/test_bayestar.py
+@@ -88,7 +88,13 @@ def test_localize_interruptible(mock_event):
+         )
+         try:
+             process.start()
+-            assert started.wait(5)
++            # Upstream sizes this for fast x86 CI; process startup (fork +
++            # interpreter/LAL import) can take noticeably longer on a slower,
++            # possibly contended riscv64 CI runner, and the child signals
++            # `started` as its very first action, before doing any real work.
++            # Raising the ceiling costs nothing on fast hardware: the wait
++            # returns as soon as the event is set.
++            assert started.wait(60)
+             os.kill(process.pid, signal.SIGINT)
+             assert cancelled.wait(10)
+         finally:

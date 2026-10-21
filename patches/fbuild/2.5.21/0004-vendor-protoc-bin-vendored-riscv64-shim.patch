@@ -1,0 +1,175 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Sat, 17 Oct 2026 00:00:01 +0000
+Subject: [PATCH] vendor a riscv64 shim for protoc-bin-vendored
+
+Upstream-Status: Inappropriate [protoc-bin-vendored ships prebuilt binaries only, and never for riscv64; this writes a replacement, not a version bump]
+
+The "Build fbuild 2.5.21 manylinux_riscv64" job now fails compiling
+zccache-protocol (pulled in transitively via zccache, the same external
+git dependency 0002/0003 already patch around for crash-context/
+crash-handler):
+
+  thread 'main' panicked at .../zccache-protocol/build.rs:11:10:
+  vendored protoc is available for zccache wire protobufs: Error { os:
+  "linux", arch: "riscv64" }
+
+zccache-protocol's build.rs calls
+`protoc_bin_vendored::protoc_bin_path().expect(...)` unconditionally and
+uses the result to set `$PROTOC` before compiling its one .proto file
+with `prost_build`. `protoc-bin-vendored` only ships *prebuilt* protoc
+binaries, for a fixed, small platform list (x86, x86_64, aarch64,
+ppc64le, s390x, macOS, Windows); riscv64 isn't in it and never will be
+by a version bump the way 0002/0003's crash-context/crash-handler gap
+was -- nothing to vendor a newer *upstream* release of, since upstream
+itself doesn't build protoc from source for any platform.
+
+prost_build's own `Config::compile_protos` already falls back to a
+$PROTOC/$PATH lookup when no `protoc_executable()` override is given --
+documented in prost-build's "Sourcing protoc" section, and the same
+fallback this repo already relies on for nemo-relay and
+databricks-zerobus-ingest-sdk's own protoc-bin-vendored patches (see
+e.g. patches/nemo-relay/0.9.3/0001-worker-proto-fall-back-to-prost-build-s-own-protoc-l.patch).
+zccache's build.rs is not ours to edit the same way (external git
+dependency, same reason 0002/0003 vendor instead of patching
+crash-context/crash-handler directly), so this instead vendors a
+from-scratch, same-name `protoc-bin-vendored` crate under
+vendor/protoc-bin-vendored-riscv64/ implementing only the one function
+zccache-protocol's build.rs calls (`protoc_bin_path()`), resolving
+`$PROTOC` first and then the first `protoc` found on `$PATH` -- i.e.
+exactly the lookup prost_build would have done itself had
+protoc_bin_path() simply returned Err and been allowed to fall through
+(which 0002/0003's companion patches do for worker-proto/the SDK by
+making the `.protoc_executable()` call conditional; zccache's build.rs
+sets $PROTOC directly instead, so there's no call site here to make
+conditional). Wired in via a third [patch.crates-io] entry in the
+top-level Cargo.toml, alongside the existing crash-context/
+crash-handler ones.
+
+A system protoc still needs to be on $PATH for this to resolve to
+anything; .github/workflows/build-fbuild.yml installs one via
+`dnf install -y protobuf-compiler protobuf-devel`, the same package
+names and manylinux_riscv64 image nemo-relay's build already installs
+protoc from successfully.
+
+Validated: `cargo tree -p protoc-bin-vendored` against the full
+workspace (with 0001-0003 applied first) resolves to this vendored
+path, confirming no version/name conflicts anywhere in the dependency
+graph; the crate itself builds standalone and its protoc_bin_path()
+was exercised directly (via a throwaway example, not shipped) for all
+three cases -- a fake protoc on $PATH, $PROTOC pointing at one, and
+neither present -- each returning the expected Ok/Err. Not validated:
+an actual riscv64 CI run of the full zccache-protocol build (no riscv64
+execution available in this sandbox); unlike 0002/0003 there is no
+upstream source to diff this against, since the fix is new code rather
+than a vendored release.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/Cargo.toml b/Cargo.toml
+index 21a87d6..36da526 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -227,3 +227,15 @@ crash-context = { path = "vendor/crash-context" }
+ # "0.6" requirement; it depends on `crash-context = "0.6"`, which the
+ # patch above already resolves to the riscv64-capable vendored copy.
+ crash-handler = { path = "vendor/crash-handler" }
++
++# protoc-bin-vendored ships prebuilt protoc binaries for a fixed platform
++# list (x86, x86_64, aarch64, ppc64le, s390x, macOS, Windows) and errors on
++# every other target, including riscv64 -- not a version-lag issue like
++# crash-context/crash-handler above (no release will ever add a riscv64
++# binary this crate doesn't build from source), so this entry points at a
++# small hand-written shim instead of a vendored upstream release. zccache's
++# build-dependency pin (zccache-protocol's build.rs) hits this error before
++# prost_build ever gets to fall back to a $PROTOC/$PATH lookup, the same
++# fallback this repo already relies on for nemo-relay and
++# databricks-zerobus-ingest-sdk. See vendor/protoc-bin-vendored-riscv64/.
++protoc-bin-vendored = { path = "vendor/protoc-bin-vendored-riscv64" }
+diff --git a/vendor/protoc-bin-vendored-riscv64/Cargo.toml b/vendor/protoc-bin-vendored-riscv64/Cargo.toml
+new file mode 100644
+index 0000000..aa2a367
+--- /dev/null
++++ b/vendor/protoc-bin-vendored-riscv64/Cargo.toml
+@@ -0,0 +1,16 @@
++[workspace]
++# Standalone crate, not a member of fbuild's workspace, matching
++# vendor/crash-context and vendor/crash-handler alongside it.
++
++[package]
++name = "protoc-bin-vendored"
++# Matches zccache's `protoc-bin-vendored = "3"` workspace dependency; any 3.x
++# satisfies it, and `[patch.crates-io]` swaps this in by name regardless.
++version = "3.2.0"
++edition = "2021"
++license = "MIT"
++description = "riscv64 shim for protoc-bin-vendored: finds the system protoc instead of a vendored binary, which upstream ships for no riscv64 target"
++
++[lib]
++name = "protoc_bin_vendored"
++path = "src/lib.rs"
+diff --git a/vendor/protoc-bin-vendored-riscv64/src/lib.rs b/vendor/protoc-bin-vendored-riscv64/src/lib.rs
+new file mode 100644
+index 0000000..ec9dff3
+--- /dev/null
++++ b/vendor/protoc-bin-vendored-riscv64/src/lib.rs
+@@ -0,0 +1,59 @@
++//! Drop-in riscv64 replacement for the `protoc-bin-vendored` crate.
++//!
++//! Upstream (<https://github.com/stepancheg/rust-protoc-bin-vendored>) ships
++//! prebuilt `protoc` binaries for a fixed list of targets (x86, x86_64,
++//! aarch64, ppc64le, s390x, macOS, Windows) and returns an error for every
++//! other platform, including riscv64. `zccache-protocol`'s build.rs (a git
++//! dependency of fbuild, so it can't be patched the way fbuild's own source
++//! is) calls `protoc_bin_vendored::protoc_bin_path()` unconditionally, which
++//! aborts the whole build on riscv64 before `prost_build` ever gets a chance
++//! to look for a `protoc` on `$PATH` or via `$PROTOC` -- the same fallback
++//! prost-build's own "Sourcing protoc" docs describe, and the same one this
++//! repo already relies on for nemo-relay and databricks-zerobus-ingest-sdk.
++//!
++//! `[patch.crates-io]` swaps this crate in for the real one by name, so it
++//! only needs to implement the one function `zccache-protocol`'s build.rs
++//! actually calls, with a public shape (`Result<PathBuf, impl Debug>`) wide
++//! enough to satisfy any caller.
++
++use std::env;
++use std::path::PathBuf;
++
++/// Error returned when no `protoc` binary can be found on this platform.
++#[derive(Debug)]
++pub struct Error(String);
++
++impl std::fmt::Display for Error {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        write!(f, "{}", self.0)
++    }
++}
++
++impl std::error::Error for Error {}
++
++/// Return a path to a `protoc` binary: `$PROTOC` if it names an existing
++/// file, otherwise the first `protoc` found on `$PATH`.
++pub fn protoc_bin_path() -> Result<PathBuf, Error> {
++    if let Ok(from_env) = env::var("PROTOC") {
++        let path = PathBuf::from(from_env);
++        if path.is_file() {
++            return Ok(path);
++        }
++    }
++
++    if let Some(path_var) = env::var_os("PATH") {
++        for dir in env::split_paths(&path_var) {
++            let candidate = dir.join("protoc");
++            if candidate.is_file() {
++                return Ok(candidate);
++            }
++        }
++    }
++
++    Err(Error(
++        "no protoc found: upstream protoc-bin-vendored ships no riscv64 \
++         binary, and no system protoc was found via $PROTOC or $PATH \
++         (install e.g. the protobuf-compiler package)"
++            .to_string(),
++    ))
++}
