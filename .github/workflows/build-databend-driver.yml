@@ -132,14 +132,16 @@ jobs:
         run: |
           python -c "import databend_driver as m; assert m._databend_driver.__file__.endswith('.so'), m._databend_driver.__file__"
           python - <<'EOF'
-          from databend_driver import connect, DatabaseError, Error
+          from databend_driver import connect, DatabaseError, Error, OperationalError
 
+          assert issubclass(OperationalError, DatabaseError)
           assert issubclass(DatabaseError, Error)
-          conn = connect("databend://root:@localhost:1/?sslmode=disable")
+          # connect() logs in eagerly (BlockingDatabendClient.get_conn()), so the
+          # refused connection surfaces from connect() itself, not a later query.
           try:
-              conn.query_row("SELECT 1")
-          except Error:
-              pass
+              connect("databend://root:@localhost:1/?sslmode=disable")
+          except OperationalError as e:
+              print("got expected", type(e).__name__)
           else:
               raise AssertionError("expected a connection error against a closed port")
           EOF
