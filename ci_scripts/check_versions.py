@@ -153,11 +153,11 @@ def matching_riscv64_wheels(
     }
 
 
-def has_riscv64_wheel(
+def has_any_riscv64_wheel(
     package_info: Dict, target_version: str, python_versions: List[str] = TARGET_PYTHON_VERSIONS
 ) -> bool:
-    """Check whether a version has upstream riscv64 wheels covering every python_versions entry."""
-    return all(matching_riscv64_wheels(package_info, target_version, python_versions).values())
+    """Check whether a version has an upstream riscv64 wheel for any python_versions entry."""
+    return any(matching_riscv64_wheels(package_info, target_version, python_versions).values())
 
 
 def is_pure_python_wheel(package_info: Dict, target_version: str) -> bool:
@@ -185,7 +185,6 @@ def find_upstream_issue(package: str) -> Optional[str]:
         issue_title = f"{package} riscv64 support"
         result = subprocess.run([
             "gh", "issue", "list",
-            "--milestone", "Upstream",
             "--search", issue_title,
             "--json", "number",
             "--jq", ".[0].number",
@@ -451,13 +450,13 @@ def check_upgrade(
         candidates = [v for v in get_new_versions(pypi_info, registry_version) or [pypi_version] if v not in declared]
 
     # We provide wheels up to the point where upstream does: a version that
-    # already has riscv64 wheels for every target Python, or that went pure
+    # already has a riscv64 wheel for any target Python, or that went pure
     # Python, is never built here, but every gap before it is.
-    upstream = [v for v in candidates if has_riscv64_wheel(pypi_info, v) or is_pure_python_wheel(pypi_info, v)]
+    upstream = [v for v in candidates if has_any_riscv64_wheel(pypi_info, v) or is_pure_python_wheel(pypi_info, v)]
     new_versions = [v for v in candidates if v not in upstream]
     if upstream:
         print(f"    [=] {package}: skipping {', '.join(f'v{v}' for v in upstream)}, "
-              f"riscv64 or pure Python wheels on PyPI for Python {', '.join(TARGET_PYTHON_VERSIONS)}")
+              "already riscv64 (full or partial) or pure Python upstream")
 
     if new_versions:
         print(f"[^] {package} can be upgraded: v{registry_version} -> {', '.join(f'v{v}' for v in new_versions)}")
@@ -479,15 +478,14 @@ def check_upgrade(
         print(f"[+] {package}: {', '.join(f'v{v}' for v in pending)} already declared, waiting for the build")
         return up_to_date
 
-    if behind and has_riscv64_wheel(pypi_info, pypi_version):
-        py_list = ", ".join(TARGET_PYTHON_VERSIONS)
+    if behind and has_any_riscv64_wheel(pypi_info, pypi_version):
         wheels_by_version = matching_riscv64_wheels(pypi_info, pypi_version)
-        print(f"[-] {package} v{pypi_version} has riscv64 wheels on PyPI for Python {py_list}. Can be deprecated.")
+        print(f"[-] {package} v{pypi_version} has riscv64 wheels on PyPI. Can be deprecated.")
         wheel_lines = [f"- {pv}: {fn}" for pv, files in wheels_by_version.items() for fn in files]
         for line in wheel_lines:
             print(f"        {line}")
         reason = (
-            f"{package} v{pypi_version} has riscv64 wheels on PyPI for Python {py_list}: "
+            f"{package} v{pypi_version} has riscv64 wheels on PyPI: "
             f"{pypi_package_url}\n\n" + "\n".join(wheel_lines)
         )
         return deprecation_result(package, registry_version, pypi_version, reason, declare)
@@ -682,7 +680,7 @@ def write_reports(results: List[Dict[str, any]], directory: Path) -> List[Dict[s
 
 
 def _self_test():
-    """Sanity-check has_riscv64_wheel's per-interpreter matching. Run with --self-test."""
+    """Sanity-check has_any_riscv64_wheel's per-interpreter matching. Run with --self-test."""
     releases = {
         "1.0": [
             {"filename": "pkg-1.0-cp312-cp312-manylinux_2_34_riscv64.whl"},
@@ -692,19 +690,20 @@ def _self_test():
         ]
     }
     info = {"releases": releases}
-    # Missing 3.14t -> not all target versions covered.
-    assert has_riscv64_wheel(info, "1.0") is False
-    assert has_riscv64_wheel(info, "1.0", ["3.12", "3.13"]) is True
+    # Missing 3.14t, but 3.12/3.13/3.14 are covered -> deprecatable even though
+    # the matrix isn't complete.
+    assert has_any_riscv64_wheel(info, "1.0") is True
+    assert has_any_riscv64_wheel(info, "1.0", ["3.14t"]) is False
 
     releases["1.0"].append({"filename": "pkg-1.0-cp314-cp314t-manylinux_2_34_riscv64.whl"})
-    assert has_riscv64_wheel(info, "1.0") is True
+    assert has_any_riscv64_wheel(info, "1.0") is True
 
     # abi3 wheel covers any cp3X >= its floor, but never a free-threaded target.
     abi3_info = {"releases": {"1.0": [
         {"filename": "pkg-1.0-cp39-abi3-manylinux_2_34_riscv64.whl"},
     ]}}
-    assert has_riscv64_wheel(abi3_info, "1.0", ["3.12", "3.13", "3.14"]) is True
-    assert has_riscv64_wheel(abi3_info, "1.0", ["3.14t"]) is False
+    assert has_any_riscv64_wheel(abi3_info, "1.0", ["3.12", "3.13", "3.14"]) is True
+    assert has_any_riscv64_wheel(abi3_info, "1.0", ["3.14t"]) is False
 
     # Per-package PR titles, one PR per package.
     upgrade = {"status": "need_upgrade", "package": "PyYAML", "registry_version": "6.0",

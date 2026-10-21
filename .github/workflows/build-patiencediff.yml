@@ -1,0 +1,115 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Based on upstream's own wheel builder (pyproject.toml's [tool.cibuildwheel] table plus
+# https://github.com/breezy-team/patiencediff/blob/master/.github/workflows/wheels.yaml).
+# setuptools-rust RustExtension, not maturin; no abi3 (no --py-limited-api), so
+# wheels are per-interpreter, same shape as build-cryptg.yml/build-dulwich.yml.
+name: Build patiencediff wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/patiencediff.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-patiencediff.yml'
+      - 'docs/packages/patiencediff.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-patiencediff.yml'
+      - 'docs/packages/patiencediff.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: patiencediff
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build patiencediff ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Per-interpreter (not abi3): setuptools-rust is not passed --py-limited-api.
+        python:
+          - "cp312"
+          - "cp313"
+          - "cp314"
+          - "cp314t"
+
+    env:
+      PATIENCEDIFF_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout patiencediff ${{ env.PATIENCEDIFF_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: breezy-team/patiencediff
+          ref: v${{ env.PATIENCEDIFF_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBUILDWHEEL: "1"
+          # No Rust in the manylinux image; install it and put cargo on PATH, same
+          # as upstream's own CIBW_BEFORE_BUILD (gotcha: manylinux_2_39_riscv64 has
+          # no yum libatomic package needed here, unlike cryptg's grammers-crypto).
+          CIBW_BEFORE_BUILD_LINUX: >-
+            pip install -U setuptools-rust &&
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --profile=minimal -y &&
+            . "$HOME/.cargo/env" && rustup show
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$PATH:$HOME/.cargo/bin"'
+          # Mirrors upstream's own test suite (patiencediff.test_patiencediff), run
+          # against the installed wheel rather than the checkout (gotcha 25).
+          CIBW_TEST_COMMAND: >-
+            python -m unittest patiencediff.test_patiencediff
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: patiencediff-${{ env.PATIENCEDIFF_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish patiencediff ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: patiencediff-${{ matrix.version }}-*-manylinux_riscv64

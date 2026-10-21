@@ -1,0 +1,91 @@
+Upstream-Status: Inappropriate [guacr-database is a private-dependency dead branch never activated by this wheel's own Cargo feature set]
+
+crates/webrtc-bindings/Cargo.toml (the maturin build target) depends on
+keeper-pam-webrtc-rs with default-features = false and features = ["python-support"]
+only, which never enables "builtin-handlers" and therefore never pulls in the
+optional "guacr" dependency, let alone guacr's own optional "database" feature.
+That shape is fixed in the published crate's own manifest, not something we are
+changing: the officially released wheel is built the same way.
+
+guacr-database is nonetheless a `[workspace]` member, and its mandatory (non-optional)
+dependency keeperdb-core/keeperdb-drivers is a git dependency on
+https://github.com/Keeper-Security/keeperdb (branch "release", pinned to a specific
+commit) which is a private repository outside Keeper Security's org — 401 Unauthorized
+for anyone else, including this CI. Because Cargo resolves every workspace member's
+manifest (including unreached optional dependencies) to build a single workspace-wide
+Cargo.lock, just being a workspace member is enough to make `cargo` try to clone that
+private repo and fail, even though nothing in the actual compiled extension ever
+references it.
+
+Dropping the guacr-database path dependency (and the "database"/"dynamodb" features
+that gate it) removes the only reachable-at-resolution-time edge into those private
+repos, without touching anything the published wheel actually compiles: guacr-database
+was never part of this crate's build graph to begin with.
+
+The same root Cargo.toml also carries a `[patch.crates-io] tiberius = { git =
+"https://github.com/Keeper-Security/tiberius", ... }` override for the mssql driver
+keeperdb-drivers would otherwise pull in — equally private, equally unreachable, and
+now provably dead (dropping guacr-database already makes it "not used in the crate
+graph" per cargo's own warning). Drop it too rather than leave an inert pointer at a
+repo we cannot resolve.
+
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,5 +1,5 @@
+ [workspace]
+-members = ["crates/keeper-pam-webrtc-rs", "crates/webrtc-bindings", "crates/guacr", "crates/guacr-encoder", "crates/guacr-handlers", "crates/guacr-protocol", "crates/guacr-terminal", "crates/guacr-ssh", "crates/guacr-telnet", "crates/guacr-rdp", "crates/guacr-vnc", "crates/guacr-database", "crates/guacr-sftp", "crates/guacr-rbi", "crates/guacr-threat-detection", "crates/guacr-tn3270", "crates/guacr-tn5250", "crates/guacr-recording", "crates/guacr-recorder", "crates/guacr-guacd", "crates/pam-socks5"]
++members = ["crates/keeper-pam-webrtc-rs", "crates/webrtc-bindings", "crates/guacr", "crates/guacr-encoder", "crates/guacr-handlers", "crates/guacr-protocol", "crates/guacr-terminal", "crates/guacr-ssh", "crates/guacr-telnet", "crates/guacr-rdp", "crates/guacr-vnc", "crates/guacr-sftp", "crates/guacr-rbi", "crates/guacr-threat-detection", "crates/guacr-tn3270", "crates/guacr-tn5250", "crates/guacr-recording", "crates/guacr-recorder", "crates/guacr-guacd", "crates/pam-socks5"]
+ resolver = "2"
+
+ [workspace.package]
+@@ -128,13 +128,6 @@
+ webpki-roots = "1.0"
+ pyo3-log = "0.13.4"
+
+-[patch.crates-io]
+-# tiberius: match the fork keeperdb-driver-mssql is authored against. Keeper's fork
+-# patches cross-platform NTLM (AuthMethod::windows on unix, prisma/tiberius#408) which
+-# our old vendor/tiberius copy lacked. Must live in the ROOT [patch] because the root
+-# workspace patch is the only one that applies to path-dep keeperdb crates.
+-tiberius = { git = "https://github.com/Keeper-Security/tiberius", rev = "f012b7948be64dcc95d2a6d3f8db8dd7e8a916b2" }
+-
+ [profile.dev]
+ incremental = false
+
+--- a/crates/guacr/Cargo.toml
++++ b/crates/guacr/Cargo.toml
+@@ -21,7 +21,6 @@
+ guacr-rdp = { path = "../guacr-rdp", version = "2.0.0", optional = true }
+ guacr-vnc = { path = "../guacr-vnc", version = "2.0.0", optional = true }
+ guacr-sftp = { path = "../guacr-sftp", version = "2.0.0", optional = true }
+-guacr-database = { path = "../guacr-database", version = "2.0.0", optional = true }
+ guacr-rbi = { path = "../guacr-rbi", version = "2.0.0", optional = true }
+ guacr-tn3270 = { path = "../guacr-tn3270", version = "2.0.0", optional = true }
+ guacr-tn5250 = { path = "../guacr-tn5250", version = "2.0.0", optional = true }
+@@ -36,9 +35,6 @@
+ rdp = ["guacr-rdp", "guacr-rdp/drive"]
+ vnc = ["guacr-vnc"]
+ sftp = ["guacr-sftp"]
+-database = ["guacr-database"]
+-# DynamoDB handler — off by default (AWS-only, deferred). Pulls the AWS SDK (rustls 0.21).
+-dynamodb = ["database", "guacr-database/dynamodb"]
+ rbi = ["guacr-rbi"]
+ tn3270 = ["guacr-tn3270"]
+ tn5250 = ["guacr-tn5250"]
+@@ -55,4 +51,4 @@
+ guacd-compat = ["guacr-guacd"]
+
+ # All protocols
+-all = ["ssh", "telnet", "rdp", "vnc", "sftp", "database", "rbi", "tn3270", "tn5250"]
++all = ["ssh", "telnet", "rdp", "vnc", "sftp", "rbi", "tn3270", "tn5250"]
+--- a/crates/keeper-pam-webrtc-rs/Cargo.toml
++++ b/crates/keeper-pam-webrtc-rs/Cargo.toml
+@@ -28,7 +28,7 @@
+
+ # Concrete protocol handlers (optional, provides built-in handler registry)
+ # Includes: SSH, Telnet, VNC, SFTP, RDP, Database, RBI (Remote Browser Isolation)
+-guacr = { path = "../guacr", optional = true, features = ["ssh", "telnet", "vnc", "sftp", "rbi", "rdp", "database"] }
++guacr = { path = "../guacr", optional = true, features = ["ssh", "telnet", "vnc", "sftp", "rbi", "rdp"] }
+
+ # Guacamole protocol codec (streaming parser, instruction types)
+ guacr-protocol = { path = "../guacr-protocol" }

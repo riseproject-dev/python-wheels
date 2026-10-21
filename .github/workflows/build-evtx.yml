@@ -1,0 +1,161 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/omerbenamram/pyevtx-rs/blob/0.13.1/.github/workflows/ci.yml
+name: Build evtx wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/evtx.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-evtx.yml'
+      - 'docs/packages/evtx.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-evtx.yml'
+      - 'docs/packages/evtx.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  MUSLLINUX_RISCV64_IMAGE: quay.io/pypa/musllinux_1_2_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: evtx
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build evtx ${{ matrix.version }} ${{ matrix.python }}-${{ matrix.platform }}_riscv64
+    runs-on: ubuntu-24.04-riscv
+    # musllinux's static-libc Rust link takes markedly longer than manylinux's
+    # on this runner (observed ~2h, right at the old 120-minute ceiling).
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        platform: ["manylinux", "musllinux"]
+        # pyo3's abi3-py310 feature gives one cp310-abi3 wheel, built on cp310 and
+        # re-tested on cp311-cp314; pyo3 drops abi3 under Py_GIL_DISABLED.
+        python: ["abi3", "cp314t"]
+
+    env:
+      EVTX_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout pyevtx-rs ${{ env.EVTX_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: omerbenamram/pyevtx-rs
+          ref: ${{ env.EVTX_VERSION }}
+          persist-credentials: false
+
+      # pyevtx-rs has no licence file; the wheel statically links the evtx crate
+      # (same author, MIT OR Apache-2.0), so ship that crate's licence texts.
+      - name: Stage the evtx crate's licence texts
+        run: |
+          ver=$(grep -A1 '^name = "evtx"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+          curl -sSfL "https://crates.io/api/v1/crates/evtx/${ver}/download" \
+            | tar xz --strip-components=1 "evtx-${ver}/LICENSE-MIT" "evtx-${ver}/LICENSE-APACHE"
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+        env:
+          CIBW_BUILD: ${{ matrix.python == 'abi3' && 'cp31?' || matrix.python }}-${{ matrix.platform }}_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_MUSLLINUX_RISCV64_IMAGE: ${{ env.MUSLLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin"
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_SOURCES: tests samples python/evtx/__init__.py
+          CIBW_TEST_COMMAND: python -m pytest tests
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for whl in sys.argv[1:]:
+              names = zipfile.ZipFile(whl).namelist()
+              assert any(n.startswith("evtx/_native.") and n.endswith(".so") for n in names), whl
+              licences = {n.rsplit("/", 1)[-1] for n in names if ".dist-info/licenses/" in n} - {""}
+              assert {"LICENSE-MIT", "LICENSE-APACHE"} <= licences, (whl, licences)
+              print(whl, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: evtx-${{ env.EVTX_VERSION }}-${{ matrix.python }}-${{ matrix.platform }}_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      EVTX_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # auditwheel's musllinux policy does not allowlist libgcc_s, so the musl wheels vendor it.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: evtx-${{ env.EVTX_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish evtx ${{ matrix.version }}
+    needs: [setup, build_wheels, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: evtx-${{ matrix.version }}-*_riscv64
+      gpl-sources-artifact: evtx-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc

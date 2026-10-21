@@ -1,0 +1,165 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# minimap2 has no wheel workflow (https://github.com/lh3/minimap2/blob/v2.31/.github/workflows/ci.yaml
+# only compiles the CLI), so this builds mappy from the tagged setup.py with cibuildwheel.
+name: Build mappy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/mappy.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mappy.yml'
+      - 'docs/packages/mappy.yaml'
+      - 'patches/mappy/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-mappy.yml'
+      - 'docs/packages/mappy.yaml'
+      - 'patches/mappy/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: mappy
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build mappy ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      MAPPY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout minimap2 v${{ env.MAPPY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: lh3/minimap2
+          ref: v${{ env.MAPPY_VERSION }}
+          persist-credentials: false
+
+      # .gitmodules declares SIMDe at lib/simde but the tree no longer commits it.
+      - name: Checkout SIMDe
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: simd-everywhere/simde
+          ref: v0.8.2
+          path: lib/simde
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply python-wheels/patches/mappy/${{ env.MAPPY_VERSION }}/*.patch
+
+      - name: Stage SIMDe licence and the mapping check
+        run: |
+          cp lib/simde/COPYING COPYING.simde
+          cat > test/check_mappy.py <<'EOF'
+          import hashlib, sys
+          import mappy as mp
+
+          t = sys.argv[1]
+          cases = [
+              (None, "MT-human.fa", "MT-orang.fa"),
+              ("asm5", "MT-human.fa", "MT-orang.fa"),
+              ("asm20", "MT-human.fa", "MT-orang.fa"),
+              ("map-ont", "MT-human.fa", "MT-orang.fa"),
+              ("splice", "x3s-ref.fa", "x3s-qry.fa"),
+              (None, "t-inv.fa", "q-inv.fa"),
+              (None, "t2.fa", "q2.fa"),
+              ("sr", "MT-human.fa", "MT-orang.fa"),
+          ]
+          out = []
+          for preset, ref, qry in cases:
+              aligner = mp.Aligner(f"{t}/{ref}", preset=preset, extra_flags=0x4000000 if preset == "splice" else 0)
+              assert aligner, (preset, ref)
+              for name, seq, qual in mp.fastx_read(f"{t}/{qry}"):
+                  for h in aligner.map(seq, cs=True, MD=True):
+                      out.append(f"{preset}\t{name}\t{h}\t{h.mapq}\t{h.NM}\t{h.cs}\t{h.MD}\t{h.trans_strand}")
+          print("\n".join(out))
+          first = next(line for line in out if line.startswith("None\tMT_orang\t")).split("\t")
+          assert first[2:12] == ["0", "16025", "+", "MT_human", "16569", "576", "16569", "13773", "16095", "60"], first[:12]
+          digest = hashlib.sha256("\n".join(out).encode()).hexdigest()
+          # Hits of the stock x86_64 (-msse4.1) build: the SIMDe kernels must match them bit for bit.
+          assert (len(out), digest) == (26, "1ff204f96b69812c7538a8960a85f63a965d70fbcddbd932a12bc7d047c8a848"), (len(out), digest)
+          print(len(out), "hits match x86_64")
+          EOF
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_SOURCES: test
+          CIBW_TEST_COMMAND: minimap2.py -c test/MT-human.fa test/MT-orang.fa && python test/check_mappy.py test
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          for path in sys.argv[1:]:
+              names = zipfile.ZipFile(path).namelist()
+              assert any(n.startswith("mappy.") and n.endswith(".so") for n in names), (path, names)
+              licences = {n.rsplit("/", 1)[-1] for n in names
+                          if ".dist-info/licenses/" in n} - {""}
+              assert licences == {"LICENSE.txt", "COPYING.simde"}, (path, licences)
+              print(path, "ok")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: mappy-${{ env.MAPPY_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish mappy ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: mappy-${{ matrix.version }}-*-manylinux_riscv64

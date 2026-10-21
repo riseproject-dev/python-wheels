@@ -3,6 +3,8 @@
 ---
 # This workflow is based on the `linux` job of
 # https://github.com/developmentseed/obstore/blob/py-v0.11.1/.github/workflows/wheels.yml
+# (pre-0.9.0 versions build like
+# https://github.com/developmentseed/obstore/blob/py-v0.8.2/.github/workflows/wheels.yml instead)
 name: Build obstore wheels (riscv64)
 
 on:
@@ -40,8 +42,58 @@ jobs:
       package: obstore
       version: ${{ inputs.version }}
 
-  build_wheels:
+  # obstore only gained the abi3-py311 feature (and a cp314t build) at 0.9.0;
+  # every pending version below that builds one non-abi3 wheel per interpreter
+  # instead, so the matrix rows are computed here rather than hardcoded.
+  plan:
     needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Expand pending versions into their build rows
+        id: plan
+        env:
+          VERSIONS: ${{ needs.setup.outputs.versions }}
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import json, os
+
+          rows = []
+          for v in json.loads(os.environ["VERSIONS"]):
+              if tuple(int(p) for p in v.split(".")[:3]) < (0, 9, 0):
+                  # No abi3 feature exists yet; cp314 is dropped too since
+                  # this era's pyo3 predates CPython 3.14.
+                  for py in ("cp312", "cp313"):
+                      rows.append({
+                          "version": v, "tag": py,
+                          "build": f"{py}-manylinux_riscv64", "features": "",
+                          "test_ignore": "--ignore=tests/test_list.py",
+                      })
+              else:
+                  rows += [
+                      {
+                          "version": v, "tag": "cp311-abi3",
+                          "build": (
+                              "cp311-manylinux_riscv64 cp312-manylinux_riscv64 "
+                              "cp313-manylinux_riscv64 cp314-manylinux_riscv64"
+                          ),
+                          "features": "--features abi3-py311 --features pyo3/extension-module",
+                          "test_ignore": "",
+                      },
+                      {
+                          "version": v, "tag": "cp314t",
+                          "build": "cp314t-manylinux_riscv64",
+                          "features": "--features pyo3/extension-module",
+                          "test_ignore": "",
+                      },
+                  ]
+          print("matrix=" + json.dumps(rows))
+          EOF
+
+  build_wheels:
+    needs: [setup, plan]
     if: needs.setup.outputs.versions != '[]'
     name: Build obstore ${{ matrix.version }} ${{ matrix.tag }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
@@ -52,23 +104,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJSON(needs.setup.outputs.versions) }}
-        include:
-          # Upstream builds one abi3 wheel with `-i 3.11 --features abi3-py311`
-          # plus per-interpreter wheels for 3.10, free-threaded and pypy.
-          # cp310 and pypy3.11 are dropped (this repo's floor is cp312 and it
-          # doesn't build PyPy wheels); cp313t is dropped: the riscv64
-          # manylinux image ships no cp313t.
-          - tag: cp311-abi3
-            # Built on cp311 -- the oldest interpreter the abi3 tag claims --
-            # and re-tested on the newer ones via find_compatible_wheel.
-            build: >-
-              cp311-manylinux_riscv64 cp312-manylinux_riscv64
-              cp313-manylinux_riscv64 cp314-manylinux_riscv64
-            features: --features abi3-py311 --features pyo3/extension-module
-          - tag: cp314t
-            build: cp314t-manylinux_riscv64
-            features: --features pyo3/extension-module
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
     env:
       OBSTORE_VERSION: ${{ matrix.version }}
@@ -113,12 +149,16 @@ jobs:
           # Computer/minio endpoint (fsspec, pystac); the handful of other
           # tests needing a running minio container are deselected below --
           # everything else runs against MemoryStore/LocalStore or constructs
-          # requests without ever reaching a server.
+          # requests without ever reaching a server. matrix.test_ignore (from
+          # the plan job) additionally drops tests/test_list.py below 0.9.0:
+          # it imports polars/pyarrow at module scope and polars has no
+          # riscv64 wheel on either index.
           CIBW_TEST_COMMAND: >-
             python -c "import obstore._obstore as m; assert m.__file__.endswith('.so'), m.__file__"
             && python -m pytest -v tests
             --ignore=tests/test_fsspec.py
             --ignore=tests/auth
+            ${{ matrix.test_ignore }}
             --deselect tests/test_delete.py::test_delete_prefix
             --deselect tests/store/test_s3.py::test_list_async
             --deselect tests/store/test_s3.py::test_get_async
