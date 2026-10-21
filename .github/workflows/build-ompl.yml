@@ -1,0 +1,145 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on
+# https://github.com/ompl/ompl/blob/2.0.1/.github/workflows/wheels_build.yml,
+# narrowed to the Linux glibc cibuildwheel job. Upstream builds yaml-cpp and Boost
+# from source because its GitHub-hosted manylinux image carries neither; the
+# manylinux_riscv64 image's own Rocky 10 CRB/AppStream repos carry boost-devel
+# 1.83.0 and eigen3-devel directly (confirmed via the public riscv64 repodata), so
+# this installs those with dnf instead of upstream's install_boost()/eigen source
+# build - OMPL's Python bindings use nanobind, not Boost.Python, so no Python-ABI
+# coupling ties Boost to a from-source build. yaml-cpp has no Rocky package and is
+# still built from source, exactly as upstream's install_yaml_cpp() does.
+name: Build ompl wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/ompl.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ompl.yml'
+      - 'docs/packages/ompl.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ompl.yml'
+      - 'docs/packages/ompl.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  YAML_CPP_VERSION: '0.8.0'
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: ompl
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build ompl ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # Upstream also builds cp310/cp311 for x86_64/aarch64; dropped here to
+        # match this registry's numpy-driven cp312 floor. No cp314t: upstream
+        # builds no free-threaded wheel either.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      OMPL_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout ompl v${{ env.OMPL_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ompl/ompl
+          ref: ${{ env.OMPL_VERSION }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: |
+          set -euo pipefail
+          for p in python-wheels/patches/ompl/${OMPL_VERSION}/*.patch; do
+            git apply -v "$p"
+          done
+
+      # Upstream's own wheel ships no licence text at all despite vendoring
+      # yaml-cpp (statically, into libompl.so) and boost_serialization (via
+      # auditwheel). Staged here since PEP 639 license-files is relative to
+      # py-bindings/pyproject.toml, one directory below OMPL's own LICENSE.
+      - name: Stage vendored dependency licences
+        run: |
+          set -euo pipefail
+          cp LICENSE py-bindings/LICENSE
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/boostorg/boost/boost-1.83.0/LICENSE_1_0.txt" -o py-bindings/LICENSE.boost
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/jbeder/yaml-cpp/${{ env.YAML_CPP_VERSION }}/LICENSE" -o py-bindings/LICENSE.yaml-cpp
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: py-bindings
+          output-dir: wheelhouse
+        env:
+          CIBW_ARCHS: riscv64
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: |
+            dnf -y install boost-devel eigen3-devel cmake
+            cd "$(mktemp -d)"
+            curl -L "https://github.com/jbeder/yaml-cpp/archive/refs/tags/${{ env.YAML_CPP_VERSION }}.tar.gz" | tar xz
+            cd "yaml-cpp-${{ env.YAML_CPP_VERSION }}"
+            cmake -Bbuild -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release
+            cmake --build build --parallel "$(nproc)"
+            cmake --install build
+          CIBW_ENVIRONMENT: PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_ONLY_BINARY=numpy
+          CIBW_TEST_REQUIRES: pytest numpy
+          CIBW_TEST_COMMAND: pytest {project}/tests/pytests --ignore={project}/tests/pytests/deprecated
+          CIBW_TEST_ENVIRONMENT: PIP_ONLY_BINARY=numpy
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ompl-${{ env.OMPL_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish ompl ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: ompl-${{ matrix.version }}-*-manylinux_riscv64
