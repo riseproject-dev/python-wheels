@@ -57,7 +57,7 @@ Mirrors [upstream's `<workflow>.yml`](<link>).
 **Differs from upstream**
 - <what> - <why>
 
-**Matrix**: <only if not cp312/cp313/cp314/cp314t - say which and why>
+**Matrix**: <only if the workflow uses `python-exclude`, edits `python-versions` away from upstream's, or hard-codes `python:` - say which and why>
 
 **Testing**
 - same as upstream

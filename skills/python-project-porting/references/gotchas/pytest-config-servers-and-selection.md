@@ -252,7 +252,8 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
     - **Mirror upstream's own interpreter cap while you are reading their wheel job.**
       pyiceberg's sets `CIBW_PROJECT_REQUIRES_PYTHON: ">=3.10,<3.14"` and
       `CIBW_SKIP: "cp3*t-*"`, and the classifiers stop at 3.13 — so the matrix is
-      `[cp312, cp313]`, not the repo default. Building `cp314`/`cp314t` there would ship
+      `[cp312, cp313]` (`check_versions.py` records this in `python-versions` from the PyPI wheel set on
+      its own). Building `cp314`/`cp314t` there would ship
       riscv64 an interpreter upstream ships on no platform, which is the goal-2 divergence,
       not extra coverage.
 
@@ -922,7 +923,7 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pytest-config-servers-
 
 631. **An old `unittest` suite that calls the deprecated `TestCase` aliases (`failUnless`,
      `failUnlessEqual`, `failUnlessRaises`, `failIfEqual`, `assertEquals`, …) fails on every
-     interpreter of the default matrix, because Python 3.12 removed them (the
+     interpreter from 3.12 on, because Python 3.12 removed them (the
      ed25519-blake2b-fork case; see `build-ed25519-blake2b-fork.yml`).** The tests are
      correct and the extension is fine — upstream's own wheel CI simply never runs them
      (its last test runner was Travis on 3.7), so nobody noticed. The error is

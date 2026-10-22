@@ -85,7 +85,8 @@ def main():
         nargs="+",
         default=DEFAULT_PYTHONS,
         metavar="TAG",
-        help="interpreter tags without the 'cp' prefix (default: %(default)s)",
+        help="interpreter tags without the 'cp' prefix; pass the workflow's "
+        "python-matrix tags (default: %(default)s)",
     )
     parser.add_argument(
         "--no-registry",

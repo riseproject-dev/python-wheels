@@ -68,6 +68,12 @@ or a repeated ask. Follow them exactly; the reference files explain the why.
   `- version:` entry without `tag:`/`files:` is pending; `_setup.yml` turns the pending set
   into the `matrix.version` every job iterates over, and the publish fills the entry in. The
   workflow derives the git tag from `matrix.version`, not the other way round.
+- **The interpreters come from upstream, never from a fixed list.** Set `python-matrix: true`
+  on the `setup` job and build from `include: ${{ fromJSON(needs.setup.outputs.matrix) }}`:
+  each version gets the interpreters in its `python-versions` in the package YAML, which
+  `check_versions.py` fills from upstream's PyPI wheels. Adjust by editing `python-versions`
+  or with `python-exclude`, with a "why" comment. Hard-code `python:` only when extra matrix
+  axes don't fit (see workflow-anatomy.md).
 - **Default to NO comments in workflows** — they are read as reference. One "why" line only for
   a genuine non-obvious deviation; never narrate standard steps.
 - **Never set `CIBW_BUILD_VERBOSITY`** — drop it if you inherit it from a template.
@@ -88,8 +94,10 @@ name, repo, version, upstream build docs — come from the invoking prompt):
 2. Add `.github/workflows/build-<pkg>.yml` following the playbook below and
    [references/workflow-anatomy.md](references/workflow-anatomy.md), **and**
    `docs/packages/<pkg>.yaml` with `package-name`, `source-code`, `license` and one
-   pending `- version: <wheel version>` entry (no `tag:`/`files:` — the publish adds them).
-   For an upgrade of an existing package, only the `- version:` line is new.
+   pending `- version: <wheel version>` entry (no `tag:`/`files:` — the publish adds them),
+   then fill its `python-versions` with `uv run --with-requirements ci_scripts/requirements.txt python3 ci_scripts/check_versions.py --python-versions <pkg>`.
+   For an upgrade of an existing package, only that version entry is new — plus, if the
+   workflow still hard-codes `python: [...]`, its conversion to `python-matrix: true`.
 3. Validate locally (gotcha 9), then push to `origin` and open a PR. The
    `pull_request: paths` trigger is what produces the **first** run of a new workflow, and
    that run is what registers it with GitHub; it builds every pending version of the YAML.

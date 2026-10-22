@@ -102,8 +102,9 @@ def main():
         help="a requirements file, repeatable",
     )
     parser.add_argument(
-        "--abi", action="append", choices=ABIS,
-        help=f"interpreter to resolve for, repeatable (default: {' '.join(ABIS)})",
+        "--abi", action="append",
+        help=f"interpreter to resolve for (e.g. cp310, cp315t), repeatable; pass the "
+        f"workflow's python-matrix tags (default: {' '.join(ABIS)})",
     )
     parser.add_argument(
         "--extra-index-url", default=REGISTRY,
