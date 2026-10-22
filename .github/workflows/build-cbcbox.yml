@@ -1,0 +1,269 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the "Linux ARM64" jobs of
+# https://github.com/h-g-s/cbcbox/blob/cd7056156bebb4347c2273ccbc0ca5e06170970d/.github/workflows/wheel.yml
+name: Build cbcbox wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/cbcbox.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cbcbox.yml'
+      - 'docs/packages/cbcbox.yaml'
+      - 'patches/cbcbox/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-cbcbox.yml'
+      - 'docs/packages/cbcbox.yaml'
+      - 'patches/cbcbox/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  # cbcbox bumps pyproject.toml's version on master without ever pushing a
+  # git tag for it (v2.931/v2.932/v2.933 are tagged, 2.934/2.935 are not), so
+  # pin the exact commit that carries version = "2.935": cd70561 bumped
+  # 2.934 -> 2.935 on 2026-08-16T22:43:04Z and the 2.935 wheels were uploaded
+  # to PyPI ~3h20m later (2026-08-17T02:08Z), with no further pyproject.toml
+  # change in between. Update this alongside the docs/packages/cbcbox.yaml
+  # version entry.
+  CBCBOX_REF: cd7056156bebb4347c2273ccbc0ca5e06170970d
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: cbcbox
+      version: ${{ inputs.version }}
+
+  compile_linux_riscv64_generic:
+    name: Compile cbcbox ${{ matrix.version }} Linux riscv64 generic
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 300
+    env:
+      CBCBOX_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout cbcbox ${{ env.CBCBOX_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: h-g-s/cbcbox
+          ref: ${{ env.CBCBOX_REF }}
+          persist-credentials: false
+
+      - name: Build generic binary (manylinux_2_39_riscv64)
+        run: |
+          for i in 1 2 3; do
+            docker pull "${MANYLINUX_RISCV64_IMAGE}" && break
+            echo "Attempt $i failed, retrying in 30s..."
+            sleep 30
+          done
+          docker run --rm \
+            -v "$PWD:/project" \
+            -e CBCBOX_BUILD_VARIANT=generic \
+            -e CBCBOX_BUILD_ONLY=1 \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash -c 'export PATH=/opt/python/cp313-cp313/bin:$PATH &&
+                     dnf install -y gcc-gfortran &&
+                     pip install setuptools wheel patchelf &&
+                     cd /project &&
+                     python setup.py build_ext'
+          sudo chown -R "$USER:$USER" cbc_dist/ 2>/dev/null || true
+          tar -czf cbc_dist_generic.tar.gz cbc_dist/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cbcbox-${{ env.CBCBOX_VERSION }}-dist-linux-riscv64-generic
+          path: cbc_dist_generic.tar.gz
+          if-no-files-found: error
+
+  compile_linux_riscv64_debug:
+    name: Compile cbcbox ${{ matrix.version }} Linux riscv64 debug
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 300
+    env:
+      CBCBOX_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout cbcbox ${{ env.CBCBOX_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: h-g-s/cbcbox
+          ref: ${{ env.CBCBOX_REF }}
+          persist-credentials: false
+
+      - name: Build debug binary (manylinux_2_39_riscv64)
+        run: |
+          for i in 1 2 3; do
+            docker pull "${MANYLINUX_RISCV64_IMAGE}" && break
+            echo "Attempt $i failed, retrying in 30s..."
+            sleep 30
+          done
+          docker run --rm \
+            -v "$PWD:/project" \
+            -e CBCBOX_BUILD_VARIANT=debug \
+            -e CBCBOX_BUILD_ONLY=1 \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash -c 'export PATH=/opt/python/cp313-cp313/bin:$PATH &&
+                     dnf install -y gcc-gfortran &&
+                     pip install setuptools wheel patchelf &&
+                     cd /project &&
+                     python setup.py build_ext &&
+                     bash scripts/build_mip_debug_cuts.sh cbc_dist_debug Cbc'
+          sudo chown -R "$USER:$USER" cbc_dist_debug/ 2>/dev/null || true
+          tar -czf cbc_dist_debug.tar.gz cbc_dist_debug/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cbcbox-${{ env.CBCBOX_VERSION }}-dist-linux-riscv64-debug
+          path: cbc_dist_debug.tar.gz
+          if-no-files-found: error
+
+  package_linux_riscv64:
+    name: Package cbcbox ${{ matrix.version }} py3-none-manylinux_riscv64
+    needs: [setup, compile_linux_riscv64_generic, compile_linux_riscv64_debug]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 300
+    env:
+      CBCBOX_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout cbcbox ${{ env.CBCBOX_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: h-g-s/cbcbox
+          ref: ${{ env.CBCBOX_REF }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # manylinux2014 (upstream's own x86_64/aarch64 wheel tag) predates
+      # riscv64; map to manylinux_2_39, the policy this job's image is built
+      # against.
+      - name: Patch cbcbox source
+        run: git apply python-wheels/patches/cbcbox/${{ env.CBCBOX_VERSION }}/*.patch
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: cbcbox-${{ env.CBCBOX_VERSION }}-dist-linux-riscv64-generic
+          path: .
+      - run: tar -xzf cbc_dist_generic.tar.gz
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: cbcbox-${{ env.CBCBOX_VERSION }}-dist-linux-riscv64-debug
+          path: .
+      - run: tar -xzf cbc_dist_debug.tar.gz
+
+      - name: Build and test wheel (compilation skipped — binaries pre-built)
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: .
+          output-dir: wheelhouse
+          config-file: "{package}/pyproject.toml"
+        env:
+          CIBW_BUILD: "cp313-*"
+          CIBW_SKIP: "*musllinux*"
+          CIBW_ARCHS: "riscv64"
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          CIBW_BEFORE_ALL_LINUX: >
+            dnf install -y gcc-gfortran &&
+            pip install patchelf
+          CIBW_ENVIRONMENT_LINUX: "PERF_REPORT_DIR=/output"
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: ""
+          CIBW_TEST_REQUIRES: "pytest"
+          CIBW_TEST_COMMAND: "mkdir -p /output && pytest {package}/tests/ -v"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cbcbox-${{ env.CBCBOX_VERSION }}-py3-none-manylinux_riscv64
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error
+
+  gpl_sources:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Collect GPL sources
+    runs-on: ubuntu-24.04-riscv
+
+    env:
+      CBCBOX_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # cbcbox bundles libgfortran (OpenBLAS is built from source with
+      # gfortran) into the wheel; its source comes from the image's own gcc,
+      # not from cbcbox.
+      - uses: ./actions/collect-gpl-sources
+        with:
+          image: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          packages: gcc
+          output: gpl-sources.tar
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cbcbox-${{ env.CBCBOX_VERSION }}-gpl-sources
+          path: gpl-sources.tar
+          if-no-files-found: error
+
+  publish:
+    name: Publish cbcbox ${{ matrix.version }}
+    needs: [setup, package_linux_riscv64, gpl_sources]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: cbcbox-${{ matrix.version }}-py3-none-manylinux_riscv64
+      gpl-sources-artifact: cbcbox-${{ matrix.version }}-gpl-sources
+      gpl-sources-description: gcc (libgfortran, linked into the bundled OpenBLAS)
