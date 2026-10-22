@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Thu, 24 Sep 2026 00:00:00 +0000
+Subject: [PATCH] test: raise appexit_http's TIMEOUT for slow/shared runners
+
+test_appexit.test_http runs test/appexit_http.py as a subprocess once per
+Stage, asserting each one exits 0. Every wait in that script - the HTTP
+connect, the body callback, the connection shutdown future, and both
+ClientBootstrap/EventLoopGroup shutdown_event.wait() calls - shares one
+hardcoded TIMEOUT = 30.0.
+
+On this repo's riscv64 runners, the cp314-cp314t leg of awscrt 0.37.0 failed
+at exactly the ClientBootstrapDone stage:
+
+    File "test/appexit_http.py", line 139, in <module>
+      assert bootstrap_shutdown_event.wait(TIMEOUT)
+    AssertionError
+
+The interleaved trace-level log (init_logging(Trace) writes to the same
+stdout the subprocess inherits) shows why this is a margin problem, not a
+hang: the host resolver's own maintenance loop re-resolves s3.amazonaws.com
+roughly once a second and only decides to kill its background thread ("no
+requests have been made for an address ... for the duration of the ttl, or
+this thread is being forcibly shutdown") about 24 seconds after the
+connection is torn down, before the channel-bootstrap release / event-loop
+destroy sequence that fires bootstrap_shutdown_event can even begin. That
+leaves under 6 seconds of the 30-second budget for the rest of native
+teardown to reach Python and set the event - on a shared riscv64 runner
+(other build jobs routinely run concurrently on the same host, see gotcha
+316 in the RISE python-wheels skill) driving a free-threaded (no-GIL)
+interpreter, whose per-object atomic refcounting adds measurable overhead to
+exactly this kind of native-callback-into-Python teardown chain.
+
+Neither of the two source changes between 0.36.4 (whose cp314-cp314t leg
+passed on the same runners in the same run) and 0.37.0 - a handful of small
+aws-c-common commits and a version bump each of aws-c-s3 and aws-lc - touch
+the ClientBootstrap/event-loop/host-resolver shutdown path (aws-c-io itself
+is unchanged), and test/appexit_http.py and test/test_appexit.py are
+byte-identical across 0.36.3, 0.36.4 and 0.37.0. So this a pre-existing
+margin that 0.37.0 happened to tip over on this run, not a version-specific
+regression, and not specific to riscv64 either - it is a statement about how
+long this host takes to tear the stack down under load. Tripling TIMEOUT
+to 90 seconds gives real headroom for a busy shared runner and free-threaded
+overhead while still failing fast (well inside any CI job timeout) if the
+shutdown genuinely never completes.
+
+Upstream-Status: Inappropriate [CI-timing headroom for this repo's shared riscv64 runners; not a functional defect and not worth carrying upstream]
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/test/appexit_http.py b/test/appexit_http.py
+index d0ee65d..3b31503 100644
+--- a/test/appexit_http.py
++++ b/test/appexit_http.py
+@@ -33,7 +33,7 @@ Stage = enum.Enum('Stage', [
+
+
+ EXIT_STAGE = Stage.Done
+-TIMEOUT = 30.0
++TIMEOUT = 90.0
+ REQUEST_HOST = 's3.amazonaws.com'
+ REQUEST_PATH = '/code-sharing-aws-crt/elastigirl.png'
+ REQUEST_PORT = 443
