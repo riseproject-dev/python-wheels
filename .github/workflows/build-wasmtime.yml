@@ -1,0 +1,153 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/bytecodealliance/wasmtime-py/blob/49.0.0/.github/workflows/main.yml
+name: Build wasmtime wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/wasmtime.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-wasmtime.yml'
+      - 'docs/packages/wasmtime.yaml'
+      - 'patches/wasmtime/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-wasmtime.yml'
+      - 'docs/packages/wasmtime.yaml'
+      - 'patches/wasmtime/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: wasmtime
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build wasmtime ${{ matrix.version }} py3-none-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+
+    env:
+      WASMTIME_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout wasmtime-py v${{ env.WASMTIME_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: bytecodealliance/wasmtime-py
+          ref: ${{ env.WASMTIME_VERSION }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      # setuptools-git-versioning reads the version from a dirty working
+      # tree as "{tag}.devN"; commit the patch and re-point the local tag
+      # at it so it reports the plain released version again (gotcha 31).
+      - name: Add riscv64 support
+        run: |
+          git apply -v python-wheels/patches/wasmtime/${{ env.WASMTIME_VERSION }}/*.patch
+          git -c user.name=ci -c user.email=ci@localhost commit -am "riscv64 patches"
+          git tag -f ${{ env.WASMTIME_VERSION }}
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - run: pip install build
+
+      # Downloads the riscv64gc-linux C-API release Wasmtime itself
+      # publishes (sha256 pinned in the asset name only, not verified by
+      # this script - same as every other platform it already fetches)
+      # and repackages it; nothing is compiled here, same as upstream.
+      - name: Build the riscv64 wheel
+        run: python3 -m build --wheel -C=--build-option=--plat-name -C=--build-option=manylinux_2_39_riscv64
+
+      - run: pip install twine && twine check --strict dist/*.whl
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: wasmtime-${{ env.WASMTIME_VERSION }}-py3-none-manylinux_riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test_wheel:
+    name: Test wasmtime ${{ matrix.version }} on Python ${{ matrix.python-version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.12', '3.13']
+
+    env:
+      WASMTIME_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout wasmtime-py v${{ env.WASMTIME_VERSION }} (tests)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: bytecodealliance/wasmtime-py
+          ref: ${{ env.WASMTIME_VERSION }}
+          persist-credentials: false
+
+      - name: Download wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: wasmtime-${{ env.WASMTIME_VERSION }}-py3-none-manylinux_riscv64
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - run: pip install --no-index --find-links . wasmtime
+      - run: pip install pycparser pytest
+
+      - name: Run upstream's tests
+        run: python -m pytest tests -v
+
+  publish:
+    name: Publish wasmtime ${{ matrix.version }}
+    needs: [setup, build_wheel, test_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: wasmtime-${{ matrix.version }}-py3-none-manylinux_riscv64
