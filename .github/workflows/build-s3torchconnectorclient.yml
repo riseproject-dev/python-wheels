@@ -88,8 +88,7 @@ jobs:
           set -euo pipefail
           project="${1:?usage: collect-crt-licenses.sh <project-dir>}"
           cargo fetch --manifest-path "$project/Cargo.toml"
-          crt_sys_src="$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 1 -type d -name 'mountpoint-s3-crt-sys-*' | head -1)"
-          cp "$crt_sys_src/LICENSE" "$project/LICENSE.mountpoint-s3-crt-sys"
+          crt_sys_src="$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -mindepth 2 -maxdepth 2 -type d -name 'mountpoint-s3-crt-sys-*' | head -1)"
           for lib in aws-lc s2n-tls aws-c-common aws-c-cal aws-c-io aws-c-compression aws-c-http aws-c-sdkutils aws-c-auth aws-checksums aws-c-s3; do
             lib_license="$(find "$crt_sys_src/crt/$lib" -maxdepth 1 -name 'LICENSE*' | head -1)"
             cp "$lib_license" "$project/LICENSE.$lib"
@@ -105,11 +104,11 @@ jobs:
         env:
           CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
           # The image ships no Rust toolchain for the setuptools-rust/pyo3 extension; rustup
-          # provisions a native riscv64gc-unknown-linux-gnu one (gotcha 10). fuse/fuse-devel
-          # match upstream's own before-all exactly, minus its CentOS7-only devtoolset/
-          # llvm-toolset packages, which this image's own gcc makes unnecessary.
+          # provisions a native riscv64gc-unknown-linux-gnu one (gotcha 10). fuse/fuse-devel and
+          # clang/clang-devel (libclang for mountpoint-s3-crt-sys's bindgen) match upstream's own
+          # manylinux_2_28 before-all, minus its gcc-toolset, which this image's own gcc replaces.
           CIBW_BEFORE_ALL_LINUX: >-
-            dnf -y install fuse fuse-devel &&
+            dnf -y install fuse fuse-devel clang clang-devel &&
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           CIBW_BEFORE_BUILD: bash collect-crt-licenses.sh {project}/s3torchconnectorclient
           CIBW_ENVIRONMENT_LINUX: >-
@@ -129,7 +128,7 @@ jobs:
         run: |
           python3 - wheelhouse/*.whl <<'EOF'
           import sys, zipfile
-          expected = {"LICENSE", "NOTICE", "LICENSE.mountpoint-s3-crt-sys", "LICENSE.aws-lc",
+          expected = {"LICENSE", "NOTICE", "LICENSE.aws-lc",
                       "LICENSE.s2n-tls", "LICENSE.aws-c-common", "LICENSE.aws-c-cal",
                       "LICENSE.aws-c-io", "LICENSE.aws-c-compression", "LICENSE.aws-c-http",
                       "LICENSE.aws-c-sdkutils", "LICENSE.aws-c-auth", "LICENSE.aws-checksums",
