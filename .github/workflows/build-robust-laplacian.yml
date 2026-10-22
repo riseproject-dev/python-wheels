@@ -1,0 +1,151 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `build_wheels` job of
+# https://github.com/nmwsharp/robust-laplacians-py/blob/v1.1.0/.github/workflows/publish.yml
+name: Build robust-laplacian wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/robust-laplacian.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-robust-laplacian.yml'
+      - 'docs/packages/robust-laplacian.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-robust-laplacian.yml'
+      - 'docs/packages/robust-laplacian.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+  # Pins from .gitmodules at v1.1.0 (git ls-tree v1.1.0 deps/), used to fetch
+  # each vendored dependency's own licence at the exact compiled-in revision.
+  PYBIND11_SHA: 45fab4087eaaff234227a10cf7845e8b07f28a98
+  EIGEN_SHA: 81bdde705cc69776fd63c870581ee0c793d48873
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: robust-laplacian
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build robust-laplacian ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      ROBUST_LAPLACIAN_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout robust-laplacians-py v${{ env.ROBUST_LAPLACIAN_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: nmwsharp/robust-laplacians-py
+          ref: v${{ env.ROBUST_LAPLACIAN_VERSION }}
+          submodules: 'recursive'
+          persist-credentials: false
+
+      # CMakeLists.txt compiles deps/{pybind11,eigen,geometry-central} and
+      # geometry-central's own deps/{happly,nanoflann,nanort} into the
+      # extension; upstream's own wheel ships only its own LICENSE (MIT).
+      # Stage each one's licence at the root for scikit-build-core's default
+      # wheel.license-files glob (gotcha 32/44, same as build-libigl.yml).
+      - name: Stage the vendored dependencies' licences
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 5 "https://raw.githubusercontent.com/pybind/pybind11/${{ env.PYBIND11_SHA }}/LICENSE" -o LICENSE.pybind11
+          {
+            curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/${{ env.EIGEN_SHA }}/COPYING.README"
+            curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/${{ env.EIGEN_SHA }}/COPYING.MPL2"
+            curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/${{ env.EIGEN_SHA }}/COPYING.BSD"
+            curl -fsSL --retry 5 "https://gitlab.com/libeigen/eigen/-/raw/${{ env.EIGEN_SHA }}/COPYING.LGPL"
+          } > LICENSE.eigen
+          cp deps/geometry-central/LICENSE LICENSE.geometry-central
+          cp deps/geometry-central/deps/happly/LICENSE LICENSE.happly
+          # nanoflann (BSD) and nanort (MIT) are vendored straight into
+          # geometry-central (no submodule of their own); jc_voronoi (MIT) is
+          # vendored straight into this repo. All three carry their licence
+          # as a header comment instead of a LICENSE file.
+          sed -n '1,30p' deps/geometry-central/deps/nanoflann/include/nanoflann.hpp > LICENSE.nanoflann
+          sed -n '5,28p' deps/geometry-central/deps/nanort/include/nanort/nanort.h > LICENSE.nanort
+          sed -n '1479,1500p' deps/jc_voronoi/include/jc_voronoi/jc_voronoi.h > LICENSE.jc_voronoi
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          output-dir: wheelhouse/
+          only: ${{ matrix.python }}-manylinux_riscv64
+          config-file: '.github/workflows/cibuildwheel_config.toml'
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # scikit-build-core's own pip-installed cmake/ninja (which upstream's
+          # before-all forces by removing the image's cmake) both have riscv64
+          # wheels on our registry already, so upstream's config needs no
+          # riscv64-specific override here.
+          CIBW_ENVIRONMENT: >-
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+            PIP_ONLY_BINARY=numpy,scipy,cmake,ninja
+          CIBW_TEST_REQUIRES: scipy
+          CIBW_TEST_COMMAND: python {project}/test/robust_laplacian_test.py
+
+      - name: Check wheel contents
+        run: |
+          python3 - wheelhouse/*.whl <<'EOF'
+          import sys, zipfile
+          path = sys.argv[1]
+          names = zipfile.ZipFile(path).namelist()
+          exts = [n for n in names if n.endswith(".so")]
+          assert exts and any("robust_laplacian_bindings" in n for n in exts), exts
+          licences = {n.split(".dist-info/licenses/", 1)[1] for n in names
+                      if ".dist-info/licenses/" in n and not n.endswith("/")}
+          expected = {"LICENSE", "LICENSE.pybind11", "LICENSE.eigen",
+                      "LICENSE.geometry-central", "LICENSE.happly",
+                      "LICENSE.nanoflann", "LICENSE.nanort", "LICENSE.jc_voronoi"}
+          assert licences == expected, licences
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: robust-laplacian-${{ env.ROBUST_LAPLACIAN_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish robust-laplacian ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: robust-laplacian-${{ matrix.version }}-*-manylinux_riscv64
