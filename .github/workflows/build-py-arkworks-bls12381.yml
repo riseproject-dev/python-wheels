@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+#
+# This workflow is based on the `linux` job of
+# https://github.com/ethereum/py-arkworks-bls12381/blob/v0.5.0/.github/workflows/CI.yml
+
+name: Build py-arkworks-bls12381 wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/py-arkworks-bls12381.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-py-arkworks-bls12381.yml'
+      - 'docs/packages/py-arkworks-bls12381.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-py-arkworks-bls12381.yml'
+      - 'docs/packages/py-arkworks-bls12381.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: py-arkworks-bls12381
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build py-arkworks-bls12381 ${{ matrix.version }} ${{ matrix.python-version }}-riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python-version: ['3.11', '3.12', '3.13', '3.14']
+
+    env:
+      PY_ARKWORKS_BLS12381_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout py-arkworks-bls12381 v${{ env.PY_ARKWORKS_BLS12381_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ethereum/py-arkworks-bls12381
+          ref: v${{ env.PY_ARKWORKS_BLS12381_VERSION }}
+          persist-credentials: false
+
+      - name: Install Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+          enable-cache: false
+
+      # `[dependencies] pyo3` in Cargo.toml carries no abi3 feature, so this
+      # package ships one wheel per CPython minor (gotcha-181's opposite
+      # shape); `[features] default = ["asm"]` only engages
+      # `ark-ff/asm`'s x86_64 inline assembly under `target_arch = "x86_64"`
+      # (arkworks-rs/algebra ff/src/fields/models/fp/montgomery_backend.rs),
+      # so it is a silent no-op here rather than a build failure.
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          args: -i ${{ matrix.python-version }} --release --out dist
+          manylinux: '2_39'
+
+      - name: Test wheel
+        run: |
+          uv pip install --force-reinstall dist/*.whl pytest pytest-benchmark
+          python -c "import py_arkworks_bls12381 as m; assert m.__file__.endswith('.so'), m.__file__"
+          python -m pytest tests/ benchmarks/ -v
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: py-arkworks-bls12381-${{ env.PY_ARKWORKS_BLS12381_VERSION }}-${{ matrix.python-version }}-riscv64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish py-arkworks-bls12381 ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: py-arkworks-bls12381-${{ matrix.version }}-*-riscv64
