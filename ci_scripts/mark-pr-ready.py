@@ -62,6 +62,24 @@ def convert_to_draft(token: str, pr: PullRequest) -> None:
     response.raise_for_status()
 
 
+def mark_ready_for_review(token: str, pr: PullRequest) -> None:
+    """Convert a draft PR to ready for review.
+
+    PyGithub's PullRequest.mark_ready_for_review() also calls GitHub's
+    GraphQL API, which Claude Code sessions cannot reach. Use the CCR REST
+    route for this direction too, mirroring convert_to_draft() above.
+    """
+    response = requests.post(
+        f"https://api.github.com/repos/{REPOSITORY}/pulls/{pr.number}/ccr/ready_for_review",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+
+
 @dataclass(frozen=True)
 class WorkflowState:
     state: str
@@ -120,7 +138,7 @@ def sync_pull_request(
         if pr.draft:
             actions.append("mark ready")
             if not dry_run:
-                pr.mark_ready_for_review()
+                mark_ready_for_review(token, pr)
         if merge:
             actions.append("squash merge")
             if not dry_run:
