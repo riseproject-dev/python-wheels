@@ -1,0 +1,148 @@
+---
+name: Build tskit wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/tskit.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tskit.yml'
+      - 'docs/packages/tskit.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-tskit.yml'
+      - 'docs/packages/tskit.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: tskit
+      version: ${{ inputs.version }}
+
+  python_sdist:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    runs-on: ubuntu-24.04-riscv
+    env:
+      TSKIT_VERSION: ${{ matrix.version }}
+
+    steps:
+    - name: checkout tskit
+      uses: actions/checkout@v7
+      with:
+        repository: tskit-dev/tskit
+        ref: ${{ env.TSKIT_VERSION }}
+        persist-credentials: false
+
+    - name: setup uv
+      uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+      with:
+        python-version: '3.12'
+        activate-environment: true
+        enable-cache: false
+
+    - name: build sdist
+      working-directory: python
+      run: |
+        rm -rf dist/
+        uv pip install build
+        python -m build --sdist
+
+    - name: upload sdist artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: tskit-${{ env.TSKIT_VERSION }}-sdist
+        path: python/dist/*.tar.gz
+        if-no-files-found: error
+
+  linux:
+    needs: [setup, python_sdist]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build tskit ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        python: ["cp312", "cp313", "cp314", "cp314t"]
+
+    env:
+      TSKIT_VERSION: ${{ matrix.version }}
+
+    steps:
+    - name: fetch sdist artifact
+      id: fetch_sdist
+      uses: actions/download-artifact@v8
+      with:
+        name: tskit-${{ env.TSKIT_VERSION }}-sdist
+
+    - name: setup uv
+      uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+      with:
+        python-version: '3.12'
+        activate-environment: true
+        enable-cache: false
+
+    - name: build/test wheels
+      id: build
+      env:
+        CIBW_BUILD: ${{ matrix.python }}-manylinux_riscv64
+        CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+        CIBW_TEST_COMMAND: >-
+          python -c "import _tskit" &&
+          tskit --help
+      run: |
+        set -eux
+
+        mkdir tskit
+
+        tar zxf ${{ steps.fetch_sdist.outputs.download-path }}/tskit*.tar.gz --strip-components=1 -C tskit
+        uv pip install --upgrade cibuildwheel
+
+        python -m cibuildwheel --output-dir dist ./tskit
+
+        echo "artifact_name=$(ls ./dist/)" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: tskit-${{ env.TSKIT_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+        path: ./dist/*.whl
+        if-no-files-found: error
+
+  publish:
+    name: Publish tskit ${{ matrix.version }}
+    needs: [setup, linux]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: tskit-${{ matrix.version }}-*-manylinux_riscv64
