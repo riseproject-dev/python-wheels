@@ -46,7 +46,7 @@ jobs:
     if: needs.setup.outputs.versions != '[]'
     name: Build breez-sdk-spark ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
     runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 90
+    timeout-minutes: 720  # ~500 crates under upstream's fat-LTO, codegen-units=1 release profile; deps alone take ~60 min here
     strategy:
       fail-fast: false
       matrix:
@@ -85,6 +85,8 @@ jobs:
           # (enabled in manylinux_2_39_riscv64) has it, but at 3.19, which resolves the
           # well-known types from /usr/include rather than carrying them in the binary
           # (CLAUDE.md gotcha 100) -- hence PROTOC_INCLUDE.
+          # `cargo run --release` reuses the uniffi-bindgen binary the release build already
+          # produced; upstream's debug `cargo run` would recompile the whole tree a second time.
           CIBW_BEFORE_ALL_LINUX: >-
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
             export PATH="$PATH:$HOME/.cargo/bin" &&
@@ -92,7 +94,7 @@ jobs:
             export PROTOC_INCLUDE=/usr/include &&
             cd {project} &&
             cargo build --release --manifest-path crates/breez-sdk/bindings/Cargo.toml --features uniffi-cli &&
-            cargo run --manifest-path crates/breez-sdk/bindings/Cargo.toml --features uniffi-cli --bin uniffi-bindgen -- generate --library target/release/libbreez_sdk_spark_bindings.so --no-format --language python -o crates/breez-sdk/bindings/langs/python/src/breez_sdk_spark &&
+            cargo run --release --manifest-path crates/breez-sdk/bindings/Cargo.toml --features uniffi-cli --bin uniffi-bindgen -- generate --library target/release/libbreez_sdk_spark_bindings.so --no-format --language python -o crates/breez-sdk/bindings/langs/python/src/breez_sdk_spark &&
             cp target/release/libbreez_sdk_spark_bindings.so crates/breez-sdk/bindings/langs/python/src/breez_sdk_spark/ &&
             sed -i -e 's/    version=".*",/    version="${{ env.BREEZ_SDK_SPARK_VERSION }}",/' crates/breez-sdk/bindings/langs/python/setup.py
           CIBW_ENVIRONMENT_LINUX: PATH="$PATH:$HOME/.cargo/bin" PROTOC_INCLUDE=/usr/include
