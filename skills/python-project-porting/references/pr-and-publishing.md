@@ -6,8 +6,8 @@ builds and publishes it — **do not dispatch anything**. Four steps remain, all
 mode that makes sense):
 
 1. **Check the publish**: `gh run list --workflow build-<pkg>.yml --branch main --limit 3`
-   must show the `push` run; when it is green, the docs PR (`github-actions/update-doc`) holds
-   the version's `tag:`/`files:`. A dispatch is only for a *re*build:
+   must show the `push` run; when it is green, the package PR (`package/<pkg>`, titled
+   `<pkg>: update packages`) holds the version's `tag:`/`files:`. A dispatch is only for a *re*build:
    `gh workflow run build-<pkg>.yml --ref main -f version=<glob>` re-releases every matching
    version, so never fire one while the `push` run is still going. Only a run whose ref is
    `main` publishes; every other ref dry-runs. Confirm afterwards with

@@ -256,9 +256,10 @@ To pull up one entry: `grep -n '^N\. ' references/gotchas/pr-ci-and-maintainer.m
     rather than the port.
     - **A `docs/packages/<pkg>.yaml` entry that still has no `tag:`/`files:` on `main` is
       not evidence the port is unpublished** — the release metadata arrives through the
-      shared `github-actions/update-doc` docs PR, which only `_publish-wheel.yml` pushes
-      to, and only on a run whose ref was `main`. Read the `push` run's conclusion and
-      the docs PR; the YAML on `main` lags the wheels by however long the maintainer takes.
+      package-specific `package/<pkg>` PR titled `<pkg>: update packages`, which
+      `_publish-wheel.yml` updates only on a run whose ref was `main`. Read the `push`
+      run's conclusion and the package PR; the YAML on `main` lags the wheels by however
+      long the maintainer takes.
     - **The `.queue.yml` entry is the *other* direction of the same trap: its `status`/`notes`
       are a pre-port research snapshot, not live state, so a fully published package can still
       read `status: porting`, `pr: null` with a note asserting "no riscv64 on PyPI or
