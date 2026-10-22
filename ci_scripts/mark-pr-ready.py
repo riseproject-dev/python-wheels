@@ -33,6 +33,7 @@ import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+import requests
 from github import Auth, Github
 from github.PullRequest import PullRequest
 from github.Repository import Repository
@@ -40,6 +41,25 @@ from github.WorkflowRun import WorkflowRun
 
 REPOSITORY = "riseproject-dev/python-wheels"
 PASSING_CONCLUSIONS = {"success", "skipped"}
+
+
+def convert_to_draft(token: str, pr: PullRequest) -> None:
+    """Convert a ready PR back to draft.
+
+    PyGithub's PullRequest.convert_to_draft() calls GitHub's GraphQL API,
+    which Claude Code sessions cannot reach (the REST API has no classic
+    endpoint for this direction either). Use the CCR REST route the
+    platform provides instead; it works the same everywhere else too.
+    """
+    response = requests.post(
+        f"https://api.github.com/repos/{REPOSITORY}/pulls/{pr.number}/ccr/convert_to_draft",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
 
 
 @dataclass(frozen=True)
@@ -83,7 +103,7 @@ def workflow_state(runs: Iterable[WorkflowRun]) -> WorkflowState:
 
 
 def sync_pull_request(
-    repo: Repository, pr: PullRequest, dry_run: bool, merge: bool
+    repo: Repository, pr: PullRequest, dry_run: bool, merge: bool, token: str
 ) -> str:
     head_sha = pr.head.sha
     # Restrict evaluation to workflows for the PR's latest commit.  Pass the
@@ -110,7 +130,7 @@ def sync_pull_request(
     elif not pr.draft:
         actions.append("convert to draft")
         if not dry_run:
-            pr.convert_to_draft()
+            convert_to_draft(token, pr)
 
     action = "; ".join(actions) if actions else "unchanged"
     details = ", ".join(
@@ -170,7 +190,7 @@ def main() -> int:
             if pr.state != "open":
                 print(f"PR #{pr.number}: closed; unchanged")
                 continue
-            sync_pull_request(repo, pr, args.dry_run, args.merge)
+            sync_pull_request(repo, pr, args.dry_run, args.merge, args.token)
     finally:
         github.close()
     return 0
