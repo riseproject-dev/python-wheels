@@ -293,8 +293,36 @@ def checkout_package_branch(branch):
     Returns the origin/<branch> commit the checkout started from, or None when
     the branch is new, so the push can lease against it.
     """
-    git_run("fetch", "origin")
+    # Checkout starts at depth 1. Fetch only main and this package branch with
+    # enough history to find their merge base, deepening only when necessary.
+    branch_ref = f"refs/heads/{branch}"
+    branch_exists = subprocess.run(
+        ["git", "ls-remote", "--exit-code", "--heads", "origin", branch_ref],
+        stdout=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0
+    refspecs = ["+refs/heads/main:refs/remotes/origin/main"]
+    if branch_exists:
+        refspecs.append(f"+{branch_ref}:refs/remotes/origin/{branch}")
+
+    git_run(
+        "fetch",
+        "--depth=100" if branch_exists else "--depth=1",
+        "origin",
+        *refspecs,
+    )
     remote_ref = f"origin/{branch}"
+    if branch_exists:
+        for deepen in (500, 2000):
+            if git_run(
+                "merge-base", "origin/main", remote_ref, check=False
+            ).returncode == 0:
+                break
+            git_run("fetch", f"--deepen={deepen}", "origin", *refspecs)
+        else:
+            # Rare fallback for a package branch with a very old merge base.
+            git_run("fetch", "--unshallow", "origin", *refspecs)
+
     result = subprocess.run(
         ["git", "rev-parse", "--verify", "--quiet", remote_ref],
         capture_output=True,
