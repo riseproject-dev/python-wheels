@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on: https://github.com/austinorr/fast-sugiyama/blob/v0.5.3/.github/workflows/python_release.yml
+name: Build fast-sugiyama wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/fast-sugiyama.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fast-sugiyama.yml'
+      - 'docs/packages/fast-sugiyama.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-fast-sugiyama.yml'
+      - 'docs/packages/fast-sugiyama.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: fast-sugiyama
+      version: ${{ inputs.version }}
+
+  build_wheel:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: Build fast-sugiyama ${{ matrix.version }} cp311-abi3-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+
+    env:
+      FAST_SUGIYAMA_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout fast-sugiyama v${{ env.FAST_SUGIYAMA_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: austinorr/fast-sugiyama
+          ref: v${{ env.FAST_SUGIYAMA_VERSION }}
+          persist-credentials: false
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b  # v1.51.0
+        with:
+          command: build
+          target: riscv64gc-unknown-linux-gnu
+          working-directory: crates/py-sugiyama
+          manylinux: '2_39'
+          args: -i python3.11 --out dist
+          # crates/py-sugiyama/.cargo/config.toml sets build-std, which needs the
+          # rust-src component; maturin-action's own toolchain install (driven by
+          # rust-toolchain.toml) does not fetch it.
+          before-script-linux: cd crates/py-sugiyama && rustup component add rust-src
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          enable-cache: false
+
+      # rectangle-packer (the "all" extra) has no riscv64 wheel on public PyPI.
+      - name: Test wheel
+        env:
+          UV_EXTRA_INDEX_URL: https://pypi.riseproject.dev/simple/
+          UV_INDEX_STRATEGY: unsafe-best-match
+        run: |
+          uv pip install crates/py-sugiyama/dist/*.whl 'rectangle-packer>=2' 'pytest>=8' 'pytest-xdist>=3' networkx
+          python -c "import fast_sugiyama._fast_sugiyama as m; assert m.__file__.endswith('.so'), m.__file__"
+          python -c "from fast_sugiyama import from_edges; print(from_edges([(51, 50), (52, 51), (53, 50), (54, 51), (55, 50), (54, 50)]))"
+          python -m pytest crates/py-sugiyama/tests
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fast-sugiyama-${{ env.FAST_SUGIYAMA_VERSION }}-cp311-abi3-manylinux_riscv64
+          path: crates/py-sugiyama/dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish fast-sugiyama ${{ matrix.version }}
+    needs: [setup, build_wheel]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: fast-sugiyama-${{ matrix.version }}-*-manylinux_riscv64
