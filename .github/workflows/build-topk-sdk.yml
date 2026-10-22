@@ -1,0 +1,137 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# This workflow is based on the `linux` job of
+# https://github.com/topk-io/topk/blob/0.15.0/.github/workflows/publish_python.yml
+name: Build topk-sdk wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/topk-sdk.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-topk-sdk.yml'
+      - 'docs/packages/topk-sdk.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-topk-sdk.yml'
+      - 'docs/packages/topk-sdk.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read  # to fetch code (actions/checkout)
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: topk-sdk
+      version: ${{ inputs.version }}
+
+  build_wheels:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build topk-sdk ${{ matrix.version }} ${{ matrix.python }}-manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+        # No cp314t: upstream ships cp39-cp314 only, all cp3x-cp3x, and the
+        # module does not declare `gil_used(false)`.
+        python: ["cp312", "cp313", "cp314"]
+
+    env:
+      TOPK_SDK_VERSION: ${{ matrix.version }}
+
+    steps:
+      # topk-py builds against the sibling topk-rs crate and ../protos, so the
+      # whole monorepo is checked out.
+      - name: Checkout topk ${{ env.TOPK_SDK_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: topk-io/topk
+          ref: ${{ env.TOPK_SDK_VERSION }}
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Apply patches
+        run: git apply python-wheels/patches/topk-sdk/${{ env.TOPK_SDK_VERSION }}/*.patch
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074  # v4.2.0
+        with:
+          package-dir: topk-py
+          output-dir: wheelhouse/
+          # musllinux is dropped: rustup.rs ships no riscv64 musl toolchain.
+          only: ${{ matrix.python }}-manylinux_riscv64
+        env:
+          CIBW_MANYLINUX_RISCV64_IMAGE: ${{ env.MANYLINUX_RISCV64_IMAGE }}
+          # protobuf ships no riscv64 protoc release; Rocky 10's CRB repo
+          # (enabled in the manylinux image) has one.
+          CIBW_BEFORE_ALL_LINUX: >-
+            yum install -y protobuf-compiler &&
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+            sh -s -- -y --profile minimal
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$PATH:$HOME/.cargo/bin"
+            PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/
+          CIBW_TEST_ENVIRONMENT_LINUX: PIP_ONLY_BINARY=numpy
+          CIBW_TEST_REQUIRES: pytest pytest-asyncio
+          # test-sources resolves against the checkout root, not package-dir.
+          CIBW_TEST_SOURCES: topk-py/tests
+          # The rest of upstream's suite needs TOPK_API_KEY and a live topk
+          # sandbox; these files exercise the extension offline.
+          CIBW_TEST_COMMAND: >-
+            python -c "import topk_sdk.topk_sdk as m;
+            assert m.__file__.endswith('.so'), m.__file__" &&
+            python -m pytest -v
+            topk-py/tests/test_data_bytes.py
+            topk-py/tests/test_data_list.py
+            topk-py/tests/test_data_matrix.py
+            topk-py/tests/test_data_struct.py
+            topk-py/tests/test_data_vector_dense.py
+            topk-py/tests/test_data_vector_sparse.py
+            topk-py/tests/test_query_expr.py
+            topk-py/tests/test_retry_config.py
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: topk-sdk-${{ env.TOPK_SDK_VERSION }}-${{ matrix.python }}-manylinux_riscv64
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish topk-sdk ${{ matrix.version }}
+    needs: [setup, build_wheels]
+    if: needs.setup.outputs.versions != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: $/.github/workflows/_publish-wheel.yml
+    secrets:
+      app-private-key: ${{ secrets.RISEPROJECT_APP_PRIVATE_KEY }}
+    with:
+      artifact-pattern: topk-sdk-${{ matrix.version }}-*-manylinux_riscv64

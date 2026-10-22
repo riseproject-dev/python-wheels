@@ -1,0 +1,3094 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ludovic Henry <git@ludovic.dev>
+Date: Wed, 15 Oct 2026 00:00:01 +0000
+Subject: [PATCH] vendor crash-context 0.7.0 for riscv64 getcontext() support
+
+Upstream-Status: Inappropriate [riscv64 getcontext support needs a newer transitive dependency crash-handler's own Cargo.toml pins out of semver range]
+
+fbuild's running-process/zccache dependencies pull in crash-handler,
+which depends on `crash-context = "0.6"`. crash-context 0.6.3 (the
+only version satisfying that range before this patch) has no riscv64
+branch anywhere in its getcontext()/ucontext_t/fpregset_t cfg-if
+chains, so the riscv64 build fails with "cannot find type `ucontext_t`
+in module `super`" compiling that crate directly.
+
+crash-context 0.7.0 (EmbarkStudios/crash-handling#102) added real
+riscv64 support (ucontext_t/mcontext_t layout plus a hand-written
+crash_context_getcontext asm routine), but it can't just be bumped to:
+crash-handler 0.6.3 AND 0.7.0 (both locked in this workspace, pulled in
+by zccache and running-process-probe respectively) each pin
+`crash-context = "0.6"`, a caret requirement that rejects 0.7.0/0.8.0
+outright, and neither of those crates is ours to patch (both are
+external git dependencies, not fbuild workspace members).
+
+Vendors the complete, unmodified crash-context 0.7.0 release (from its
+own published .crate tarball) under vendor/crash-context/, with only
+its Cargo.toml version string turned back to "0.6.3" so it keeps
+satisfying every "crash-context = 0.6" requirement in the graph, and
+wires it in via [patch.crates-io] in the top-level Cargo.toml -- a
+standard Cargo mechanism for substituting a transitive dependency's
+source without needing to fork everything above it in the dependency
+graph. No hand-written code: the riscv64 getcontext asm, ucontext_t/
+mcontext_t/fpregset_t layout and everything else come straight from
+crash-context's own tested, released 0.7.0 source.
+
+Validated: `cargo check` on the vendored crate standalone (both the
+default host target and a cross-check against the installed
+riscv64gc-unknown-linux-gnu rust-std component -- the latter failed in
+this sandbox on an unrelated "can't find crate for `core`" sysroot
+issue affecting every crate including libc, not anything in this
+patch, so riscv64 codegen itself is unverified locally) and the whole
+patch applying cleanly against a fresh v2.5.21 checkout.
+
+Signed-off-by: Ludovic Henry <git@ludovic.dev>
+---
+diff --git a/Cargo.toml b/Cargo.toml
+index a7c341b..f4514cf 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -205,3 +205,14 @@ debug = "line-tables-only"
+ [profile.dev.package."*"]
+ opt-level = 3
+ debug = false
++
++[patch.crates-io]
++# crash-context 0.6.3 (the version crash-handler 0.6/0.7 both require) has
++# no riscv64 getcontext() implementation at all -- `target_arch = "riscv64"`
++# falls through its cfg-if chain with no branch, leaving ucontext_t/
++# fpregset_t undefined. Vendor the real upstream 0.7.0 release (which added
++# riscv64 support, EmbarkStudios/crash-handling#102) with its version string
++# alone turned back to "0.6.3" so it still satisfies crash-handler's "0.6"
++# requirement; everything else, including the riscv64 getcontext asm, is
++# unmodified upstream code.
++crash-context = { path = "vendor/crash-context" }
+diff --git a/vendor/crash-context/CHANGELOG.md b/vendor/crash-context/CHANGELOG.md
+new file mode 100644
+index 0000000..bcc0792
+--- /dev/null
++++ b/vendor/crash-context/CHANGELOG.md
+@@ -0,0 +1,101 @@
++<!-- markdownlint-disable blanks-around-headings blanks-around-lists no-duplicate-heading -->
++
++# Changelog
++
++All notable changes to this project will be documented in this file.
++
++The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
++and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
++
++<!-- next-header -->
++## [Unreleased] - ReleaseDate
++## [0.7.0] - 2026-01-13
++### Added
++- [PR#102](https://github.com/EmbarkStudios/crash-handling/pull/102) added support for RISCV64 `getcontext`.
++- [PR#109](https://github.com/EmbarkStudios/crash-handling/pull/102) added support for s390x `getcontext`.
++
++### Changed
++- [PR#111](https://github.com/EmbarkStudios/crash-handling/pull/111) updated MSRV to 1.85.0.
++
++## [0.6.3] - 2024-07-25
++### Fixed
++- [PR#89](https://github.com/EmbarkStudios/crash-handling/pull/89) fixed compilation for `arm-unknown-linux-gnueabihf`...again.
++
++## [0.6.2] - 2024-06-08
++### Changed
++- Update MSRV to 1.62.0
++
++## [0.6.1] - 2023-06-19
++### Added
++- [PR#76](https://github.com/EmbarkStudios/crash-handling/pull/76) added support for `i686-linux-android` and `x86_64-linux-android`. Thanks [@gabrielesvelto](https://github.com/gabrielesvelto)!
++
++## [0.6.0] - 2023-04-03
++### Changed
++- [PR#70](https://github.com/EmbarkStudios/crash-handling/pull/70) removed the `winapi` dependency in favor of embedded bindings to avoid dependencies.
++- [PR#70](https://github.com/EmbarkStudios/crash-handling/pull/70) removed the asm implementations for Windows CPU context retrieval in favor of using `RtlCaptureContext`. This means that floating state is not captured, but is otherwise and improvement.
++
++### Added
++- [PR#68](https://github.com/EmbarkStudios/crash-handling/pull/68) added capture context support for x86 Windows, but this change was supplanted in [PR#70](https://github.com/EmbarkStudios/crash-handling/pull/70) to use `RtlCaptureContext` instead.
++
++### Fixed
++- [PR#71](https://github.com/EmbarkStudios/crash-handling/pull/71) fixed the definition of `mcontext_t` for `i686-unknow-linux`. Thanks [@afranchuk](https://github.com/afranchuk)!
++
++## [0.5.1] - 2022-11-17
++### Fixed
++- [PR#66](https://github.com/EmbarkStudios/crash-handling/pull/66) (apparently) resolved [#65](https://github.com/EmbarkStudios/crash-handling/issues/65) by...changing from AT&T to Intel syntax. This shouldn't have changed anything, but it did, and I'm too tired and have other things to work on, so here we are.
++
++## [0.5.0] - 2022-11-17
++### Added
++- [PR#62](https://github.com/EmbarkStudios/crash-handling/pull/62) added a replacement implementation of `RtlCaptureContext`, and defines its own `CONTEXT` structure. This was needed due to both `winapi` and `windows-sys` incorrectly defining the `CONTEXT` and related structures on both x86_64 and aarch64 to not be correctly aligned, as well as `RtlCaptureContext` not actually capturing the floating point and vector state.
++
++## [0.4.0] - 2022-07-21
++### Added
++- [PR#46](https://github.com/EmbarkStudios/crash-handling/pull/46) added support for unpacking `EXC_RESOURCE` exceptions on MacOS.
++- [PR#47](https://github.com/EmbarkStudios/crash-handling/pull/47) added support for unpacking `EXC_GUARD` exceptions on MacOS.
++
++### Changed
++- [PR#47](https://github.com/EmbarkStudios/crash-handling/pull/47) changed `ExceptionInfo` to use unsigned types for all of its fields. While these are declared as signed, in practice all usage of them is as unsigned integers.
++
++### Fixed
++- [PR#47](https://github.com/EmbarkStudios/crash-handling/pull/47) fixed a potential issue with the IPC exception passing due to the structure's not being `#[repr(C, packed(4))]`, and the receiving side not (properly) accounting for the trailer that is added by the kernel to every mach msg.
++
++## [0.3.1] - 2022-05-25
++### Changed
++- Updated to `minidump-writer` 0.2.1 which includes support for MacOS thread names, and aligns on crash-context 0.3.0.
++
++## [0.3.0] - 2022-05-23
++### Added
++- First usable release of `crash-context`, `crash-handler`, `sadness-generator`, and `minidumper` crates.
++
++## [crash-handler-v0.1.0] - 2022-04-29
++### Added
++- Initial publish of crash-handler with Linux, Windows, and MacOS support
++
++## [sadness-generator-v0.1.0] - 2022-04-29
++### Added
++- Initial published of sadness-generator, can generated crashes on Linux, Windows, and MacOS
++
++## [crash-context-v0.2.0] - 2022-04-29
++### Added
++- Add Windows and MacOS support
++
++## [crash-context-v0.1.0] - 2022-04-21
++### Added
++- Initial pass of crash-context, Linux only
++
++<!-- next-url -->
++[Unreleased]: https://github.com/EmbarkStudios/crash-handling/compare/crash-context-0.7.0...HEAD
++[0.7.0]: https://github.com/EmbarkStudios/crash-handling/compare/{{tag_name}}...crash-context-0.7.0
++[0.6.3]: https://github.com/EmbarkStudios/crash-handling/compare/crash-context-0.6.2...{{tag_name}}
++[0.6.2]: https://github.com/EmbarkStudios/crash-handling/compare/crash-context-0.6.1...crash-context-0.6.2
++[0.6.1]: https://github.com/EmbarkStudios/crash-handling/compare/crash-context-0.6.0...crash-context-0.6.1
++[0.6.0]: https://github.com/EmbarkStudios/crash-handling/compare/crash-context-0.5.1...crash-context-0.6.0
++[0.5.1]: https://github.com/EmbarkStudios/crash-handling/compare/crash-context-0.5.0...crash-context-0.5.1
++[0.5.0]: https://github.com/EmbarkStudios/crash-handling/compare/crash-context-0.4.0...crash-context-0.5.0
++[0.4.0]: https://github.com/EmbarkStudios/crash-handling/compare/0.3.1...crash-context-0.4.0
++[0.3.1]: https://github.com/EmbarkStudios/crash-handling/compare/0.3.0...0.3.1
++[0.3.0]: https://github.com/EmbarkStudios/crash-handling/compare/crash-handler-v0.1.0...0.3.0
++[crash-handler-v0.1.0]: https://github.com/EmbarkStudios/crash-handling/releases/tag/crash-handler-v0.1.0
++[sadness-generator-v0.1.0]: https://github.com/EmbarkStudios/crash-handling/releases/tag/sadness-generator-v0.1.0
++[crash-context-v0.2.0]: https://github.com/EmbarkStudios/crash-handling/releases/tag/crash-context-v0.2.0
++[crash-context-v0.1.0]: https://github.com/EmbarkStudios/crash-handling/releases/tag/crash-context-v0.1.0
+diff --git a/vendor/crash-context/Cargo.toml b/vendor/crash-context/Cargo.toml
+new file mode 100644
+index 0000000..cee7137
+--- /dev/null
++++ b/vendor/crash-context/Cargo.toml
+@@ -0,0 +1,60 @@
++# THIS FILE IS AUTOMATICALLY GENERATED BY CARGO
++#
++# When uploading crates to the registry Cargo will automatically
++# "normalize" Cargo.toml files for maximal compatibility
++# with all versions of Cargo and also rewrite `path` dependencies
++# to registry (e.g., crates.io) dependencies.
++#
++# If you are reading this file be aware that the original Cargo.toml
++# will likely look very different (and much more reasonable).
++# See Cargo.toml.orig for the original contents.
++
++# Keep this out of fbuild's own workspace -- it's a vendored, patched
++# copy of a third-party crate, not a first-party fbuild crate.
++[workspace]
++
++[package]
++edition = "2024"
++rust-version = "1.85.0"
++name = "crash-context"
++version = "0.6.3"
++authors = [
++    "Embark <opensource@embark-studios.com>",
++    "Jake Shadle <jake.shadle@embark-studios.com>",
++]
++build = false
++autolib = false
++autobins = false
++autoexamples = false
++autotests = false
++autobenches = false
++description = "Provides portable types containing target specific contextual information at the time of a crash"
++homepage = "https://github.com/EmbarkStudios/crash-handling/tree/main/crash-context"
++documentation = "https://docs.rs/crash-context"
++readme = "README.md"
++keywords = [
++    "crash",
++    "libc",
++    "getcontext",
++]
++categories = ["external-ffi-bindings"]
++license = "MIT OR Apache-2.0"
++repository = "https://github.com/EmbarkStudios/crash-handling"
++resolver = "2"
++
++[lib]
++name = "crash_context"
++path = "src/lib.rs"
++
++[[test]]
++name = "capture_context"
++path = "tests/capture_context.rs"
++
++[dependencies.cfg-if]
++version = "1.0"
++
++[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies.libc]
++version = ">=0.2.180"
++
++[target.'cfg(target_os = "macos")'.dependencies.mach2]
++version = "0.4"
+diff --git a/vendor/crash-context/Cargo.toml.orig b/vendor/crash-context/Cargo.toml.orig
+new file mode 100644
+index 0000000..64f0214
+--- /dev/null
++++ b/vendor/crash-context/Cargo.toml.orig
+@@ -0,0 +1,25 @@
++[package]
++name = "crash-context"
++version = "0.7.0"
++description = "Provides portable types containing target specific contextual information at the time of a crash"
++repository.workspace = true
++authors.workspace = true
++edition.workspace = true
++license.workspace = true
++readme = "README.md"
++documentation = "https://docs.rs/crash-context"
++homepage = "https://github.com/EmbarkStudios/crash-handling/tree/main/crash-context"
++categories = ["external-ffi-bindings"]
++keywords = ["crash", "libc", "getcontext"]
++rust-version.workspace = true
++
++[dependencies]
++# Nicer cfg handling
++cfg-if.workspace = true
++
++[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
++libc.workspace = true
++
++[target.'cfg(target_os = "macos")'.dependencies]
++# provides bindings to mach specifics
++mach2.workspace = true
+diff --git a/vendor/crash-context/LICENSE-APACHE b/vendor/crash-context/LICENSE-APACHE
+new file mode 100644
+index 0000000..11069ed
+--- /dev/null
++++ b/vendor/crash-context/LICENSE-APACHE
+@@ -0,0 +1,201 @@
++                              Apache License
++                        Version 2.0, January 2004
++                     http://www.apache.org/licenses/
++
++TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
++
++1. Definitions.
++
++   "License" shall mean the terms and conditions for use, reproduction,
++   and distribution as defined by Sections 1 through 9 of this document.
++
++   "Licensor" shall mean the copyright owner or entity authorized by
++   the copyright owner that is granting the License.
++
++   "Legal Entity" shall mean the union of the acting entity and all
++   other entities that control, are controlled by, or are under common
++   control with that entity. For the purposes of this definition,
++   "control" means (i) the power, direct or indirect, to cause the
++   direction or management of such entity, whether by contract or
++   otherwise, or (ii) ownership of fifty percent (50%) or more of the
++   outstanding shares, or (iii) beneficial ownership of such entity.
++
++   "You" (or "Your") shall mean an individual or Legal Entity
++   exercising permissions granted by this License.
++
++   "Source" form shall mean the preferred form for making modifications,
++   including but not limited to software source code, documentation
++   source, and configuration files.
++
++   "Object" form shall mean any form resulting from mechanical
++   transformation or translation of a Source form, including but
++   not limited to compiled object code, generated documentation,
++   and conversions to other media types.
++
++   "Work" shall mean the work of authorship, whether in Source or
++   Object form, made available under the License, as indicated by a
++   copyright notice that is included in or attached to the work
++   (an example is provided in the Appendix below).
++
++   "Derivative Works" shall mean any work, whether in Source or Object
++   form, that is based on (or derived from) the Work and for which the
++   editorial revisions, annotations, elaborations, or other modifications
++   represent, as a whole, an original work of authorship. For the purposes
++   of this License, Derivative Works shall not include works that remain
++   separable from, or merely link (or bind by name) to the interfaces of,
++   the Work and Derivative Works thereof.
++
++   "Contribution" shall mean any work of authorship, including
++   the original version of the Work and any modifications or additions
++   to that Work or Derivative Works thereof, that is intentionally
++   submitted to Licensor for inclusion in the Work by the copyright owner
++   or by an individual or Legal Entity authorized to submit on behalf of
++   the copyright owner. For the purposes of this definition, "submitted"
++   means any form of electronic, verbal, or written communication sent
++   to the Licensor or its representatives, including but not limited to
++   communication on electronic mailing lists, source code control systems,
++   and issue tracking systems that are managed by, or on behalf of, the
++   Licensor for the purpose of discussing and improving the Work, but
++   excluding communication that is conspicuously marked or otherwise
++   designated in writing by the copyright owner as "Not a Contribution."
++
++   "Contributor" shall mean Licensor and any individual or Legal Entity
++   on behalf of whom a Contribution has been received by Licensor and
++   subsequently incorporated within the Work.
++
++2. Grant of Copyright License. Subject to the terms and conditions of
++   this License, each Contributor hereby grants to You a perpetual,
++   worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++   copyright license to reproduce, prepare Derivative Works of,
++   publicly display, publicly perform, sublicense, and distribute the
++   Work and such Derivative Works in Source or Object form.
++
++3. Grant of Patent License. Subject to the terms and conditions of
++   this License, each Contributor hereby grants to You a perpetual,
++   worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++   (except as stated in this section) patent license to make, have made,
++   use, offer to sell, sell, import, and otherwise transfer the Work,
++   where such license applies only to those patent claims licensable
++   by such Contributor that are necessarily infringed by their
++   Contribution(s) alone or by combination of their Contribution(s)
++   with the Work to which such Contribution(s) was submitted. If You
++   institute patent litigation against any entity (including a
++   cross-claim or counterclaim in a lawsuit) alleging that the Work
++   or a Contribution incorporated within the Work constitutes direct
++   or contributory patent infringement, then any patent licenses
++   granted to You under this License for that Work shall terminate
++   as of the date such litigation is filed.
++
++4. Redistribution. You may reproduce and distribute copies of the
++   Work or Derivative Works thereof in any medium, with or without
++   modifications, and in Source or Object form, provided that You
++   meet the following conditions:
++
++   (a) You must give any other recipients of the Work or
++       Derivative Works a copy of this License; and
++
++   (b) You must cause any modified files to carry prominent notices
++       stating that You changed the files; and
++
++   (c) You must retain, in the Source form of any Derivative Works
++       that You distribute, all copyright, patent, trademark, and
++       attribution notices from the Source form of the Work,
++       excluding those notices that do not pertain to any part of
++       the Derivative Works; and
++
++   (d) If the Work includes a "NOTICE" text file as part of its
++       distribution, then any Derivative Works that You distribute must
++       include a readable copy of the attribution notices contained
++       within such NOTICE file, excluding those notices that do not
++       pertain to any part of the Derivative Works, in at least one
++       of the following places: within a NOTICE text file distributed
++       as part of the Derivative Works; within the Source form or
++       documentation, if provided along with the Derivative Works; or,
++       within a display generated by the Derivative Works, if and
++       wherever such third-party notices normally appear. The contents
++       of the NOTICE file are for informational purposes only and
++       do not modify the License. You may add Your own attribution
++       notices within Derivative Works that You distribute, alongside
++       or as an addendum to the NOTICE text from the Work, provided
++       that such additional attribution notices cannot be construed
++       as modifying the License.
++
++   You may add Your own copyright statement to Your modifications and
++   may provide additional or different license terms and conditions
++   for use, reproduction, or distribution of Your modifications, or
++   for any such Derivative Works as a whole, provided Your use,
++   reproduction, and distribution of the Work otherwise complies with
++   the conditions stated in this License.
++
++5. Submission of Contributions. Unless You explicitly state otherwise,
++   any Contribution intentionally submitted for inclusion in the Work
++   by You to the Licensor shall be under the terms and conditions of
++   this License, without any additional terms or conditions.
++   Notwithstanding the above, nothing herein shall supersede or modify
++   the terms of any separate license agreement you may have executed
++   with Licensor regarding such Contributions.
++
++6. Trademarks. This License does not grant permission to use the trade
++   names, trademarks, service marks, or product names of the Licensor,
++   except as required for reasonable and customary use in describing the
++   origin of the Work and reproducing the content of the NOTICE file.
++
++7. Disclaimer of Warranty. Unless required by applicable law or
++   agreed to in writing, Licensor provides the Work (and each
++   Contributor provides its Contributions) on an "AS IS" BASIS,
++   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
++   implied, including, without limitation, any warranties or conditions
++   of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
++   PARTICULAR PURPOSE. You are solely responsible for determining the
++   appropriateness of using or redistributing the Work and assume any
++   risks associated with Your exercise of permissions under this License.
++
++8. Limitation of Liability. In no event and under no legal theory,
++   whether in tort (including negligence), contract, or otherwise,
++   unless required by applicable law (such as deliberate and grossly
++   negligent acts) or agreed to in writing, shall any Contributor be
++   liable to You for damages, including any direct, indirect, special,
++   incidental, or consequential damages of any character arising as a
++   result of this License or out of the use or inability to use the
++   Work (including but not limited to damages for loss of goodwill,
++   work stoppage, computer failure or malfunction, or any and all
++   other commercial damages or losses), even if such Contributor
++   has been advised of the possibility of such damages.
++
++9. Accepting Warranty or Additional Liability. While redistributing
++   the Work or Derivative Works thereof, You may choose to offer,
++   and charge a fee for, acceptance of support, warranty, indemnity,
++   or other liability obligations and/or rights consistent with this
++   License. However, in accepting such obligations, You may act only
++   on Your own behalf and on Your sole responsibility, not on behalf
++   of any other Contributor, and only if You agree to indemnify,
++   defend, and hold each Contributor harmless for any liability
++   incurred by, or claims asserted against, such Contributor by reason
++   of your accepting any such warranty or additional liability.
++
++END OF TERMS AND CONDITIONS
++
++APPENDIX: How to apply the Apache License to your work.
++
++   To apply the Apache License to your work, attach the following
++   boilerplate notice, with the fields enclosed by brackets "[]"
++   replaced with your own identifying information. (Don't include
++   the brackets!)  The text should be enclosed in the appropriate
++   comment syntax for the file format. We also recommend that a
++   file or class name and description of purpose be included on the
++   same "printed page" as the copyright notice for easier
++   identification within third-party archives.
++
++Copyright [yyyy] [name of copyright owner]
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
+diff --git a/vendor/crash-context/LICENSE-MIT b/vendor/crash-context/LICENSE-MIT
+new file mode 100644
+index 0000000..0bdad8f
+--- /dev/null
++++ b/vendor/crash-context/LICENSE-MIT
+@@ -0,0 +1,25 @@
++Copyright (c) 2019 Embark Studios
++
++Permission is hereby granted, free of charge, to any
++person obtaining a copy of this software and associated
++documentation files (the "Software"), to deal in the
++Software without restriction, including without
++limitation the rights to use, copy, modify, merge,
++publish, distribute, sublicense, and/or sell copies of
++the Software, and to permit persons to whom the Software
++is furnished to do so, subject to the following
++conditions:
++
++The above copyright notice and this permission notice
++shall be included in all copies or substantial portions
++of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
++ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
++TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
++PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
++SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
++CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
++OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
++IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++DEALINGS IN THE SOFTWARE.
+diff --git a/vendor/crash-context/README.md b/vendor/crash-context/README.md
+new file mode 100644
+index 0000000..91375c9
+--- /dev/null
++++ b/vendor/crash-context/README.md
+@@ -0,0 +1,60 @@
++<!-- Allow this file to not have a first line heading -->
++<!-- markdownlint-disable-file MD041 -->
++
++<!-- inline html -->
++<!-- markdownlint-disable-file MD033 MD036 -->
++
++<div align="center">
++
++# `🔥 crash-context`
++
++**Provides portable types containing target specific contextual information at the time of a crash**
++
++[![Embark](https://img.shields.io/badge/embark-open%20source-blueviolet.svg)](https://embark.dev)
++[![Embark](https://img.shields.io/badge/discord-ark-%237289da.svg?logo=discord)](https://discord.gg/dAuKfZS)
++[![Crates.io](https://img.shields.io/crates/v/crash-context.svg)](https://crates.io/crates/crash-context)
++[![Docs](https://docs.rs/crash-context/badge.svg)](https://docs.rs/crash-context)
++[![dependency status](https://deps.rs/repo/github/EmbarkStudios/crash-handling/status.svg)](https://deps.rs/repo/github/EmbarkStudios/crash-handling)
++[![Build status](https://github.com/EmbarkStudios/crash-handling/workflows/CI/badge.svg)](https://github.com/EmbarkStudios/crash-handling/actions)
++
++</div>
++
++## Supported targets
++
++- `aarch64-android-linux`
++- `aarch64-apple-darwin`
++- `aarch64-unknown-linux-gnu`
++- `aarch64-unknown-linux-musl`
++- `arm-linux-androideabi`
++- `arm-unknown-linux-gnueabi`
++- `arm-unknown-linux-musleabi`
++- `i686-linux-android`
++- `i686-unknown-linux-gnu`
++- `i686-unknown-linux-musl`
++- `x86_64-apple-darwin`
++- `x86_64-linux-android`
++- `x86_64-pc-windows-msvc`
++- `x86_64-unknown-linux-gnu`
++- `x86_64-unknown-linux-musl`
++
++## Contribution
++
++[![Contributor Covenant](https://img.shields.io/badge/contributor%20covenant-v1.4-ff69b4.svg)](../CODE_OF_CONDUCT.md)
++
++We welcome community contributions to this project.
++
++Please read our [Contributor Guide](../CONTRIBUTING.md) for more information on how to get started.
++Please also read our [Contributor Terms](../CONTRIBUTING.md#contributor-terms) before you make any contributions.
++
++Any contribution intentionally submitted for inclusion in an Embark Studios project, shall comply with the Rust standard licensing model (MIT OR Apache 2.0) and therefore be dual licensed as described below, without any additional terms or conditions:
++
++### License
++
++This contribution is dual licensed under EITHER OF
++
++- Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
++- MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
++
++at your option.
++
++For clarity, "your" refers to Embark or any other licensee/user of the contribution.
+diff --git a/vendor/crash-context/release.toml b/vendor/crash-context/release.toml
+new file mode 100644
+index 0000000..cf6a8e5
+--- /dev/null
++++ b/vendor/crash-context/release.toml
+@@ -0,0 +1,10 @@
++pre-release-commit-message = "Release crash-context-{{version}}"
++tag-message = "Release crash-context-{{version}}"
++tag-name = "crash-context-{{version}}"
++pre-release-replacements = [
++    { file = "CHANGELOG.md", search = "Unreleased", replace = "{{version}}" },
++    { file = "CHANGELOG.md", search = "\\.\\.\\.HEAD", replace = "...{{tag_name}}" },
++    { file = "CHANGELOG.md", search = "ReleaseDate", replace = "{{date}}" },
++    { file = "CHANGELOG.md", search = "<!-- next-header -->", replace = "<!-- next-header -->\n## [Unreleased] - ReleaseDate" },
++    { file = "CHANGELOG.md", search = "<!-- next-url -->", replace = "<!-- next-url -->\n[Unreleased]: https://github.com/EmbarkStudios/crash-handling/compare/{{tag_name}}...HEAD" },
++]
+diff --git a/vendor/crash-context/src/lib.rs b/vendor/crash-context/src/lib.rs
+new file mode 100644
+index 0000000..4056de8
+--- /dev/null
++++ b/vendor/crash-context/src/lib.rs
+@@ -0,0 +1,38 @@
++//! This crate exposes a platform specific [`CrashContext`] which contains the
++//! details for a crash (signal, exception, etc). This crate is fairly minimal
++//! since the intended use case is to more easily share these crash details
++//! between different crates without requiring lots of dependencies, and is
++//! currently only really made for the purposes of the crates in this repo, and
++//! [minidump-writer](https://github.com/rust-minidump/minidump-writer).
++//!
++//! ## Linux/Android
++//!
++//! This crate also contains a portable implementation of [`getcontext`](
++//! https://man7.org/linux/man-pages/man3/getcontext.3.html), as not all libc
++//! implementations (notably `musl`) implement it as it has been deprecated from
++//! POSIX.
++//!
++//! ## Macos
++//!
++//! One major difference on Macos is that the details in the [`CrashContext`]
++//! cannot be transferred to another process via normal methods (eg. sockets)
++//! and must be sent via the criminally undocumented mach ports. This crate
++//! provides a `Client` and `Server` that can be used to send and receive a
++//! [`CrashContext`] across processes so that you don't have to suffer like I
++//! did.
++
++// crate-specific exceptions:
++#![allow(unsafe_code, nonstandard_style)]
++
++cfg_if::cfg_if! {
++    if #[cfg(any(target_os = "linux", target_os = "android"))] {
++        mod linux;
++        pub use linux::*;
++    } else if #[cfg(target_os = "windows")] {
++        mod windows;
++        pub use windows::*;
++    } else if #[cfg(target_os = "macos")] {
++        mod mac;
++        pub use mac::*;
++    }
++}
+diff --git a/vendor/crash-context/src/linux.rs b/vendor/crash-context/src/linux.rs
+new file mode 100644
+index 0000000..ed2584c
+--- /dev/null
++++ b/vendor/crash-context/src/linux.rs
+@@ -0,0 +1,376 @@
++mod getcontext;
++
++pub use getcontext::crash_context_getcontext;
++
++/// The full context for a Linux/Android crash
++#[repr(C)]
++#[derive(Clone)]
++pub struct CrashContext {
++    /// Crashing thread context.
++    ///
++    /// Note that we use [`crate::ucontext_t`] instead of [`libc::ucontext_t`]
++    /// as libc's differs between glibc and musl <https://github.com/rust-lang/libc/pull/1646>
++    /// even though the `ucontext_t` received from a signal will be the same
++    /// regardless of the libc implementation used as it is only arch specific
++    /// and not libc specific
++    ///
++    /// Note that we hide `ucontext_t::uc_link` as it is a pointer and thus can't
++    /// be accessed in a process other than the one the `CrashContext` was created
++    /// in. This is a just a self-reference so is not useful in practice.
++    ///
++    /// Note that the same applies to [`mcontext_t::fpregs`], but since that points
++    /// to floating point registers and _is_ interesting to read in another process,
++    /// those registers available as [`Self::float_state`], except on the `arm`
++    /// architecture since they aren't part of `mcontext_t` at all.
++    pub context: ucontext_t,
++    /// State of floating point registers.
++    ///
++    /// This isn't part of the user ABI for Linux arm
++    #[cfg(not(target_arch = "arm"))]
++    pub float_state: fpregset_t,
++    /// The signal info for the crash
++    pub siginfo: libc::signalfd_siginfo,
++    /// The id of the crashing process
++    pub pid: libc::pid_t,
++    /// The id of the crashing thread
++    pub tid: libc::pid_t,
++}
++
++unsafe impl Send for CrashContext {}
++
++impl CrashContext {
++    pub fn as_bytes(&self) -> &[u8] {
++        unsafe {
++            let size = std::mem::size_of_val(self);
++            let ptr = (self as *const Self).cast();
++            std::slice::from_raw_parts(ptr, size)
++        }
++    }
++
++    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
++        if bytes.len() != std::mem::size_of::<Self>() {
++            return None;
++        }
++
++        unsafe { Some((*bytes.as_ptr().cast::<Self>()).clone()) }
++    }
++}
++
++#[repr(C)]
++#[derive(Clone)]
++#[doc(hidden)]
++pub struct sigset_t {
++    #[cfg(target_pointer_width = "32")]
++    __val: [u32; 32],
++    #[cfg(target_pointer_width = "64")]
++    __val: [u64; 16],
++}
++
++#[repr(C)]
++#[derive(Clone)]
++#[doc(hidden)]
++pub struct stack_t {
++    pub ss_sp: *mut std::ffi::c_void,
++    pub ss_flags: i32,
++    pub ss_size: usize,
++}
++
++cfg_if::cfg_if! {
++    if #[cfg(target_arch = "x86_64")] {
++        #[repr(C)]
++        #[derive(Clone)]
++        #[doc(hidden)]
++        pub struct ucontext_t {
++            pub uc_flags: u64,
++            uc_link: *mut ucontext_t,
++            pub uc_stack: stack_t,
++            pub uc_mcontext: mcontext_t,
++            pub uc_sigmask: sigset_t,
++            __private: [u8; 512],
++            /// Shadow stack
++            __ssp: [u64; 4],
++        }
++
++        #[repr(C)]
++        #[derive(Clone)]
++        #[doc(hidden)]
++        pub struct mcontext_t {
++            pub gregs: [i64; 23],
++            pub fpregs: *mut fpregset_t,
++            __reserved: [u64; 8],
++        }
++
++        #[repr(C)]
++        #[derive(Clone)]
++        #[doc(hidden)]
++        pub struct fpregset_t {
++            pub cwd: u16,
++            pub swd: u16,
++            pub ftw: u16,
++            pub fop: u16,
++            pub rip: u64,
++            pub rdp: u64,
++            pub mxcsr: u32,
++            pub mxcr_mask: u32,
++            pub st_space: [u32; 32],
++            pub xmm_space: [u32; 64],
++            __padding: [u64; 12],
++        }
++    } else if #[cfg(target_arch = "x86")] {
++        #[repr(C)]
++        #[derive(Clone)]
++        #[doc(hidden)]
++        pub struct ucontext_t {
++            pub uc_flags: u32,
++            uc_link: *mut ucontext_t,
++            pub uc_stack: stack_t,
++            pub uc_mcontext: mcontext_t,
++            pub uc_sigmask: sigset_t,
++            pub __fpregs_mem: [u32; 28],
++        }
++
++        #[repr(C)]
++        #[derive(Clone)]
++        #[doc(hidden)]
++        pub struct mcontext_t {
++            pub gregs: [i32; 23],
++            pub fpregs: *mut fpregset_t,
++            pub oldmask: u32,
++            pub cr2: u32,
++        }
++
++        #[repr(C)]
++        #[derive(Clone)]
++        #[doc(hidden)]
++        pub struct fpreg_t {
++            pub significand: [u16; 4],
++            pub exponent: u16,
++        }
++
++        #[repr(C)]
++        #[derive(Clone)]
++        #[doc(hidden)]
++        pub struct fpregset_t {
++            pub cw: u32,
++            pub sw: u32,
++            pub tag: u32,
++            pub ipoff: u32,
++            pub cssel: u32,
++            pub dataoff: u32,
++            pub datasel: u32,
++            pub _st: [fpreg_t; 8],
++            pub status: u32,
++        }
++    } else if #[cfg(target_arch = "aarch64")] {
++        #[repr(C)]
++        #[derive(Clone)]
++        #[doc(hidden)]
++        pub struct ucontext_t {
++            pub uc_flags: u64,
++            uc_link: *mut ucontext_t,
++            pub uc_stack: stack_t,
++            pub uc_sigmask: sigset_t,
++            pub uc_mcontext: mcontext_t,
++        }
++
++        // Note you might see this defined in C with `unsigned long` or
++        // `unsigned long long` and think, WTF, those aren't the same! Except
++        // `long` means either 32-bit _or_ 64-bit depending on the data model,
++        // and the default data model for C/C++ is LP64 which means long is
++        // 64-bit. I had forgotten what a trash type long was.
++        #[repr(C)]
++        #[derive(Clone)]
++        #[doc(hidden)]
++        pub struct mcontext_t {
++            // Note in the kernel this is just part of regs which is length 32
++            pub fault_address: u64,
++            pub regs: [u64; 31],
++            pub sp: u64,
++            pub pc: u64,
++            pub pstate: u64,
++            // Note that u128 is ABI safe on aarch64, this is actually a
++            // `long double` in C which Rust doesn't have native support
++            pub __reserved: [u128; 256],
++        }
++
++        /// Magic value written by the kernel and our custom getcontext
++        #[doc(hidden)]
++        pub const FPSIMD_MAGIC: u32 = 0x46508001;
++
++        #[repr(C)]
++        #[derive(Clone)]
++        #[doc(hidden)]
++        pub struct _aarch64_ctx {
++            pub magic: u32,
++            pub size: u32,
++        }
++
++        #[repr(C)]
++        #[derive(Clone)]
++        #[doc(hidden)]
++        pub struct fpsimd_context {
++            pub head: _aarch64_ctx,
++            pub fpsr: u32,
++            pub fpcr: u32,
++            pub vregs: [u128; 32],
++        }
++
++        #[doc(hidden)]
++        pub type fpregset_t = fpsimd_context;
++    } else if #[cfg(target_arch = "arm")] {
++        #[repr(C)]
++        #[derive(Clone)]
++        #[doc(hidden)]
++        pub struct ucontext_t {
++            pub uc_flags: u32,
++            uc_link: *mut ucontext_t,
++            pub uc_stack: stack_t,
++            // Note that the mcontext_t and sigset_t are swapped compared to
++            // all of the other arches currently supported :p
++            pub uc_mcontext: mcontext_t,
++            pub uc_sigmask: sigset_t,
++            pub uc_regspace: [u64; 64],
++        }
++
++        #[repr(C)]
++        #[derive(Clone)]
++        #[doc(hidden)]
++        pub struct mcontext_t {
++            pub trap_no: u32,
++            pub error_code: u32,
++            pub oldmask: u32,
++            pub arm_r0: u32,
++            pub arm_r1: u32,
++            pub arm_r2: u32,
++            pub arm_r3: u32,
++            pub arm_r4: u32,
++            pub arm_r5: u32,
++            pub arm_r6: u32,
++            pub arm_r7: u32,
++            pub arm_r8: u32,
++            pub arm_r9: u32,
++            pub arm_r10: u32,
++            pub arm_fp: u32,
++            pub arm_ip: u32,
++            pub arm_sp: u32,
++            pub arm_lr: u32,
++            pub arm_pc: u32,
++            pub arm_cpsr: u32,
++            pub fault_address: u32,
++        }
++    } else if #[cfg(target_arch = "riscv64")] {
++        #[repr(C)]
++        #[derive(Clone)]
++        #[doc(hidden)]
++        pub struct ucontext_t {
++            pub __uc_flags: u64,
++            pub uc_link: *mut ucontext_t,
++            pub uc_stack: stack_t,
++            pub uc_sigmask: sigset_t,
++            pub uc_mcontext: mcontext_t,
++        }
++
++        #[repr(C, align(16))]
++        #[derive(Clone)]
++        #[doc(hidden)]
++        pub struct mcontext_t {
++            pub __gregs: [u64; 32],
++            pub __fpregs: __riscv_mc_fp_state,
++        }
++
++        #[repr(C)]
++        #[derive(Clone, Copy)]
++        #[doc(hidden)]
++        pub union __riscv_mc_fp_state {
++            pub __f: __riscv_mc_f_ext_state,
++            pub __d: __riscv_mc_d_ext_state,
++            pub __q: __riscv_mc_q_ext_state,
++        }
++
++        #[repr(C)]
++        #[derive(Clone, Copy)]
++        #[doc(hidden)]
++        pub struct __riscv_mc_f_ext_state {
++            pub __f: [u32; 32],
++            pub __fcsr: u32,
++        }
++
++        #[repr(C)]
++        #[derive(Clone, Copy)]
++        #[doc(hidden)]
++        pub struct __riscv_mc_d_ext_state {
++            pub __f: [u64; 32],
++            pub __fcsr: u32,
++        }
++
++        #[repr(C, align(16))]
++        #[derive(Clone, Copy)]
++        #[doc(hidden)]
++        pub struct __riscv_mc_q_ext_state {
++            pub __f: [u64; 64],
++            pub __fcsr: u32,
++            pub __reserved: [u32; 3],
++        }
++
++        pub type fpregset_t = __riscv_mc_fp_state;
++    } else if #[cfg(target_arch = "s390x")] {
++        #[repr(C)]
++        #[derive(Clone)]
++        #[doc(hidden)]
++        pub struct ucontext_t {
++            pub uc_flags: u64,
++            pub uc_link: *mut ucontext_t,
++            pub uc_stack: stack_t,
++            pub uc_mcontext: mcontext_t,
++            pub uc_sigmask: sigset_t,
++        }
++
++        #[repr(C, align(8))]
++        #[derive(Clone,Copy)]
++        #[doc(hidden)]
++        pub struct mcontext_t {
++            pub psw: psw_t,
++            pub gregs: [u64; 16],
++            pub aregs: [u32; 16],
++            pub __fpregs: fpregset_t,
++        }
++
++        #[repr(C)]
++        #[derive(Clone,Copy)]
++        #[doc(hidden)]
++        pub struct fpregset_t {
++            pub fpc: u32,
++            __pad: u32,
++            pub fprs: [fpreg_t; 16],
++        }
++
++        #[repr(C)]
++        #[derive(Clone,Copy)]
++        #[doc(hidden)]
++        pub struct fpreg_t {
++            pub d: f64,
++            // pub f: f32,
++        }
++
++        #[repr(C)]
++        #[derive(Clone,Copy)]
++        #[doc(hidden)]
++        pub struct psw_t {
++            pub mask: u64,
++            pub addr: u64,
++        }
++    }
++}
++
++#[cfg(test)]
++mod test {
++    // Musl doesn't contain fpregs in libc because reasons https://github.com/rust-lang/libc/pull/1646
++    #[cfg(not(target_env = "musl"))]
++    #[test]
++    fn matches_libc() {
++        assert_eq!(
++            std::mem::size_of::<libc::ucontext_t>(),
++            std::mem::size_of::<super::ucontext_t>()
++        );
++    }
++}
+diff --git a/vendor/crash-context/src/linux/getcontext.rs b/vendor/crash-context/src/linux/getcontext.rs
+new file mode 100644
+index 0000000..3d1bbf0
+--- /dev/null
++++ b/vendor/crash-context/src/linux/getcontext.rs
+@@ -0,0 +1,28 @@
++//! Implementation of [`getcontext`](https://man7.org/linux/man-pages/man3/getcontext.3.html)
++
++unsafe extern "C" {
++    /// A portable implementation of [`getcontext`](https://man7.org/linux/man-pages/man3/getcontext.3.html)
++    /// since it is not supported by all libc implementations, namely `musl`, as
++    /// it has been deprecated from POSIX for over a decade
++    ///
++    /// The implementation is ported from Breakpad, which is itself ported from
++    /// libunwind
++    #[cfg_attr(target_arch = "aarch64", allow(improper_ctypes))]
++    pub fn crash_context_getcontext(ctx: *mut super::ucontext_t) -> i32;
++}
++
++cfg_if::cfg_if! {
++    if #[cfg(target_arch = "x86_64")] {
++        mod x86_64;
++    } else if #[cfg(target_arch = "x86")] {
++        mod x86;
++    } else if #[cfg(target_arch = "aarch64")] {
++        mod aarch64;
++    } else if #[cfg(target_arch = "arm")] {
++        mod arm;
++    } else if #[cfg(target_arch = "riscv64")] {
++        mod riscv64;
++    } else if #[cfg(target_arch = "s390x")] {
++        mod s390x;
++    }
++}
+diff --git a/vendor/crash-context/src/linux/getcontext/aarch64.rs b/vendor/crash-context/src/linux/getcontext/aarch64.rs
+new file mode 100644
+index 0000000..3cc7e66
+--- /dev/null
++++ b/vendor/crash-context/src/linux/getcontext/aarch64.rs
+@@ -0,0 +1,86 @@
++// GREGS_OFFSET = 184
++// REGISTER_SIZE = 8
++// SIMD_REGISTER_SIZE = 16
++
++std::arch::global_asm! {
++    ".text",
++    ".global crash_context_getcontext",
++    ".hidden crash_context_getcontext",
++    ".type crash_context_getcontext, #function",
++    ".align 4",
++    ".cfi_startproc",
++"crash_context_getcontext:",
++
++    // The saved context will return to the getcontext() call point
++    // with a return value of 0
++    "str     xzr,      [x0, 184]", // GREGS_OFFSET
++
++    "stp     x18, x19, [x0, 328]", // GREGS_OFFSET + 18 * REGISTER_SIZE
++    "stp     x20, x21, [x0, 344]", // GREGS_OFFSET + 20 * REGISTER_SIZE
++    "stp     x22, x23, [x0, 360]", // GREGS_OFFSET + 22 * REGISTER_SIZE
++    "stp     x24, x25, [x0, 376]", // GREGS_OFFSET + 24 * REGISTER_SIZE
++    "stp     x26, x27, [x0, 392]", // GREGS_OFFSET + 26 * REGISTER_SIZE
++    "stp     x28, x29, [x0, 408]", // GREGS_OFFSET + 28 * REGISTER_SIZE
++    "str     x30,      [x0, 424]", // GREGS_OFFSET + 30 * REGISTER_SIZE
++
++    // Place LR into the saved PC, this will ensure that when switching to this
++    // saved context with setcontext() control will pass back to the caller of
++    // getcontext(), we have already arranged to return the appropriate return
++    // value in x0 above.
++    "str     x30, [x0, 440]",
++
++    // Save the current SP
++    "mov     x2, sp",
++    "str     x2, [x0, 432]",
++
++    // Initialize the pstate.
++    "str     xzr, [x0, 448]",
++
++    // Figure out where to place the first context extension block.
++    "add     x2, x0, #464",
++
++    // Write the context extension fpsimd header.
++    // FPSIMD_MAGIC = 0x46508001
++    "mov     w3, #(0x46508001 & 0xffff)",
++    "movk    w3, #(0x46508001 >> 16), lsl #16",
++    "str     w3, [x2, #0]", // FPSIMD_CONTEXT_MAGIC_OFFSET
++    "mov     w3, #528", // FPSIMD_CONTEXT_SIZE
++    "str     w3, [x2, #4]", // FPSIMD_CONTEXT_SIZE_OFFSET
++
++    // Fill in the FP SIMD context.
++    "add     x3, x2, #144", // VREGS_OFFSET + 8 * SIMD_REGISTER_SIZE
++    "stp     d8,  d9, [x3], #32",
++    "stp     d10, d11, [x3], #32",
++    "stp     d12, d13, [x3], #32",
++    "stp     d14, d15, [x3], #32",
++
++    "add     x3, x2, 8", // FPSR_OFFSET
++
++    "mrs     x4, fpsr",
++    "str     w4, [x3]",
++
++    "mrs     x4, fpcr",
++    "str     w4, [x3, 4]", // FPCR_OFFSET - FPSR_OFFSET
++
++    // Write the termination context extension header.
++    "add     x2, x2, #528", // FPSIMD_CONTEXT_SIZE
++
++    "str     xzr, [x2, #0]", // FPSIMD_CONTEXT_MAGIC_OFFSET
++    "str     xzr, [x2, #4]", // FPSIMD_CONTEXT_SIZE_OFFSET
++
++    // Grab the signal mask
++    // rt_sigprocmask (SIG_BLOCK, NULL, &ucp->uc_sigmask, _NSIG8)
++    "add     x2, x0, #40", // UCONTEXT_SIGMASK_OFFSET
++    "mov     x0, #0",  // SIG_BLOCK
++    "mov     x1, #0",  // NULL
++    "mov     x3, #(64 / 8)", // _NSIG / 8
++    "mov     x8, #135", // __NR_rt_sigprocmask
++    "svc     0",
++
++    // Return x0 for success
++    "mov     x0, 0",
++    "ret",
++
++    ".cfi_endproc",
++    ".size crash_context_getcontext, . - crash_context_getcontext",
++}
+diff --git a/vendor/crash-context/src/linux/getcontext/arm.rs b/vendor/crash-context/src/linux/getcontext/arm.rs
+new file mode 100644
+index 0000000..83b4b75
+--- /dev/null
++++ b/vendor/crash-context/src/linux/getcontext/arm.rs
+@@ -0,0 +1,53 @@
++std::arch::global_asm! {
++    ".text",
++    ".global crash_context_getcontext",
++    ".hidden crash_context_getcontext",
++    ".type crash_context_getcontext, #function",
++    ".align 0",
++    ".fnstart",
++"crash_context_getcontext:",
++
++    // First, save r4-r11
++    "add   r1, r0, #(32 + 4 * 4)",
++    "stm   r1, {{r4-r11}}",
++
++    // r12 is a scratch register, don't save it
++
++    // Save sp and lr explicitly.
++    // - sp can't be stored with stmia in Thumb-2
++    // - STM instructions that store sp and pc are deprecated in ARM
++    "str   sp, [r0, #(32 + 13 * 4)]",
++    "str   lr, [r0, #(32 + 14 * 4)]",
++
++    // Save the caller's address in 'pc'
++    "str   lr, [r0, #(32 + 15 * 4)]",
++
++    // Save ucontext_t* pointer across next call
++    "mov   r4, r0",
++
++    // Call sigprocmask(SIG_BLOCK, NULL, &(ucontext->uc_sigmask))
++    "mov   r0, #0",  // SIG_BLOCK
++    "mov   r1, #0",  // NULL
++    "add   r2, r4, #104", // UCONTEXT_SIGMASK_OFFSET
++    "bl    sigprocmask(PLT)",
++
++    /* Intentionally do not save the FPU state here. This is because on
++    * Linux/ARM, one should instead use ptrace(PTRACE_GETFPREGS) or
++    * ptrace(PTRACE_GETVFPREGS) to get it.
++    *
++    * Note that a real implementation of getcontext() would need to save
++    * this here to allow setcontext()/swapcontext() to work correctly.
++    */
++
++    // Restore the values of r4 and lr
++    "mov   r0, r4",
++    "ldr   lr, [r0, #(32 + 14 * 4)]",
++    "ldr   r4, [r0, #(32 +  4 * 4)]",
++
++    // Return 0
++    "mov   r0, #0",
++    "mov   pc, lr",
++
++    ".fnend",
++    ".size crash_context_getcontext, . - crash_context_getcontext",
++}
+diff --git a/vendor/crash-context/src/linux/getcontext/riscv64.rs b/vendor/crash-context/src/linux/getcontext/riscv64.rs
+new file mode 100644
+index 0000000..e84ac6a
+--- /dev/null
++++ b/vendor/crash-context/src/linux/getcontext/riscv64.rs
+@@ -0,0 +1,97 @@
++// UCONTEXT_SIGMASK_OFFSET = 40
++// MCONTEXT_GREGS_OFFSET = 168
++// MCONTEXT_GREGS_SIZE = 8
++
++std::arch::global_asm! {
++    ".text",
++    ".attribute arch, \"rv64gc\"",
++    ".globl crash_context_getcontext",
++    ".hidden crash_context_getcontext",
++    ".type crash_context_getcontext, @function",
++    ".align 0",
++    ".cfi_startproc",
++"crash_context_getcontext:",
++
++    // Save general registers
++    "sd ra,  0xa8(a0)",
++    "sd ra,  0xb0(a0)",
++    "sd sp,  0xb8(a0)",
++    "sd gp,  0xc0(a0)",
++    "sd tp,  0xc8(a0)",
++    "sd t0,  0xd0(a0)",
++    "sd t1,  0xd8(a0)",
++    "sd t2,  0xe0(a0)",
++    "sd s0,  0xe8(a0)",
++    "sd s1,  0xf0(a0)",
++    "sd a0,  0xf8(a0)",
++    "sd a1,  0x100(a0)",
++    "sd a2,  0x108(a0)",
++    "sd a3,  0x110(a0)",
++    "sd a4,  0x118(a0)",
++    "sd a5,  0x120(a0)",
++    "sd a6,  0x128(a0)",
++    "sd a7,  0x130(a0)",
++    "sd s2,  0x138(a0)",
++    "sd s3,  0x140(a0)",
++    "sd s4,  0x148(a0)",
++    "sd s5,  0x150(a0)",
++    "sd s6,  0x158(a0)",
++    "sd s7,  0x160(a0)",
++    "sd s8,  0x168(a0)",
++    "sd s9,  0x170(a0)",
++    "sd s10, 0x178(a0)",
++    "sd s11, 0x180(a0)",
++    "sd t3,  0x188(a0)",
++    "sd t4,  0x190(a0)",
++    "sd t5,  0x198(a0)",
++    "sd t6 , 0x1a0(a0)",
++
++    // Save floating point registers
++    "frsr a1",  // Save CSR
++    "fsd ft0,  0x1a8(a0)",
++    "fsd ft1,  0x1b0(a0)",
++    "fsd ft2,  0x1b8(a0)",
++    "fsd ft3,  0x1c0(a0)",
++    "fsd ft4,  0x1c8(a0)",
++    "fsd ft5,  0x1d0(a0)",
++    "fsd ft6,  0x1d8(a0)",
++    "fsd ft7,  0x1e0(a0)",
++    "fsd fs0,  0x1e8(a0)",
++    "fsd fs1,  0x1f0(a0)",
++    "fsd fa0,  0x1f8(a0)",
++    "fsd fa1,  0x200(a0)",
++    "fsd fa2,  0x208(a0)",
++    "fsd fa3,  0x210(a0)",
++    "fsd fa4,  0x218(a0)",
++    "fsd fa5,  0x220(a0)",
++    "fsd fa6,  0x228(a0)",
++    "fsd fa7,  0x230(a0)",
++    "fsd fs2,  0x238(a0)",
++    "fsd fs3,  0x240(a0)",
++    "fsd fs4,  0x248(a0)",
++    "fsd fs5,  0x250(a0)",
++    "fsd fs6,  0x258(a0)",
++    "fsd fs7,  0x260(a0)",
++    "fsd fs8,  0x268(a0)",
++    "fsd fs9,  0x270(a0)",
++    "fsd fs10, 0x278(a0)",
++    "fsd fs11, 0x280(a0)",
++    "fsd ft8,  0x288(a0)",
++    "fsd ft9,  0x290(a0)",
++    "fsd ft10, 0x298(a0)",
++    "fsd ft11, 0x2a0(a0)",
++    "sw a1, 0x2a8(a0)",
++
++    "mv a1, zero",
++    "add a2, a0, 40",  // UCONTEXT_SIGMASK_OFFSET
++    "li a3, 8",        // _NSIG8
++    "mv a0, zero",
++    "li a7, 135",      // __NR_rt_sigprocmask
++    "ecall",
++
++    "mv a0, zero",
++    "ret",
++
++    ".cfi_endproc",
++    ".size crash_context_getcontext, . - crash_context_getcontext",
++}
+diff --git a/vendor/crash-context/src/linux/getcontext/s390x.rs b/vendor/crash-context/src/linux/getcontext/s390x.rs
+new file mode 100644
+index 0000000..9e73284
+--- /dev/null
++++ b/vendor/crash-context/src/linux/getcontext/s390x.rs
+@@ -0,0 +1,58 @@
++std::arch::global_asm! {
++    ".text",
++    ".global crash_context_getcontext",
++    ".hidden crash_context_getcontext",
++    ".type crash_context_getcontext, @function",
++    ".align 8",
++    ".cfi_startproc",
++    "crash_context_getcontext:",
++
++    "lgr     %r0,%r2",
++
++    /* rt_sigprocmask (SIG_BLOCK, NULL, &sc->sc_mask, sigsetsize).  */
++    "la      %r4,384(%r2)",
++    "la      %r2,0",
++    "slgr    %r3,%r3",
++    "lghi    %r5,8",
++    "lghi    %r1,175",
++    "svc     0",
++
++    /* Store fpu context.  */
++    "lgr     %r1,%r0",
++    "stfpc   248(%r1)",
++    "std     %f0,256(%r1)",
++    "std     %f1,264(%r1)",
++    "std     %f2,272(%r1)",
++    "std     %f3,280(%r1)",
++    "std     %f4,288(%r1)",
++    "std     %f5,296(%r1)",
++    "std     %f6,304(%r1)",
++    "std     %f7,312(%r1)",
++    "std     %f8,320(%r1)",
++    "std     %f9,328(%r1)",
++    "std     %f10,336(%r1)",
++    "std     %f11,344(%r1)",
++    "std     %f12,352(%r1)",
++    "std     %f13,360(%r1)",
++    "std     %f14,368(%r1)",
++    "std     %f15,376(%r1)",
++
++    /* Set __getcontext return value to 0.  */
++    "slgr    %r2,%r2",
++
++    /* Store access registers.  */
++    "stam    %a0,%a15,184(%r1)",
++
++    /* Store general purpose registers.  */
++    "stmg    %r0,%r15,56(%r1)",
++
++    /* Store psw mask to 0x0 and addr to return address.  Then the address
++    can be retrieved from the ucontext structure in the same way as if it
++    is created by kernel and passed to a signal-handler. */
++    "stg     %r2,40(%r1)",
++    "stg     %r14,48(%r1)",
++    "br      %r14",
++
++    ".cfi_endproc",
++    ".size crash_context_getcontext, . - crash_context_getcontext",
++}
+diff --git a/vendor/crash-context/src/linux/getcontext/x86.rs b/vendor/crash-context/src/linux/getcontext/x86.rs
+new file mode 100644
+index 0000000..cb823e1
+--- /dev/null
++++ b/vendor/crash-context/src/linux/getcontext/x86.rs
+@@ -0,0 +1,68 @@
++// Unfortunately, the asm! macro has a few really annoying limitations at the
++// moment
++//
++// 1. const operands are unstable
++// 2. cfg attributes can't be used inside the asm macro at all
++//
++// and the worst part is we need it for literally only 1 thing, using a different
++// offset to the fpstate in ucontext depending on whether we are targeting android
++// or not :(
++macro_rules! asm_func {
++    ($offset:expr) => {
++        std::arch::global_asm! {
++            ".text",
++            ".global crash_context_getcontext",
++            ".hidden crash_context_getcontext",
++            ".align 4",
++            ".type crash_context_getcontext, @function",
++        "crash_context_getcontext:",
++            "movl 4(%esp), %eax",   // eax = uc
++
++            // Save register values
++            "movl %ecx, 0x3c(%eax)",
++            "movl %edx, 0x38(%eax)",
++            "movl %ebx, 0x34(%eax)",
++            "movl %edi, 0x24(%eax)",
++            "movl %esi, 0x28(%eax)",
++            "movl %ebp, 0x2c(%eax)",
++
++            "movl (%esp), %edx",   /* return address */
++            "lea  4(%esp), %ecx",  /* exclude return address from stack */
++            "mov  %edx, 0x4c(%eax)",
++            "mov  %ecx, 0x30(%eax)",
++
++            "xorl %ecx, %ecx",
++            "movw %fs, %cx",
++            "mov  %ecx, 0x18(%eax)",
++
++            "movl $0, 0x40(%eax)",
++
++            // Save floating point state to fpregstate, then update
++            // the fpregs pointer to point to it
++            stringify!(leal $offset(%eax),%ecx),
++            "fnstenv (%ecx)",
++            "fldenv  (%ecx)",
++            "mov %ecx, 0x60(%eax)",
++
++            // Save signal mask: sigprocmask(SIGBLOCK, NULL, &uc->uc_sigmask)
++            "leal 0x6c(%eax), %edx",
++            "xorl %ecx, %ecx",
++            "push %edx",   /* &uc->uc_sigmask */
++            "push %ecx",   /* NULL */
++            "push %ecx",   /* SIGBLOCK == 0 on i386 */
++            "call sigprocmask@PLT",
++            "addl $12, %esp",
++
++            "movl $0, %eax",
++            "ret",
++
++            ".size crash_context_getcontext, . - crash_context_getcontext",
++            options(att_syntax)
++        }
++    };
++}
++
++#[cfg(target_os = "linux")]
++asm_func!(0xec);
++#[cfg(target_os = "android")]
++asm_func!(0x74);
+diff --git a/vendor/crash-context/src/linux/getcontext/x86_64.rs b/vendor/crash-context/src/linux/getcontext/x86_64.rs
+new file mode 100644
+index 0000000..ee759f8
+--- /dev/null
++++ b/vendor/crash-context/src/linux/getcontext/x86_64.rs
+@@ -0,0 +1,105 @@
++/* The x64 implementation of breakpad_getcontext was derived in part
++from the implementation of libunwind which requires the following
++notice. */
++/* libunwind - a platform-independent unwind library
++   Copyright (C) 2008 Google, Inc
++    Contributed by Paul Pluzhnikov <ppluzhnikov@google.com>
++   Copyright (C) 2010 Konstantin Belousov <kib@freebsd.org>
++
++This file is part of libunwind.
++
++Permission is hereby granted, free of charge, to any person obtaining
++a copy of this software and associated documentation files (the
++"Software"), to deal in the Software without restriction, including
++without limitation the rights to use, copy, modify, merge, publish,
++distribute, sublicense, and/or sell copies of the Software, and to
++permit persons to whom the Software is furnished to do so, subject to
++the following conditions:
++
++The above copyright notice and this permission notice shall be
++included in all copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
++LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
++OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
++WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.  */
++
++// Oof, unfortunately android libc and normal linux libc don't have the same
++// fpregs offset in ucontext_t, but asm! in Rust is...not convenient for only
++// adding certain lines/blocks of asm based using cfg https://github.com/rust-lang/rust/issues/15701
++// and they're not really inputs, just literals, so...yah
++
++#![cfg(any(target_os = "linux", target_os = "android"))]
++
++// Unfortunately, the asm! macro has a few really annoying limitations at the
++// moment
++//
++// 1. const operands are unstable
++// 2. cfg attributes can't be used inside the asm macro at all
++//
++// and the worst part is we need it for literally only 1 thing, using a different
++// offset to the fpstate in ucontext depending on whether we are targeting android
++// or not :(
++macro_rules! asm_func {
++    ($offset:expr) => {
++        std::arch::global_asm! {
++            ".text",
++            ".global crash_context_getcontext",
++            ".hidden crash_context_getcontext",
++            ".align 4",
++            ".type crash_context_getcontext, @function",
++        "crash_context_getcontext:",
++            ".cfi_startproc",
++            // Callee saved: RBX, RBP, R12-R15
++            "movq %r12, 0x48(%rdi)",
++            "movq %r13, 0x50(%rdi)",
++            "movq %r14, 0x58(%rdi)",
++            "movq %r15, 0x60(%rdi)",
++            "movq %rbp, 0x78(%rdi)",
++            "movq %rbx, 0x80(%rdi)",
++
++            // Save argument registers
++            "movq %r8,  0x28(%rdi)",
++            "movq %r9,  0x30(%rdi)",
++            "movq %rdi, 0x68(%rdi)",
++            "movq %rsi, 0x70(%rdi)",
++            "movq %rdx, 0x88(%rdi)",
++            "movq %rax, 0x90(%rdi)",
++            "movq %rcx, 0x98(%rdi)",
++
++            // Save fp state
++            stringify!(leaq $offset(%rdi),%r8),
++            "movq %r8, 0xe0(%rdi)",
++            "fnstenv (%r8)",
++            "stmxcsr 0x18(%r8)",
++
++            // Exclude this call
++            "leaq 8(%rsp), %rax",
++            "movq %rax, 0xa0(%rdi)",
++
++            "movq 0(%rsp), %rax",
++            "movq %rax, 0xa8(%rdi)",
++
++            // Save signal mask: sigprocmask(SIGBLOCK, NULL, &uc->uc_sigmask)
++            "leaq 0x128(%rdi), %rdx",  // arg3
++            "xorq %rsi, %rsi",  // arg2 NULL
++            "xorq %rdi, %rdi",  // arg1 SIGBLOCK == 0
++            "call sigprocmask@PLT",
++
++            // Always return 0 for success, even if sigprocmask failed.
++            "xorl %eax, %eax",
++            "ret",
++            ".cfi_endproc",
++            ".size crash_context_getcontext, . - crash_context_getcontext",
++            options(att_syntax)
++        }
++    };
++}
++
++#[cfg(target_os = "linux")]
++asm_func!(0x1a8);
++#[cfg(target_os = "android")]
++asm_func!(0x130);
+diff --git a/vendor/crash-context/src/mac.rs b/vendor/crash-context/src/mac.rs
+new file mode 100644
+index 0000000..fcbe97d
+--- /dev/null
++++ b/vendor/crash-context/src/mac.rs
+@@ -0,0 +1,32 @@
++pub mod guard;
++pub mod ipc;
++pub mod resource;
++
++use mach2::mach_types as mt;
++
++/// Information on the exception that caused the crash
++#[derive(Copy, Clone, Debug)]
++pub struct ExceptionInfo {
++    /// The exception kind
++    pub kind: u32,
++    /// The exception code
++    pub code: u64,
++    /// Optional subcode with different meanings depending on the exception type
++    /// * `EXC_BAD_ACCESS` - The address that caused the exception
++    /// * `EXC_GUARD` - The unique guard identifier that was guarding a resource
++    /// * `EXC_RESOURCE` - Additional details depending on the resource type
++    pub subcode: Option<u64>,
++}
++
++/// Full Macos crash context
++#[derive(Debug)]
++pub struct CrashContext {
++    /// The process which crashed
++    pub task: mt::task_t,
++    /// The thread in the process that crashed
++    pub thread: mt::thread_t,
++    /// The thread that handled the exception. This may be useful to ignore.
++    pub handler_thread: mt::thread_t,
++    /// Optional exception information
++    pub exception: Option<ExceptionInfo>,
++}
+diff --git a/vendor/crash-context/src/mac/guard.rs b/vendor/crash-context/src/mac/guard.rs
+new file mode 100644
+index 0000000..7caee5f
+--- /dev/null
++++ b/vendor/crash-context/src/mac/guard.rs
+@@ -0,0 +1,92 @@
++//! Contains types and helpers for dealing with `EXC_GUARD` exceptions.
++//!
++//! `EXC_GUARD` exceptions embed details about the guarded resource in the `code`
++//! and `subcode` fields of the exception
++//!
++//! See <https://github.com/apple-oss-distributions/xnu/blob/e7776783b89a353188416a9a346c6cdb4928faad/osfmk/kern/exc_guard.h>
++//! for the top level types that this module wraps.
++
++use mach2::exception_types::EXC_GUARD;
++
++/// The set of possible guard kinds
++#[derive(Copy, Clone, Debug)]
++#[repr(u8)]
++pub enum GuardKind {
++    /// Null variant
++    None = 0,
++    /// A `mach_port_t`
++    MachPort = 1,
++    /// File descriptor
++    Fd = 2,
++    /// Userland assertion
++    User = 3,
++    /// Vnode
++    Vnode = 4,
++    /// Virtual memory operation
++    VirtualMemory = 5,
++    /// Rejected system call trap
++    RejectedSyscall = 6,
++}
++
++#[inline]
++pub fn extract_guard_kind(code: u64) -> u8 {
++    ((code >> 61) & 0x7) as u8
++}
++
++#[inline]
++pub fn extract_guard_flavor(code: u64) -> u32 {
++    ((code >> 32) & 0x1fffffff) as u32
++}
++
++#[inline]
++pub fn extract_guard_target(code: u64) -> u32 {
++    code as u32
++}
++
++/// The extracted details of an `EXC_GUARD` exception
++pub struct GuardException {
++    /// One of [`GuardKind`]
++    pub kind: u8,
++    /// The specific guard flavor that was violated, specific to each `kind`
++    pub flavor: u32,
++    /// The resource that was guarded
++    pub target: u32,
++    /// Target specific guard information
++    pub identifier: u64,
++}
++
++/// Extracts the guard details from an exceptions code and subcode
++///
++/// code:
++/// +-------------------+----------------+--------------+
++/// |[63:61] guard type | [60:32] flavor | [31:0] target|
++/// +-------------------+----------------+--------------+
++///
++/// subcode:
++/// +---------------------------------------------------+
++/// |[63:0] guard identifier                            |
++/// +---------------------------------------------------+
++#[inline]
++pub fn extract_guard_exception(code: u64, subcode: u64) -> GuardException {
++    GuardException {
++        kind: extract_guard_kind(code),
++        flavor: extract_guard_flavor(code),
++        target: extract_guard_target(code),
++        identifier: subcode,
++    }
++}
++
++impl super::ExceptionInfo {
++    /// If this is an `EXC_GUARD` exception, retrieves the exception metadata
++    /// from the code, otherwise returns `None`
++    pub fn guard_exception(&self) -> Option<GuardException> {
++        if self.kind != EXC_GUARD {
++            return None;
++        }
++
++        Some(extract_guard_exception(
++            self.code,
++            self.subcode.unwrap_or_default(),
++        ))
++    }
++}
+diff --git a/vendor/crash-context/src/mac/ipc.rs b/vendor/crash-context/src/mac/ipc.rs
+new file mode 100644
+index 0000000..9ebdf74
+--- /dev/null
++++ b/vendor/crash-context/src/mac/ipc.rs
+@@ -0,0 +1,557 @@
++//! Unfortunately, sending a [`CrashContext`] to another process on Macos
++//! needs to be done via mach ports, as, for example, `mach_task_self` is a
++//! special handle that needs to be translated into the "actual" task when used
++//! by another process, this _might_ be possible completely in userspace, but
++//! examining the source code for this leads me to believe that there are enough
++//! footguns, particularly around security, that this might take a while, so for
++//! now, if you need to use a [`CrashContext`] across processes, you need
++//! to use the IPC mechanisms here to get meaningful/accurate data
++//!
++//! Note that in all cases of an optional timeout, a `None` will return
++//! immediately regardless of whether the messaged has been enqueued or
++//! dequeued from the kernel queue, so it is _highly_ recommended to use
++//! reasonable timeouts for sending and receiving messages between processes.
++
++use crate::CrashContext;
++use mach2::{
++    bootstrap, kern_return::KERN_SUCCESS, mach_port, message as msg, port, task,
++    traps::mach_task_self,
++};
++pub use mach2::{kern_return::kern_return_t, message::mach_msg_return_t};
++use std::{ffi::CStr, time::Duration};
++
++unsafe extern "C" {
++    /// From `<usr/include/mach/mach_traps.h>`, there is no binding for this in mach2
++    pub fn pid_for_task(task: port::mach_port_name_t, pid: *mut i32) -> kern_return_t;
++}
++
++/// <https://github.com/apple-oss-distributions/xnu/blob/e6231be02a03711ca404e5121a151b24afbff733/osfmk/mach/message.h#L379-L391>
++#[repr(C, packed(4))]
++struct MachMsgPortDescriptor {
++    name: u32,
++    __pad1: u32,
++    __pad2: u16,
++    disposition: u8,
++    __type: u8,
++}
++
++impl MachMsgPortDescriptor {
++    fn new(name: u32, disposition: u32) -> Self {
++        Self {
++            name,
++            disposition: disposition as u8,
++            __pad1: 0,
++            __pad2: 0,
++            __type: msg::MACH_MSG_PORT_DESCRIPTOR as u8,
++        }
++    }
++}
++
++#[repr(C, packed(4))]
++struct MachMsgBody {
++    pub descriptor_count: u32,
++}
++
++#[repr(C, packed(4))]
++pub struct MachMsgTrailer {
++    pub kind: u32,
++    pub size: u32,
++}
++
++/// <https://github.com/apple-oss-distributions/xnu/blob/e6231be02a03711ca404e5121a151b24afbff733/osfmk/mach/message.h#L545-L552>
++#[repr(C, packed(4))]
++struct MachMsgHeader {
++    pub bits: u32,
++    pub size: u32,
++    pub remote_port: u32,
++    pub local_port: u32,
++    pub voucher_port: u32,
++    pub id: u32,
++}
++
++/// The actual crash context message sent and received. This message is a single
++/// struct since it needs to be contiguous block of memory. I suppose it's like
++/// this because people are expected to use MIG to generate the interface code,
++/// but it's ugly as hell regardless.
++#[repr(C, packed(4))]
++struct CrashContextMessage {
++    head: MachMsgHeader,
++    /// When providing port descriptors, this must be present to say how many
++    /// of them follow the header and body
++    body: MachMsgBody,
++    // These are the really the critical piece of the payload, during
++    // sending (or receiving?) these are turned into descriptors that
++    // can actually be used by another process
++    /// The task that crashed (ie `mach_task_self`)
++    task: MachMsgPortDescriptor,
++    /// The thread that crashed
++    crash_thread: MachMsgPortDescriptor,
++    /// The handler thread, probably, but not necessarily `mach_thread_self`
++    handler_thread: MachMsgPortDescriptor,
++    // Port opened by the client to receive an ack from the server
++    ack_port: MachMsgPortDescriptor,
++    /// Combination of the FLAG_* constants
++    flags: u32,
++    /// The exception type
++    exception_kind: u32,
++    /// The exception code
++    exception_code: u64,
++    /// The optional exception subcode
++    exception_subcode: u64,
++    /// We don't actually send this, but it's tacked on by the kernel :(
++    trailer: MachMsgTrailer,
++}
++
++const FLAG_HAS_EXCEPTION: u32 = 0x1;
++const FLAG_HAS_SUBCODE: u32 = 0x2;
++
++/// Message sent from the [`Receiver`] upon receiving and handling a [`CrashContextMessage`]
++#[repr(C, packed(4))]
++struct AcknowledgementMessage {
++    head: MachMsgHeader,
++    result: u32,
++}
++
++/// An error that can occur while interacting with mach ports
++#[derive(Copy, Clone, Debug)]
++pub enum Error {
++    /// A kernel error will generally indicate an error occurred while creating
++    /// or modifying a mach port
++    Kernel(kern_return_t),
++    /// A message error indicates an error occurred while sending or receiving
++    /// a message on a mach port
++    Message(mach_msg_return_t),
++}
++
++impl std::error::Error for Error {}
++
++use std::fmt;
++
++impl fmt::Display for Error {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        // TODO: use a good string for the error codes
++        write!(f, "{:?}", self)
++    }
++}
++
++macro_rules! kern {
++    ($call:expr) => {{
++        let res = $call;
++
++        if res != KERN_SUCCESS {
++            return Err(Error::Kernel(res));
++        }
++    }};
++}
++
++macro_rules! msg {
++    ($call:expr) => {{
++        let res = $call;
++
++        if res != msg::MACH_MSG_SUCCESS {
++            return Err(Error::Message(res));
++        }
++    }};
++}
++
++/// Sends a [`CrashContext`] from a crashing process to another process running
++/// a [`Server`] with the same name
++pub struct Client {
++    port: port::mach_port_t,
++}
++
++impl Client {
++    /// Attempts to create a new client that can send messages to a [`Server`]
++    /// that was created with the specified name.
++    ///
++    /// # Errors
++    ///
++    /// The specified port is not available for some reason, if you expect the
++    /// port to be created you can retry this function until it connects.
++    pub fn create(name: &CStr) -> Result<Self, Error> {
++        // SAFETY: syscalls. The user has no invariants to uphold, hence the
++        // unsafe not being on the function as a whole
++        unsafe {
++            let mut task_bootstrap_port = 0;
++            kern!(task::task_get_special_port(
++                mach_task_self(),
++                task::TASK_BOOTSTRAP_PORT,
++                &mut task_bootstrap_port
++            ));
++
++            let mut port = 0;
++            kern!(bootstrap::bootstrap_look_up(
++                task_bootstrap_port,
++                name.as_ptr(),
++                &mut port
++            ));
++
++            Ok(Self { port })
++        }
++    }
++
++    /// Sends the specified [`CrashContext`] to a [`Server`].
++    ///
++    /// If the ack from the [`Server`] times out `Ok(None)` is returned, otherwise
++    /// it is the value specified in the [`Server`] process to [`Acknowledger::send_ack`]
++    ///
++    /// # Errors
++    ///
++    /// The send of the [`CrashContext`] or the receive of the ack fails.
++    pub fn send_crash_context(
++        &self,
++        ctx: &CrashContext,
++        send_timeout: Option<Duration>,
++        receive_timeout: Option<Duration>,
++    ) -> Result<Option<u32>, Error> {
++        // SAFETY: syscalls. Again, the user has no invariants to uphold, so
++        // the function itself is not marked unsafe
++        unsafe {
++            // Create a new port to receive a response from the reciving end of
++            // this port so we that we know when it has actually processed the
++            // CrashContext, which is (presumably) interesting for the caller. If
++            // that is not interesting they can set the receive_timeout to 0 to
++            // just return immediately
++            let mut ack_port = AckReceiver::new()?;
++
++            let (flags, exception_kind, exception_code, exception_subcode) =
++                if let Some(exc) = ctx.exception {
++                    (
++                        FLAG_HAS_EXCEPTION
++                            | if exc.subcode.is_some() {
++                                FLAG_HAS_SUBCODE
++                            } else {
++                                0
++                            },
++                        exc.kind,
++                        exc.code,
++                        exc.subcode.unwrap_or_default(),
++                    )
++                } else {
++                    (0, 0, 0, 0)
++                };
++
++            let mut msg = CrashContextMessage {
++                head: MachMsgHeader {
++                    bits: msg::MACH_MSG_TYPE_COPY_SEND | msg::MACH_MSGH_BITS_COMPLEX,
++                    // We don't send the trailer, that's added by the kernel
++                    size: std::mem::size_of::<CrashContextMessage>() as u32 - 8,
++                    remote_port: self.port,
++                    local_port: port::MACH_PORT_NULL,
++                    voucher_port: port::MACH_PORT_NULL,
++                    id: 0,
++                },
++                body: MachMsgBody {
++                    descriptor_count: 4,
++                },
++                task: MachMsgPortDescriptor::new(ctx.task, msg::MACH_MSG_TYPE_COPY_SEND),
++                crash_thread: MachMsgPortDescriptor::new(ctx.thread, msg::MACH_MSG_TYPE_COPY_SEND),
++                handler_thread: MachMsgPortDescriptor::new(
++                    ctx.handler_thread,
++                    msg::MACH_MSG_TYPE_COPY_SEND,
++                ),
++                ack_port: MachMsgPortDescriptor::new(ack_port.port, msg::MACH_MSG_TYPE_COPY_SEND),
++                flags,
++                exception_kind,
++                exception_code,
++                exception_subcode,
++                // We don't actually send this but I didn't feel like making
++                // two types
++                trailer: MachMsgTrailer { kind: 0, size: 8 },
++            };
++
++            // Try to actually send the message to the Server
++            msg!(msg::mach_msg(
++                ((&mut msg.head) as *mut MachMsgHeader).cast(),
++                msg::MACH_SEND_MSG | msg::MACH_SEND_TIMEOUT,
++                msg.head.size,
++                0,
++                port::MACH_PORT_NULL,
++                send_timeout
++                    .map(|st| st.as_millis() as u32)
++                    .unwrap_or_default(),
++                port::MACH_PORT_NULL
++            ));
++
++            // Wait for a response from the Server
++            match ack_port.recv_ack(receive_timeout) {
++                Ok(result) => Ok(Some(result)),
++                Err(Error::Message(msg::MACH_RCV_TIMED_OUT)) => Ok(None),
++                Err(e) => Err(e),
++            }
++        }
++    }
++}
++
++/// Returned from [`Server::try_recv_crash_context`] when a [`Client`] has sent
++/// a crash context
++pub struct ReceivedCrashContext {
++    /// The crash context sent by a [`Client`]
++    pub crash_context: CrashContext,
++    /// Allows the sending of an ack back to the [`Client`] to acknowledge that
++    /// your code has received and processed the [`CrashContext`]
++    pub acker: Acknowledger,
++    /// The process id of the process the [`Client`] lives in. This is retrieved
++    /// via `pid_for_task`.
++    pub pid: u32,
++}
++
++/// Receives a [`CrashContext`] from another process
++pub struct Server {
++    port: port::mach_port_t,
++}
++
++impl Server {
++    /// Creates a new [`Server`] "bound" to the specified service name.
++    ///
++    /// # Errors
++    ///
++    /// We fail to acquire the bootstrap port, or fail to register the service.
++    pub fn create(name: &CStr) -> Result<Self, Error> {
++        // SAFETY: syscalls. Again, the caller has no invariants to uphold, so
++        // the entire function is not marked as unsafe
++        unsafe {
++            let mut task_bootstrap_port = 0;
++            kern!(task::task_get_special_port(
++                mach_task_self(),
++                task::TASK_BOOTSTRAP_PORT,
++                &mut task_bootstrap_port
++            ));
++
++            let mut port = 0;
++            // Note that Breakpad uses bootstrap_register instead of this function as
++            // MacOS 10.5 apparently deprecated bootstrap_register and then provided
++            // bootstrap_check_in, but broken. However, 10.5 had its most recent update
++            // over 13 years ago, and is not supported by Apple, so why should we?
++            kern!(bootstrap::bootstrap_check_in(
++                task_bootstrap_port,
++                name.as_ptr(),
++                &mut port,
++            ));
++
++            Ok(Self { port })
++        }
++    }
++
++    /// Attempts to retrieve a [`CrashContext`] sent from a crashing process.
++    ///
++    /// Note that in event of a timeout, this method will return `Ok(None)` to
++    /// indicate that a crash context was unavailable rather than an error.
++    ///
++    /// # Errors
++    ///
++    /// We fail to receive the [`CrashContext`] message for a reason other than
++    /// one not being in the queue, or we fail to translate the task identifier
++    /// into a pid
++    pub fn try_recv_crash_context(
++        &mut self,
++        timeout: Option<Duration>,
++    ) -> Result<Option<ReceivedCrashContext>, Error> {
++        // SAFETY: syscalls. The caller has no invariants to uphold, so the
++        // entire function is not marked unsafe.
++        unsafe {
++            let mut crash_ctx_msg: CrashContextMessage = std::mem::zeroed();
++            crash_ctx_msg.head.local_port = self.port;
++
++            let ret = msg::mach_msg(
++                ((&mut crash_ctx_msg.head) as *mut MachMsgHeader).cast(),
++                msg::MACH_RCV_MSG | msg::MACH_RCV_TIMEOUT,
++                0,
++                std::mem::size_of::<CrashContextMessage>() as u32,
++                self.port,
++                timeout.map(|t| t.as_millis() as u32).unwrap_or_default(),
++                port::MACH_PORT_NULL,
++            );
++
++            if ret == msg::MACH_RCV_TIMED_OUT {
++                return Ok(None);
++            } else if ret != msg::MACH_MSG_SUCCESS {
++                return Err(Error::Message(ret));
++            }
++
++            // Reconstruct a crash context from the message we received
++            let exception = if crash_ctx_msg.flags & FLAG_HAS_EXCEPTION != 0 {
++                Some(crate::ExceptionInfo {
++                    kind: crash_ctx_msg.exception_kind,
++                    code: crash_ctx_msg.exception_code,
++                    subcode: (crash_ctx_msg.flags & FLAG_HAS_SUBCODE != 0)
++                        .then_some(crash_ctx_msg.exception_subcode),
++                })
++            } else {
++                None
++            };
++
++            let crash_context = CrashContext {
++                task: crash_ctx_msg.task.name,
++                thread: crash_ctx_msg.crash_thread.name,
++                handler_thread: crash_ctx_msg.handler_thread.name,
++                exception,
++            };
++
++            // Translate the task to a pid so the user doesn't have to do it
++            // since there is not a binding available in libc/mach/mach2 for it
++            let mut pid = 0;
++            kern!(pid_for_task(crash_ctx_msg.task.name, &mut pid));
++            let ack_port = crash_ctx_msg.ack_port.name;
++
++            // Provide a way for the user to tell the client when they are done
++            // processing the crash context, unless the specified port was not
++            // set or somehow died immediately
++            let acker = Acknowledger {
++                port: (ack_port != port::MACH_PORT_DEAD && ack_port != port::MACH_PORT_NULL)
++                    .then_some(ack_port),
++            };
++
++            Ok(Some(ReceivedCrashContext {
++                crash_context,
++                acker,
++                pid: pid as u32,
++            }))
++        }
++    }
++}
++
++impl Drop for Server {
++    fn drop(&mut self) {
++        // SAFETY: syscall
++        unsafe {
++            mach_port::mach_port_deallocate(mach_task_self(), self.port);
++        }
++    }
++}
++
++/// Used by a process running the [`Server`] to send a response back to the
++/// [`Client`] that sent a [`CrashContext`] after it has finished
++/// processing.
++pub struct Acknowledger {
++    port: Option<port::mach_port_t>,
++}
++
++impl Acknowledger {
++    /// Sends an ack back to the client that sent a [`CrashContext`]
++    ///
++    /// # Errors
++    ///
++    /// We fail to send the ack to the port created in the [`Client`] process
++    pub fn send_ack(&mut self, ack: u32, timeout: Option<Duration>) -> Result<(), Error> {
++        if let Some(port) = self.port {
++            // SAFETY: syscalls. The caller has no invariants to uphold, so the
++            // entire function is not marked unsafe.
++            unsafe {
++                let mut msg = AcknowledgementMessage {
++                    head: MachMsgHeader {
++                        bits: msg::MACH_MSG_TYPE_COPY_SEND,
++                        size: std::mem::size_of::<AcknowledgementMessage>() as u32,
++                        remote_port: port,
++                        local_port: port::MACH_PORT_NULL,
++                        voucher_port: port::MACH_PORT_NULL,
++                        id: 0,
++                    },
++                    result: ack,
++                };
++
++                // Try to actually send the message
++                msg!(msg::mach_msg(
++                    ((&mut msg.head) as *mut MachMsgHeader).cast(),
++                    msg::MACH_SEND_MSG | msg::MACH_SEND_TIMEOUT,
++                    msg.head.size,
++                    0,
++                    port::MACH_PORT_NULL,
++                    timeout.map(|t| t.as_millis() as u32).unwrap_or_default(),
++                    port::MACH_PORT_NULL
++                ));
++
++                Ok(())
++            }
++        } else {
++            Ok(())
++        }
++    }
++}
++
++/// Used by [`Sender::send_crash_context`] to create a port to receive the
++/// external process's response to sending a [`CrashContext`]
++struct AckReceiver {
++    port: port::mach_port_t,
++}
++
++impl AckReceiver {
++    /// Allocates a new port to receive an ack from a [`Server`]
++    ///
++    /// # Errors
++    ///
++    /// We fail to allocate a port, or fail to add a send right to it.
++    ///
++    /// # Safety
++    ///
++    /// Performs syscalls. Only used internally hence the entire function being
++    /// marked unsafe.
++    unsafe fn new() -> Result<Self, Error> {
++        unsafe {
++            let mut port = 0;
++            kern!(mach_port::mach_port_allocate(
++                mach_task_self(),
++                port::MACH_PORT_RIGHT_RECEIVE,
++                &mut port
++            ));
++
++            kern!(mach_port::mach_port_insert_right(
++                mach_task_self(),
++                port,
++                port,
++                msg::MACH_MSG_TYPE_MAKE_SEND
++            ));
++
++            Ok(Self { port })
++        }
++    }
++
++    /// Waits for the specified duration to receive a result from the [`Server`]
++    /// that was sent a [`CrashContext`]
++    ///
++    /// # Errors
++    ///
++    /// We fail to receive an ack for some reason
++    ///
++    /// # Safety
++    ///
++    /// Performs syscalls. Only used internally hence the entire function being
++    /// marked unsafe.
++    unsafe fn recv_ack(&mut self, timeout: Option<Duration>) -> Result<u32, Error> {
++        unsafe {
++            let mut ack = AcknowledgementMessage {
++                head: MachMsgHeader {
++                    bits: 0,
++                    size: std::mem::size_of::<AcknowledgementMessage>() as u32,
++                    remote_port: port::MACH_PORT_NULL,
++                    local_port: self.port,
++                    voucher_port: port::MACH_PORT_NULL,
++                    id: 0,
++                },
++                result: 0,
++            };
++
++            // Wait for a response from the Server
++            msg!(msg::mach_msg(
++                ((&mut ack.head) as *mut MachMsgHeader).cast(),
++                msg::MACH_RCV_MSG | msg::MACH_RCV_TIMEOUT,
++                0,
++                ack.head.size,
++                self.port,
++                timeout.map(|t| t.as_millis() as u32).unwrap_or_default(),
++                port::MACH_PORT_NULL
++            ));
++
++            Ok(ack.result)
++        }
++    }
++}
++
++impl Drop for AckReceiver {
++    fn drop(&mut self) {
++        // SAFETY: syscall
++        unsafe {
++            mach_port::mach_port_deallocate(mach_task_self(), self.port);
++        }
++    }
++}
+diff --git a/vendor/crash-context/src/mac/resource.rs b/vendor/crash-context/src/mac/resource.rs
+new file mode 100644
+index 0000000..bf4890a
+--- /dev/null
++++ b/vendor/crash-context/src/mac/resource.rs
+@@ -0,0 +1,516 @@
++//! Contains types and helpers for dealing with `EXC_RESOURCE` exceptions.
++//!
++//! `EXC_RESOURCE` exceptions embed details about the resource and the limits
++//! it exceeded within the `code` and, in some cases `subcode`, fields of the exception
++//!
++//! See <https://github.com/apple-oss-distributions/xnu/blob/e6231be02a03711ca404e5121a151b24afbff733/osfmk/kern/exc_resource.h>
++//! for the various constants and decoding of exception information wrapped in
++//! this module.
++
++use mach2::exception_types::EXC_RESOURCE;
++use std::time::Duration;
++
++/// The details for an `EXC_RESOURCE` exception as retrieved from the exception's
++/// code and subcode
++pub enum ResourceException {
++    /// This is sent by the kernel when the CPU usage monitor is tripped. Possibly fatal.
++    Cpu(CpuResourceException),
++    /// This is sent by the kernel when the platform idle wakeups monitor is tripped. Possibly fatal.
++    Wakeups(WakeupsResourceException),
++    /// This is sent by the kernel when a task crosses its high watermark memory limit. Never fatal at least on current `MacOS` versions.
++    Memory(MemoryResourceException),
++    /// This is sent by the kernel when a task crosses its I/O limits. Never fatal.
++    Io(IoResourceException),
++    /// This is sent by the kernel when a task crosses its thread limit. Always fatal.
++    Threads(ThreadsResourceException),
++    /// This is sent by the kernel when the process is leaking ipc ports and has
++    /// filled its port space. Always fatal.
++    Ports(PortsResourceException),
++    /// An unknown resource kind due to an addition to the set of possible
++    /// resource exception kinds in `exc_resource.h`
++    Unknown { kind: u8, flavor: u8 },
++}
++
++/// Each different resource exception type has 1 or more flavors that it can be,
++/// and while these most likely don't change often, we try to be forward
++/// compatible by not failing if a particular flavor is unknown
++#[derive(Copy, Clone, Debug)]
++pub enum Flavor<T: Copy + Clone + std::fmt::Debug> {
++    Known(T),
++    Unknown(u8),
++}
++
++impl<T: TryFrom<u8> + Copy + Clone + std::fmt::Debug> From<u64> for Flavor<T> {
++    #[inline]
++    fn from(code: u64) -> Self {
++        let flavor = resource_exc_flavor(code);
++        if let Ok(known) = T::try_from(flavor) {
++            Self::Known(known)
++        } else {
++            Self::Unknown(flavor)
++        }
++    }
++}
++
++impl<T: PartialEq + Copy + Clone + std::fmt::Debug> PartialEq<T> for Flavor<T> {
++    fn eq(&self, o: &T) -> bool {
++        match self {
++            Self::Known(flavor) => flavor == o,
++            Self::Unknown(_) => false,
++        }
++    }
++}
++
++/// Retrieves the resource exception kind from an exception code
++#[inline]
++pub fn resource_exc_kind(code: u64) -> u8 {
++    ((code >> 61) & 0x7) as u8
++}
++
++/// Retrieves the resource exception flavor from an exception code
++#[inline]
++pub fn resource_exc_flavor(code: u64) -> u8 {
++    ((code >> 58) & 0x7) as u8
++}
++
++impl super::ExceptionInfo {
++    /// If this is an `EXC_RESOURCE` exception, retrieves the exception metadata
++    /// from the code, otherwise returns `None`
++    pub fn resource_exception(&self) -> Option<ResourceException> {
++        if self.kind != EXC_RESOURCE {
++            return None;
++        }
++
++        let kind = resource_exc_kind(self.code);
++
++        let res_exc = if kind == ResourceKind::Cpu as u8 {
++            ResourceException::Cpu(CpuResourceException::from_exc_info(self.code, self.subcode))
++        } else if kind == ResourceKind::Wakeups as u8 {
++            ResourceException::Wakeups(WakeupsResourceException::from_exc_info(
++                self.code,
++                self.subcode,
++            ))
++        } else if kind == ResourceKind::Memory as u8 {
++            ResourceException::Memory(MemoryResourceException::from_exc_info(self.code))
++        } else if kind == ResourceKind::Io as u8 {
++            ResourceException::Io(IoResourceException::from_exc_info(self.code, self.subcode))
++        } else if kind == ResourceKind::Threads as u8 {
++            ResourceException::Threads(ThreadsResourceException::from_exc_info(self.code))
++        } else if kind == ResourceKind::Ports as u8 {
++            ResourceException::Ports(PortsResourceException::from_exc_info(self.code))
++        } else {
++            ResourceException::Unknown {
++                kind,
++                flavor: resource_exc_flavor(self.code),
++            }
++        };
++
++        Some(res_exc)
++    }
++}
++
++/// The types of resources that an `EXC_RESOURCE` exception can pertain to
++#[repr(u8)]
++pub enum ResourceKind {
++    Cpu = 1,
++    Wakeups = 2,
++    Memory = 3,
++    Io = 4,
++    Threads = 5,
++    Ports = 6,
++}
++
++/// The flavors for a [`CpuResourceException`]
++#[derive(Copy, Clone, Debug, PartialEq, Eq)]
++#[repr(u8)]
++pub enum CpuFlavor {
++    /// The process has surpassed its CPU limit
++    Monitor = 1,
++    /// The process has surpassed its CPU limit, and the process has been configured
++    /// to make this exception fatal
++    MonitorFatal = 2,
++}
++
++impl TryFrom<u8> for CpuFlavor {
++    type Error = ();
++
++    fn try_from(flavor: u8) -> Result<Self, Self::Error> {
++        match flavor {
++            1 => Ok(Self::Monitor),
++            2 => Ok(Self::MonitorFatal),
++            _ => Err(()),
++        }
++    }
++}
++
++/// These exceptions _may_ be fatal. They are not fatal by default at task
++/// creation but can be made fatal by calling `proc_rlimit_control` with
++/// `RLIMIT_CPU_USAGE_MONITOR` as the second argument and `CPUMON_MAKE_FATAL`
++/// set in the flags. The flavor extracted from the exception code determines if
++/// the exception is fatal.
++///
++/// [Kernel code](https://github.com/apple-oss-distributions/xnu/blob/e7776783b89a353188416a9a346c6cdb4928faad/osfmk/kern/thread.c#L2475-L2616)
++#[derive(Copy, Clone, Debug)]
++pub struct CpuResourceException {
++    pub flavor: Flavor<CpuFlavor>,
++    /// If the exception is fatal. Currently only true if the flavor is [`CpuFlavor::MonitorFatal`]
++    pub is_fatal: bool,
++    /// The time period in which the CPU limit was surpassed
++    pub observation_interval: Duration,
++    /// The CPU % limit
++    pub limit: u8,
++    /// The CPU % consumed by the task
++    pub consumed: u8,
++}
++
++impl CpuResourceException {
++    /*
++     * code:
++     * +-----------------------------------------------+
++     * |[63:61] RESOURCE |[60:58] FLAVOR_CPU_ |[57:32] |
++     * |_TYPE_CPU        |MONITOR[_FATAL]     |Unused  |
++     * +-----------------------------------------------+
++     * |[31:7]  Interval (sec)    | [6:0] CPU limit (%)|
++     * +-----------------------------------------------+
++     *
++     * subcode:
++     * +-----------------------------------------------+
++     * |                          | [6:0] % of CPU     |
++     * |                          | actually consumed  |
++     * +-----------------------------------------------+
++     *
++     */
++    #[inline]
++    pub fn from_exc_info(code: u64, subcode: Option<u64>) -> Self {
++        debug_assert_eq!(resource_exc_kind(code), ResourceKind::Cpu as u8);
++
++        let flavor = Flavor::from(code);
++        let interval_seconds = (code >> 7) & 0x1ffffff;
++        let limit = (code & 0x7f) as u8;
++        let consumed = subcode.map_or(0, |sc| sc & 0x7f) as u8;
++
++        // The default is that cpu resource exceptions are not fatal, so
++        // we only check the flavor against the (currently) one known value
++        // that indicates the exception is fatal
++        Self {
++            flavor,
++            is_fatal: flavor == CpuFlavor::MonitorFatal,
++            observation_interval: Duration::from_secs(interval_seconds),
++            limit,
++            consumed,
++        }
++    }
++}
++
++/// The flavors for a [`WakeupsResourceException`]
++#[derive(Copy, Clone, Debug, PartialEq, Eq)]
++#[repr(u8)]
++pub enum WakeupsFlavor {
++    Monitor = 1,
++}
++
++impl TryFrom<u8> for WakeupsFlavor {
++    type Error = ();
++
++    fn try_from(flavor: u8) -> Result<Self, Self::Error> {
++        match flavor {
++            1 => Ok(Self::Monitor),
++            _ => Err(()),
++        }
++    }
++}
++
++/// These exceptions may be fatal. They are not fatal by default at task
++/// creation, but can be made fatal by calling `proc_rlimit_control` with
++/// `RLIMIT_WAKEUPS_MONITOR` as the second argument and `WAKEMON_MAKE_FATAL`
++/// set in the flags. Calling [`proc_get_wakemon_params`](https://github.com/apple-oss-distributions/xnu/blob/e6231be02a03711ca404e5121a151b24afbff733/libsyscall/wrappers/libproc/libproc.c#L592-L608)
++/// determines whether these exceptions are fatal.
++///
++/// [Kernel source](https://github.com/apple-oss-distributions/xnu/blob/e6231be02a03711ca404e5121a151b24afbff733/osfmk/kern/task.c#L7501-L7580)
++pub struct WakeupsResourceException {
++    pub flavor: Flavor<WakeupsFlavor>,
++    /// The time period in which the number of wakeups was surpassed
++    pub observation_interval: Duration,
++    /// The number of wakeups permitted per second
++    pub permitted: u32,
++    /// The number of wakeups observed per second
++    pub observed: u32,
++}
++
++impl WakeupsResourceException {
++    /*
++     * code:
++     * +-----------------------------------------------+
++     * |[63:61] RESOURCE |[60:58] FLAVOR_     |[57:32] |
++     * |_TYPE_WAKEUPS    |WAKEUPS_MONITOR     |Unused  |
++     * +-----------------------------------------------+
++     * | [31:20] Observation     | [19:0] # of wakeups |
++     * |         interval (sec)  | permitted (per sec) |
++     * +-----------------------------------------------+
++     *
++     * subcode:
++     * +-----------------------------------------------+
++     * |                         | [19:0] # of wakeups |
++     * |                         | observed (per sec)  |
++     * +-----------------------------------------------+
++     *
++     */
++    #[inline]
++    pub fn from_exc_info(code: u64, subcode: Option<u64>) -> Self {
++        debug_assert_eq!(resource_exc_kind(code), ResourceKind::Wakeups as u8);
++
++        let flavor = Flavor::from(code);
++        // Note that Apple has a bug in exc_resource.h where the masks in the
++        // decode macros for the interval and the permitted wakeups have been swapped
++        let interval_seconds = (code >> 20) & 0xfff;
++        let permitted = (code & 0xfffff) as u32;
++        let observed = subcode.map_or(0, |sc| sc & 0xfffff) as u32;
++
++        Self {
++            flavor,
++            observation_interval: Duration::from_secs(interval_seconds),
++            permitted,
++            observed,
++        }
++    }
++}
++
++/// The flavors for a [`MemoryResourceException`]
++#[derive(Copy, Clone, Debug, PartialEq, Eq)]
++#[repr(u8)]
++pub enum MemoryFlavor {
++    HighWatermark = 1,
++}
++
++impl TryFrom<u8> for MemoryFlavor {
++    type Error = ();
++
++    fn try_from(flavor: u8) -> Result<Self, Self::Error> {
++        match flavor {
++            1 => Ok(Self::HighWatermark),
++            _ => Err(()),
++        }
++    }
++}
++
++/// These exceptions, as of this writing, are never fatal.
++///
++/// While memory exceptions _can_ be fatal, this appears to only be possible if
++/// the kernel is built with `CONFIG_JETSAM` or in `DEVELOPMENT` or `DEBUG` modes,
++/// so as of now, they should never be considered fatal, at least on `MacOS`
++///
++/// [Kernel source](https://github.com/apple-oss-distributions/xnu/blob/e6231be02a03711ca404e5121a151b24afbff733/osfmk/kern/task.c#L6767-L6874)
++pub struct MemoryResourceException {
++    pub flavor: Flavor<MemoryFlavor>,
++    /// The limit in MiB of the high watermark
++    pub limit_mib: u16,
++}
++
++impl MemoryResourceException {
++    /*
++     * code:
++     * +------------------------------------------------+
++     * |[63:61] RESOURCE |[60:58] FLAVOR_HIGH_ |[57:32] |
++     * |_TYPE_MEMORY     |WATERMARK            |Unused  |
++     * +------------------------------------------------+
++     * |                         | [12:0] HWM limit (MB)|
++     * +------------------------------------------------+
++     *
++     * subcode:
++     * +------------------------------------------------+
++     * |                                         unused |
++     * +------------------------------------------------+
++     *
++     */
++    #[inline]
++    pub fn from_exc_info(code: u64) -> Self {
++        debug_assert_eq!(resource_exc_kind(code), ResourceKind::Memory as u8);
++
++        let flavor = Flavor::from(code);
++        let limit_mib = (code & 0x1fff) as u16;
++
++        Self { flavor, limit_mib }
++    }
++}
++
++/// The flavors for an [`IoResourceException`]
++#[derive(Copy, Clone, Debug, PartialEq, Eq)]
++#[repr(u8)]
++pub enum IoFlavor {
++    PhysicalWrites = 1,
++    LogicalWrites = 2,
++}
++
++impl TryFrom<u8> for IoFlavor {
++    type Error = ();
++
++    fn try_from(flavor: u8) -> Result<Self, Self::Error> {
++        match flavor {
++            1 => Ok(Self::PhysicalWrites),
++            2 => Ok(Self::LogicalWrites),
++            _ => Err(()),
++        }
++    }
++}
++
++/// These exceptions are never fatal.
++///
++/// [Kernel source](https://github.com/apple-oss-distributions/xnu/blob/e6231be02a03711ca404e5121a151b24afbff733/osfmk/kern/task.c#L7739-L7792)
++pub struct IoResourceException {
++    pub flavor: Flavor<MemoryFlavor>,
++    /// The time period in which the I/O limit was surpassed
++    pub observation_interval: Duration,
++    /// The I/O limit in MiB of the high watermark
++    pub limit_mib: u16,
++    /// The observed I/O in MiB
++    pub observed_mib: u16,
++}
++
++impl IoResourceException {
++    /*
++     * code:
++     * +-----------------------------------------------+
++     * |[63:61] RESOURCE |[60:58] FLAVOR_IO_  |[57:32] |
++     * |_TYPE_IO         |PHYSICAL/LOGICAL    |Unused  |
++     * +-----------------------------------------------+
++     * |[31:15]  Interval (sec)    | [14:0] Limit (MB) |
++     * +-----------------------------------------------+
++     *
++     * subcode:
++     * +-----------------------------------------------+
++     * |                           | [14:0] I/O Count  |
++     * |                           | (in MB)           |
++     * +-----------------------------------------------+
++     *
++     */
++    #[inline]
++    pub fn from_exc_info(code: u64, subcode: Option<u64>) -> Self {
++        debug_assert_eq!(resource_exc_kind(code), ResourceKind::Io as u8);
++
++        let flavor = Flavor::from(code);
++        let interval_seconds = (code >> 15) & 0x1ffff;
++        let limit_mib = (code & 0x7fff) as u16;
++        let observed_mib = subcode.map_or(0, |sc| sc & 0x7fff) as u16;
++
++        Self {
++            flavor,
++            observation_interval: Duration::from_secs(interval_seconds),
++            limit_mib,
++            observed_mib,
++        }
++    }
++}
++
++/// The flavors for a [`ThreadsResourceException`]
++#[derive(Copy, Clone, Debug, PartialEq, Eq)]
++#[repr(u8)]
++pub enum ThreadsFlavor {
++    HighWatermark = 1,
++}
++
++impl TryFrom<u8> for ThreadsFlavor {
++    type Error = ();
++
++    fn try_from(flavor: u8) -> Result<Self, Self::Error> {
++        match flavor {
++            1 => Ok(Self::HighWatermark),
++            _ => Err(()),
++        }
++    }
++}
++
++/// This exception is provided for completeness sake, but is only possible if
++/// the kernel is built in `DEVELOPMENT` or `DEBUG` modes.
++///
++/// [Kernel source](https://github.com/apple-oss-distributions/xnu/blob/e6231be02a03711ca404e5121a151b24afbff733/osfmk/kern/thread.c#L2575-L2620)
++pub struct ThreadsResourceException {
++    pub flavor: Flavor<ThreadsFlavor>,
++    /// The thread limit
++    pub limit: u16,
++}
++
++impl ThreadsResourceException {
++    /*
++     * code:
++     * +--------------------------------------------------+
++     * |[63:61] RESOURCE |[60:58] FLAVOR_        |[57:32] |
++     * |_TYPE_THREADS    |THREADS_HIGH_WATERMARK |Unused  |
++     * +--------------------------------------------------+
++     * |[31:15]  Unused  | [14:0] Limit                   |
++     * +--------------------------------------------------+
++     *
++     * subcode:
++     * +-----------------------------------------------+
++     * |                         | Unused              |
++     * |                         |                     |
++     * +-----------------------------------------------+
++     *
++     */
++    #[inline]
++    pub fn from_exc_info(code: u64) -> Self {
++        debug_assert_eq!(resource_exc_kind(code), ResourceKind::Threads as u8);
++
++        let flavor = Flavor::from(code);
++        let limit = (code & 0x7fff) as u16;
++
++        Self { flavor, limit }
++    }
++}
++
++/// The flavors for a [`PortsResourceException`]
++#[derive(Copy, Clone, Debug, PartialEq, Eq)]
++#[repr(u8)]
++pub enum PortsFlavor {
++    SpaceFull = 1,
++}
++
++impl TryFrom<u8> for PortsFlavor {
++    type Error = ();
++
++    fn try_from(flavor: u8) -> Result<Self, Self::Error> {
++        match flavor {
++            1 => Ok(Self::SpaceFull),
++            _ => Err(()),
++        }
++    }
++}
++
++/// This exception is always fatal, and in fact I'm unsure if this exception
++/// is even observable, as the kernel will kill the offending process if
++/// the port space is full
++///
++/// [Kernel source](https://github.com/apple-oss-distributions/xnu/blob/e7776783b89a353188416a9a346c6cdb4928faad/osfmk/kern/task.c#L7907-L7969)
++pub struct PortsResourceException {
++    pub flavor: Flavor<ThreadsFlavor>,
++    /// The number of allocated ports
++    pub allocated: u32,
++}
++
++impl PortsResourceException {
++    /*
++     * code:
++     * +-----------------------------------------------+
++     * |[63:61] RESOURCE |[60:58] FLAVOR_     |[57:32] |
++     * |_TYPE_PORTS      |PORT_SPACE_FULL     |Unused  |
++     * +-----------------------------------------------+
++     * | [31:24] Unused          | [23:0] # of ports   |
++     * |                         | allocated           |
++     * +-----------------------------------------------+
++     *
++     * subcode:
++     * +-----------------------------------------------+
++     * |                         | Unused              |
++     * |                         |                     |
++     * +-----------------------------------------------+
++     *
++     */
++    #[inline]
++    pub fn from_exc_info(code: u64) -> Self {
++        debug_assert_eq!(resource_exc_kind(code), ResourceKind::Ports as u8);
++
++        let flavor = Flavor::from(code);
++        let allocated = (code & 0xffffff) as u32;
++
++        Self { flavor, allocated }
++    }
++}
+diff --git a/vendor/crash-context/src/windows.rs b/vendor/crash-context/src/windows.rs
+new file mode 100644
+index 0000000..076a6b3
+--- /dev/null
++++ b/vendor/crash-context/src/windows.rs
+@@ -0,0 +1,262 @@
++/// Full Windows crash context
++pub struct CrashContext {
++    /// The information on the exception.
++    ///
++    /// Note that this is a pointer into the actual memory of the crashed process,
++    /// and is a pointer to an [EXCEPTION_POINTERS](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-exception_pointers)
++    pub exception_pointers: *const EXCEPTION_POINTERS,
++    /// The top level exception code from the `exception_pointers`. This is provided
++    /// so that external processes don't need to use `ReadProcessMemory` to inspect
++    /// the exception code
++    pub exception_code: i32,
++    /// The pid of the process that crashed
++    pub process_id: u32,
++    /// The thread id on which the exception occurred
++    pub thread_id: u32,
++}
++
++#[link(name = "kernel32")]
++unsafe extern "system" {
++    #[link_name = "RtlCaptureContext"]
++    pub fn capture_context(ctx_rec: *mut CONTEXT);
++}
++
++cfg_if::cfg_if! {
++    if #[cfg(target_arch = "x86_64")] {
++        #[repr(C, align(16))]
++        pub struct M128A {
++            pub Low: u64,
++            pub High: i64,
++        }
++
++        #[repr(C)]
++        pub struct CONTEXT_0_0 {
++            pub Header: [M128A; 2],
++            pub Legacy: [M128A; 8],
++            pub Xmm0: M128A,
++            pub Xmm1: M128A,
++            pub Xmm2: M128A,
++            pub Xmm3: M128A,
++            pub Xmm4: M128A,
++            pub Xmm5: M128A,
++            pub Xmm6: M128A,
++            pub Xmm7: M128A,
++            pub Xmm8: M128A,
++            pub Xmm9: M128A,
++            pub Xmm10: M128A,
++            pub Xmm11: M128A,
++            pub Xmm12: M128A,
++            pub Xmm13: M128A,
++            pub Xmm14: M128A,
++            pub Xmm15: M128A,
++        }
++
++        #[repr(C, align(16))]
++        pub struct XSAVE_FORMAT {
++            pub ControlWord: u16,
++            pub StatusWord: u16,
++            pub TagWord: u8,
++            pub Reserved1: u8,
++            pub ErrorOpcode: u16,
++            pub ErrorOffset: u32,
++            pub ErrorSelector: u16,
++            pub Reserved2: u16,
++            pub DataOffset: u32,
++            pub DataSelector: u16,
++            pub Reserved3: u16,
++            pub MxCsr: u32,
++            pub MxCsr_Mask: u32,
++            pub FloatRegisters: [M128A; 8],
++            pub XmmRegisters: [M128A; 16],
++            pub Reserved4: [u8; 96],
++        }
++
++        #[repr(C)]
++        pub union CONTEXT_0 {
++            pub FltSave: std::mem::ManuallyDrop<XSAVE_FORMAT>,
++            pub Anonymous: std::mem::ManuallyDrop<CONTEXT_0_0>,
++        }
++
++        #[repr(C, align(16))]
++        pub struct CONTEXT {
++            pub P1Home: u64,
++            pub P2Home: u64,
++            pub P3Home: u64,
++            pub P4Home: u64,
++            pub P5Home: u64,
++            pub P6Home: u64,
++            pub ContextFlags: u32,
++            pub MxCsr: u32,
++            pub SegCs: u16,
++            pub SegDs: u16,
++            pub SegEs: u16,
++            pub SegFs: u16,
++            pub SegGs: u16,
++            pub SegSs: u16,
++            pub EFlags: u32,
++            pub Dr0: u64,
++            pub Dr1: u64,
++            pub Dr2: u64,
++            pub Dr3: u64,
++            pub Dr6: u64,
++            pub Dr7: u64,
++            pub Rax: u64,
++            pub Rcx: u64,
++            pub Rdx: u64,
++            pub Rbx: u64,
++            pub Rsp: u64,
++            pub Rbp: u64,
++            pub Rsi: u64,
++            pub Rdi: u64,
++            pub R8: u64,
++            pub R9: u64,
++            pub R10: u64,
++            pub R11: u64,
++            pub R12: u64,
++            pub R13: u64,
++            pub R14: u64,
++            pub R15: u64,
++            pub Rip: u64,
++            pub Anonymous: CONTEXT_0,
++            pub VectorRegister: [M128A; 26],
++            pub VectorControl: u64,
++            pub DebugControl: u64,
++            pub LastBranchToRip: u64,
++            pub LastBranchFromRip: u64,
++            pub LastExceptionToRip: u64,
++            pub LastExceptionFromRip: u64,
++        }
++    } else if #[cfg(target_arch = "x86")] {
++        #[repr(C)]
++        pub struct FLOATING_SAVE_AREA {
++            pub ControlWord: u32,
++            pub StatusWord: u32,
++            pub TagWord: u32,
++            pub ErrorOffset: u32,
++            pub ErrorSelector: u32,
++            pub DataOffset: u32,
++            pub DataSelector: u32,
++            pub RegisterArea: [u8; 80],
++            pub Spare0: u32,
++        }
++
++        #[repr(C, packed(4))]
++        pub struct CONTEXT {
++            pub ContextFlags: u32,
++            pub Dr0: u32,
++            pub Dr1: u32,
++            pub Dr2: u32,
++            pub Dr3: u32,
++            pub Dr6: u32,
++            pub Dr7: u32,
++            pub FloatSave: FLOATING_SAVE_AREA,
++            pub SegGs: u32,
++            pub SegFs: u32,
++            pub SegEs: u32,
++            pub SegDs: u32,
++            pub Edi: u32,
++            pub Esi: u32,
++            pub Ebx: u32,
++            pub Edx: u32,
++            pub Ecx: u32,
++            pub Eax: u32,
++            pub Ebp: u32,
++            pub Eip: u32,
++            pub SegCs: u32,
++            pub EFlags: u32,
++            pub Esp: u32,
++            pub SegSs: u32,
++            pub ExtendedRegisters: [u8; 512],
++        }
++    } else if #[cfg(target_arch = "aarch64")] {
++        #[repr(C)]
++        pub struct ARM64_NT_NEON128_0 {
++            pub Low: u64,
++            pub High: i64,
++        }
++        #[repr(C)]
++        pub union ARM64_NT_NEON128 {
++            pub Anonymous: std::mem::ManuallyDrop<ARM64_NT_NEON128_0>,
++            pub D: [f64; 2],
++            pub S: [f32; 4],
++            pub H: [u16; 8],
++            pub B: [u8; 16],
++        }
++
++        #[repr(C)]
++        pub struct CONTEXT_0_0 {
++            pub X0: u64,
++            pub X1: u64,
++            pub X2: u64,
++            pub X3: u64,
++            pub X4: u64,
++            pub X5: u64,
++            pub X6: u64,
++            pub X7: u64,
++            pub X8: u64,
++            pub X9: u64,
++            pub X10: u64,
++            pub X11: u64,
++            pub X12: u64,
++            pub X13: u64,
++            pub X14: u64,
++            pub X15: u64,
++            pub X16: u64,
++            pub X17: u64,
++            pub X18: u64,
++            pub X19: u64,
++            pub X20: u64,
++            pub X21: u64,
++            pub X22: u64,
++            pub X23: u64,
++            pub X24: u64,
++            pub X25: u64,
++            pub X26: u64,
++            pub X27: u64,
++            pub X28: u64,
++            pub Fp: u64,
++            pub Lr: u64,
++        }
++
++        #[repr(C)]
++        pub union CONTEXT_0 {
++            pub Anonymous: std::mem::ManuallyDrop<CONTEXT_0_0>,
++            pub X: [u64; 31],
++        }
++
++        #[repr(C, align(16))]
++        pub struct CONTEXT {
++            pub ContextFlags: u32,
++            pub Cpsr: u32,
++            pub Anonymous: CONTEXT_0,
++            pub Sp: u64,
++            pub Pc: u64,
++            pub V: [ARM64_NT_NEON128; 32],
++            pub Fpcr: u32,
++            pub Fpsr: u32,
++            pub Bcr: [u32; 8],
++            pub Bvr: [u64; 8],
++            pub Wcr: [u32; 2],
++            pub Wvr: [u64; 2],
++        }
++    }
++}
++
++pub type NTSTATUS = i32;
++pub type BOOL = i32;
++
++#[repr(C)]
++pub struct EXCEPTION_RECORD {
++    pub ExceptionCode: NTSTATUS,
++    pub ExceptionFlags: u32,
++    pub ExceptionRecord: *mut EXCEPTION_RECORD,
++    pub ExceptionAddress: *mut std::ffi::c_void,
++    pub NumberParameters: u32,
++    pub ExceptionInformation: [usize; 15],
++}
++
++#[repr(C)]
++pub struct EXCEPTION_POINTERS {
++    pub ExceptionRecord: *mut EXCEPTION_RECORD,
++    pub ContextRecord: *mut CONTEXT,
++}
+diff --git a/vendor/crash-context/tests/capture_context.rs b/vendor/crash-context/tests/capture_context.rs
+new file mode 100644
+index 0000000..641e1dd
+--- /dev/null
++++ b/vendor/crash-context/tests/capture_context.rs
+@@ -0,0 +1,49 @@
++#[test]
++fn captures() {
++    fn one() {
++        two();
++    }
++
++    fn two() {
++        three();
++    }
++
++    #[allow(unsafe_code)]
++    fn three() {
++        cfg_if::cfg_if! {
++            if #[cfg(target_os = "windows")] {
++                let ctx = unsafe {
++                    let mut ctx = std::mem::MaybeUninit::zeroed();
++                    crash_context::capture_context(ctx.as_mut_ptr());
++
++                    ctx.assume_init()
++                };
++
++                cfg_if::cfg_if! {
++                    if #[cfg(target_arch = "x86_64")] {
++                        assert!(ctx.Rbp != 0);
++                        assert!(ctx.Rsp != 0);
++                        assert!(ctx.Rip != 0);
++                    } else if #[cfg(target_arch = "x86")] {
++                        assert!(ctx.Ebp != 0);
++                        assert!(ctx.Esp != 0);
++                        assert!(ctx.Eip != 0);
++                    }
++                }
++            } else if #[cfg(all(target_os = "linux", target_arch = "x86_64"))] {
++                let ctx = unsafe {
++                    let mut ctx = std::mem::MaybeUninit::zeroed();
++                    assert_eq!(crash_context::crash_context_getcontext(ctx.as_mut_ptr()), 0);
++                    ctx.assume_init()
++                };
++
++                let gregs = &ctx.uc_mcontext.gregs;
++                assert!(gregs[libc::REG_RBP as usize] != 0);
++                assert!(gregs[libc::REG_RSP as usize] != 0);
++                assert!(gregs[libc::REG_RIP as usize] != 0);
++            }
++        }
++    }
++
++    one();
++}
