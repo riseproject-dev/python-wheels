@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: 2026 The RISE Project
+# SPDX-License-Identifier: MIT
+---
+# Validation-in-progress: this job only runs Blender's own `make deps` dependency
+# stage (build_files/build_environment). The main Blender configure/compile/wheel
+# stage (bpy_module.cmake onward) is not wired up yet -- see the PR description.
+name: Build bpy wheels (riscv64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version glob to (re)build; empty builds every version of docs/packages/bpy.yaml not released yet'
+        required: false
+        default: ''
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-bpy.yml'
+      - 'docs/packages/bpy.yaml'
+      - 'patches/bpy/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-bpy.yml'
+      - 'docs/packages/bpy.yaml'
+      - 'patches/bpy/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MANYLINUX_RISCV64_IMAGE: quay.io/pypa/manylinux_2_39_riscv64
+
+jobs:
+  setup:
+    uses: $/.github/workflows/_setup.yml
+    with:
+      package: bpy
+      version: ${{ inputs.version }}
+
+  build_environment:
+    needs: [setup]
+    if: needs.setup.outputs.versions != '[]'
+    name: Build bpy ${{ matrix.version }} build_environment manylinux_riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 2880  # 48h: USD/OIIO/OpenVDB/OpenColorIO/Alembic/Draco/OpenSubdiv/FFmpeg from source
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.setup.outputs.versions) }}
+    env:
+      BPY_VERSION: ${{ matrix.version }}
+
+    steps:
+      - name: Checkout blender v${{ env.BPY_VERSION }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: blender/blender
+          ref: v${{ env.BPY_VERSION }}
+          sparse-checkout: |
+            build_files/build_environment
+          persist-credentials: false
+
+      - name: Checkout python-wheels
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: python-wheels
+          persist-credentials: false
+
+      - name: Patch build_environment for riscv64
+        run: git apply python-wheels/patches/bpy/${{ env.BPY_VERSION }}/*.patch
+
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761  # master
+        with:
+          swap-size-gb: 10
+
+      - name: Build build_environment
+        run: |
+          mkdir -p harvest
+          docker run --rm -i --network=host \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            "${MANYLINUX_RISCV64_IMAGE}" \
+            bash <<'SCRIPT'
+          set -eux
+
+          dnf install -y --setopt=install_weak_deps=False \
+            autoconf automake libtool bison flex ninja-build meson \
+            gettext texinfo help2man patchelf pkgconf-pkg-config tcl \
+            yasm python3-mako zip openssl-devel
+
+          export SOURCE_DATE_EPOCH=1745584760
+          cmake -S build_files/build_environment -B deps_build \
+            -DHARVEST_TARGET=/work/harvest
+          build_files/build_environment/linux/make_deps_wrapper.sh -s \
+            -C deps_build -j"$(nproc)" install
+          SCRIPT
+
+      - name: Pack build_environment's harvest tree
+        run: tar -C harvest -czf build-environment.tar.gz .
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bpy-${{ env.BPY_VERSION }}-build-environment
+          path: build-environment.tar.gz
+          if-no-files-found: error
