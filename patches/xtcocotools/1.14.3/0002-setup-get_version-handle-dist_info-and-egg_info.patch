@@ -1,0 +1,28 @@
+Upstream-Status: To upstream [not submitted from this automated port run; needs a pull request against jin-s13/xtcocoapi]
+
+get_version() only returns version.py's short_version when 'sdist' or
+'bdist_wheel' is in sys.argv, and otherwise falls back to __version__, which
+version.py does not define. That else branch is dead code under upstream's
+own usage (always a literal `python setup.py sdist`/`bdist_wheel`), but a
+modern pip first calls prepare_metadata_for_build_wheel with 'dist_info' (not
+'bdist_wheel') in sys.argv, hitting the else branch and raising
+KeyError: '__version__'. This is why the manylinux_riscv64 cp313/cp314/cp314t
+legs fail at the metadata-prep step while cp312 (whose image ships an older
+pip that skips straight to bdist_wheel) does not; it is not riscv64-specific
+and reproduces with any sufficiently new pip on x86.
+
+diff --git a/setup.py b/setup.py
+index 1111111..2222222 100644
+--- a/setup.py
++++ b/setup.py
+@@ -7,7 +7,9 @@ def get_version():
+         exec(compile(f.read(), version_file, 'exec'))
+     import sys
+     # return short version for sdist
+-    if 'sdist' in sys.argv or 'bdist_wheel' in sys.argv:
++    # pip's build backend also runs prepare_metadata_for_build_wheel with
++    # 'dist_info'/'egg_info' in sys.argv, not 'bdist_wheel'; treat the same.
++    if {'sdist', 'bdist_wheel', 'dist_info', 'egg_info'} & set(sys.argv):
+         return locals()['short_version']
+     else:
+         return locals()['__version__']
